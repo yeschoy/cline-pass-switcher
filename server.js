@@ -1,5 +1,5 @@
 // Cline Pass 上游观察/切换代理
-// 零依赖，Node >= 18。
+// Node >= 18。
 //
 // 网关行为（实测结论，README 有证据）：
 // - 订阅模型（cline-pass/*）与非 free 目录模型：请求体里的 provider.* 会被 Cline 网关丢弃，
@@ -12,12 +12,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Transform } from 'node:stream';
 import { fileURLToPath } from 'node:url';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { SocksProxyAgent } from 'socks-proxy-agent';
+import { JsonlLogStore, enforceCombinedLimit } from './lib/jsonl-log-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 const META_PATH = path.join(DATA_DIR, 'metadata.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const LOG_DIR = path.join(DATA_DIR, 'logs');
 
 const DEFAULT_CONFIG = {
   port: 3123,
@@ -31,6 +35,7 @@ const DEFAULT_CONFIG = {
   activeAccount: 0,        // single 模式下使用的账号下标
   concurrencyWaitMs: 2000,
   accountErrorRules: {},   // "429": { action: 'cooldown', cooldownMs: 1800000 } | { action: 'ban' } | { action: 'ignore' }
+  modelAliases: {},        // client alias -> cline-pass/* model
   knownModels: [
     'cline-pass/glm-5.3-flash',
     'cline-pass/kimi-k3',
@@ -76,6 +81,10 @@ const config = { ...DEFAULT_CONFIG, ...loadJson(CONFIG_PATH, {}) };
 const META = loadJson(META_PATH, { models: {}, history: [], catalog: null, orModelsFetchedAt: 0, orModelList: null });
 const saveConfig = () => atomicWriteJson(CONFIG_PATH, config);
 const saveMeta = () => atomicWriteJson(META_PATH, META);
+const requestLogs = new JsonlLogStore({ dir: LOG_DIR, prefix: 'requests', maxRecords: 50000 });
+const errorLogs = new JsonlLogStore({ dir: LOG_DIR, prefix: 'errors', maxRecords: 10000 });
+enforceCombinedLimit(LOG_DIR, 100 * 1024 * 1024);
+const recentHistory = Array.isArray(META.history) ? [...META.history] : [];
 
 function randomId(prefix = 'acc') {
   return `${prefix}_${crypto.randomBytes(12).toString('hex')}`;
@@ -149,6 +158,50 @@ function normalizeAccountErrorRules(rules = {}) {
   }
   return out;
 }
+const ACCOUNT_MODES = new Set(['single', 'roundrobin', 'sticky', 'least-connections', 'weighted-roundrobin', 'priority-failover']);
+const FORBIDDEN_CUSTOM_HEADER = /(?:authorization|proxy-authorization|cookie|set-cookie|host|content-length|connection|transfer-encoding|upgrade|keep-alive|te|trailer|session|thread|conversation|attestation|installation|api[-_]?key|access[-_]?token|secret|credential|device[-_]?id)/i;
+function validateNote(note) {
+  return typeof note === 'string' && note.length <= 500 && !/[\x00-\x09\x0b-\x1f\x7f\r]/.test(note);
+}
+function normalizeProxyUrl(value, { strict = false } = {}) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    if (raw.length > 2048) throw new Error('too long');
+    const u = new URL(raw);
+    if (!['http:', 'https:', 'socks5:', 'socks5h:'].includes(u.protocol) || !u.hostname || u.search || u.hash || (u.pathname && u.pathname !== '/')) throw new Error('invalid');
+    if (u.port && (!Number.isInteger(Number(u.port)) || Number(u.port) < 1 || Number(u.port) > 65535)) throw new Error('port');
+    return u.toString();
+  } catch { if (strict) throw new Error('proxyUrl must be an http, https, socks5 or socks5h URL without path/query/hash'); console.warn('[配置] 已禁用一个非法账号代理 URL'); return ''; }
+}
+function validateAndNormalizeHeaders(value, { strict = false } = {}) {
+  const fail = (message) => { if (strict) throw new Error(message); console.warn(`[配置] 已禁用非法账号请求头：${message}`); return {}; };
+  if (value === undefined) return {};
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length > 32) return fail('headers must be an object with at most 32 entries');
+  const out = {}, seen = new Set();
+  for (const [name, raw] of Object.entries(value)) {
+    const low = name.toLowerCase();
+    if (name.length > 128 || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) || FORBIDDEN_CUSTOM_HEADER.test(low) || seen.has(low)) return fail(`forbidden or invalid custom header: ${name}`);
+    if (typeof raw !== 'string' || raw.length > 2048 || /[\x00-\x1f\x7f]/.test(raw)) return fail(`invalid value for custom header: ${name}`);
+    seen.add(low); out[name] = raw;
+  }
+  if (Buffer.byteLength(JSON.stringify(out)) > 16 * 1024) return fail('custom headers exceed 16 KiB');
+  return out;
+}
+function validateModelAliases(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length > 500) return 'aliases must be an object with at most 500 entries';
+  const original = new Set(config.knownModels || []);
+  for (const [alias, target] of Object.entries(value)) {
+    if (!alias || alias !== alias.trim() || alias.length > 300 || /[\x00-\x1f\x7f]/.test(alias) || original.has(alias)) return `invalid or conflicting alias: ${alias}`;
+    if (typeof target !== 'string' || target !== target.trim() || target.length > 300 || !target.startsWith('cline-pass/') || !original.has(target)) return `invalid alias target for ${alias}`;
+  }
+  return null;
+}
+function normalizeModelAliases(value) {
+  const error = validateModelAliases(value || {}); if (error) { console.warn(`[配置] 已禁用非法模型别名：${error}`); return {}; }
+  return Object.fromEntries(Object.entries(value || {}).map(([a, t]) => [a.trim(), t.trim()]));
+}
+function resolveModelAlias(model) { return config.modelAliases?.[model] || model; }
 function normalizeAccount(a, i, prevById = new Map(), prevByName = new Map()) {
   const suppliedId = String(a?.id || '').trim();
   const id = (/^[A-Za-z0-9_-]{1,100}$/.test(suppliedId) ? suppliedId : '') || prevByName.get(String(a?.name || '').slice(0, 50))?.id || randomId();
@@ -156,9 +209,14 @@ function normalizeAccount(a, i, prevById = new Map(), prevByName = new Map()) {
   return {
     id,
     name: String(a?.name || previous.name || `账号${i + 1}`).slice(0, 50),
+    note: validateNote(a?.note) ? a.note : '',
     key: String(a?.key || '').trim(),
     enabled: a?.enabled !== false,
     maxConcurrent: Math.max(0, Math.floor(Number(a?.maxConcurrent) || 0)),
+    weight: Number.isInteger(Number(a?.weight)) && Number(a.weight) >= 1 && Number(a.weight) <= 100 ? Number(a.weight) : 1,
+    priority: Number.isInteger(Number(a?.priority)) && Number(a.priority) >= 1 && Number(a.priority) <= 100 ? Number(a.priority) : 100,
+    proxyUrl: normalizeProxyUrl(a?.proxyUrl),
+    headers: validateAndNormalizeHeaders(a?.headers),
     perModel: normalizePerModelMap(a?.perModel || {}),
   };
 }
@@ -180,10 +238,12 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
     config.activeAccount = 0;
     dirty = true;
   }
-  if (!['single', 'roundrobin', 'sticky'].includes(config.accountMode)) { config.accountMode = config.accountMode === 'roundrobin' ? 'roundrobin' : 'single'; dirty = true; }
+  if (!ACCOUNT_MODES.has(config.accountMode)) { config.accountMode = 'single'; dirty = true; }
   const wait = Math.floor(Number(config.concurrencyWaitMs));
   if (!Number.isFinite(wait) || wait < 0 || wait > 30000) { config.concurrencyWaitMs = 2000; dirty = true; }
   else if (config.concurrencyWaitMs !== wait) { config.concurrencyWaitMs = wait; dirty = true; }
+  const aliases = normalizeModelAliases(config.modelAliases || {});
+  if (JSON.stringify(aliases) !== JSON.stringify(config.modelAliases || {})) { config.modelAliases = aliases; dirty = true; }
   const pm = normalizePerModelMap(config.perModel || {});
   if (JSON.stringify(pm) !== JSON.stringify(config.perModel || {})) { config.perModel = pm; dirty = true; }
   const rules = normalizeAccountErrorRules(config.accountErrorRules || {});
@@ -224,11 +284,24 @@ if (!isConfigured()) {
 }
 
 let RR_COUNTER = 0;
+const strategyCounters = new Map();
 const activeCounts = new Map();
 const waiters = new Set();
 function notifyCapacityWaiters() { for (const resolve of [...waiters]) resolve(); }
 function getAccountState(id) { return (META.accountStates ||= {})[id] || null; }
-function safeReason(s) { return redactSecrets(String(s || '').replace(/[\r\n\t]+/g, ' ').slice(0, 200)); }
+function safeReason(s, extraSecrets = []) {
+  let reason = redactSecrets(String(s || '').replace(/[\r\n\t]+/g, ' ').slice(0, 200));
+  for (const secret of extraSecrets) if (secret) reason = reason.split(secret).join('[REDACTED]');
+  return reason;
+}
+function sensitiveMessageValues(body) {
+  const values = [];
+  for (const message of Array.isArray(body?.messages) ? body.messages : []) {
+    if (typeof message?.content === 'string') values.push(message.content.slice(0, 200));
+    else if (Array.isArray(message?.content)) for (const part of message.content) if (typeof part?.text === 'string') values.push(part.text.slice(0, 200));
+  }
+  return values.filter(Boolean);
+}
 function clearExpiredCooldowns() {
   let dirty = false;
   const now = Date.now();
@@ -301,34 +374,70 @@ function rrRank(list) {
   const start = RR_COUNTER++ % list.length;
   return [...list.slice(start), ...list.slice(0, start)];
 }
+function strategyRank(mode, list) {
+  if (mode === 'least-connections') {
+    const min = Math.min(...list.map((a) => activeCounts.get(a.id) || 0));
+    return rrRank(list.filter((a) => (activeCounts.get(a.id) || 0) === min));
+  }
+  if (mode === 'weighted-roundrobin') {
+    const slots = list.flatMap((a) => Array.from({ length: a.weight || 1 }, () => a));
+    const cursor = strategyCounters.get(mode) || 0;
+    strategyCounters.set(mode, cursor + 1);
+    const start = cursor % slots.length;
+    return [...new Map([...slots.slice(start), ...slots.slice(0, start)].map((a) => [a.id, a])).values()];
+  }
+  if (mode === 'priority-failover') {
+    const priority = Math.min(...list.map((a) => a.priority || 100));
+    return rrRank(list.filter((a) => (a.priority || 100) === priority));
+  }
+  return rrRank(list);
+}
+function selectionResult(lease, mode, preferred, reason, identity, overflow = false) {
+  return {
+    lease, strategy: mode, preferredAccountId: preferred?.id || null, preferredAccountName: preferred?.name || null,
+    selectedAccountId: lease.account.id, selectedAccountName: lease.account.name, reason, overflow,
+    sessionSource: identity?.source || (mode === 'single' ? 'single' : 'roundrobin'), source: identity?.source || (mode === 'single' ? 'single' : 'roundrobin'),
+  };
+}
 async function acquireAccountLease(identity, { excludeIds = new Set(), allowOverflow = true } = {}) {
   const waitMs = Math.min(30000, Math.max(0, Number(config.concurrencyWaitMs) || 0));
   const list = enabledAccounts({ excludeIds });
-  if (!list.length) return { error: 'no available upstream account' };
+  if (!list.length) return { error: 'no available upstream account', strategy: config.accountMode };
   const mode = config.accountMode;
   if (mode === 'sticky' && identity?.fingerprint) {
     const ranked = hrwRank(list, identity.fingerprint);
     const primary = ranked[0];
     let lease = tryLease(primary);
-    if (lease) return { lease, overflow: false, source: identity.source };
+    if (lease) return selectionResult(lease, mode, primary, 'sticky-primary', identity);
     lease = await waitForLease([primary], waitMs);
-    if (lease) return { lease, overflow: false, source: identity.source };
+    if (lease) return selectionResult(lease, mode, primary, 'sticky-primary', identity);
     if (allowOverflow) {
       lease = await waitForLease(ranked.slice(1), 0);
-      if (lease) return { lease, overflow: true, source: identity.source };
+      if (lease) return selectionResult(lease, mode, primary, 'sticky-overflow', identity, true);
     }
-    return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs) };
+    return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
   }
-  if (mode === 'roundrobin' || (mode === 'sticky' && !identity?.fingerprint)) {
-    const ranked = rrRank(list);
-    const lease = await waitForLease(ranked, waitMs);
-    if (lease) return { lease, source: identity?.source || 'roundrobin' };
-    return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs) };
+  if (mode === 'single') {
+    const preferred = singlePreferred(list);
+    const lease = await waitForLease([preferred], waitMs);
+    if (lease) return selectionResult(lease, mode, preferred, 'single-selected', identity);
+    return { error: 'upstream account is busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
   }
-  const preferred = singlePreferred(list);
-  const lease = await waitForLease([preferred], waitMs);
-  if (lease) return { lease, source: 'single' };
-  return { error: 'upstream account is busy', retryAfter: retryAfterSeconds(waitMs) };
+  const reasons = { roundrobin: 'roundrobin-next', sticky: 'sticky-no-identity-roundrobin', 'least-connections': 'least-active', 'weighted-roundrobin': 'weighted-slot', 'priority-failover': 'priority-tier' };
+  const deadline = Date.now() + waitMs;
+  while (true) {
+    const current = enabledAccounts({ excludeIds });
+    if (!current.length) return { error: 'no available upstream account', strategy: mode };
+    const available = current.filter(accountHasCapacity);
+    if (available.length) {
+      const ranked = strategyRank(mode, available);
+      const lease = tryLease(ranked[0]);
+      if (lease) return selectionResult(lease, mode, ranked[0], reasons[mode], identity);
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
+    await waitForCapacity(remaining);
+  }
 }
 function retryAfterSeconds(waitMs) { return Math.min(30, Math.max(1, Math.ceil((Number(waitMs) || 1000) / 1000))); }
 function pickAccount() {
@@ -363,6 +472,12 @@ function publicProxyBase() {
 
 const OR_API = 'https://openrouter.ai/api/v1';
 
+async function accountFetchJSON(url, opts = {}, timeoutMs = 60000, account = null) {
+  const headers = account ? responseHeadersFor(account, opts.headers || {}) : (opts.headers || {});
+  const result = await clineRequestJSON(url, { headers, body: opts.body || '', timeoutMs, account });
+  let json = null; try { json = JSON.parse(result.text); } catch { json = { raw: result.text }; }
+  return { status: result.status, json };
+}
 async function fetchJSON(url, opts = {}, timeoutMs = 60000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -443,7 +558,7 @@ async function harvestAvailableProviders(modelId, pipeline) {
   const body = pipeline === 'planner'
     ? { ...base, providerOptions: { gateway: { only: ['__probe__'] } } }
     : { ...base, provider: { only: ['__probe__'] } };
-  const { json } = await fetchJSON(`${config.upstreamBase}/chat/completions`, { method: 'POST', headers: chatHeaders(acc.key), body: JSON.stringify(body) }, 60000);
+  const { json } = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, { headers: chatHeaders(acc.key), body: JSON.stringify(body) }, 60000, acc);
   const err = json?.error;
   if (typeof err !== 'string') return null;
   if (pipeline === 'planner') {
@@ -469,11 +584,9 @@ async function probeModel(modelId) {
   const acc = pickAccount();
   const t0 = Date.now();
   const body = { model: modelId, messages: [{ role: 'user', content: 'Reply with the word OK' }], max_tokens: 256 };
-  const { json } = await fetchJSON(`${config.upstreamBase}/chat/completions`, {
-    method: 'POST',
-    headers: chatHeaders(acc.key),
-    body: JSON.stringify(body),
-  }, 180000);
+  const { json } = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, {
+    headers: chatHeaders(acc.key), body: JSON.stringify(body),
+  }, 180000, acc);
   const ms = Date.now() - t0;
   if (json?.error && !json?.data) {
     return { ok: false, error: safeReason(typeof json.error === 'string' ? json.error : JSON.stringify(json.error)) };
@@ -563,9 +676,9 @@ async function validateUpstreams(modelId) {
       const body = pipeline === 'planner'
         ? { ...base, providerOptions: { gateway: { only: [slug] } } }
         : { ...base, provider: { only: [slug] } };
-      const { json } = await fetchJSON(`${config.upstreamBase}/chat/completions`, {
-        method: 'POST', headers: chatHeaders(acc.key), body: JSON.stringify(body),
-      }, 60000).catch(() => ({ json: { error: 'network error' } }));
+      const { json } = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, {
+        headers: chatHeaders(acc.key), body: JSON.stringify(body),
+      }, 60000, acc).catch(() => ({ json: { error: 'network error' } }));
       let status = 'unknown';
       let note = '';
       if (json?.error && !json?.data) {
@@ -630,16 +743,37 @@ async function fetchOfficialModels() {
 }
 
 function record(modelId, info) {
-  META.models[modelId] = { ...(META.models[modelId] || {}), ...info };
-  META.history.unshift({ ts: Date.now(), model: modelId, ...info });
-  if (META.history.length > 100) META.history.length = 100;
+  const ts = Date.now();
+  META.models[modelId] = { ...(META.models[modelId] || {}), provider: info.provider, canonical: info.canonical, lastMs: info.ms };
+  const legacy = { ts, model: modelId, ...info };
+  recentHistory.unshift(legacy); if (recentHistory.length > 100) recentHistory.length = 100;
   if (info.account) {
     META.stats = META.stats || {};
     const st = (META.stats[info.account] ||= { requests: 0, lastUsed: 0, lastError: null });
-    st.requests += 1;
-    st.lastUsed = Date.now();
-    st.lastError = info.error || null;
+    st.requests += 1; st.lastUsed = ts; st.lastError = info.error || null;
   }
+  const request = {
+    ts, requestId: info.requestId || crypto.randomUUID(), requestedModel: info.requestedModel || modelId,
+    resolvedModel: info.resolvedModel || modelId, stream: !!info.stream, strategy: info.strategy || config.accountMode,
+    sessionSource: info.sessionSource || null, preferredAccountId: info.preferredAccountId || null,
+    preferredAccountName: info.preferredAccountName || null, accountId: info.accountId || null, accountName: info.account || null,
+    selectionReason: info.selectionReason || null, overflow: !!info.overflow,
+    targetProviders: Array.isArray(info.targets) ? info.targets : [], actualProvider: info.provider || null,
+    attempts: Array.isArray(info.trace) ? info.trace.map((t) => ({ provider: t.upstream || 'auto', status: t.status, upstreamStatus: t.upstreamStatus, ms: t.ms, account: t.account, action: t.action || null })) : [],
+    status: info.normalizedStatus || (info.error ? 502 : 200), upstreamStatus: info.upstreamStatus ?? null,
+    durationMs: Number(info.ms) || 0, accountActions: info.accountActions || [], switched: (info.accountPath || []).length > 1, appliedHeaderNames: info.appliedHeaderNames || [],
+    errorCategory: info.error ? (info.proxyError ? 'proxy' : 'upstream') : null,
+  };
+  const writes = [requestLogs.append(request)];
+  for (const [attemptIndex, attempt] of (info.trace || []).entries()) {
+    if (attempt.status === 200 && !attempt.action) continue;
+    writes.push(errorLogs.append({ ts, requestId: request.requestId, requestedModel: request.requestedModel, resolvedModel: request.resolvedModel,
+      accountId: attempt.accountId || info.accountId || null, accountName: attempt.account || info.account || null, attemptIndex,
+      targetProvider: attempt.upstream || null, providerPath: (info.trace || []).slice(0, attemptIndex + 1).map((t) => t.upstream || 'auto'),
+      status: attempt.normalizedStatus || attempt.status, upstreamStatus: attempt.upstreamStatus ?? null,
+      category: attempt.upstreamStatus === 0 ? (info.proxyError ? 'proxy' : 'network') : 'upstream', reason: safeReason(attempt.note, info.sensitiveValues), accountAction: attempt.action || null }));
+  }
+  Promise.all(writes).then(() => enforceCombinedLimit(LOG_DIR, 100 * 1024 * 1024)).catch(() => {});
   saveMeta();
 }
 
@@ -768,10 +902,19 @@ function forwardHeadersFor(req, body = {}) {
   // unrelated generic metadata merely because the client supplied it.
   return copyAllowedHeaders(req, protocol === 'codex' ? CODEX_HEADERS : protocol === 'claude' ? CLAUDE_HEADERS : GENERIC_HEADERS);
 }
-function clineRequestJSON(url, { headers = {}, body, signal, timeoutMs = 120000 } = {}) {
-  return clineRequest(url, { headers, body, signal, timeoutMs }).then(async (res) => ({ status: res.status, headers: res.headers, text: await streamToString(res.body) }));
+const proxyAgents = new Map();
+function proxyAgentFor(proxyUrl) {
+  if (!proxyUrl) return undefined;
+  if (proxyAgents.has(proxyUrl)) return proxyAgents.get(proxyUrl);
+  const protocol = new URL(proxyUrl).protocol;
+  const agent = protocol === 'socks5:' || protocol === 'socks5h:' ? new SocksProxyAgent(proxyUrl) : new HttpsProxyAgent(proxyUrl);
+  proxyAgents.set(proxyUrl, agent);
+  return agent;
 }
-function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000 } = {}) {
+function clineRequestJSON(url, { headers = {}, body, signal, timeoutMs = 120000, account = null, proxyUrl = '' } = {}) {
+  return clineRequest(url, { headers, body, signal, timeoutMs, account, proxyUrl }).then(async (res) => ({ status: res.status, headers: res.headers, text: await streamToString(res.body) }));
+}
+function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, account = null, proxyUrl = '' } = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const lib = u.protocol === 'https:' ? https : http;
@@ -781,7 +924,8 @@ function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000 } = 
     const onAbort = () => { response?.destroy(new Error('aborted')); req.destroy(new Error('aborted')); };
     const cleanup = () => signal?.removeEventListener('abort', onAbort);
     const fail = (error) => { cleanup(); if (!settled) { settled = true; reject(error); } };
-    const req = lib.request({ protocol: u.protocol, hostname: u.hostname, port: u.port, path: `${u.pathname}${u.search}`, method: 'POST', headers: { ...headers, 'Content-Length': data.length } }, (res) => {
+    const agent = proxyAgentFor(proxyUrl || account?.proxyUrl || '');
+    const req = lib.request({ protocol: u.protocol, hostname: u.hostname, port: u.port, path: `${u.pathname}${u.search}`, method: 'POST', headers: { ...headers, 'Content-Length': data.length }, ...(agent ? { agent } : {}) }, (res) => {
       response = res;
       res.once('end', cleanup);
       res.once('close', cleanup);
@@ -990,9 +1134,13 @@ function buildAttempts(modelId, cfg) {
 
 function redactSecrets(value) {
   let s = String(value ?? '');
-  const keys = [config.apiKey, config.proxyKey, PROXY_KEY, ...(config.accounts || []).map((a) => a.key)].filter(Boolean);
+  const keys = [config.apiKey, config.proxyKey, PROXY_KEY, ...(config.accounts || []).flatMap((a) => {
+    const values = [a.key, a.proxyUrl, ...Object.values(a.headers || {})];
+    try { const u = new URL(a.proxyUrl); values.push(decodeURIComponent(u.username), decodeURIComponent(u.password)); } catch {}
+    return values;
+  })].filter(Boolean);
   for (const k of keys) s = s.split(k).join('[REDACTED]');
-  s = s.replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, 'Bearer [REDACTED]');
+  s = s.replace(/(?:https?|socks5h?):\/\/[^\s]+/gi, '[REDACTED_PROXY]').replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, 'Bearer [REDACTED]');
   return s;
 }
 // 把上游错误信息归一成短字符串（用于学习与尝试日志）
@@ -1022,14 +1170,14 @@ function persistAccountAction(account, action, reason) {
   saveMeta();
 }
 function responseHeadersFor(account, forwardedHeaders) {
-  return { ...forwardedHeaders, 'Content-Type': 'application/json', Authorization: `Bearer ${account.key}` };
+  return { ...forwardedHeaders, ...(account?.headers || {}), 'Content-Type': 'application/json', Authorization: `Bearer ${account.key}` };
 }
 // 单次向上游网关发起非流式请求；返回 { status, out, routing, acc, upstreamStatus, normalizedStatus }
 async function attemptOnce(modelId, body, attempt, account, forwardedHeaders, signal) {
   const send = injectPrefs(body, modelId, attempt);
   try {
     const res = await clineRequestJSON(`${config.upstreamBase}/chat/completions`, {
-      headers: responseHeadersFor(account, forwardedHeaders), body: JSON.stringify(send), signal,
+      headers: responseHeadersFor(account, forwardedHeaders), body: JSON.stringify(send), signal, account,
     });
     let json = null;
     try { json = JSON.parse(res.text); } catch {}
@@ -1066,7 +1214,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
           const send = injectPrefs(body, modelId, attempt);
           let up = null, netError = null;
           try {
-            up = await clineRequest(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, forwardedHeaders), body: JSON.stringify(send), signal: ctrl.signal, timeoutMs: attemptTimeoutMs });
+            up = await clineRequest(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, forwardedHeaders), body: JSON.stringify(send), signal: ctrl.signal, timeoutMs: attemptTimeoutMs, account });
           } catch (e) { netError = errText(e.message); }
           const ctype = String(up?.headers?.['content-type'] || '');
           let isSSE = !!up && up.status === 200 && ctype.toLowerCase().includes('event-stream');
@@ -1102,7 +1250,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
             const inferred = normalizeStatus(up.status, json, normalizeStatus(0, { error: text }, 502));
             const un = json ? unwrap(json, up.status) : { status: inferred, upstreamStatus: up.status, normalizedStatus: inferred, body: { error: { message: errText(text.slice(0, 400) || netError), type: 'upstream_error' } }, routing: {} };
             const msg = errText(un.body?.error?.message || text || netError);
-            trace.push({ upstream: attempt.upstream, status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, ms, note: msg.slice(0, 160), account: account.name });
+            trace.push({ upstream: attempt.upstream, status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, ms, note: msg.slice(0, 160), account: account.name, accountId: account.id });
             if (attempt.upstream) learnUpstreamStatus(modelId, attempt.upstream, msg);
             if (!attempt.upstream && (attempt.excludeList || []).length) learnAvailableProviders(modelId, msg);
             last = { status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing, acc: account, netError: null, accountAction: accountActionFor(un) };
@@ -1111,20 +1259,20 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
             continue;
           }
           if (!up) {
-            trace.push({ upstream: attempt.upstream, status: 502, upstreamStatus: 0, normalizedStatus: 502, ms, note: netError || 'no response', account: account.name });
+            trace.push({ upstream: attempt.upstream, status: 502, upstreamStatus: 0, normalizedStatus: 502, ms, note: netError || 'no response', account: account.name, accountId: account.id });
             last = { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${netError || 'no response'}`, type: 'upstream_error' } }, routing: {}, acc: account, netError: netError || 'no response', accountAction: accountActionFor({ normalizedStatus: 502 }) };
             trace[trace.length - 1].action = last.accountAction?.action || null;
             if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'ban') break;
             continue;
           }
           keepCloseHook = true;
-          trace.push({ upstream: attempt.upstream, status: 200, upstreamStatus: 200, normalizedStatus: 200, ms, note: 'stream', account: account.name });
+          trace.push({ upstream: attempt.upstream, status: 200, upstreamStatus: 200, normalizedStatus: 200, ms, note: 'stream', account: account.name, accountId: account.id });
           return { status: 200, streamUp: up, streamHead: firstChunk, acc: account, trace, t0, started: true, cleanupClientClose };
         }
         const r = await attemptOnce(modelId, body, attempt, account, forwardedHeaders, ctrl.signal);
         const ms = Date.now() - t1;
         const note = r.netError || (r.status !== 200 ? errText(r.out?.error?.message).slice(0, 160) : 'ok');
-        trace.push({ upstream: attempt.upstream, status: r.status, upstreamStatus: r.upstreamStatus, normalizedStatus: r.normalizedStatus, ms, note, account: account.name });
+        trace.push({ upstream: attempt.upstream, status: r.status, upstreamStatus: r.upstreamStatus, normalizedStatus: r.normalizedStatus, ms, note, account: account.name, accountId: account.id });
         if (r.status !== 200 && attempt.upstream) learnUpstreamStatus(modelId, attempt.upstream, errText(r.out?.error?.message));
         if (r.status !== 200 && !attempt.upstream && (attempt.excludeList || []).length) learnAvailableProviders(modelId, r.netError || note);
         last = { ...r, accountAction: accountActionFor(r) };
@@ -1140,20 +1288,29 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
 }
 
 async function handleChat(req, res) {
+  const requestId = crypto.randomUUID();
+  res.setHeader('X-Cline-Request-Id', requestId);
   const raw = await readBody(req);
   let body;
   try { body = JSON.parse(raw.toString('utf8')); } catch { return sendJSON(res, 400, { error: { message: 'invalid JSON body' } }); }
   if (!body || typeof body !== 'object' || Array.isArray(body)) return sendJSON(res, 400, { error: { message: 'JSON body must be an object' } });
-  const modelId = typeof body.model === 'string' ? body.model.trim() : '';
-  if (!modelId || modelId.length > 300) return sendJSON(res, 400, { error: { message: 'valid model is required' } });
-
+  const requestedModel = typeof body.model === 'string' ? body.model.trim() : '';
+  if (!requestedModel || requestedModel.length > 300) return sendJSON(res, 400, { error: { message: 'valid model is required' } });
+  const sensitiveValues = sensitiveMessageValues(body);
+  const modelId = resolveModelAlias(requestedModel);
+  body = { ...body, model: modelId };
   const identity = extractSessionIdentity(req, body);
   const forwardedHeaders = forwardHeadersFor(req, body);
   const isStream = body.stream === true;
   const excluded = new Set();
   const accountPath = [];
   let selected = await acquireAccountLease(identity, { excludeIds: excluded });
-  if (!selected.lease) return sendBusy(res, selected.error, selected.retryAfter, enabledAccounts().length ? 429 : 503);
+  if (!selected.lease) {
+    const status = enabledAccounts().length ? 429 : 503;
+    record(modelId, { requestId, requestedModel, resolvedModel: modelId, stream: isStream, strategy: selected.strategy, sessionSource: identity.source, selectionReason: 'capacity-unavailable', normalizedStatus: status, upstreamStatus: null, error: selected.error, ms: 0 });
+    return sendBusy(res, selected.error, selected.retryAfter, status);
+  }
+  const initialSelection = { ...selected };
 
   let chain, cfg, targets, chainLease = selected.lease;
   const completedTrace = [];
@@ -1183,6 +1340,7 @@ async function handleChat(req, res) {
       chainLease = null;
       selected = await acquireAccountLease(identity, { excludeIds: excluded });
       if (selected.lease) {
+        selected.reason = 'replacement-after-account-action';
         completedTrace.push(...chain.trace);
         continue;
       }
@@ -1243,7 +1401,7 @@ async function handleChat(req, res) {
           }
         } catch {}
       }
-      record(modelId, { provider, canonical, ms: Date.now() - chain.t0, stream: true, error: streamError, account: acc.name, attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, accountPath, accountActions, sessionSource: identity.source });
+      record(modelId, { requestId, requestedModel, resolvedModel: modelId, provider, canonical, ms: Date.now() - chain.t0, stream: true, error: streamError, account: acc.name, accountId: acc.id, attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, accountPath, accountActions, sessionSource: identity.source, strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, targets, appliedHeaderNames: Object.keys(acc.headers || {}), proxyError: !!acc.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues });
     };
     const tap = new Transform({ transform(c, enc, cb) { buf.push(Buffer.from(c)); cb(null, c); }, flush(cb) { finalize(); cb(); } });
     up.body.on('error', (e) => { finalize(e.message); if (!res.destroyed) res.destroy(e); });
@@ -1256,11 +1414,12 @@ async function handleChat(req, res) {
   const { status, out, routing = {}, acc } = chain;
   if (!out) return sendJSON(res, 502, { error: { message: 'no upstream response', type: 'upstream_error' } });
   if (status === 200 && /^cline-pass\//.test(modelId) && !config.knownModels.includes(modelId)) { config.knownModels.push(modelId); saveConfig(); }
-  const safeOut = status === 200 ? out : { ...out, error: { ...(out.error || {}), message: safeReason(out?.error?.message || 'upstream error') } };
+  const safeOut = status === 200 ? out : { ...out, error: { ...(out.error || {}), message: safeReason(out?.error?.message || 'upstream error', sensitiveValues) } };
   record(modelId, {
-    provider: routing.finalProvider || null, canonical: routing.canonicalSlug || null, ms: Date.now() - chain.t0, stream: false,
+    requestId, requestedModel, resolvedModel: modelId, provider: routing.finalProvider || null, canonical: routing.canonicalSlug || null, ms: Date.now() - chain.t0, stream: false,
     attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, error: status !== 200 ? safeOut.error.message : null,
-    account: acc?.name || null, accountPath, accountActions, accountAction: chain.accountAction?.action || accountActions.at(-1)?.action || null, upstreamStatus: chain.upstreamStatus, normalizedStatus: chain.normalizedStatus, sessionSource: identity.source,
+    account: acc?.name || null, accountId: acc?.id || null, accountPath, accountActions, accountAction: chain.accountAction?.action || accountActions.at(-1)?.action || null, upstreamStatus: chain.upstreamStatus, normalizedStatus: chain.normalizedStatus, sessionSource: identity.source,
+    strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, targets, appliedHeaderNames: Object.keys(acc?.headers || {}), proxyError: !!acc?.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues,
   });
   res.writeHead(status, {
     'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*',
@@ -1330,8 +1489,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && p === '/api/test') {
       const input = await readJsonBody(req);
-      const { model, upstream, upstreams, exclude, accountId } = input;
-      if (!model) return sendJSON(res, 400, { error: 'model required' });
+      const { model: requestedModel, upstream, upstreams, exclude, accountId } = input;
+      if (!requestedModel) return sendJSON(res, 400, { error: 'model required' });
+      const model = resolveModelAlias(String(requestedModel));
       const forced = accountId ? config.accounts.find((a) => a.id === String(accountId)) : null;
       if (accountId && !forced) return sendJSON(res, 400, { error: { message: 'unknown accountId' } });
       if (forced && !enabledAccounts().some((a) => a.id === forced.id)) return sendJSON(res, 409, { error: { message: 'selected account is unavailable' } });
@@ -1354,6 +1514,58 @@ const server = http.createServer(async (req, res) => {
       record(model, { provider: r.finalProvider, canonical: r.canonicalSlug, ms: Date.now() - t0, stream: false, attempts: trace.map((t) => t.upstream || 'auto'), error: null, account: chain.acc?.name || null });
       return sendJSON(res, 200, { ok: true, ms: Date.now() - t0, targets: cfg.upstreams || [], exclude: cfg.exclude || [], actual: r.finalProvider, actualName: r.finalProviderName, pipeline: r.pipeline, pinnable: r.pipeline !== null, canonicalSlug: r.canonicalSlug, fallbacks: r.fallbacks, content: (r.content || '').slice(0, 120), account: chain.acc?.name || null, trace });
     }
+    if (req.method === 'GET' && p === '/api/model-aliases') {
+      return sendJSON(res, 200, { aliases: config.modelAliases || {}, targets: (config.knownModels || []).filter((id) => id.startsWith('cline-pass/')) });
+    }
+    if (req.method === 'POST' && p === '/api/model-aliases') {
+      const body = await readJsonBody(req);
+      const aliases = body?.aliases;
+      const error = validateModelAliases(aliases);
+      if (error) return sendJSON(res, 400, { error: { message: error } });
+      config.modelAliases = normalizeModelAliases(aliases); saveConfig();
+      return sendJSON(res, 200, { ok: true, count: Object.keys(config.modelAliases).length });
+    }
+    if ((req.method === 'GET' || req.method === 'DELETE') && (p === '/api/logs/requests' || p === '/api/logs/errors')) {
+      const store = p.endsWith('/errors') ? errorLogs : requestLogs;
+      if (req.method === 'DELETE') { await store.clear(); return sendJSON(res, 200, { ok: true }); }
+      const allowed = p.endsWith('/errors')
+        ? ['from','to','requestId','model','requestedModel','resolvedModel','account','accountId','accountName','status','upstreamStatus','category','provider','targetProvider','accountAction']
+        : ['from','to','requestId','model','requestedModel','resolvedModel','account','accountId','accountName','strategy','status','upstreamStatus','stream','provider','actualProvider','targetProviders','overflow','switched','accountAction','errorCategory'];
+      const rawLimit = url.searchParams.get('limit') || '50', cursor = url.searchParams.get('cursor') || '';
+      const allowedParams = new Set([...allowed, 'limit', 'cursor']);
+      for (const key of url.searchParams.keys()) if (!allowedParams.has(key)) return sendJSON(res, 400, { error: { message: `unknown log filter: ${key}` } });
+      if (!/^\d+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 200 || cursor.length > 512) return sendJSON(res, 400, { error: { message: 'invalid log pagination' } });
+      if (cursor) { try { const decoded = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')); if (!Number.isFinite(Number(decoded.ts)) || typeof decoded.requestId !== 'string') throw new Error(); } catch { return sendJSON(res, 400, { error: { message: 'invalid log cursor' } }); } }
+      const filters = {};
+      for (const key of allowed) if (url.searchParams.has(key)) {
+        const value = url.searchParams.get(key);
+        if (value.length > 300) return sendJSON(res, 400, { error: { message: `invalid log filter: ${key}` } });
+        if (['from', 'to'].includes(key) && !/^\d+$/.test(value)) return sendJSON(res, 400, { error: { message: `invalid log time filter: ${key}` } });
+        if (['status', 'upstreamStatus'].includes(key) && !/^\d{1,3}$/.test(value)) return sendJSON(res, 400, { error: { message: `invalid numeric log filter: ${key}` } });
+        if (['stream', 'overflow', 'switched'].includes(key) && !['true', 'false'].includes(value)) return sendJSON(res, 400, { error: { message: `invalid boolean log filter: ${key}` } });
+        filters[key] = ['stream', 'overflow', 'switched'].includes(key) ? value === 'true' : value;
+      }
+      return sendJSON(res, 200, store.query({ limit: Number(rawLimit), cursor, filters }));
+    }
+    if (req.method === 'POST' && p === '/api/accounts/proxy-test') {
+      const body = await readJsonBody(req);
+      const account = config.accounts.find((a) => a.id === String(body?.accountId || ''));
+      if (!account) return sendJSON(res, 400, { error: { message: 'unknown accountId' } });
+      let proxyUrl;
+      try { proxyUrl = body.proxyUrl === undefined ? account.proxyUrl : normalizeProxyUrl(body.proxyUrl, { strict: true }); }
+      catch (e) { return sendJSON(res, 400, { error: { message: e.message } }); }
+      if (!proxyUrl) return sendJSON(res, 400, { error: { message: 'proxyUrl is required' } });
+      const t0 = Date.now();
+      try {
+        const model = config.knownModels[0];
+        const result = await clineRequestJSON(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, {}), body: JSON.stringify({ model, messages: [], max_tokens: 1 }), proxyUrl, timeoutMs: 15000 });
+        return sendJSON(res, 200, { ok: result.status > 0, proxyType: new URL(proxyUrl).protocol.replace(':', ''), ms: Date.now() - t0, status: result.status });
+      } catch (e) {
+        let reason = String(e.message || 'proxy error');
+        try { const u = new URL(proxyUrl); for (const secret of [proxyUrl, decodeURIComponent(u.username), decodeURIComponent(u.password)].filter(Boolean)) reason = reason.split(secret).join('[REDACTED]'); } catch {}
+        return sendJSON(res, 200, { ok: false, proxyType: new URL(proxyUrl).protocol.replace(':', ''), ms: Date.now() - t0, errorCategory: 'proxy', reason: safeReason(reason) });
+      }
+    }
     if (req.method === 'GET' && p === '/api/accounts') {
       clearExpiredCooldowns();
       return sendJSON(res, 200, {
@@ -1365,7 +1577,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && p === '/api/accounts') {
       const body = await readJsonBody(req);
       if (!body || typeof body !== 'object' || !Array.isArray(body.accounts)) return sendJSON(res, 400, { error: { message: 'accounts array is required' } });
-      if (!['single', 'roundrobin', 'sticky'].includes(body.mode)) return sendJSON(res, 400, { error: { message: 'invalid account mode' } });
+      if (!ACCOUNT_MODES.has(body.mode)) return sendJSON(res, 400, { error: { message: 'invalid account mode' } });
       const wait = Number(body.concurrencyWaitMs ?? 2000);
       if (!Number.isInteger(wait) || wait < 0 || wait > 30000) return sendJSON(res, 400, { error: { message: 'concurrencyWaitMs must be an integer from 0 to 30000' } });
       const ruleError = validateAccountErrorRulesInput(body.accountErrorRules || {});
@@ -1376,9 +1588,13 @@ const server = http.createServer(async (req, res) => {
         if (!a || typeof a !== 'object' || Array.isArray(a)) return sendJSON(res, 400, { error: { message: `invalid account at index ${i}` } });
         if (a.id !== undefined && (!/^[A-Za-z0-9_-]{1,100}$/.test(String(a.id)) || !existingIds.has(String(a.id)))) return sendJSON(res, 400, { error: { message: `invalid or immutable account id at index ${i}` } });
         if (a.name !== undefined && (typeof a.name !== 'string' || a.name.length > 50 || /[\x00-\x1f\x7f]/.test(a.name))) return sendJSON(res, 400, { error: { message: `invalid account name at index ${i}` } });
+        if (a.note !== undefined && !validateNote(a.note)) return sendJSON(res, 400, { error: { message: `invalid note at index ${i}` } });
         if (a.key !== undefined && (typeof a.key !== 'string' || a.key.length > 4096 || /[\r\n\x00]/.test(a.key))) return sendJSON(res, 400, { error: { message: `invalid account key at index ${i}` } });
         const max = Number(a.maxConcurrent ?? 0);
         if (!Number.isInteger(max) || max < 0 || max > 100000) return sendJSON(res, 400, { error: { message: `invalid maxConcurrent at index ${i}` } });
+        for (const field of ['weight', 'priority']) if (a[field] !== undefined && (!Number.isInteger(Number(a[field])) || Number(a[field]) < 1 || Number(a[field]) > 100)) return sendJSON(res, 400, { error: { message: `invalid ${field} at index ${i}` } });
+        try { normalizeProxyUrl(a.proxyUrl, { strict: true }); validateAndNormalizeHeaders(a.headers, { strict: true }); }
+        catch (e) { return sendJSON(res, 400, { error: { message: `account ${i}: ${e.message}` } }); }
         const routeError = validatePerModelInput(a.perModel || {});
         if (routeError) return sendJSON(res, 400, { error: { message: `account ${i}: ${routeError}` } });
       }
@@ -1395,7 +1611,7 @@ const server = http.createServer(async (req, res) => {
       config.concurrencyWaitMs = wait; config.accountErrorRules = normalizeAccountErrorRules(body.accountErrorRules || {});
       for (const id of Object.keys(META.accountStates || {})) if (!seen.has(id)) delete META.accountStates[id];
       for (const id of activeCounts.keys()) if (!seen.has(id)) activeCounts.delete(id);
-      saveConfig(); saveMeta(); RR_COUNTER = 0;
+      saveConfig(); saveMeta(); RR_COUNTER = 0; strategyCounters.clear(); proxyAgents.clear();
       return sendJSON(res, 200, { ok: true, accounts: accs.length, mode: config.accountMode, active: config.activeAccount });
     }
     if (req.method === 'POST' && p === '/api/accounts/recover') {
@@ -1406,16 +1622,22 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { ok: true });
     }
     if (req.method === 'POST' && p === '/api/accounts/test') {
-      const { key } = await readJsonBody(req);
-      const k = String(key || '').trim();
+      const input = await readJsonBody(req);
+      const k = String(input?.key || '').trim();
       if (!k) return sendJSON(res, 400, { error: { message: 'key required' } });
+      const saved = config.accounts.find((a) => a.id === String(input?.accountId || ''));
+      let proxyUrl = saved?.proxyUrl || '';
+      try { if (input?.proxyUrl !== undefined) proxyUrl = normalizeProxyUrl(input.proxyUrl, { strict: true }); }
+      catch (e) { return sendJSON(res, 400, { error: { message: e.message } }); }
+      const account = { ...(saved || {}), key: k, proxyUrl };
       const t0 = Date.now();
       const model = config.knownModels[0] || 'cline-pass/glm-5.3-flash';
-      const { json } = await fetchJSON(`${config.upstreamBase}/chat/completions`, {
-        method: 'POST',
-        headers: chatHeaders(k),
-        body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Say OK' }], max_tokens: 512 }),
-      }, 120000);
+      let json;
+      try {
+        ({ json } = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, {
+          headers: chatHeaders(k), body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Say OK' }], max_tokens: 512 }),
+        }, 120000, account));
+      } catch (e) { return sendJSON(res, 200, { ok: false, ms: Date.now() - t0, error: safeReason(e.message), errorCategory: proxyUrl ? 'proxy' : 'network' }); }
       if (json?.error && !json?.data) {
         const rawMsg = typeof json.error === 'string' ? json.error : JSON.stringify(json.error);
         const msg = errText(rawMsg).split(k).join('[REDACTED]');
@@ -1452,7 +1674,7 @@ const server = http.createServer(async (req, res) => {
       const r = await fetchOfficialModels();
       return sendJSON(res, 200, { ok: true, ...r });
     }
-    if (req.method === 'GET' && p === '/api/history') return sendJSON(res, 200, { history: META.history });
+    if (req.method === 'GET' && p === '/api/history') return sendJSON(res, 200, { history: recentHistory });
     if (req.method === 'GET' && p === '/api/config') return sendJSON(res, 200, { port: config.port, perModel: config.perModel, knownModels: config.knownModels });
     if (req.method === 'POST' && p === '/api/config') {
       const body = await readJsonBody(req);
@@ -1477,8 +1699,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && (p === '/v1/models' || p === '/api/v1/models' || p === '/models')) {
       // 默认只暴露订阅模型，避免目录模型淹没客户端的模型选择器；exposeCatalog=true 时合并完整目录
       const ids = config.exposeCatalog
-        ? [...new Set([...config.knownModels, ...(await catalog())])]
-        : [...new Set([...config.knownModels, ...Object.keys(config.perModel)])];
+        ? [...new Set([...config.knownModels, ...(await catalog()), ...Object.keys(config.modelAliases || {})])]
+        : [...new Set([...config.knownModels, ...Object.keys(config.perModel), ...Object.keys(config.modelAliases || {})])];
       return sendJSON(res, 200, { object: 'list', data: ids.map((id) => ({ id, object: 'model' })) });
     }
     if (CHAT_PATHS.has(p) && req.method === 'POST') return await handleChat(req, res);

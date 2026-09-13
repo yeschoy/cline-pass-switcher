@@ -10,7 +10,7 @@
     --text: #e6e9f0; --dim: #8b93a5; --accent: #4f8cff; --green: #34c77b; --orange: #f0a53c; --red: #e5534b;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: "Segoe UI", system-ui, -apple-system, sans-serif; padding: 24px; max-width: 1200px; margin: 0 auto; }
+  body { background: var(--bg); color: var(--text); font-family: "Segoe UI", system-ui, -apple-system, sans-serif; padding: 24px; width:min(100%,1800px); margin: 0 auto; }
   h1 { font-size: 20px; margin-bottom: 4px; }
   .sub { color: var(--dim); font-size: 13px; margin-bottom: 16px; }
   .banner { background: var(--card2); border: 1px solid var(--border); border-left: 3px solid var(--orange); border-radius: 8px; padding: 12px 14px; font-size: 13px; line-height: 1.7; color: var(--dim); margin-bottom: 18px; }
@@ -22,9 +22,18 @@
   button.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
   button.ghost:hover { border-color: var(--accent); }
   button:disabled { opacity: .5; cursor: wait; }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 18px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 18px; overflow-x:auto; }
   .card h2 { font-size: 15px; margin-bottom: 12px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .table-wrap { width:100%; overflow-x:auto; }
+  .account-name { min-width:240px; white-space:nowrap; }
+  .drawer-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:70; display:none; }
+  .drawer { position:absolute; right:0; top:0; height:100%; width:min(520px,100%); overflow:auto; background:var(--card); padding:24px; border-left:1px solid var(--border); }
+  .drawer label { display:block; color:var(--dim); font-size:12px; margin:14px 0 5px; }
+  .drawer input,.drawer textarea { width:100%; background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px; }
+  .modal { position:fixed; inset:0; z-index:80; background:rgba(0,0,0,.65); display:none; align-items:center; justify-content:center; }
+  .modal-box { width:min(680px,calc(100% - 24px)); max-height:80vh; overflow:auto; background:var(--card); border:1px solid var(--border); border-radius:10px; padding:20px; }
+  @media(max-width:600px){ body{padding:12px}.card{padding:12px}.drawer{padding:16px} }
   th { text-align: left; color: var(--dim); font-weight: 500; padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
   td { padding: 9px 10px; border-bottom: 1px solid #22262f; vertical-align: middle; }
   tr:hover td { background: #1a1e27; }
@@ -127,20 +136,21 @@
     <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px; flex-wrap:wrap;">
       <label class="dim" style="font-size:13px">模式：</label>
       <select id="accMode">
-        <option value="single">单账号（手动指定）</option>
-        <option value="roundrobin">账号池轮询</option>
-        <option value="sticky">会话粘性（HRW）</option>
+        <option value="single">单账号（手动指定）</option><option value="roundrobin">账号池轮询</option><option value="sticky">会话粘性（HRW）</option>
+        <option value="least-connections">最少连接</option><option value="weighted-roundrobin">加权轮询</option><option value="priority-failover">主备优先级</option>
       </select>
       <label class="dim" style="font-size:12px">容量等待(ms) <input id="concurrencyWaitMs" type="number" min="0" max="30000" value="2000" style="width:90px"></label>
-      <label class="dim" style="font-size:12px"><input type="checkbox" id="accShowKeys" onchange="toggleKeyVis()"> 显示密钥</label>
+      <select id="preset"><option value="">策略预设…</option><option value="stable">会话稳定</option><option value="throughput">最大吞吐</option><option value="even">均匀分摊</option><option value="quota">按额度分摊</option><option value="failover">主备容灾</option><option value="safe">保守防封</option></select>
+      <button class="ghost" onclick="previewPreset()">预览应用</button>
+      <input id="accSearch" placeholder="搜索名称或备注" oninput="renderAccounts()" style="background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px">
       <button class="ghost" onclick="addAccountRow()">＋ 添加账号</button>
       <button onclick="saveAccounts()">保存账号配置</button>
       <span class="dim" style="font-size:12px" id="accMsg" aria-live="polite"></span>
     </div>
-    <table>
-      <thead><tr><th>使用</th><th>名称</th><th>API Key</th><th>启用</th><th>并发上限</th><th>运行状态</th><th>请求数</th><th>最近使用</th><th>操作</th></tr></thead>
-      <tbody id="accBody"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
-    </table>
+    <div class="table-wrap"><table style="min-width:980px">
+      <thead><tr><th>使用</th><th>名称</th><th>备注</th><th>启用</th><th>并发</th><th>权重/优先级</th><th>代理</th><th>运行状态</th><th>请求数</th><th>操作</th></tr></thead>
+      <tbody id="accBody"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
+    </table></div>
     <div style="margin-top:12px"><label class="dim" style="font-size:12px">账号错误规则（JSON；例：<code>{&quot;429&quot;:{&quot;action&quot;:&quot;cooldown&quot;,&quot;cooldownMs&quot;:1800000}}</code>）</label>
       <textarea id="accountErrorRules" rows="3" style="width:100%;margin-top:5px;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:Consolas,monospace"></textarea>
     </div>
@@ -197,11 +207,15 @@
   </div>
 
   <div class="card">
-    <h2>请求历史（最近 100 条，经代理的请求自动记录）</h2>
-    <table>
-      <thead><tr><th>时间</th><th>模型</th><th>账号</th><th>实际上游</th><th>背后模型</th><th>耗时</th><th>方式</th><th>尝试序列</th></tr></thead>
-      <tbody id="histBody"><tr><td colspan="7" class="empty">暂无记录</td></tr></tbody>
-    </table>
+    <h2>模型别名映射</h2>
+    <div class="toolbar"><input id="aliasPrefix" placeholder="统一前缀"><input id="aliasSuffix" placeholder="统一后缀"><button class="ghost" onclick="generateAliases()">从 cline-pass/* 批量生成</button><button onclick="saveAliases()">保存映射</button><span id="aliasMsg" aria-live="polite"></span></div>
+    <textarea id="aliasEditor" rows="8" style="width:100%;background:var(--card2);color:var(--text);border:1px solid var(--border);padding:8px" placeholder="每行：别名 = cline-pass/实际模型"></textarea>
+  </div>
+
+  <div class="card">
+    <div class="toolbar"><h2 style="margin:0">独立请求 / 错误日志</h2><select id="logType" onchange="loadLogs()"><option value="requests">请求日志</option><option value="errors">错误日志</option></select><input id="logFrom" type="datetime-local" title="开始时间"><input id="logTo" type="datetime-local" title="结束时间"><input id="logRequestId" placeholder="请求 ID"><input id="logModel" placeholder="模型"><input id="logAccount" placeholder="账号"><input id="logStatus" placeholder="状态码"><input id="logProvider" placeholder="供应商"><input id="logStrategy" placeholder="策略/错误类别"><select id="logStream"><option value="">流式：全部</option><option value="true">流式</option><option value="false">非流式</option></select><select id="logOverflow"><option value="">容量：全部</option><option value="true">容量溢出</option><option value="false">未溢出</option></select><select id="logSwitched"><option value="">换号：全部</option><option value="true">已换号</option><option value="false">未换号</option></select><button class="ghost" onclick="loadLogs()">筛选</button><button class="ghost" onclick="clearLogs()">清空当前日志</button></div>
+    <div class="table-wrap"><table style="min-width:1000px"><thead><tr><th>时间</th><th>请求 ID</th><th>请求/实际模型</th><th>账号</th><th>策略/原因</th><th>状态</th><th>供应商路径</th><th>详情</th></tr></thead><tbody id="logBody"><tr><td colspan="8" class="empty">暂无记录</td></tr></tbody></table></div>
+    <button id="logNext" class="ghost" onclick="loadLogs(true)" style="margin-top:10px">下一页</button>
   </div>
 
   <div class="card">
@@ -216,6 +230,17 @@
     </details>
   </div>
 
+<div id="accountDrawerBackdrop" class="drawer-backdrop" onclick="if(event.target===this)closeAccountDrawer()">
+  <aside id="accountDrawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
+    <h2 id="drawerTitle">账号设置</h2><label for="drawerName">账号名称</label><input id="drawerName"><label for="drawerNote">备注（最多 500 字符）</label><textarea id="drawerNote" rows="5"></textarea>
+    <label>API Key</label><input id="drawerKey" type="password"><label>并发上限（0=不限）</label><input id="drawerMax" type="number" min="0" max="100000">
+    <label>权重（1-100）</label><input id="drawerWeight" type="number" min="1" max="100"><label>优先级（1-100，越小越优先）</label><input id="drawerPriority" type="number" min="1" max="100">
+    <label>出站代理 URL（认证值默认掩码）</label><input id="drawerProxy" type="password" placeholder="http:// / https:// / socks5:// / socks5h://"><button class="ghost" onclick="testDraftProxy()" style="margin-top:6px">测试代理连通性</button>
+    <label>安全自定义请求头（JSON，仅账号级）</label><textarea id="drawerHeaders" rows="6"></textarea><div id="drawerError" aria-live="polite" style="color:var(--red)"></div>
+    <p class="dim" id="drawerRoutes" style="margin-top:12px"></p><div class="toolbar" style="margin-top:18px"><button onclick="saveDrawer()">保存草案</button><button class="ghost" onclick="closeAccountDrawer()">关闭</button></div>
+  </aside>
+</div>
+<div id="presetModal" class="modal"><div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="presetTitle"><h2 id="presetTitle">预设变更预览</h2><div id="presetDiff" style="white-space:pre-wrap;margin:14px 0"></div><div id="presetAdjust"></div><button onclick="applyPreset()">确认并保存</button> <button class="ghost" onclick="closePreset()">取消</button></div></div>
 <script>
 let DATA = null;
 let AUTH_KEY = localStorage.getItem('cps_key') || '';
@@ -224,10 +249,11 @@ const escapeHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '
 const jsArg = (s) => escapeHtml(JSON.stringify(String(s ?? '')));
 const fmt = (ts) => new Date(ts).toLocaleTimeString();
 
-async function api(path, body) {
+async function api(path, body, method) {
   const headers = body ? { 'Content-Type': 'application/json' } : {};
   if (AUTH_KEY) headers['X-Admin-Key'] = AUTH_KEY;
-  const res = await fetch(path, body ? { method: 'POST', headers, body: JSON.stringify(body) } : { headers });
+  const verb = method || (body ? 'POST' : 'GET');
+  const res = await fetch(path, { method: verb, headers, ...(body ? { body: JSON.stringify(body) } : {}) });
   if (res.status === 401) { showLogin(); throw new Error('unauthorized'); }
   return res.json();
 }
@@ -371,7 +397,7 @@ function render() {
   $('#officialInfo').textContent = of ? `上次拉取 ${new Date(of.ts).toLocaleString()}（${(of.sources || []).join('+')}，新增 ${of.added.length}）` : '尚未拉取过官方清单';
   renderCatalog();
 
-  loadHistory();
+  loadLogs();
 }
 
 function renderCatalog() {
@@ -388,9 +414,10 @@ function renderCatalog() {
 
 async function loadAll() {
   const accountId = $('#routeScope')?.value || '';
-  const [models, accs, sec, meta] = await Promise.all([api('/api/models' + (accountId ? '?accountId=' + encodeURIComponent(accountId) : '')), api('/api/accounts'), api('/api/security'), api('/api/meta')]);
+  const [models, accs, sec, meta, aliases] = await Promise.all([api('/api/models' + (accountId ? '?accountId=' + encodeURIComponent(accountId) : '')), api('/api/accounts'), api('/api/security'), api('/api/meta'), api('/api/model-aliases')]);
   DATA = models;
-  ACCS = accs;
+  ACCS = accs; ALIASES = aliases;
+  $('#aliasEditor').value = Object.entries(aliases.aliases || {}).map(([a,t]) => `${a} = ${t}`).join('\n');
   const testAccount = $('#testAccount');
   if (testAccount) { const selectedTest = testAccount.value; testAccount.innerHTML = '<option value="">按调度策略选号</option>' + accs.accounts.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`).join(''); testAccount.value = selectedTest; }
   const scope = $('#routeScope');
@@ -687,110 +714,54 @@ function bulkUp(id, action) {
   }
 }
 
-async function loadHistory() {
-  const { history } = await api('/api/history');
-  $('#histBody').innerHTML = history.length ? history.map((h) => `<tr>
-      <td>${escapeHtml(fmt(h.ts))}</td><td class="mono">${escapeHtml(h.model)}</td>
-      <td>${h.account ? '<span class="badge">' + escapeHtml(h.account) + '</span>' : '<span class="dim">—</span>'}</td>
-      <td>${h.provider ? '<span class="badge">' + escapeHtml(h.provider) + '</span>' : '<span class="dim">—</span>'}</td>
-      <td class="mono dim">${escapeHtml(h.canonical || '—')}</td>
-      <td>${Number.isFinite(Number(h.ms)) ? Number(h.ms) : '—'} ms</td>
-      <td>${h.stream ? '流式' : '非流式'}</td>
-      <td class="dim">${escapeHtml((h.trace || h.attempts || []).map((t) => typeof t === 'string' ? t : `${t.upstream || 'auto'}(${t.status === 200 ? '✔' : '✗'}${t.ms}ms)`).join(' → ') || '—')}</td>
-    </tr>`).join('') : '<tr><td colspan="8" class="empty">暂无记录 —— 把客户端 Base URL 指向代理地址即可自动记录</td></tr>';
-}
-
-let ACCS = null;
+let ACCS = null, ALIASES = null, DRAWER_INDEX = -1, DRAWER_SNAPSHOT = '', DRAWER_RETURN = null, PENDING_PRESET = null, LOG_CURSOR = null;
 function renderAccounts() {
   if (!ACCS) return;
-  $('#accMode').value = ACCS.mode;
-  $('#concurrencyWaitMs').value = ACCS.concurrencyWaitMs ?? 2000;
-  $('#accountErrorRules').value = JSON.stringify(ACCS.accountErrorRules || {}, null, 2);
-  const show = $('#accShowKeys').checked;
-  const rows = ACCS.accounts.map((a, i) => {
-    const usage = (ACCS.stats || {})[a.name] || {};
-    const checked = ACCS.mode === 'single' && i === ACCS.active;
-    const state = a.state?.banned ? '封禁' : a.state?.cooldownUntil > Date.now() ? `冷却至 ${new Date(a.state.cooldownUntil).toLocaleTimeString()}` : '健康';
-    return `<tr>
-      <td><input type="radio" name="accActive" data-i="${i}" ${checked ? 'checked' : ''} ${ACCS.mode !== 'single' ? 'disabled' : ''}></td>
-      <td><input class="accName" data-i="${i}" value="${escapeHtml(a.name)}" style="width:110px;background:var(--card2);color:var(--text)"></td>
-      <td><input class="accKey" data-i="${i}" type="${show ? 'text' : 'password'}" value="${escapeHtml(a.key)}" style="width:100%;min-width:260px;background:var(--card2);color:var(--text)"></td>
-      <td><input type="checkbox" class="accEnabled" data-i="${i}" ${a.enabled !== false ? 'checked' : ''}></td>
-      <td><input type="number" class="accMax" data-i="${i}" min="0" value="${a.maxConcurrent || 0}" title="0 表示不限"> / ${a.activeCount || 0}</td>
-      <td><span class="badge ${state === '健康' ? 'green' : 'orange'}">${escapeHtml(state)}</span>${a.state?.reason ? `<div class="dim">${escapeHtml(a.state.reason)}</div>` : ''}</td>
-      <td>${Number(usage.requests) || 0}</td><td class="dim">${usage.lastUsed ? escapeHtml(fmt(usage.lastUsed)) : '—'}</td>
-      <td><div class="row-actions"><button class="ghost" onclick="testAccount(${i}, this)">测试</button>${a.state ? `<button class="ghost" onclick="recoverAccount('${escapeHtml(a.id)}')">恢复</button>` : ''}<button class="ghost" onclick="delAccount(${i})">删除</button></div></td>
-    </tr>`;
+  $('#accMode').value = ACCS.mode; $('#concurrencyWaitMs').value = ACCS.concurrencyWaitMs ?? 2000; $('#accountErrorRules').value = JSON.stringify(ACCS.accountErrorRules || {}, null, 2);
+  const q = ($('#accSearch').value || '').toLowerCase();
+  const rows = ACCS.accounts.map((a, i) => ({a,i})).filter(({a}) => !q || `${a.name} ${a.note || ''}`.toLowerCase().includes(q)).map(({a,i}) => {
+    const usage=(ACCS.stats||{})[a.name]||{}, checked=ACCS.mode==='single'&&i===ACCS.active;
+    const state=a.state?.banned?'封禁':a.state?.cooldownUntil>Date.now()?`冷却至 ${new Date(a.state.cooldownUntil).toLocaleTimeString()}`:'健康';
+    let proxy='直连'; try { if(a.proxyUrl) proxy=new URL(a.proxyUrl).protocol.replace(':','').toUpperCase(); } catch {}
+    const note=String(a.note||'').replace(/\s+/g,' ').slice(0,50);
+    return `<tr><td><input type="radio" name="accActive" data-i="${i}" ${checked?'checked':''} ${ACCS.mode!=='single'?'disabled':''} onchange="ACCS.active=${i}"></td><td class="account-name" title="${escapeHtml(a.name)}">${escapeHtml(a.name)}</td><td class="dim">${escapeHtml(note||'—')}</td><td><input type="checkbox" ${a.enabled!==false?'checked':''} onchange="ACCS.accounts[${i}].enabled=this.checked"></td><td>${a.maxConcurrent||0} / ${a.activeCount||0}</td><td>${a.weight||1} / ${a.priority||100}</td><td><span class="badge">${escapeHtml(proxy)}</span></td><td><span class="badge ${state==='健康'?'green':'orange'}">${escapeHtml(state)}</span></td><td>${Number(usage.requests)||0}</td><td><div class="row-actions"><button class="ghost" onclick="openAccountDrawer(${i},this)">设置</button><button class="ghost" onclick="testAccount(${i},this)">测试</button>${a.state?`<button class="ghost" onclick="recoverAccount(${jsArg(a.id)})">恢复</button>`:''}<button class="ghost" onclick="delAccount(${i})">删除</button></div></td></tr>`;
   }).join('');
-  $('#accBody').innerHTML = rows || '<tr><td colspan="9" class="empty">暂无账号，点击「＋ 添加账号」</td></tr>';
+  $('#accBody').innerHTML=rows||'<tr><td colspan="10" class="empty">无匹配账号</td></tr>';
 }
-
-// 把 DOM 里当前编辑值收回 ACCS（避免重渲染丢输入）
-function collectAccounts() {
-  const mode = $('#accMode').value;
-  const accs = ACCS.accounts.map((a, i) => ({
-    id: a.id,
-    name: document.querySelector(`.accName[data-i="${i}"]`)?.value?.trim() || a.name,
-    key: document.querySelector(`.accKey[data-i="${i}"]`)?.value?.trim() || '',
-    enabled: document.querySelector(`.accEnabled[data-i="${i}"]`)?.checked !== false,
-    maxConcurrent: Number(document.querySelector(`.accMax[data-i="${i}"]`)?.value || 0),
-    perModel: a.perModel || {},
-  }));
-  const checked = document.querySelector('input[name="accActive"]:checked');
-  const active = checked ? parseInt(checked.dataset.i) : Math.min(ACCS.active ?? 0, Math.max(0, accs.length - 1));
-  return { accounts: accs, mode, active };
+function collectAccounts(){return {accounts:ACCS.accounts.map(a=>({id:a.id,name:a.name,note:a.note||'',key:a.key||'',enabled:a.enabled!==false,maxConcurrent:Number(a.maxConcurrent)||0,weight:Number(a.weight)||1,priority:Number(a.priority)||100,proxyUrl:a.proxyUrl||'',headers:a.headers||{},perModel:a.perModel||{}})),mode:$('#accMode').value,active:ACCS.active||0};}
+async function saveAccounts(payload=null){payload||=collectAccounts();payload.concurrencyWaitMs=Number($('#concurrencyWaitMs').value);try{payload.accountErrorRules||=JSON.parse($('#accountErrorRules').value||'{}');}catch{return accMsg('错误规则不是有效 JSON',true);}if(!payload.accounts.some(a=>a.key))return accMsg('至少需要一个 key 非空的账号',true);const r=await api('/api/accounts',payload);if(!r.ok)return accMsg(r.error?.message||'保存失败',true);accMsg(`已保存：${r.accounts} 个账号 · ${r.mode}`);await loadAll();}
+async function recoverAccount(id){const r=await api('/api/accounts/recover',{id});if(r.ok){accMsg('账号已恢复');await loadAll();}}
+function addAccountRow(){ACCS.accounts.push({name:`账号${ACCS.accounts.length+1}`,note:'',key:'',enabled:true,maxConcurrent:0,weight:1,priority:100,proxyUrl:'',headers:{},perModel:{}});renderAccounts();openAccountDrawer(ACCS.accounts.length-1);}
+function delAccount(i){if(!confirm('确认删除该账号？'))return;ACCS.accounts.splice(i,1);ACCS.active=Math.min(ACCS.active,Math.max(0,ACCS.accounts.length-1));renderAccounts();}
+async function testAccount(i,btn){const a=ACCS.accounts[i];if(!a.key)return accMsg('请先在设置中填写 key',true);btn.disabled=true;const r=await api('/api/accounts/test',{accountId:a.id,key:a.key,proxyUrl:a.proxyUrl||''});btn.disabled=false;accMsg(r.ok?`✔ ${a.name} 可用（${r.ms} ms）`:`✘ ${a.name}：${r.error}`,!r.ok);}
+function drawerValue(){return JSON.stringify([$('#drawerName').value,$('#drawerNote').value,$('#drawerKey').value,$('#drawerMax').value,$('#drawerWeight').value,$('#drawerPriority').value,$('#drawerProxy').value,$('#drawerHeaders').value]);}
+function openAccountDrawer(i,button){const a=ACCS.accounts[i];DRAWER_INDEX=i;DRAWER_RETURN=button||document.activeElement;[['drawerName',a.name],['drawerNote',a.note||''],['drawerKey',a.key||''],['drawerMax',a.maxConcurrent||0],['drawerWeight',a.weight||1],['drawerPriority',a.priority||100],['drawerProxy',a.proxyUrl||''],['drawerHeaders',JSON.stringify(a.headers||{},null,2)]].forEach(([id,v])=>$('#'+id).value=v);$('#drawerRoutes').textContent=`账号专属模型路由：${Object.keys(a.perModel||{}).length} 条（可在模型表切换作用域编辑）`;$('#drawerError').textContent='';$('#accountDrawerBackdrop').style.display='block';DRAWER_SNAPSHOT=drawerValue();setTimeout(()=>$('#drawerName').focus(),0);}
+function closeAccountDrawer(force=false){if(!force&&DRAWER_INDEX>=0&&drawerValue()!==DRAWER_SNAPSHOT&&!confirm('存在未保存变更，确认关闭？'))return;$('#accountDrawerBackdrop').style.display='none';DRAWER_INDEX=-1;DRAWER_RETURN?.focus?.();DRAWER_RETURN=null;}
+function saveDrawer(){try{const a=ACCS.accounts[DRAWER_INDEX],headers=JSON.parse($('#drawerHeaders').value||'{}');Object.assign(a,{name:$('#drawerName').value.trim(),note:$('#drawerNote').value,key:$('#drawerKey').value.trim(),maxConcurrent:Number($('#drawerMax').value),weight:Number($('#drawerWeight').value),priority:Number($('#drawerPriority').value),proxyUrl:$('#drawerProxy').value.trim(),headers});DRAWER_SNAPSHOT=drawerValue();closeAccountDrawer(true);renderAccounts();accMsg('草案已更新，请点击“保存账号配置”持久化');}catch{$('#drawerError').textContent='请求头必须是有效 JSON';}}
+async function testDraftProxy(){const a=ACCS.accounts[DRAWER_INDEX];if(!a.id)return $('#drawerError').textContent='请先保存新账号再测试代理';const r=await api('/api/accounts/proxy-test',{accountId:a.id,proxyUrl:$('#drawerProxy').value.trim()});$('#drawerError').style.color=r.ok?'var(--green)':'var(--red)';$('#drawerError').textContent=r.ok?`代理可达：${r.proxyType} · ${r.ms}ms`:`代理失败：${r.reason||r.error?.message}`;}
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('#accountDrawerBackdrop').style.display==='block')closeAccountDrawer();});
+const PRESETS={stable:{mode:'sticky',wait:2000,rules:{429:{action:'cooldown',cooldownMs:1800000}}},throughput:{mode:'least-connections',wait:0,rules:{429:{action:'cooldown',cooldownMs:300000}}},even:{mode:'roundrobin',wait:0,weight:1,priority:100,rules:{429:{action:'cooldown',cooldownMs:1800000}}},quota:{mode:'weighted-roundrobin',wait:0,weight:1,rules:{429:{action:'cooldown',cooldownMs:1800000}}},failover:{mode:'priority-failover',wait:0,priorities:true,rules:{429:{action:'cooldown',cooldownMs:1800000}}},safe:{mode:'sticky',wait:5000,maxConcurrent:1,rules:{401:{action:'ban'},403:{action:'ban'},429:{action:'cooldown',cooldownMs:3600000}}}};
+function previewPreset(){const p=PRESETS[$('#preset').value];if(!p)return accMsg('请先选择预设',true);const draft=collectAccounts(),changes=[];if(draft.mode!==p.mode)changes.push(`accountMode: ${draft.mode} → ${p.mode}`);draft.mode=p.mode;draft.concurrencyWaitMs=p.wait;changes.push(`concurrencyWaitMs: ${$('#concurrencyWaitMs').value} → ${p.wait}`);draft.accountErrorRules={...ACCS.accountErrorRules,...p.rules};draft.accounts=draft.accounts.map((a,i)=>{const n={...a};if(p.weight)n.weight=p.weight;if(p.priority)n.priority=p.priority;if(p.priorities)n.priority=Math.min(100,i===0?1:i*10);if(p.maxConcurrent)n.maxConcurrent=p.maxConcurrent;for(const k of ['maxConcurrent','weight','priority'])if(n[k]!==a[k])changes.push(`${a.name}.${k}: ${a[k]} → ${n[k]}`);return n});for(const c of Object.keys(p.rules))changes.push(`accountErrorRules.${c}: ${JSON.stringify(ACCS.accountErrorRules[c]||null)} → ${JSON.stringify(p.rules[c])}`);PENDING_PRESET=draft;$('#presetDiff').textContent=changes.join('\n')||'没有变化';$('#presetAdjust').innerHTML=p.weight?draft.accounts.map((a,i)=>`<label>${escapeHtml(a.name)} 权重 <input type="number" min="1" max="100" value="${a.weight}" onchange="updatePresetAccount(${i},'weight',this.value)"></label>`).join(''):p.priorities?draft.accounts.map((a,i)=>`<label>${escapeHtml(a.name)} 优先级 <input type="number" min="1" max="100" value="${a.priority}" onchange="updatePresetAccount(${i},'priority',this.value)"></label>`).join(''):'';$('#presetModal').style.display='flex';}
+function updatePresetAccount(i,field,value){if(PENDING_PRESET)PENDING_PRESET.accounts[i][field]=Math.min(100,Math.max(1,Number(value)||1));}
+function closePreset(){$('#presetModal').style.display='none';PENDING_PRESET=null;}async function applyPreset(){const p=PENDING_PRESET;$('#presetModal').style.display='none';PENDING_PRESET=null;if(p){$('#accMode').value=p.mode;$('#concurrencyWaitMs').value=p.concurrencyWaitMs;$('#accountErrorRules').value=JSON.stringify(p.accountErrorRules,null,2);await saveAccounts(p);}}
+function parseAliases(){const out={},seen=new Set();for(const raw of $('#aliasEditor').value.split('\n')){if(!raw.trim())continue;const i=raw.indexOf('=');if(i<1)throw Error(`无效行：${raw}`);const a=raw.slice(0,i).trim(),t=raw.slice(i+1).trim();if(seen.has(a))throw Error(`重复别名：${a}`);seen.add(a);out[a]=t;}return out;}
+function generateAliases(){const pre=$('#aliasPrefix').value,suf=$('#aliasSuffix').value;$('#aliasEditor').value=(ALIASES.targets||[]).map(t=>`${pre}${t.replace(/^cline-pass\//,'')}${suf} = ${t}`).join('\n');}
+async function saveAliases(){try{const r=await api('/api/model-aliases',{aliases:parseAliases()});$('#aliasMsg').textContent=r.ok?`已保存 ${r.count} 条`:r.error?.message;if(r.ok)await loadAll();}catch(e){$('#aliasMsg').textContent=e.message;}}
+async function loadLogs(next=false){
+  if(!$('#logBody'))return; const type=$('#logType').value; if(!next)LOG_CURSOR=null;
+  const params=new URLSearchParams({limit:'50'}); if(LOG_CURSOR)params.set('cursor',LOG_CURSOR);
+  const values={requestId:$('#logRequestId').value,model:$('#logModel').value,account:$('#logAccount').value,status:$('#logStatus').value,provider:$('#logProvider').value};
+  for(const [k,v] of Object.entries(values))if(v.trim())params.set(k,v.trim());
+  if($('#logFrom').value)params.set('from',String(new Date($('#logFrom').value).getTime()));if($('#logTo').value)params.set('to',String(new Date($('#logTo').value).getTime()));
+  const strategy=$('#logStrategy').value.trim(); if(strategy)params.set(type==='errors'?'category':'strategy',strategy);
+  if(type==='requests'&&$('#logStream').value)params.set('stream',$('#logStream').value);
+  if(type==='requests'&&$('#logOverflow').value)params.set('overflow',$('#logOverflow').value);
+  if(type==='requests'&&$('#logSwitched').value)params.set('switched',$('#logSwitched').value);
+  const r=await api(`/api/logs/${type}?${params}`),items=r.items||[];
+  $('#logBody').innerHTML=items.map(x=>`<tr><td>${escapeHtml(new Date(x.ts).toLocaleString())}</td><td class="mono">${escapeHtml(x.requestId)}</td><td class="mono">${escapeHtml(x.requestedModel||'—')}<br><span class="dim">${escapeHtml(x.resolvedModel||'—')}</span></td><td>${escapeHtml(x.accountName||'—')}</td><td>${escapeHtml(x.strategy||x.category||'—')}<br><span class="dim">${escapeHtml(x.selectionReason||x.accountAction||'')}</span></td><td>${escapeHtml(x.status??'—')} / ${escapeHtml(x.upstreamStatus??'—')}</td><td>${escapeHtml((x.targetProviders||x.providerPath||[]).join(' → ')||x.actualProvider||x.targetProvider||'—')}</td><td><details><summary>展开</summary><pre>${escapeHtml(JSON.stringify(x,null,2))}</pre></details></td></tr>`).join('')||'<tr><td colspan="8" class="empty">暂无记录</td></tr>';
+  LOG_CURSOR=r.nextCursor;$('#logNext').disabled=!LOG_CURSOR;
 }
-
-async function saveAccounts() {
-  const payload = collectAccounts();
-  payload.concurrencyWaitMs = Number($('#concurrencyWaitMs').value);
-  try { payload.accountErrorRules = JSON.parse($('#accountErrorRules').value || '{}'); }
-  catch { accMsg('错误规则不是有效 JSON', true); return; }
-  if (!payload.accounts.filter((a) => a.key).length) { accMsg('至少需要一个 key 非空的账号', true); return; }
-  const r = await api('/api/accounts', payload);
-  if (r.ok) {
-    accMsg(`已保存：${r.accounts} 个账号 · ${r.mode === 'roundrobin' ? '轮询' : r.mode === 'sticky' ? '会话粘性' : '单账号'}模式`);
-    const scope = $('#routeScope');
-    if (scope.value && !payload.accounts.some((a) => a.id === scope.value)) scope.value = '';
-    await loadAll();
-  } else accMsg(r.error?.message || '保存失败', true);
-}
-
-async function recoverAccount(id) {
-  const r = await api('/api/accounts/recover', { id });
-  if (r.ok) { accMsg('账号已恢复'); await loadAll(); }
-}
-
-function addAccountRow() {
-  const cur = collectAccounts();
-  cur.accounts.push({ name: `账号${cur.accounts.length + 1}`, key: '', enabled: true, maxConcurrent: 0, perModel: {} });
-  ACCS.accounts = cur.accounts; ACCS.mode = cur.mode; ACCS.active = cur.active;
-  renderAccounts();
-  const last = document.querySelectorAll('.accKey');
-  if (last.length) last[last.length - 1].focus();
-}
-
-function delAccount(i) {
-  const cur = collectAccounts();
-  cur.accounts.splice(i, 1);
-  ACCS.accounts = cur.accounts; ACCS.mode = cur.mode; ACCS.active = Math.min(cur.active, Math.max(0, cur.accounts.length - 1));
-  renderAccounts();
-}
-
-async function testAccount(i, btn) {
-  const acc = collectAccounts().accounts[i];
-  if (!acc.key) { accMsg('请先填写该账号的 key', true); return; }
-  btn.disabled = true; btn.textContent = '测试中…'; accMsg(`正在测试 ${acc.name} …`);
-  const r = await api('/api/accounts/test', { key: acc.key });
-  btn.disabled = false; btn.textContent = '测试';
-  accMsg(r.ok ? `✔ ${acc.name} 可用（${r.ms} ms）${r.note ? ' · ' + r.note : ''}` : `✘ ${acc.name} 不可用：${r.error}`, !r.ok);
-}
-
-function toggleKeyVis() {
-  const show = $('#accShowKeys').checked;
-  document.querySelectorAll('.accKey').forEach((el) => { el.type = show ? 'text' : 'password'; });
-}
-
+async function clearLogs(){if(!confirm('确认清空当前日志？此操作不可撤销。'))return;await api('/api/logs/'+$('#logType').value,null,'DELETE');await loadLogs();}
 function accMsg(msg, isErr) {
   const el = $('#accMsg');
   el.textContent = msg;

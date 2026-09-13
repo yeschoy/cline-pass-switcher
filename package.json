@@ -1,7 +1,7 @@
 {
   "name": "cline-pass-switcher",
   "version": "1.2.0",
-  "description": "Cline Pass 上游控制台：枚举/校验/钉住订阅模型背后的上游渠道，账号池轮询，OpenAI 兼容代理（零依赖 Node）",
+  "description": "Cline Pass 上游控制台：账号池调度、上游路由、账号代理与可观测日志的 OpenAI 兼容代理",
   "private": false,
   "license": "MIT",
   "type": "module",
@@ -11,5 +11,9 @@
   "scripts": {
     "start": "node server.js",
     "test": "node --test"
+  },
+  "dependencies": {
+    "https-proxy-agent": "7.0.6",
+    "socks-proxy-agent": "8.0.5"
   }
 }

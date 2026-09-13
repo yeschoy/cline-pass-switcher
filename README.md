@@ -4,15 +4,17 @@
 ![Node](https://img.shields.io/badge/node-%E2%89%A5%2018-green)
 ![Docker](https://img.shields.io/badge/docker-ready-2496ED)
 
-**零依赖**的 Node.js 本地/服务器代理 + 网页控制台，用于 [Cline Pass](https://cline.bot/cline-pass) 订阅：
+Node.js 本地/服务器代理 + 网页控制台，用于 [Cline Pass](https://cline.bot/cline-pass) 订阅：
 
 - 🔍 **上游枚举与校验** —— 列出订阅模型背后每一条上游渠道，并一键实测哪些「✔可用 / ⏳限流 / ✘不可钉」
 - 🎯 **精确钉住上游** —— 严格钉住 / 优先+回退两种模式，支持按最低成本、最快首字、最高吞吐排序
 - 🧬 **多上游优先级故障转移（2026-09-06 新增）** —— 勾选多个上游即按勾选顺序逐个尝试：第一个异常（报错 / 网络失败 / 超时）自动顺切下一个，全部失败才透传错误；每次尝试有独立 120s 超时与逐次尝试明细（请求头 X-Cline-Target-Upstream: a>b 与 X-Cline-Attempts，历史与测试台展示逐次尝试路径 upstream(502) 到 upstream(200)）
 - 🚫 **上游排除** —— 勾「排除」的渠道永不被使用：勾选模式下从候选中剔除；自动模式与优先+回退模式下把排除换算成 only 白名单（已知上游 - 排除项）注入，两类管道均实测生效；网关侧渠道清单更新导致白名单过期时，报错中附带的最新渠道清单会被自动学习合并
-- 👥 **账号池** —— 多账号管理、手动切换、轮询均衡与基于会话的 HRW 粘性调度；支持每账号并发上限、冷却/封禁与手动恢复
+- 👥 **账号池** —— 支持单账号、轮询、HRW 粘性、最少连接、加权轮询和优先级容灾；六种安全预设可先预览再应用
+- 🛡️ **账号高级设置** —— 备注、并发、权重、优先级、安全自定义 Header，以及 HTTP/HTTPS/SOCKS5/SOCKS5H 出站代理（故障绝不回退直连）
 - 🔗 **账号级模型路由** —— 每个账号可为模型整项覆盖全局上游顺序、模式、排除、排序与重试上限，删除专属配置即可恢复继承
-- 📊 **观测** —— 每条请求记录账号/供应商尝试路径、实际渠道、规范化状态和处置动作（不记录会话原值或消息正文）
+- 📊 **观测** —— 独立滚动请求/错误 JSONL 日志，支持筛选、分页和清空；记录调度原因、别名解析与供应商路径
+- 🏷️ **模型别名** —— 批量把 `cline-pass/*` 生成客户端短别名，原始模型仍保留
 - 🔑 **代理密钥** —— 给下游客户端发一把独立密钥，可随时在页面轮换
 - 🌐 **OpenAI 兼容** —— 任何 OpenAI 客户端 / Cline 扩展把 Base URL 指向代理即可，无侵入
 
@@ -25,7 +27,8 @@
 ```bash
 git clone https://github.com/<你的用户名>/cline-pass-switcher.git
 cd cline-pass-switcher
-node server.js        # 仅需 Node ≥ 18，无需 npm install
+npm install
+node server.js        # Node ≥ 18
 ```
 
 打开 <http://127.0.0.1:3123/>，在「账号管理」里添加你的 Cline Pass 账号（`sk_` 开头的 key）并保存即可。
@@ -93,8 +96,8 @@ location / {
 
 | 字段 | 说明 |
 |---|---|
-| `accounts` | 账号池：`[{ id, name, key, enabled, maxConcurrent, perModel }]`；`maxConcurrent: 0` 表示不限 |
-| `accountMode` | `single` 手动指定 / `roundrobin` 轮询 / `sticky` 会话 HRW 粘性 |
+| `accounts` | 账号池：`[{ id, name, note, key, enabled, maxConcurrent, weight, priority, proxyUrl, headers, perModel }]`；备注不进入上游/日志，`maxConcurrent: 0` 表示不限 |
+| `accountMode` | `single` / `roundrobin` / `sticky` / `least-connections` / `weighted-roundrobin` / `priority-failover` |
 | `activeAccount` | 单账号模式下使用的下标 |
 | `concurrencyWaitMs` | 容量等待时间，0～30000 ms，默认 2000 |
 | `accountErrorRules` | 全局账号处置规则，例如 `{"429":{"action":"cooldown","cooldownMs":1800000},"500":{"action":"ban"}}` |
@@ -102,6 +105,7 @@ location / {
 | `publicBaseUrl` | 公网代理地址（控制台展示用） |
 | `exposeCatalog` | `true` 时代理的 `/v1/models` 会合并 Cline 公开目录模型；默认 `false` 只返回订阅模型（避免客户端模型列表被淹没） |
 | `knownModels` | 订阅模型清单（控制台主表） |
+| `modelAliases` | 客户端别名到现有 `cline-pass/*` 模型的映射；路由按解析后的模型执行 |
 | `perModel` | 每模型路由：`{ upstreams, exclude, pinMode, sort, maxRetries }`；`maxRetries` 是首试后的外层重试次数。账号内同名配置整项覆盖全局配置，不逐字段合并 |
 | `apiKey` | 旧版单 key 字段，启动时自动迁移进 `accounts` |
 
@@ -155,12 +159,13 @@ Cline Pass 订阅模型在 Cline 网关之后分成两条管道，钉住上游�
 
 | 卡片 | 功能 |
 |---|---|
-| 账号管理 | 账号池增删改、显隐密钥、逐账号连通性测试、单账号/轮询模式、用量统计 |
+| 账号管理 | 六种调度模式与预设、名称/备注搜索、右侧设置抽屉、代理测试和用量统计 |
 | 访问与安全 | 修改下游代理密钥（即时生效）、公网代理地址、鉴权开关 |
 | 订阅模型 | 背后模型 / 渠道数 / 最近实际渠道；渠道下拉（带可用性标注）；严格钉住 / 优先+回退；排序 |
 | 操作按钮 | 探测（刷新渠道清单）、测试（单次钉住验证）、校验（全渠道实测地图） |
 | 测试台 | 任选模型+渠道发一条小请求，直接看网关是否采纳 |
-| 请求历史 | 自动记录每条请求的账号、实际渠道、耗时、尝试序列（最近 100 条，含流式） |
+| 请求/错误日志 | 独立 JSONL 视图、筛选、游标分页、详情与分类清空 |
+| 模型别名 | 批量生成去前缀别名、统一前后缀、冲突校验和完整映射保存 |
 | 完整目录 | Cline 公开目录模型，`:free` 变体可精确钉住 |
 
 代理同时做了兼容性标准化：解包 Cline 的 `{"data":...}` 包装为标准 OpenAI 格式，并在可验证时保留真实上游 HTTP 状态；仅网络失败、非 JSON 或无有效状态的错误包使用 502。响应附加不含密钥/会话值的 `X-Cline-Target-Upstream / X-Cline-Actual-Upstream / X-Cline-Account` 等诊断头。
@@ -172,6 +177,14 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 `sticky` 模式分别识别 Codex 的 parent thread / `prompt_cache_key` / session/thread 字段，以及 Claude Code 的 parent-agent / session / agent 字段；无显式会话时只对首个 system/developer 与首个 user 消息做本机 HMAC 路由指纹。原始会话值和消息不会持久化。客户端真实提供的 Codex、Claude 或通用会话/SDK Header 按允许列表透传；`Authorization`、`Proxy-Authorization`、Cookie、逐跳 Header、Installation ID 和 Attestation 始终剔除，也不会伪造 User-Agent、设备、浏览器或 TLS 指纹。
 
 账号错误规则默认空以兼容旧行为。`ignore` 保持账号可用；`cooldown` 到期自动恢复；`ban` 只能在控制台手动恢复。普通供应商故障转移固定使用同一账号，只有 cooldown/ban 且 SSE 尚未开始时最多换号一次。首期不提供 RPM、出口 IP 或指纹伪装。
+
+### 日志、代理和安全边界
+
+请求与错误日志分别写入 `DATA_DIR/logs/requests-*.jsonl` 和 `errors-*.jsonl`。默认保留 30 天、请求 50,000 条、错误 10,000 条，两类合计不超过 100 MiB；查询 API 为 `GET /api/logs/{requests|errors}`（`limit` 1～200、`cursor` 游标和字段筛选），对应 `DELETE` 只清空指定类型。每个代理请求返回 `X-Cline-Request-Id`。
+
+账号代理支持 `http://`、`https://`、`socks5://`、`socks5h://` 和可选 URL 用户名/密码，只应用于该账号的 Cline 请求；代理失败进入网络/代理错误记录，并且不会回退直连。账号 Header 在客户端协议白名单之后合并，随后由系统强制覆盖 `Content-Type` 和账号 `Authorization`。Authorization、Cookie、逐跳 Header、会话/线程/设备身份及凭据类 Header 均禁止配置。
+
+日志仅保存允许字段和已应用 Header 名称，不保存账号 Key、代理 URL/认证值、Header 值、备注、原始会话、消息正文或敏感上游正文。旧配置缺少新字段时会自动补安全默认值。
 
 ---
 

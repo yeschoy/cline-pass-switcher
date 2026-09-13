@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import https from 'node:https';
+import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -69,10 +71,10 @@ function pausedOversizedJson(port, pathname) {
   });
 }
 
-async function startSwitcher(config, existingDir = null) {
+async function startSwitcher(config, existingDir = null, extraEnv = {}) {
   const dir = existingDir || fs.mkdtempSync(path.join(os.tmpdir(), 'cps-test-'));
   if (config) fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config));
-  const child = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: { ...process.env, DATA_DIR: dir, BIND_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: { ...process.env, ...extraEnv, DATA_DIR: dir, BIND_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
   child.stdout.on('data', (c) => { output += c; }); child.stderr.on('data', (c) => { output += c; });
   await new Promise((resolve, reject) => {
@@ -544,4 +546,100 @@ test('legacy migration and cooldown state survive restart', async (t) => {
   const afterMeta = JSON.parse(fs.readFileSync(path.join(running.dir, 'metadata.json')));
   assert.equal(afterMeta.routingSecret, beforeRestart.routingSecret);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(running.dir, 'config.json'))).accounts.map((a) => a.id), migrated.accounts.map((a) => a.id));
+});
+
+test('new scheduling modes, account fields, model aliases and independent logs', async (t) => {
+  const seen = [];
+  let coolFailures = 1;
+  const mock = http.createServer((req, res) => {
+    const chunks=[]; req.on('data',(c)=>chunks.push(c)); req.on('end',()=>{
+      const body=JSON.parse(Buffer.concat(chunks).toString()||'{}'); seen.push({ auth:req.headers.authorization, headers:req.headers, body });
+      if (body.model === 'cool' && req.headers.authorization === 'Bearer ka' && coolFailures-- > 0) { res.writeHead(429, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'limited' } })); }
+      if (body.model === 'leak') { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: `failed ${req.headers['x-safe-account']} ${body.messages?.[0]?.content}` } })); }
+      const reply=()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}],provider:'Mock'}));};
+      if(body.model==='slow')setTimeout(reply,100);else reply();
+    });
+  });
+  const upstreamPort=await listen(mock); const socket=http.createServer(); const switchPort=await listen(socket); await close(socket);
+  const cfg={port:switchPort,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'weighted-roundrobin',concurrencyWaitMs:20,
+    accounts:[{id:'a',name:'A',note:'primary\naccount',key:'ka',enabled:true,maxConcurrent:1,weight:1,priority:1,headers:{'X-Safe-Account':'header-secret-value'},perModel:{}},{id:'b',name:'B',key:'kb',enabled:true,maxConcurrent:1,weight:3,priority:10,perModel:{}}],knownModels:['cline-pass/target','slow','cool','leak'],modelAliases:{},perModel:{},accountErrorRules:{}};
+  const running=await startSwitcher(cfg); t.after(async()=>{await stop(running.child);await close(mock);fs.rmSync(running.dir,{recursive:true,force:true});});
+  for(let i=0;i<8;i++)assert.equal((await rawJson(switchPort,'/v1/chat/completions',{model:'cline-pass/target',messages:[]})).status,200);
+  assert.deepEqual(seen.slice(0,8).reduce((m,x)=>(m[x.auth]=(m[x.auth]||0)+1,m),{}),{'Bearer ka':2,'Bearer kb':6});
+  const accounts=(await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json()).accounts;
+  assert.equal(accounts[0].note,'primary\naccount'); assert.equal(seen[0].headers['x-safe-account'],'header-secret-value');
+  assert.equal((await rawJson(switchPort,'/api/accounts',{accounts,mode:'priority-failover',active:0,concurrencyWaitMs:20,accountErrorRules:{429:{action:'cooldown',cooldownMs:60000}}})).status,200);
+  seen.length=0;
+  const highPriorityBusy=rawJson(switchPort,'/v1/chat/completions',{model:'slow',messages:[]});await new Promise(r=>setTimeout(r,10));
+  const fallbackWhileBusy=rawJson(switchPort,'/v1/chat/completions',{model:'slow',messages:[]});await Promise.all([highPriorityBusy,fallbackWhileBusy]);
+  assert.deepEqual(new Set(seen.map(x=>x.auth)),new Set(['Bearer ka','Bearer kb']),'priority mode must immediately fall back while the high-priority account is full');
+  seen.length=0;await rawJson(switchPort,'/v1/chat/completions',{model:'cline-pass/target',messages:[]});assert.equal(seen[0].auth,'Bearer ka','released high-priority account must re-enter the pool');
+  seen.length=0;assert.equal((await rawJson(switchPort,'/v1/chat/completions',{model:'cool',messages:[]})).status,200);assert.deepEqual(seen.map(x=>x.auth),['Bearer ka','Bearer kb'],'cooldown action must replace the account once');
+  assert.equal((await rawJson(switchPort,'/api/accounts/recover',{id:'a'})).status,200);seen.length=0;await rawJson(switchPort,'/v1/chat/completions',{model:'cline-pass/target',messages:[]});assert.equal(seen[0].auth,'Bearer ka','recovered account must re-enter its priority tier');
+  assert.equal((await rawJson(switchPort,'/api/accounts',{accounts,mode:'least-connections',active:0,concurrencyWaitMs:20,accountErrorRules:{}})).status,200);
+  seen.length=0; const first=rawJson(switchPort,'/v1/chat/completions',{model:'slow',messages:[]}); await new Promise(r=>setTimeout(r,10)); const second=rawJson(switchPort,'/v1/chat/completions',{model:'slow',messages:[]}); await Promise.all([first,second]);
+  assert.equal(new Set(seen.map(x=>x.auth)).size,2,'least-connections must use the idle account');
+  assert.equal((await rawJson(switchPort,'/api/model-aliases',{aliases:{friendly:'cline-pass/target'}})).status,200);
+  assert.equal((await rawJson(switchPort,'/api/model-aliases',{aliases:{bad:'cline-pass/missing'}})).status,400);
+  seen.length=0; const aliased=await rawJson(switchPort,'/v1/chat/completions',{model:'friendly',messages:[]}); assert.equal(aliased.status,200);assert.equal(seen[0].body.model,'cline-pass/target');assert.ok(aliased.headers['x-cline-request-id']);
+  const models=await (await fetch(`http://127.0.0.1:${switchPort}/v1/models`)).json();assert.ok(models.data.some(x=>x.id==='friendly')&&models.data.some(x=>x.id==='cline-pass/target'));
+  await new Promise(r=>setTimeout(r,30)); const logs=await (await fetch(`http://127.0.0.1:${switchPort}/api/logs/requests?requestedModel=friendly`)).json();
+  assert.equal(logs.items[0].resolvedModel,'cline-pass/target');assert.equal(logs.items[0].requestId,aliased.headers['x-cline-request-id']);assert.equal(JSON.stringify(logs).includes('primary account'),false);assert.equal(JSON.stringify(logs).includes('ka'),false);
+  assert.equal((await rawJson(switchPort,'/api/accounts',{accounts,mode:'single',active:0,concurrencyWaitMs:20,accountErrorRules:{}})).status,200);
+  const leaked=await rawJson(switchPort,'/v1/chat/completions',{model:'leak',messages:[{role:'user',content:'message-secret-value'}]});assert.equal(leaked.status,500);assert.equal(leaked.text.includes('message-secret-value'),false);assert.equal(leaked.text.includes('header-secret-value'),false);
+  await new Promise(r=>setTimeout(r,20));const redactedErrors=await(await fetch(`http://127.0.0.1:${switchPort}/api/logs/errors?requestedModel=leak`)).json();assert.equal(JSON.stringify(redactedErrors).includes('message-secret-value'),false);assert.equal(JSON.stringify(redactedErrors).includes('header-secret-value'),false);
+  const bytes=fs.readFileSync(path.join(running.dir,'config.json'));
+  const invalidHeader=await rawJson(switchPort,'/api/accounts',{accounts:[{...accounts[0],headers:{Authorization:'bad'}},accounts[1]],mode:'single',active:0,concurrencyWaitMs:20,accountErrorRules:{}});assert.equal(invalidHeader.status,400);assert.deepEqual(fs.readFileSync(path.join(running.dir,'config.json')),bytes);
+  const invalidProxy=await rawJson(switchPort,'/api/accounts',{accounts:[{...accounts[0],proxyUrl:'ftp://user:pass@example.test'},accounts[1]],mode:'single',active:0,concurrencyWaitMs:20,accountErrorRules:{}});assert.equal(invalidProxy.status,400);
+  assert.equal((await fetch(`http://127.0.0.1:${switchPort}/api/logs/requests?limit=999`)).status,400);
+  assert.equal((await fetch(`http://127.0.0.1:${switchPort}/api/logs/requests?unknown=value`)).status,400);
+  assert.equal((await fetch(`http://127.0.0.1:${switchPort}/api/logs/requests`,{method:'DELETE'})).status,200);assert.equal((await (await fetch(`http://127.0.0.1:${switchPort}/api/logs/requests`)).json()).items.length,0);
+});
+
+test('account HTTP proxy is used and proxy failure never falls back to direct', async (t) => {
+  let upstreamHits=0, connects=0;
+  const upstream=http.createServer((req,res)=>{upstreamHits++;req.resume();req.on('end',()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));});});
+  const upstreamPort=await listen(upstream);
+  const proxy=http.createServer();
+  proxy.on('connect',(req,client,head)=>{connects++;const [host,port]=req.url.split(':');const target=net.connect(Number(port),host,()=>{client.write('HTTP/1.1 200 Connection Established\r\n\r\n');if(head.length)target.write(head);target.pipe(client);client.pipe(target);});target.on('error',()=>client.destroy());});
+  const proxyPort=await listen(proxy);const socket=http.createServer();const switchPort=await listen(socket);await close(socket);
+  const config={port:switchPort,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'single',concurrencyWaitMs:0,accounts:[{id:'a',name:'A',key:'ka',enabled:true,proxyUrl:`http://127.0.0.1:${proxyPort}`,perModel:{}}],knownModels:['cline-pass/test'],perModel:{},accountErrorRules:{}};
+  const running=await startSwitcher(config);t.after(async()=>{await stop(running.child);await close(proxy);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  const ok=await rawJson(switchPort,'/v1/chat/completions',{model:'cline-pass/test',messages:[]});assert.equal(ok.status,200);assert.equal(connects,1);assert.equal(upstreamHits,1);
+  const accounts=(await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json()).accounts;
+  const spare=http.createServer();const deadPort=await listen(spare);await close(spare);
+  accounts[0].proxyUrl=`http://user:password@127.0.0.1:${deadPort}`;
+  assert.equal((await rawJson(switchPort,'/api/accounts',{accounts,mode:'single',active:0,concurrencyWaitMs:0,accountErrorRules:{}})).status,200);
+  const failed=await rawJson(switchPort,'/v1/chat/completions',{model:'cline-pass/test',messages:[]});assert.equal(failed.status,502);assert.equal(upstreamHits,1,'a failed configured proxy must not retry direct');
+  await new Promise(r=>setTimeout(r,20));
+  const logs=await (await fetch(`http://127.0.0.1:${switchPort}/api/logs/errors?category=proxy`)).json();assert.ok(logs.items.some(x=>x.category==='proxy'));assert.equal(JSON.stringify(logs).includes('password'),false);
+});
+
+test('account HTTPS proxy uses a TLS CONNECT tunnel', async (t) => {
+  let upstreamHits = 0, connects = 0;
+  const tunnels = new Set();
+  const certPath = path.resolve('test/fixtures/proxy-cert.pem');
+  const tlsOptions = { key: fs.readFileSync(path.resolve('test/fixtures/proxy-key.pem')), cert: fs.readFileSync(certPath) };
+  const upstream = https.createServer(tlsOptions, (req, res) => { upstreamHits++; req.resume(); req.on('end', () => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] })); }); });
+  const upstreamPort = await listen(upstream);
+  const proxy = https.createServer(tlsOptions);
+  proxy.on('connect', (req, client, head) => { connects++; const target = net.connect(upstreamPort, '127.0.0.1', () => { tunnels.add(client); tunnels.add(target); client.write('HTTP/1.1 200 Connection Established\r\n\r\n'); if (head.length) target.write(head); target.pipe(client); client.pipe(target); }); target.on('error', () => client.destroy()); });
+  const proxyPort = await listen(proxy); const socket = http.createServer(); const switchPort = await listen(socket); await close(socket);
+  const config = { port: switchPort, upstreamBase: `https://127.0.0.1:${upstreamPort}`, accountMode: 'single', concurrencyWaitMs: 0, accounts: [{ id: 'a', name: 'A', key: 'ka', enabled: true, proxyUrl: `https://127.0.0.1:${proxyPort}`, perModel: {} }], knownModels: ['cline-pass/test'], perModel: {}, accountErrorRules: {} };
+  const running = await startSwitcher(config, null, { NODE_EXTRA_CA_CERTS: certPath });
+  t.after(async () => { await stop(running.child); for (const socket of tunnels) socket.destroy(); proxy.closeAllConnections?.(); upstream.closeAllConnections?.(); await close(proxy); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const result = await rawJson(switchPort, '/v1/chat/completions', { model: 'cline-pass/test', messages: [] });
+  assert.equal(result.status, 200, result.text); assert.equal(connects, 1); assert.equal(upstreamHits, 1);
+});
+
+test('SOCKS5 and SOCKS5H account proxies tunnel requests', async (t) => {
+  let hits=0, socksConnections=0;
+  const upstream=http.createServer((req,res)=>{hits++;req.resume();req.on('end',()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));});});
+  const upstreamPort=await listen(upstream);
+  const socks=net.createServer((client)=>{socksConnections++;let buffer=Buffer.alloc(0),stage=0;client.on('data',function onData(chunk){buffer=Buffer.concat([buffer,chunk]);if(stage===0){if(buffer.length<2)return;const n=buffer[1];if(buffer.length<2+n)return;buffer=buffer.subarray(2+n);client.write(Buffer.from([5,0]));stage=1;}if(stage===1){if(buffer.length<5)return;const atyp=buffer[3];let off=4,host;if(atyp===1){if(buffer.length<10)return;host=[...buffer.subarray(off,off+4)].join('.');off+=4;}else if(atyp===3){const n=buffer[off++];if(buffer.length<off+n+2)return;host=buffer.subarray(off,off+n).toString();off+=n;}else return client.destroy();const port=buffer.readUInt16BE(off);off+=2;const rest=buffer.subarray(off);buffer=Buffer.alloc(0);stage=2;const target=net.connect(port,host,()=>{client.write(Buffer.from([5,0,0,1,0,0,0,0,0,0]));if(rest.length)target.write(rest);client.removeListener('data',onData);client.pipe(target);target.pipe(client);});target.on('error',()=>client.destroy());}});});
+  const socksPort=await listen(socks);const socket=http.createServer();const switchPort=await listen(socket);await close(socket);
+  const base={id:'a',name:'A',key:'ka',enabled:true,perModel:{}};
+  const running=await startSwitcher({port:switchPort,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'single',concurrencyWaitMs:0,accounts:[{...base,proxyUrl:`socks5://127.0.0.1:${socksPort}`}],knownModels:['cline-pass/test'],perModel:{},accountErrorRules:{}});t.after(async()=>{await stop(running.child);await close(socks);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  for(const protocol of ['socks5','socks5h']){const accounts=(await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json()).accounts;accounts[0].proxyUrl=`${protocol}://127.0.0.1:${socksPort}`;assert.equal((await rawJson(switchPort,'/api/accounts',{accounts,mode:'single',active:0,concurrencyWaitMs:0,accountErrorRules:{}})).status,200);assert.equal((await rawJson(switchPort,'/v1/chat/completions',{model:'cline-pass/test',messages:[]})).status,200);}
+  assert.equal(hits,2);assert.equal(socksConnections,2);
 });
