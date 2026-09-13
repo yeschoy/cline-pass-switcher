@@ -4,3 +4,38 @@
 > Started: 2026-09-13
 
 ---
+
+
+## Session 1: 完成账号路由、调度预设、代理与可观测日志
+
+**Date**: 2026-09-13
+**Task**: 完成账号路由、调度预设、代理与可观测日志
+**Branch**: `main`
+
+### Summary
+
+完成并验证账号路由断连修复、新增三种调度策略与六种预设、滚动请求/错误日志、账号代理与安全 Header、备注抽屉、响应式控制台和批量模型别名；12/12 测试通过并完成宽窄屏手工验收。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `05718c5` | (see git log) |
+| `8b54014` | (see git log) |
+| `96070b8` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
