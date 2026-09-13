@@ -797,6 +797,7 @@ function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000 } = 
   });
 }
 function streamToString(stream) {
+  if (stream.readableEnded || stream.destroyed) return Promise.resolve('');
   return new Promise((resolve, reject) => {
     const chunks = [];
     stream.on('data', (c) => chunks.push(Buffer.from(c)));
@@ -826,17 +827,57 @@ function readFirstSseEvent(stream, maxBytes = 64 * 1024) {
 // ---------- 聊天代理 ----------
 const CHAT_PATHS = new Set(['/chat/completions', '/v1/chat/completions', '/api/v1/chat/completions']);
 
+const MAX_REQUEST_BODY_BYTES = 50 * 1024 * 1024;
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
-    req.on('data', (c) => {
-      size += c.length;
-      if (size > 50 * 1024 * 1024) { const e = new Error('body too large'); e.statusCode = 413; reject(e); req.destroy(); return; }
-      chunks.push(c);
-    });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
+    let settled = false;
+    const cleanup = () => {
+      req.off('data', onData);
+      req.off('end', onEnd);
+      req.off('error', onError);
+    };
+    const rejectTooLarge = () => {
+      if (settled) return;
+      settled = true;
+      chunks.length = 0;
+      cleanup();
+      const drainCleanup = () => {
+        req.off('end', drainCleanup);
+        req.off('close', drainCleanup);
+        req.off('error', drainCleanup);
+      };
+      req.once('end', drainCleanup);
+      req.once('close', drainCleanup);
+      req.once('error', drainCleanup);
+      req.resume();
+      const error = new Error('body too large');
+      error.statusCode = 413;
+      reject(error);
+    };
+    const onData = (chunk) => {
+      size += chunk.length;
+      if (size > MAX_REQUEST_BODY_BYTES) return rejectTooLarge();
+      chunks.push(chunk);
+    };
+    const onEnd = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(Buffer.concat(chunks));
+    };
+    const onError = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
+    const declaredLength = Number(req.headers['content-length']);
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BODY_BYTES) rejectTooLarge();
   });
 }
 async function readJsonBody(req) {
@@ -847,9 +888,12 @@ async function readJsonBody(req) {
   }
 }
 
+function upstreamErrorOf(json) {
+  return json?.error || json?.data?.error || null;
+}
 function normalizeStatus(httpStatus, json, fallback = 502) {
   if (Number.isInteger(httpStatus) && httpStatus >= 400 && httpStatus <= 599) return httpStatus;
-  const err = json?.error || json?.data?.error;
+  const err = upstreamErrorOf(json);
   const code = Number(err?.status || err?.status_code || err?.code || json?.status || json?.status_code);
   if (Number.isInteger(code) && code >= 400 && code <= 599) return code;
   const msg = errText(err || json);
@@ -859,7 +903,7 @@ function normalizeStatus(httpStatus, json, fallback = 502) {
   return fallback;
 }
 function unwrap(json, httpStatus = 200) {
-  const d = json?.data && json.data.choices ? json.data : json;
+  const d = json?.data && (json.data.choices || json.data.error) ? json.data : json;
   if (d?.error && !d?.choices) {
     const msg = errText(d.error);
     const status = normalizeStatus(httpStatus, d, 502);
@@ -1006,11 +1050,13 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
   let activeReq = null;
   let keepCloseHook = false;
   const clientSocket = req.socket;
-  const onClientClose = () => { if (activeReq) activeReq.abort?.(); };
+  let clientClosed = !!clientSocket?.destroyed;
+  const onClientClose = () => { clientClosed = true; if (activeReq) activeReq.abort?.(); };
   clientSocket?.on('close', onClientClose);
   const cleanupClientClose = () => clientSocket?.off('close', onClientClose);
   try {
     for (const attempt of attempts) {
+      if (clientClosed) break;
       const t1 = Date.now();
       const ctrl = new AbortController();
       activeReq = ctrl;
@@ -1038,7 +1084,8 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
                   const eventText = head.split(/\r?\n\r?\n/, 1)[0];
                   const payload = eventText.split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.replace(/^data:\s?/, '')).join('\n');
                   const event = payload === '[DONE]' ? null : safeJsonParse(payload, 64 * 1024);
-                  if (event?.error) { isSSE = false; netError = `stream error: ${safeReason(errText(event.error))}`; }
+                  const eventError = upstreamErrorOf(event);
+                  if (eventError) { isSSE = false; netError = `stream error: ${safeReason(errText(eventError))}`; }
                 }
               }
             } catch (e) { isSSE = false; netError = errText(e.message); }
@@ -1129,15 +1176,16 @@ async function handleChat(req, res) {
       const reason = chain.out?.error?.message || chain.netError || `upstream status ${chain.normalizedStatus || chain.status}`;
       if (action.action !== 'ignore') persistAccountAction(account, action, reason);
       accountActions.push({ account: account.name, action: action.action, statusCode: action.statusCode });
-      chain.trace.push({ account: account.name, action: action.action, upstreamStatus: chain.upstreamStatus || 0, normalizedStatus: chain.normalizedStatus || chain.status, status: chain.status, ms: 0, note: action.action });
     }
     if (action && (action.action === 'cooldown' || action.action === 'ban') && !chain.started && accountAttempt === 0) {
-      completedTrace.push(...chain.trace);
       excluded.add(account.id);
       lease.release();
       chainLease = null;
       selected = await acquireAccountLease(identity, { excludeIds: excluded });
-      if (selected.lease) continue;
+      if (selected.lease) {
+        completedTrace.push(...chain.trace);
+        continue;
+      }
     }
     break;
   }
@@ -1175,12 +1223,22 @@ async function handleChat(req, res) {
         if (!line.trimStart().startsWith('data:')) continue;
         try {
           const event = JSON.parse(line.trimStart().replace(/^data:\s*/, ''));
-          if (event?.error) {
+          const eventError = upstreamErrorOf(event);
+          if (eventError) {
             const normalizedStatus = normalizeStatus(200, event, 502);
             const action = accountActionFor({ normalizedStatus });
-            streamError = safeReason(errText(event.error));
-            if (action && action.action !== 'ignore') persistAccountAction(acc, action, streamError);
-            chain.trace.push({ account: acc.name, action: action?.action || null, upstreamStatus: 200, normalizedStatus, status: normalizedStatus, ms: 0, note: 'stream error after response started' });
+            streamError = safeReason(errText(eventError));
+            if (action) {
+              if (action.action !== 'ignore') persistAccountAction(acc, action, streamError);
+              accountActions.push({ account: acc.name, action: action.action, statusCode: action.statusCode });
+            }
+            const providerAttempt = chain.trace.at(-1);
+            if (providerAttempt) {
+              providerAttempt.action = action?.action || null;
+              providerAttempt.normalizedStatus = normalizedStatus;
+              providerAttempt.status = normalizedStatus;
+              providerAttempt.note = 'stream error after response started';
+            }
             break;
           }
         } catch {}
@@ -1327,7 +1385,7 @@ const server = http.createServer(async (req, res) => {
       const previousById = new Map(config.accounts.map((a) => [a.id, a]));
       const previousByName = new Map(config.accounts.map((a) => [a.name, a]));
       const seen = new Set();
-      const normalizedAccounts = body.accounts.map((a, i) => normalizeAccount({ ...a, id: a.id || config.accounts[i]?.id }, i, previousById, previousByName));
+      const normalizedAccounts = body.accounts.map((a, i) => normalizeAccount(a, i, previousById, previousByName));
       const requestedActiveId = normalizedAccounts[Number(body.active)]?.id;
       const accs = normalizedAccounts.filter((a) => a.key);
       if (!accs.length) return sendJSON(res, 400, { error: { message: '至少需要一个有效账号（key 非空）' } });
@@ -1423,7 +1481,7 @@ const server = http.createServer(async (req, res) => {
         : [...new Set([...config.knownModels, ...Object.keys(config.perModel)])];
       return sendJSON(res, 200, { object: 'list', data: ids.map((id) => ({ id, object: 'model' })) });
     }
-    if (CHAT_PATHS.has(p) && req.method === 'POST') return handleChat(req, res);
+    if (CHAT_PATHS.has(p) && req.method === 'POST') return await handleChat(req, res);
     return sendJSON(res, 404, { error: { message: `no route: ${req.method} ${p}` } });
   } catch (e) {
     return sendJSON(res, Number.isInteger(e?.statusCode) ? e.statusCode : 500, { error: { message: safeReason(e.message || 'internal error') } });

@@ -106,7 +106,7 @@ Account keys are intentionally persisted only as static account configuration in
 |---|---|
 | Chat JSON is malformed or not an object | `400`; no upstream request |
 | Chat `model` is missing, blank, non-string, or over 300 characters | `400` |
-| Request body exceeds 50 MiB | `413` |
+| Request body exceeds 50 MiB | Reject promptly with `413` as soon as the limit is crossed, even if the client pauses before request end; discard/drain the remaining body without buffering or destroying the socket |
 | No statically available account | `503` with a redacted error |
 | Accounts exist but required capacity is unavailable after waiting | `429`, `Retry-After` integer clamped to 1-30 seconds |
 | Explicit `/api/test.accountId` is unknown / unavailable | `400` / `409` |
@@ -140,10 +140,12 @@ Account keys are intentionally persisted only as static account configuration in
 - real allowed headers arrive, prohibited headers do not, downstream Authorization is replaced, and no synthetic User-Agent appears;
 - sticky capacity overflows temporarily, all-full returns `429` plus `Retry-After`, and all `activeCount` values return to zero;
 - fragmented first-event SSE errors are normalized before output; valid SSE contains data and `[DONE]`;
-- downstream disconnect aborts the upstream request and releases capacity;
+- a wrapped error after SSE output starts updates the existing provider trace and future account state without replaying or adding a pseudo-attempt;
+- downstream disconnect before or after SSE starts aborts the upstream request, stops supplier failover, and releases capacity;
+- oversized clients receive prompt `413` before request end while request buffering remains bounded;
 - persisted history contains no account key or raw session value.
 
-The current integration suite directly covers stable identities, provider/account failover, capacity overflow, valid SSE, fragmented pre-response SSE errors, and a non-streaming downstream disconnect. It does not contain a dedicated HRW input-order/minimal-remapping property test or a post-start SSE disconnect test; do not claim those two as direct automated evidence until assertions are added.
+The current integration suite directly covers stable identities, provider/account failover, capacity overflow, valid SSE, fragmented pre-response SSE errors, wrapped post-start SSE errors without replay, non-streaming and post-start SSE downstream disconnects, prompt oversized-body rejection, HRW input-order independence, and minimal remapping after account removal.
 
 Run `node --check server.js`, `npm test`, and `git diff --check` after changing this boundary.
 

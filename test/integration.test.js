@@ -24,6 +24,51 @@ function rawJson(port, pathname, body, headers = {}) {
   });
 }
 
+function pausedOversizedJson(port, pathname) {
+  return new Promise((resolve, reject) => {
+    const chunk = Buffer.alloc(1024 * 1024, 0x20);
+    let remaining = 50 * 1024 * 1024 + 1;
+    let responseStarted = false;
+    let stopped = false;
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      stopped = true;
+      clearTimeout(timer);
+      req.destroy();
+      fn(value);
+    };
+    const req = http.request({
+      hostname: '127.0.0.1', port, path: pathname, method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    }, (res) => {
+      responseStarted = true;
+      stopped = true;
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('error', (error) => finish(reject, error));
+      res.on('end', () => finish(resolve, { status: res.statusCode, text: Buffer.concat(chunks).toString() }));
+    });
+    const timer = setTimeout(() => finish(reject, new Error('oversized request did not receive a prompt response before request end')), 3000);
+    req.on('error', (error) => {
+      if (!responseStarted) finish(reject, new Error(`oversized request reset before HTTP response: ${error.code || error.message}`));
+    });
+    const write = () => {
+      while (!stopped && remaining > 0) {
+        const size = Math.min(remaining, chunk.length);
+        remaining -= size;
+        if (!req.write(size === chunk.length ? chunk : chunk.subarray(0, size))) {
+          req.once('drain', write);
+          return;
+        }
+      }
+      // Deliberately do not end the request: the server must reject as soon as the limit is crossed.
+    };
+    write();
+  });
+}
+
 async function startSwitcher(config, existingDir = null) {
   const dir = existingDir || fs.mkdtempSync(path.join(os.tmpdir(), 'cps-test-'));
   if (config) fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config));
@@ -43,6 +88,7 @@ const stop = (child) => new Promise((resolve) => { child.once('exit', resolve); 
 test('account routing, header boundary, failover, state and streaming', async (t) => {
   const seen = [];
   let upstreamAborted = false;
+  let streamUpstreamAborted = false;
   const mock = http.createServer((req, res) => {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
@@ -54,6 +100,18 @@ test('account routing, header boundary, failover, state and streaming', async (t
       if ((body.model === 'cooldown-model' && auth === 'Bearer key-a') || (body.model === 'double-cooldown-model' && (auth === 'Bearer key-a' || auth === 'Bearer key-b'))) {
         res.writeHead(429, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'rate limited', status: 429 } }));
       }
+      if (body.model === 'wrapped-cooldown-model' && auth === 'Bearer key-a') {
+        res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ data: { error: { message: 'wrapped rate limited', status: 429 } } }));
+      }
+      if (body.model === 'wrapped-sse-error-model' && body.stream && auth === 'Bearer key-a') {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        return res.end('data: {"data":{"error":{"message":"wrapped stream limited","status":429}}}\n\n');
+      }
+      if (body.model === 'post-start-wrapped-sse-error-model' && body.stream) {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write('data: {"choices":[{"delta":{"content":"started"}}]}\n\n');
+        return setTimeout(() => res.end('data: {"data":{"error":{"message":"late wrapped stream limited","status":429}}}\n\ndata: [DONE]\n\n'), 5);
+      }
       if (body.model === 'ban-model' && auth === 'Bearer key-a') {
         res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'account failed', status: 500 } }));
       }
@@ -64,6 +122,12 @@ test('account routing, header boundary, failover, state and streaming', async (t
       }
       if (body.model === 'abort-model') {
         res.on('close', () => { if (!res.writableEnded) upstreamAborted = true; });
+        return;
+      }
+      if (body.model === 'stream-abort-model' && body.stream) {
+        res.on('close', () => { if (!res.writableEnded) streamUpstreamAborted = true; });
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write('data: {"choices":[{"delta":{"content":"started"}}]}\n\n');
         return;
       }
       if (body.model === 'planner-model') {
@@ -94,7 +158,7 @@ test('account routing, header boundary, failover, state and streaming', async (t
     accounts: [
       { id: 'a', name: 'A', key: 'key-a', enabled: true, maxConcurrent: 0, perModel: {} },
       { id: 'b', name: 'B', key: 'key-b', enabled: true, maxConcurrent: 0, perModel: {} },
-    ], knownModels: ['test-model', 'planner-model', 'slow-model', 'abort-model', 'cooldown-model', 'double-cooldown-model', 'ban-model', 'sse-error-model'], perModel: {}, accountErrorRules: {},
+    ], knownModels: ['test-model', 'planner-model', 'slow-model', 'abort-model', 'stream-abort-model', 'cooldown-model', 'wrapped-cooldown-model', 'wrapped-sse-error-model', 'post-start-wrapped-sse-error-model', 'double-cooldown-model', 'ban-model', 'sse-error-model'], perModel: {}, accountErrorRules: {},
   };
   const { child, dir } = await startSwitcher(baseConfig);
   t.after(async () => { await stop(child); await close(mock); fs.rmSync(dir, { recursive: true, force: true }); });
@@ -171,6 +235,46 @@ test('account routing, header boundary, failover, state and streaming', async (t
   const cooldownHistory = await (await fetch(`http://127.0.0.1:${switchPort}/api/history`)).json();
   assert.deepEqual(cooldownHistory.history[0].accountPath, ['A', 'B']);
   assert.equal(cooldownHistory.history[0].accountActions[0].action, 'cooldown');
+  assert.equal(cooled.headers['x-cline-attempts'], '2', 'account action diagnostics must not count as an upstream attempt');
+  assert.equal(cooldownHistory.history[0].attempts.length, 2);
+  assert.equal(cooldownHistory.history[0].trace.length, 2);
+  assert.equal(cooldownHistory.history[0].trace[0].action, 'cooldown');
+  assert.equal((await rawJson(switchPort, '/api/accounts/recover', { id: 'a' })).status, 200);
+
+  // HTTP-200 wrapped errors must normalize before account rules and restart on the replacement account.
+  seen.length = 0;
+  const wrappedCooldown = await rawJson(switchPort, '/v1/chat/completions', { model: 'wrapped-cooldown-model', messages: [] });
+  assert.equal(wrappedCooldown.status, 200);
+  assert.deepEqual(seen.map((x) => x.headers.authorization), ['Bearer key-a', 'Bearer key-b']);
+  assert.equal(wrappedCooldown.headers['x-cline-attempts'], '2');
+  assert.ok(JSON.parse(fs.readFileSync(path.join(dir, 'metadata.json'))).accountStates.a.cooldownUntil > Date.now());
+  assert.equal((await rawJson(switchPort, '/api/accounts/recover', { id: 'a' })).status, 200);
+
+  // The same wrapped envelope in the first SSE event must fail over before exposing a stream.
+  seen.length = 0;
+  const wrappedStream = await rawJson(switchPort, '/v1/chat/completions', { model: 'wrapped-sse-error-model', stream: true, messages: [] });
+  assert.equal(wrappedStream.status, 200);
+  assert.match(wrappedStream.text, /data:.*OK/);
+  assert.deepEqual(seen.map((x) => x.headers.authorization), ['Bearer key-a', 'Bearer key-b']);
+  assert.equal(wrappedStream.headers['x-cline-attempts'], '2');
+  assert.ok(JSON.parse(fs.readFileSync(path.join(dir, 'metadata.json'))).accountStates.a.cooldownUntil > Date.now());
+  assert.equal((await rawJson(switchPort, '/api/accounts/recover', { id: 'a' })).status, 200);
+
+  // A wrapped error after streaming starts updates the one real provider attempt and records its account action separately.
+  seen.length = 0;
+  const postStartWrapped = await rawJson(switchPort, '/v1/chat/completions', { model: 'post-start-wrapped-sse-error-model', stream: true, messages: [] });
+  assert.equal(postStartWrapped.status, 200);
+  assert.match(postStartWrapped.text, /started/);
+  assert.match(postStartWrapped.text, /late wrapped stream limited/);
+  assert.equal(postStartWrapped.headers['x-cline-attempts'], '1');
+  assert.equal(seen.length, 1, 'an error after SSE starts must not replay the upstream request');
+  const postStartHistory = await (await fetch(`http://127.0.0.1:${switchPort}/api/history`)).json();
+  assert.equal(postStartHistory.history[0].attempts.length, 1);
+  assert.equal(postStartHistory.history[0].trace.length, 1);
+  assert.equal(postStartHistory.history[0].trace[0].action, 'cooldown');
+  assert.equal(postStartHistory.history[0].trace[0].normalizedStatus, 429);
+  assert.deepEqual(postStartHistory.history[0].accountActions, [{ account: 'A', action: 'cooldown', statusCode: 429 }]);
+  assert.ok(JSON.parse(fs.readFileSync(path.join(dir, 'metadata.json'))).accountStates.a.cooldownUntil > Date.now());
   assert.equal((await rawJson(switchPort, '/api/accounts/recover', { id: 'a' })).status, 200);
 
   // Even with a third healthy account available, a second removal action must not trigger a third account attempt.
@@ -182,6 +286,19 @@ test('account routing, header boundary, failover, state and streaming', async (t
   assert.deepEqual(seen.map((x) => x.headers.authorization), ['Bearer key-a', 'Bearer key-b']);
   await rawJson(switchPort, '/api/accounts/recover', { id: 'a' });
   await rawJson(switchPort, '/api/accounts/recover', { id: 'b' });
+
+  // If no replacement account exists, the failed provider trace must remain present exactly once.
+  assert.equal((await rawJson(switchPort, '/api/accounts', { accounts: [accounts[0], { ...accounts[1], enabled: false }], mode: 'single', active: 0, concurrencyWaitMs: 20, accountErrorRules: { '429': { action: 'cooldown', cooldownMs: 60000 } } })).status, 200);
+  seen.length = 0;
+  const noReplacement = await rawJson(switchPort, '/v1/chat/completions', { model: 'cooldown-model', messages: [] });
+  assert.equal(noReplacement.status, 429);
+  assert.equal(noReplacement.headers['x-cline-attempts'], '1');
+  assert.equal(seen.length, 1);
+  const noReplacementHistory = await (await fetch(`http://127.0.0.1:${switchPort}/api/history`)).json();
+  assert.equal(noReplacementHistory.history[0].attempts.length, 1);
+  assert.equal(noReplacementHistory.history[0].trace.length, 1);
+  assert.equal(noReplacementHistory.history[0].trace[0].action, 'cooldown');
+  await rawJson(switchPort, '/api/accounts/recover', { id: 'a' });
 
   await rawJson(switchPort, '/api/accounts', { accounts, mode: 'single', active: accounts.findIndex((a) => a.id === 'a'), concurrencyWaitMs: 20, accountErrorRules: { '500': { action: 'ban' } } });
   seen.length = 0;
@@ -225,7 +342,8 @@ test('account routing, header boundary, failover, state and streaming', async (t
   const after = await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json();
   assert.ok(after.accounts.every((a) => a.activeCount === 0));
 
-  // A downstream disconnect must abort the in-flight native request and release its account lease.
+  // A downstream disconnect must abort the in-flight native request, stop supplier failover, and release its account lease.
+  assert.equal((await rawJson(switchPort, '/api/config', { scope: 'global', perModel: { 'abort-model': { upstreams: ['first', 'second'], pinMode: 'strict' } } })).status, 200);
   const abortReq = http.request({ hostname: '127.0.0.1', port: switchPort, path: '/v1/chat/completions', method: 'POST', headers: { 'Content-Type': 'application/json' } });
   abortReq.on('error', () => {});
   abortReq.end(JSON.stringify({ model: 'abort-model', messages: [] }));
@@ -233,6 +351,7 @@ test('account routing, header boundary, failover, state and streaming', async (t
   abortReq.destroy();
   for (let i = 0; i < 100 && !upstreamAborted; i++) await new Promise((r) => setTimeout(r, 5));
   assert.equal(upstreamAborted, true, 'client disconnect must abort the upstream request');
+  assert.equal(seen.filter((x) => x.body.model === 'abort-model').length, 1, 'client disconnect must not start another supplier attempt');
   let afterAbort;
   for (let i = 0; i < 100; i++) {
     afterAbort = await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json();
@@ -241,15 +360,111 @@ test('account routing, header boundary, failover, state and streaming', async (t
   }
   assert.ok(afterAbort.accounts.every((a) => a.activeCount === 0), 'client disconnect must release capacity');
 
+  // Once SSE has started, disconnect aborts that stream and releases capacity without replay.
+  await new Promise((resolve, reject) => {
+    const streamReq = http.request({ hostname: '127.0.0.1', port: switchPort, path: '/v1/chat/completions', method: 'POST', headers: { 'Content-Type': 'application/json' } }, (streamRes) => {
+      streamRes.once('data', () => { streamReq.destroy(); resolve(); });
+    });
+    streamReq.on('error', (e) => { if (e.code !== 'ECONNRESET') reject(e); });
+    streamReq.end(JSON.stringify({ model: 'stream-abort-model', stream: true, messages: [] }));
+  });
+  for (let i = 0; i < 100 && !streamUpstreamAborted; i++) await new Promise((r) => setTimeout(r, 5));
+  assert.equal(streamUpstreamAborted, true, 'post-start stream disconnect must abort the upstream stream');
+  for (let i = 0; i < 100; i++) {
+    afterAbort = await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json();
+    if (afterAbort.accounts.every((a) => a.activeCount === 0)) break;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.ok(afterAbort.accounts.every((a) => a.activeCount === 0), 'post-start stream disconnect must release capacity');
+  assert.equal(seen.filter((x) => x.body.model === 'stream-abort-model').length, 1, 'started SSE must not be replayed');
+
+  const oversized = await pausedOversizedJson(switchPort, '/v1/chat/completions');
+  assert.equal(oversized.status, 413, `paused oversized clients must receive HTTP 413 instead of ECONNRESET: ${oversized.text}`);
+  assert.match(oversized.text, /body too large/);
+
   const withBlank = [accounts[0], { ...accounts[1], key: '' }, { name: 'C', key: 'key-c', enabled: true }, { name: 'D', key: 'key-d', enabled: true }];
   assert.equal((await rawJson(switchPort, '/api/accounts', { accounts: withBlank, mode: 'single', active: 2, concurrencyWaitMs: 20, accountErrorRules: {} })).status, 200);
   const activeAfterFilter = await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json();
   assert.equal(activeAfterFilter.accounts[activeAfterFilter.active].name, 'C', 'filtering an empty key must not shift the selected account');
 
+  // Replacing an account row with a new id-less account must allocate a fresh id instead of reusing the old row's id.
+  const kept = activeAfterFilter.accounts[1];
+  const replaceWithNew = await rawJson(switchPort, '/api/accounts', {
+    accounts: [kept, { name: 'E', key: 'key-e', enabled: true, maxConcurrent: 0, perModel: {} }],
+    mode: 'single', active: 1, concurrencyWaitMs: 20, accountErrorRules: {},
+  });
+  assert.equal(replaceWithNew.status, 200);
+  const afterReplacement = await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json();
+  assert.equal(new Set(afterReplacement.accounts.map((a) => a.id)).size, 2);
+  assert.equal(afterReplacement.accounts[afterReplacement.active].name, 'E');
+
   assert.equal((await rawJson(switchPort, '/api/accounts', { accounts: [], mode: 'sticky', active: 0, concurrencyWaitMs: 20, accountErrorRules: [] })).status, 400);
   assert.equal((await rawJson(switchPort, '/api/accounts', { accounts: [{ ...accounts[0], id: 'changed-id' }], mode: 'single', active: 0, concurrencyWaitMs: 20, accountErrorRules: {} })).status, 400);
 });
 
+test('HRW routing is order-independent and only remaps sessions owned by a removed account', async () => {
+  const mock = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }));
+    });
+  });
+  const upstreamPort = await listen(mock);
+  const portSocket = http.createServer();
+  const switchPort = await listen(portSocket);
+  await close(portSocket);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-hrw-'));
+  const routingSecret = 'fixed-routing-secret-for-order-test';
+  fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({ routingSecret, accountStates: {}, models: {}, history: [], stats: {} }));
+  const account = (id) => ({ id, name: id.toUpperCase(), key: `key-${id}`, enabled: true, maxConcurrent: 0, perModel: {} });
+  const makeConfig = (ids) => ({
+    port: switchPort,
+    upstreamBase: `http://127.0.0.1:${upstreamPort}`,
+    accountMode: 'sticky',
+    concurrencyWaitMs: 0,
+    accounts: ids.map(account),
+    knownModels: ['test-model'],
+    perModel: {},
+    accountErrorRules: {},
+  });
+  const sessions = Array.from({ length: 48 }, (_, i) => `hrw-session-${i}`);
+  const collectAssignments = async () => {
+    const result = new Map();
+    for (const session of sessions) {
+      const response = await rawJson(switchPort, '/v1/chat/completions', { model: 'test-model', messages: [] }, { 'Session-Id': session });
+      assert.equal(response.status, 200);
+      result.set(session, response.headers['x-cline-account']);
+    }
+    return result;
+  };
+  let running = null;
+  try {
+    running = await startSwitcher(makeConfig(['a', 'b', 'c']), dir);
+    const original = await collectAssignments();
+    await stop(running.child); running = null;
+
+    running = await startSwitcher(makeConfig(['c', 'a', 'b']), dir);
+    const reordered = await collectAssignments();
+    assert.deepEqual([...reordered], [...original], 'HRW choices must not depend on account input order');
+    await stop(running.child); running = null;
+
+    const counts = new Map();
+    for (const selected of original.values()) counts.set(selected, (counts.get(selected) || 0) + 1);
+    const removedName = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    const removedId = removedName.toLowerCase();
+    running = await startSwitcher(makeConfig(['a', 'b', 'c'].filter((id) => id !== removedId)), dir);
+    const afterRemoval = await collectAssignments();
+    for (const session of sessions) {
+      if (original.get(session) === removedName) assert.notEqual(afterRemoval.get(session), removedName);
+      else assert.equal(afterRemoval.get(session), original.get(session), `unaffected session ${session} must keep its account`);
+    }
+  } finally {
+    if (running?.child) await stop(running.child);
+    await close(mock);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('malformed persisted config is never overwritten during startup migration', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-corrupt-'));
