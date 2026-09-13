@@ -10,7 +10,7 @@
 
 Use this contract when changing account rows, route scope, route editing, health recovery, or the `/api/accounts`, `/api/models`, and `/api/config` payloads shared by `public/index.html` and `server.js`.
 
-The main cross-layer risk is destructive full-list account saves: account-specific `perModel` routes must survive edits to names, keys, enablement, capacity, mode, active account, wait time, or error rules.
+The main cross-layer risk is destructive full-list account saves: account-specific `perModel`, notes, proxy, Header, weight, and priority fields must survive edits, filtering, presets, and drawer round trips.
 
 ### 2. Signatures
 
@@ -26,6 +26,15 @@ changeRouteScope()
 copyGlobalCfg(modelId)
 inheritCfg(modelId)
 recoverAccount(accountId)
+openAccountDrawer(index, returnButton)
+closeAccountDrawer(force)
+saveDrawer()
+previewPreset()
+applyPreset()
+generateAliases()
+saveAliases()
+loadLogs(nextPage)
+clearLogs()
 ```
 
 API signatures:
@@ -51,6 +60,23 @@ POST /api/config
 
 POST /api/accounts/recover
   <- { id }
+  -> { ok: true }
+
+POST /api/accounts/proxy-test
+  <- { accountId, proxyUrl? }
+  -> { ok, proxyType?, ms?, status?, reason? }
+
+GET /api/model-aliases
+  -> { aliases, targets }
+
+POST /api/model-aliases
+  <- { aliases }
+  -> { ok, count }
+
+GET /api/logs/{requests|errors}?<filters>&limit=<1..200>&cursor=<opaque>
+  -> { items, nextCursor }
+
+DELETE /api/logs/{requests|errors}
   -> { ok: true }
 ```
 
@@ -87,7 +113,11 @@ Editing any inherited field creates an account-owned route. `copyGlobalCfg()` ex
 `POST /api/accounts` replaces the account array. The implemented route field is `perModel` (not `modelRouting`). Therefore every row collected by `collectAccounts()` must carry:
 
 ```js
-{ id, name, key, enabled, maxConcurrent, perModel }
+{
+  id, name, note, key, enabled,
+  maxConcurrent, weight, priority,
+  proxyUrl, headers, perModel
+}
 ```
 
 `id` preserves runtime-state identity. `perModel` preserves all account-specific model routes even though the account table does not edit those routes inline. Omitting `perModel` would normalize it to `{}` and erase that account's overrides.
@@ -98,7 +128,15 @@ The active radio is an array index in the submitted list. The server resolves th
 
 All server-provided text used in HTML strings passes through `escapeHtml()` (or `jsArg()` where a JavaScript string argument is needed). Status regions use `aria-live="polite"`. Account keys are password inputs unless the operator explicitly enables “show keys.” This is display protection only; account data comes from the management API and must be protected by the configured proxy key.
 
-Raw sessions and message content are not frontend state and must never be added to account, model, history, or diagnostic views.
+Raw sessions and message content are not frontend state and must never be added to account, model, history, or diagnostic views. Account notes, proxy URLs/authentication, account Keys, and custom Header values are editable only in the authenticated drawer and must not be copied into log rows/details.
+
+#### Preset, alias, and log state
+
+Preset selection owns a temporary draft only. Confirm submits the complete ordinary account payload; cancel discards it. Presets may not mutate Key, proxy, Header, note, enablement, or `perModel`.
+
+`ALIASES` owns the `/api/model-aliases` snapshot. Batch generation edits text locally; successful save reloads aliases and models. Alias targets are server-provided known `cline-pass/*` models.
+
+`LOG_CURSOR` belongs to the current log type plus filter set. Starting a new query or changing filters resets it; “next” sends the opaque server cursor unchanged. Clearing logs targets only the selected type and reloads the first page.
 
 ### 4. Validation & Error Matrix
 
@@ -106,10 +144,14 @@ Raw sessions and message content are not frontend state and must never be added 
 |---|---|
 | Error-rules textarea is invalid JSON | stop in `saveAccounts()`; display an error; do not call API |
 | No submitted account has a non-empty key | stop and display an error |
-| Account mode is not `single`, `roundrobin`, or `sticky` | server `400`; retain/reload prior state |
+| Account mode is not one of the six supported scheduling modes | server `400`; retain/reload prior state |
 | `concurrencyWaitMs` is not an integer in 0-30000 | server `400` |
 | Account `maxConcurrent` is not an integer in 0-100000 | server `400` |
+| Weight/priority is outside integer 1-100, note invalid, proxy malformed, or Header map unsafe | server `400`; retain/reload prior state |
 | Existing account ID is unknown/changed or duplicated | server `400` |
+| Alias text is malformed/duplicated or server target invalid | block locally when possible; server `400` remains authoritative |
+| Log filter/cursor query is rejected | show safe error; do not render stale results as current |
+| Dirty drawer closes by Escape/backdrop/button | confirm before discard and restore opener focus |
 | Account route or global route is invalid | server `400`; `saveModelCfg()` reloads on failure |
 | Route account ID is unknown | server `400` |
 | Recover account ID is unknown | server `400` |
@@ -124,7 +166,7 @@ Browser-side validation improves feedback but never replaces the server matrix.
 - **Good:** edit account A's name and capacity; `collectAccounts()` submits A's unchanged `id` and `perModel`, so its routes and cooldown/ban join key survive.
 - **Good:** select account A, copy a global model route, edit it, observe `configSource: "account"`, then restore inheritance and observe `"inherited"` after reload.
 - **Base:** global scope has no `accountId`; model saves update global `perModel` only.
-- **Base:** a new account row starts with `maxConcurrent: 0` and `perModel: {}`.
+- **Base:** a new account row starts with `maxConcurrent: 0`, `weight: 1`, `priority: 100`, direct transport, empty note/Header fields, and `perModel: {}`.
 - **Bad:** construct account payloads from visible table columns only and omit `perModel`; this silently deletes account-specific routes.
 - **Bad:** infer account scope from the rendered badge while sending no `scope`/`accountId`; the backend defaults to global.
 - **Bad:** merge an account route field-by-field with the global route; account ownership is whole-entry replacement.
@@ -135,14 +177,16 @@ Cross-layer changes must assert:
 
 - `/api/models?accountId=` reports `account` for an own route and `inherited` after `action: "inherit"`;
 - provider attempts use the selected account route, while an account without an own entry uses the global route;
-- posting `/api/accounts` with the full account snapshot preserves stable IDs, `perModel`, mode, active account, wait, and rules;
-- filtering a blank-key row does not change which account is active;
+- posting `/api/accounts` with the full account snapshot preserves stable IDs, `perModel`, notes, proxy/Header fields, weight/priority, mode, active account, wait, and rules;
+- filtering/searching account rows or a blank-key row does not change which account is active;
+- preset preview/cancel/apply changes only allowed fields and round-trips through the normal save;
+- alias generation/save/reload and log type/filter/cursor/clear keep separate state owners;
 - invalid scope, malformed JSON, immutable ID changes, empty account lists, and invalid rule shapes return `400` without persistence;
 - account recovery clears displayed dynamic state after reload;
 - every server-controlled name, reason, model, provider, and trace note is HTML-escaped before `innerHTML` use;
 - keyboard-operable controls remain buttons/selects/inputs and asynchronous status remains announced.
 
-The Node integration suite proves the API route ownership/inheritance, ID validation, and active-account filtering contracts. There is currently no browser automation proving DOM round trips, escaping, or accessibility; those require manual console review or a future browser-level test and must not be claimed as automated coverage.
+The Node integration suite proves API route ownership/inheritance, account schema validation, aliases, logs, ID validation, and active-account filtering. `test/ui-contract.test.js` statically verifies required controls and safety markers, but it is not browser automation. Visual width, narrow-screen scrolling, focus order, keyboard-only drawer use, masking, and live interactions still require manual browser review and must not be claimed as automated coverage.
 
 ### 7. Wrong vs Correct
 
@@ -161,12 +205,9 @@ const accounts = ACCS.accounts.map((a, i) => ({
 
 ```js
 const accounts = ACCS.accounts.map((a, i) => ({
-  id: a.id,
+  ...a,
   name: readName(i),
-  key: readKey(i),
-  enabled: readEnabled(i),
-  maxConcurrent: readLimit(i),
-  perModel: a.perModel || {}
+  enabled: readEnabled(i)
 }));
 ```
 

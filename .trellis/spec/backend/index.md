@@ -18,7 +18,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Persistence Guidelines](./database-guidelines.md) | JSON configuration, metadata, and startup migration contracts | Filled |
 | [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
 | [Quality Guidelines](./quality-guidelines.md) | Account routing, transport, security, and test contracts | Filled |
-| [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
+| [Logging Guidelines](./logging-guidelines.md) | Bounded JSONL request/error diagnostics and sensitive-data projections | Filled |
 
 ---
 

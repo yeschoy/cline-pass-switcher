@@ -1,0 +1,9 @@
+{"file":".trellis/spec/backend/index.md","reason":"后端规范入口与实现前检查"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"扩展 config.json、账号字段、别名与文件持久化时保持迁移和原子写契约"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"调度、原生传输、SSE、Header、错误脱敏和管理 API 的现有可执行边界"}
+{"file":".trellis/spec/frontend/index.md","reason":"前端规范入口与静态控制台约束"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"完整账号快照、账号专属路由和后端/控制台字段往返契约"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"配置、日志事件、API、游标和 UI 投影的跨层一致性"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用单一校验、调度、传输和日志投影路径，避免多入口漂移"}
+{"file":".trellis/tasks/09-13-routing-presets-logs-account-proxy/research/proxy-and-storage-options.md","reason":"代理库版本/协议能力与滚动 JSONL 选型依据"}
+{"file":".trellis/tasks/09-13-routing-presets-logs-account-proxy/research/non-stream-newapi-diagnosis.md","reason":"理解流式/非流式对照、账号分配差异及日志所需诊断字段"}

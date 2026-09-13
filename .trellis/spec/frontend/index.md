@@ -18,7 +18,7 @@ This directory contains guidelines for frontend development. Fill in each file w
 | [Component Guidelines](./component-guidelines.md) | Component patterns, props, composition | To fill |
 | [Hook Guidelines](./hook-guidelines.md) | Custom hooks, data fetching patterns | To fill |
 | [State Management](./state-management.md) | Console server-state and account/model routing round-trip contracts | Filled |
-| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
+| [Quality Guidelines](./quality-guidelines.md) | Responsive account drawer, presets, aliases, logs, rendering and accessibility contracts | Filled |
 | [Type Safety](./type-safety.md) | Type patterns, validation | To fill |
 
 ---

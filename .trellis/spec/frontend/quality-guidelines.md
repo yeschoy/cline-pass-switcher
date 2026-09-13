@@ -1,51 +1,155 @@
-# Quality Guidelines
+# Frontend Quality Guidelines
 
-> Code quality standards for frontend development.
-
----
-
-## Overview
-
-<!--
-Document your project's quality standards here.
-
-Questions to answer:
-- What patterns are forbidden?
-- What linting rules do you enforce?
-- What are your testing requirements?
-- What code review standards apply?
--->
-
-(To be filled by the team)
+> Executable UI contracts for the static Cline Pass administration console.
 
 ---
 
-## Forbidden Patterns
+## Scenario: Responsive account administration and diagnostic views
 
-<!-- Patterns that should never be used and why -->
+### 1. Scope / Trigger
 
-(To be filled by the team)
+Use this contract when changing `public/index.html` account management, presets, the account drawer, model aliases, or request/error logs.
 
----
+The console is a single static HTML file with authenticated JSON calls. Server validation remains authoritative, while the browser must preserve hidden account state and prevent accidental destructive changes.
 
-## Required Patterns
+### 2. Signatures
 
-<!-- Patterns that must always be used -->
+```js
+loadAll()
+renderAccounts()
+collectAccounts()
+openAccountDrawer(index, returnButton)
+closeAccountDrawer(force)
+saveDrawer()
+previewPreset()
+applyPreset()
+generateAliases()
+saveAliases()
+loadLogs(nextPage)
+clearLogs()
+```
 
-(To be filled by the team)
+Relevant APIs:
 
----
+```text
+GET/POST /api/accounts
+POST     /api/accounts/proxy-test
+GET/POST /api/model-aliases
+GET      /api/logs/{requests|errors}
+DELETE   /api/logs/{requests|errors}
+```
 
-## Testing Requirements
+### 3. Contracts
 
-<!-- What level of testing is expected -->
+#### Responsive layout
 
-(To be filled by the team)
+- The page uses the available desktop width up to 1800px; it must not restore the old 1200px cap.
+- Wide tables live in `.table-wrap { overflow-x: auto }` rather than squeezing fields until unusable.
+- Account names have at least a 240px desktop column and a full-value `title`. Common email-style names remain inspectable.
+- At widths below 600px, page/drawer padding decreases, but controls remain reachable and tables scroll horizontally.
 
----
+#### Account table and drawer
 
-## Code Review Checklist
+The main table is a status summary. Full name, note, Key, capacity, weight, priority, proxy URL, custom Header map, and account-route summary are edited in the right-side account drawer.
 
-<!-- What reviewers should check -->
+The drawer:
 
-(To be filled by the team)
+- is a labelled `role="dialog"` with `aria-modal="true"`;
+- moves focus into the form and returns focus to the opening control;
+- closes on Escape/backdrop/Close only after confirming dirty drafts;
+- masks account Key and proxy URL by default;
+- keeps proxy/error feedback in an `aria-live` region;
+- saves into the local complete account snapshot, then requires the explicit account-config save for persistence.
+
+`collectAccounts()` must preserve every hidden field:
+
+```js
+{
+  id, name, note, key, enabled,
+  maxConcurrent, weight, priority,
+  proxyUrl, headers, perModel
+}
+```
+
+Filtering by name/note changes rendering only; it must not change account indexes, active-account identity, or the submitted full list.
+
+#### Presets
+
+The six presets produce an editable draft and a current-to-next preview. They may change only `accountMode`, `concurrencyWaitMs`, `maxConcurrent`, `weight`, `priority`, and status-specific `accountErrorRules`. They never mutate names, Keys, enablement, proxy, Header maps, or model routes.
+
+Cancel discards the draft. Confirm submits through the ordinary complete account save, so the server applies the same validation as manual edits. No persistent “selected preset” state exists.
+
+#### Model aliases
+
+The alias editor uses one `alias = cline-pass/target` pair per line. Batch generation removes `cline-pass/` and applies the optional common prefix/suffix. Duplicate/malformed rows are rejected in the browser for feedback, and the complete object is still validated by the server.
+
+After successful save, reload the server snapshot. Do not optimistically claim aliases that the server rejected.
+
+#### Logs
+
+Request and error tabs share bounded filter controls and cursor pagination. “Next” sends only the server-provided cursor. Changing a filter or type resets the cursor. Clear requires explicit confirmation and targets the selected log type only.
+
+Render only projected log fields. Never render raw request/response bodies, Header values, proxy URLs, account notes, or credential-like data in a log detail.
+
+#### Rendering safety
+
+Every server-controlled value inserted via `innerHTML` passes through `escapeHtml()`; JavaScript string arguments use `jsArg()`. Prefer `textContent` for drawer/status text. Authentication failures continue to show the login overlay rather than rendering partial sensitive state.
+
+### 4. Validation & Error Matrix
+
+| UI condition | Required behavior |
+|---|---|
+| Drawer Header JSON is malformed | keep drawer open, show error, do not mutate account draft |
+| Name/note/number/proxy/Header fails server validation | keep/reload prior server state and show safe error |
+| Drawer is dirty and user presses Escape/backdrop/Close | ask before discarding |
+| Proxy test on unsaved account | explain that the account must be saved first |
+| Preset is cancelled | no account or global field changes |
+| Preset is confirmed | submit a complete account snapshot through normal API |
+| Alias row lacks `=` or duplicates an alias | block save and identify the row/alias |
+| Log filter changes | reset cursor before querying |
+| Clear log selected | confirm, delete only selected type, then reload first page |
+| API returns `401` | show login overlay and reject the operation |
+| Narrow viewport | maintain usable controls and horizontal table scrolling |
+
+### 5. Good / Base / Bad Cases
+
+- **Good:** open an account by its original table index after filtering, edit proxy/Header values, save the draft and full list, then reload without losing `id` or `perModel`.
+- **Good:** preview “保守防封”, inspect the capacity/rule changes, cancel, and observe an unchanged account snapshot.
+- **Base:** an old account shows weight 1, priority 100, direct proxy status, and empty note/Header fields.
+- **Base:** no log records renders an empty-state row and disables next page.
+- **Bad:** rebuild account objects from visible table cells; hidden routes/proxy/Header fields will be erased.
+- **Bad:** put raw server JSON into a log `<pre>`; future fields could expose secrets.
+- **Bad:** encode preset logic in the backend and UI independently; values will drift.
+
+### 6. Tests Required
+
+`test/ui-contract.test.js` provides static executable checks for:
+
+- 1800px responsive container, table wrappers, and account-name width;
+- six bounded presets and forbidden-field absence from preset drafts;
+- labelled modal/drawer semantics, Escape handling, focus return, dirty confirmation, and `aria-live` feedback;
+- account snapshot preservation for new hidden fields;
+- log filters/pagination/clear controls and model-alias batch controls.
+
+Manual browser review remains required for visual width, narrow-screen scrolling, focus order, keyboard-only drawer use, password masking, preview readability, and log/alias interaction. Static string tests must not be reported as visual browser automation.
+
+Run the embedded script syntax check used by the test suite, `npm test`, and `git diff --check` after changing the console.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```js
+const accounts = visibleRows.map(readVisibleColumns);
+```
+
+#### Correct
+
+```js
+const accounts = ACCS.accounts.map((account, index) => ({
+  ...account,
+  enabled: readEnabled(index)
+}));
+```
+
+Treat the server snapshot as the complete object owner. A filtered/status table is a projection, not the source of truth.

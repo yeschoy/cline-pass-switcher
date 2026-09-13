@@ -1,0 +1,9 @@
+{"file":".trellis/spec/backend/index.md","reason":"执行后端完整质量检查"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"检查旧配置迁移、严格校验、原子保存与日志文件安全"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查六种调度、代理传输、SSE、Header/凭据和错误边界"}
+{"file":".trellis/spec/frontend/index.md","reason":"执行控制台完整质量检查"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"检查抽屉编辑、完整账号快照、预设和模型映射往返不丢字段"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查 JSONL 记录到查询 API 与 UI 的字段、过滤和游标一致性"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"检查重复校验、重复日志 finalize 和分叉传输实现"}
+{"file":".trellis/tasks/09-13-routing-presets-logs-account-proxy/research/proxy-and-storage-options.md","reason":"核对代理依赖、Node 18 兼容与代理不回退直连"}
+{"file":".trellis/tasks/09-13-routing-presets-logs-account-proxy/research/non-stream-newapi-diagnosis.md","reason":"检查日志能否区分流式类型、账号分配、额度错误与协议实现问题"}
