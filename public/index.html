@@ -22,6 +22,8 @@
   button.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
   button.ghost:hover { border-color: var(--accent); }
   button:disabled { opacity: .5; cursor: wait; }
+  .section-nav { display:flex; gap:8px; margin-bottom:18px; flex-wrap:wrap; }
+  .section-nav button[aria-pressed="true"] { background:var(--accent); border-color:var(--accent); color:#fff; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 18px; overflow-x:auto; }
   .card h2 { font-size: 15px; margin-bottom: 12px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -30,7 +32,7 @@
   .drawer-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:70; display:none; }
   .drawer { position:absolute; right:0; top:0; height:100%; width:min(520px,100%); overflow:auto; background:var(--card); padding:24px; border-left:1px solid var(--border); }
   .drawer label { display:block; color:var(--dim); font-size:12px; margin:14px 0 5px; }
-  .drawer input,.drawer textarea { width:100%; background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px; }
+  .drawer input:not([type=checkbox]),.drawer textarea { width:100%; background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px; }
   .modal { position:fixed; inset:0; z-index:80; background:rgba(0,0,0,.65); display:none; align-items:center; justify-content:center; }
   .modal-box { width:min(680px,calc(100% - 24px)); max-height:80vh; overflow:auto; background:var(--card); border:1px solid var(--border); border-radius:10px; padding:20px; }
   @media(max-width:600px){ body{padding:12px}.card{padding:12px}.drawer{padding:16px} }
@@ -107,6 +109,21 @@
   <h1>Cline Pass 上游控制台</h1>
   <div class="sub">本地代理 + 观测面板 —— 枚举订阅模型背后的上游，多上游按优先级自动故障转移，支持精确钉住 / 优先回退 / 排除上游 / 成本·首字·吞吐排序</div>
 
+  <nav class="section-nav" aria-label="顶层板块">
+    <button id="navConsole" class="ghost" type="button" aria-pressed="true" aria-controls="consolePanel" onclick="switchSection('console')">控制台</button>
+    <button id="navRequests" class="ghost" type="button" aria-pressed="false" aria-controls="logPanel" onclick="switchSection('requests')">请求日志</button>
+    <button id="navErrors" class="ghost" type="button" aria-pressed="false" aria-controls="logPanel" onclick="switchSection('errors')">错误日志</button>
+  </nav>
+
+  <section id="logPanel" aria-labelledby="logTitle" hidden>
+    <div class="card">
+      <div class="toolbar"><h2 id="logTitle" style="margin:0">请求日志</h2><span id="logSectionStatus" class="badge green" aria-live="polite">当前板块：请求日志</span><input id="logType" type="hidden" value="requests"><input id="logFrom" type="datetime-local" title="开始时间"><input id="logTo" type="datetime-local" title="结束时间"><input id="logRequestId" placeholder="请求 ID"><input id="logModel" placeholder="模型"><input id="logAccount" placeholder="账号"><input id="logStatus" placeholder="状态码"><input id="logProvider" placeholder="供应商"><input id="logStrategy" placeholder="策略/错误类别"><select id="logStream"><option value="">流式：全部</option><option value="true">流式</option><option value="false">非流式</option></select><select id="logOverflow"><option value="">容量：全部</option><option value="true">容量溢出</option><option value="false">未溢出</option></select><select id="logSwitched"><option value="">换号：全部</option><option value="true">已换号</option><option value="false">未换号</option></select><button class="ghost" onclick="loadLogs()">筛选</button><button class="ghost" onclick="clearLogs()">清空当前日志</button></div>
+      <div class="table-wrap"><table style="min-width:1000px"><thead><tr><th>时间</th><th>请求 ID</th><th>请求/实际模型</th><th>账号</th><th>策略/原因</th><th>状态</th><th>供应商路径</th><th>详情</th></tr></thead><tbody id="logBody"><tr><td colspan="8" class="empty">暂无记录</td></tr></tbody></table></div>
+      <button id="logNext" class="ghost" onclick="loadLogs(true)" style="margin-top:10px">下一页</button>
+    </div>
+  </section>
+
+  <section id="consolePanel">
   <div id="noKeyBanner" class="banner" style="display:none; border-left-color: var(--red);">
     <b>尚未配置上游 API Key：</b>在下方「账号管理」添加你的 Cline Pass 账号（sk_ 开头的 key）并保存即可开始使用；也可通过 config.json 的 accounts 或环境变量 CLINE_PASS_KEY 提供。
   </div>
@@ -213,12 +230,6 @@
   </div>
 
   <div class="card">
-    <div class="toolbar"><h2 style="margin:0">独立请求 / 错误日志</h2><select id="logType" onchange="loadLogs()"><option value="requests">请求日志</option><option value="errors">错误日志</option></select><input id="logFrom" type="datetime-local" title="开始时间"><input id="logTo" type="datetime-local" title="结束时间"><input id="logRequestId" placeholder="请求 ID"><input id="logModel" placeholder="模型"><input id="logAccount" placeholder="账号"><input id="logStatus" placeholder="状态码"><input id="logProvider" placeholder="供应商"><input id="logStrategy" placeholder="策略/错误类别"><select id="logStream"><option value="">流式：全部</option><option value="true">流式</option><option value="false">非流式</option></select><select id="logOverflow"><option value="">容量：全部</option><option value="true">容量溢出</option><option value="false">未溢出</option></select><select id="logSwitched"><option value="">换号：全部</option><option value="true">已换号</option><option value="false">未换号</option></select><button class="ghost" onclick="loadLogs()">筛选</button><button class="ghost" onclick="clearLogs()">清空当前日志</button></div>
-    <div class="table-wrap"><table style="min-width:1000px"><thead><tr><th>时间</th><th>请求 ID</th><th>请求/实际模型</th><th>账号</th><th>策略/原因</th><th>状态</th><th>供应商路径</th><th>详情</th></tr></thead><tbody id="logBody"><tr><td colspan="8" class="empty">暂无记录</td></tr></tbody></table></div>
-    <button id="logNext" class="ghost" onclick="loadLogs(true)" style="margin-top:10px">下一页</button>
-  </div>
-
-  <div class="card">
     <h2>完整模型目录（Cline 公开目录，含 :free 可钉住模型）</h2>
     <div style="margin-bottom:10px">
       <label class="dim" style="font-size:13px"><input type="checkbox" id="exposeCatalog" onchange="saveExposeCatalog(this.checked)"> 把目录模型加入代理的 /v1/models（默认关闭：客户端只看到订阅模型）</label>
@@ -229,11 +240,12 @@
       <table><tbody id="catBody"></tbody></table>
     </details>
   </div>
+  </section>
 
 <div id="accountDrawerBackdrop" class="drawer-backdrop" onclick="if(event.target===this)closeAccountDrawer()">
   <aside id="accountDrawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
     <h2 id="drawerTitle">账号设置</h2><label for="drawerName">账号名称</label><input id="drawerName"><label for="drawerNote">备注（最多 500 字符）</label><textarea id="drawerNote" rows="5"></textarea>
-    <label>API Key</label><input id="drawerKey" type="password"><label>并发上限（0=不限）</label><input id="drawerMax" type="number" min="0" max="100000">
+    <label for="drawerKey">API Key</label><input id="drawerKey" type="password"><label><input id="drawerShowKey" type="checkbox" onchange="$('#drawerKey').type=this.checked?'text':'password'"> 显示 API Key</label><label>并发上限（0=不限）</label><input id="drawerMax" type="number" min="0" max="100000">
     <label>权重（1-100）</label><input id="drawerWeight" type="number" min="1" max="100"><label>优先级（1-100，越小越优先）</label><input id="drawerPriority" type="number" min="1" max="100">
     <label>出站代理 URL（认证值默认掩码）</label><input id="drawerProxy" type="password" placeholder="http:// / https:// / socks5:// / socks5h://"><button class="ghost" onclick="testDraftProxy()" style="margin-top:6px">测试代理连通性</button>
     <label>安全自定义请求头（JSON，仅账号级）</label><textarea id="drawerHeaders" rows="6"></textarea><div id="drawerError" aria-live="polite" style="color:var(--red)"></div>
@@ -397,7 +409,7 @@ function render() {
   $('#officialInfo').textContent = of ? `上次拉取 ${new Date(of.ts).toLocaleString()}（${(of.sources || []).join('+')}，新增 ${of.added.length}）` : '尚未拉取过官方清单';
   renderCatalog();
 
-  loadLogs();
+  if (!$('#logPanel').hidden) loadLogs();
 }
 
 function renderCatalog() {
@@ -714,7 +726,7 @@ function bulkUp(id, action) {
   }
 }
 
-let ACCS = null, ALIASES = null, DRAWER_INDEX = -1, DRAWER_SNAPSHOT = '', DRAWER_RETURN = null, PENDING_PRESET = null, LOG_CURSOR = null;
+let ACCS = null, ALIASES = null, DRAWER_INDEX = -1, DRAWER_SNAPSHOT = '', DRAWER_RETURN = null, PENDING_PRESET = null, LOG_CURSOR = null, LOG_QUERY_ID = 0;
 function renderAccounts() {
   if (!ACCS) return;
   $('#accMode').value = ACCS.mode; $('#concurrencyWaitMs').value = ACCS.concurrencyWaitMs ?? 2000; $('#accountErrorRules').value = JSON.stringify(ACCS.accountErrorRules || {}, null, 2);
@@ -735,7 +747,7 @@ function addAccountRow(){ACCS.accounts.push({name:`账号${ACCS.accounts.length+
 function delAccount(i){if(!confirm('确认删除该账号？'))return;ACCS.accounts.splice(i,1);ACCS.active=Math.min(ACCS.active,Math.max(0,ACCS.accounts.length-1));renderAccounts();}
 async function testAccount(i,btn){const a=ACCS.accounts[i];if(!a.key)return accMsg('请先在设置中填写 key',true);btn.disabled=true;const r=await api('/api/accounts/test',{accountId:a.id,key:a.key,proxyUrl:a.proxyUrl||''});btn.disabled=false;accMsg(r.ok?`✔ ${a.name} 可用（${r.ms} ms）`:`✘ ${a.name}：${r.error}`,!r.ok);}
 function drawerValue(){return JSON.stringify([$('#drawerName').value,$('#drawerNote').value,$('#drawerKey').value,$('#drawerMax').value,$('#drawerWeight').value,$('#drawerPriority').value,$('#drawerProxy').value,$('#drawerHeaders').value]);}
-function openAccountDrawer(i,button){const a=ACCS.accounts[i];DRAWER_INDEX=i;DRAWER_RETURN=button||document.activeElement;[['drawerName',a.name],['drawerNote',a.note||''],['drawerKey',a.key||''],['drawerMax',a.maxConcurrent||0],['drawerWeight',a.weight||1],['drawerPriority',a.priority||100],['drawerProxy',a.proxyUrl||''],['drawerHeaders',JSON.stringify(a.headers||{},null,2)]].forEach(([id,v])=>$('#'+id).value=v);$('#drawerRoutes').textContent=`账号专属模型路由：${Object.keys(a.perModel||{}).length} 条（可在模型表切换作用域编辑）`;$('#drawerError').textContent='';$('#accountDrawerBackdrop').style.display='block';DRAWER_SNAPSHOT=drawerValue();setTimeout(()=>$('#drawerName').focus(),0);}
+function openAccountDrawer(i,button){const a=ACCS.accounts[i];DRAWER_INDEX=i;DRAWER_RETURN=button||document.activeElement;[['drawerName',a.name],['drawerNote',a.note||''],['drawerKey',a.key||''],['drawerMax',a.maxConcurrent||0],['drawerWeight',a.weight||1],['drawerPriority',a.priority||100],['drawerProxy',a.proxyUrl||''],['drawerHeaders',JSON.stringify(a.headers||{},null,2)]].forEach(([id,v])=>$('#'+id).value=v);$('#drawerShowKey').checked=false;$('#drawerKey').type='password';$('#drawerRoutes').textContent=`账号专属模型路由：${Object.keys(a.perModel||{}).length} 条（可在模型表切换作用域编辑）`;$('#drawerError').textContent='';$('#accountDrawerBackdrop').style.display='block';DRAWER_SNAPSHOT=drawerValue();setTimeout(()=>$('#drawerName').focus(),0);}
 function closeAccountDrawer(force=false){if(!force&&DRAWER_INDEX>=0&&drawerValue()!==DRAWER_SNAPSHOT&&!confirm('存在未保存变更，确认关闭？'))return;$('#accountDrawerBackdrop').style.display='none';DRAWER_INDEX=-1;DRAWER_RETURN?.focus?.();DRAWER_RETURN=null;}
 function saveDrawer(){try{const a=ACCS.accounts[DRAWER_INDEX],headers=JSON.parse($('#drawerHeaders').value||'{}');Object.assign(a,{name:$('#drawerName').value.trim(),note:$('#drawerNote').value,key:$('#drawerKey').value.trim(),maxConcurrent:Number($('#drawerMax').value),weight:Number($('#drawerWeight').value),priority:Number($('#drawerPriority').value),proxyUrl:$('#drawerProxy').value.trim(),headers});DRAWER_SNAPSHOT=drawerValue();closeAccountDrawer(true);renderAccounts();accMsg('草案已更新，请点击“保存账号配置”持久化');}catch{$('#drawerError').textContent='请求头必须是有效 JSON';}}
 async function testDraftProxy(){const a=ACCS.accounts[DRAWER_INDEX];if(!a.id)return $('#drawerError').textContent='请先保存新账号再测试代理';const r=await api('/api/accounts/proxy-test',{accountId:a.id,proxyUrl:$('#drawerProxy').value.trim()});$('#drawerError').style.color=r.ok?'var(--green)':'var(--red)';$('#drawerError').textContent=r.ok?`代理可达：${r.proxyType} · ${r.ms}ms`:`代理失败：${r.reason||r.error?.message}`;}
@@ -747,8 +759,19 @@ function closePreset(){$('#presetModal').style.display='none';PENDING_PRESET=nul
 function parseAliases(){const out={},seen=new Set();for(const raw of $('#aliasEditor').value.split('\n')){if(!raw.trim())continue;const i=raw.indexOf('=');if(i<1)throw Error(`无效行：${raw}`);const a=raw.slice(0,i).trim(),t=raw.slice(i+1).trim();if(seen.has(a))throw Error(`重复别名：${a}`);seen.add(a);out[a]=t;}return out;}
 function generateAliases(){const pre=$('#aliasPrefix').value,suf=$('#aliasSuffix').value;$('#aliasEditor').value=(ALIASES.targets||[]).map(t=>`${pre}${t.replace(/^cline-pass\//,'')}${suf} = ${t}`).join('\n');}
 async function saveAliases(){try{const r=await api('/api/model-aliases',{aliases:parseAliases()});$('#aliasMsg').textContent=r.ok?`已保存 ${r.count} 条`:r.error?.message;if(r.ok)await loadAll();}catch(e){$('#aliasMsg').textContent=e.message;}}
+async function switchSection(section){
+  const isConsole=section==='console',type=section==='errors'?'errors':'requests';
+  LOG_QUERY_ID++;
+  $('#consolePanel').hidden=!isConsole;$('#logPanel').hidden=isConsole;
+  for(const [name,id] of [['console','navConsole'],['requests','navRequests'],['errors','navErrors']])$('#'+id).setAttribute('aria-pressed',String(section===name));
+  if(isConsole)return;
+  $('#logType').value=type;
+  const title=type==='errors'?'错误日志':'请求日志';
+  $('#logTitle').textContent=title;$('#logSectionStatus').textContent=`当前板块：${title}`;
+  await loadLogs(false);
+}
 async function loadLogs(next=false){
-  if(!$('#logBody'))return; const type=$('#logType').value; if(!next)LOG_CURSOR=null;
+  if(!$('#logBody'))return; const type=$('#logType').value; if(!next)LOG_CURSOR=null; const queryId=++LOG_QUERY_ID;
   const params=new URLSearchParams({limit:'50'}); if(LOG_CURSOR)params.set('cursor',LOG_CURSOR);
   const values={requestId:$('#logRequestId').value,model:$('#logModel').value,account:$('#logAccount').value,status:$('#logStatus').value,provider:$('#logProvider').value};
   for(const [k,v] of Object.entries(values))if(v.trim())params.set(k,v.trim());
@@ -758,10 +781,11 @@ async function loadLogs(next=false){
   if(type==='requests'&&$('#logOverflow').value)params.set('overflow',$('#logOverflow').value);
   if(type==='requests'&&$('#logSwitched').value)params.set('switched',$('#logSwitched').value);
   const r=await api(`/api/logs/${type}?${params}`),items=r.items||[];
+  if(queryId!==LOG_QUERY_ID||type!==$('#logType').value)return;
   $('#logBody').innerHTML=items.map(x=>`<tr><td>${escapeHtml(new Date(x.ts).toLocaleString())}</td><td class="mono">${escapeHtml(x.requestId)}</td><td class="mono">${escapeHtml(x.requestedModel||'—')}<br><span class="dim">${escapeHtml(x.resolvedModel||'—')}</span></td><td>${escapeHtml(x.accountName||'—')}</td><td>${escapeHtml(x.strategy||x.category||'—')}<br><span class="dim">${escapeHtml(x.selectionReason||x.accountAction||'')}</span></td><td>${escapeHtml(x.status??'—')} / ${escapeHtml(x.upstreamStatus??'—')}</td><td>${escapeHtml((x.targetProviders||x.providerPath||[]).join(' → ')||x.actualProvider||x.targetProvider||'—')}</td><td><details><summary>展开</summary><pre>${escapeHtml(JSON.stringify(x,null,2))}</pre></details></td></tr>`).join('')||'<tr><td colspan="8" class="empty">暂无记录</td></tr>';
   LOG_CURSOR=r.nextCursor;$('#logNext').disabled=!LOG_CURSOR;
 }
-async function clearLogs(){if(!confirm('确认清空当前日志？此操作不可撤销。'))return;await api('/api/logs/'+$('#logType').value,null,'DELETE');await loadLogs();}
+async function clearLogs(){const type=$('#logType').value,title=type==='errors'?'错误日志':'请求日志';if(!confirm(`确认清空${title}？此操作不可撤销。`))return;await api('/api/logs/'+type,null,'DELETE');if($('#logPanel').hidden||type!==$('#logType').value)return;await loadLogs();}
 function accMsg(msg, isErr) {
   const el = $('#accMsg');
   el.textContent = msg;

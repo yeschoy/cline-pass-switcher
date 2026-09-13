@@ -33,6 +33,7 @@ previewPreset()
 applyPreset()
 generateAliases()
 saveAliases()
+switchSection(section)
 loadLogs(nextPage)
 clearLogs()
 ```
@@ -128,6 +129,8 @@ The active radio is an array index in the submitted list. The server resolves th
 
 All server-provided text used in HTML strings passes through `escapeHtml()` (or `jsArg()` where a JavaScript string argument is needed). Status regions use `aria-live="polite"`. Account keys are password inputs unless the operator explicitly enables “show keys.” This is display protection only; account data comes from the management API and must be protected by the configured proxy key.
 
+Key visibility is transient drawer UI state: every `openAccountDrawer()` clears the show control and restores `drawerKey.type = "password"`. Visibility state is excluded from `drawerValue()`, so showing or hiding an unchanged Key never marks the account draft dirty.
+
 Raw sessions and message content are not frontend state and must never be added to account, model, history, or diagnostic views. Account notes, proxy URLs/authentication, account Keys, and custom Header values are editable only in the authenticated drawer and must not be copied into log rows/details.
 
 #### Preset, alias, and log state
@@ -136,7 +139,9 @@ Preset selection owns a temporary draft only. Confirm submits the complete ordin
 
 `ALIASES` owns the `/api/model-aliases` snapshot. Batch generation edits text locally; successful save reloads aliases and models. Alias targets are server-provided known `cline-pass/*` models.
 
-`LOG_CURSOR` belongs to the current log type plus filter set. Starting a new query or changing filters resets it; “next” sends the opaque server cursor unchanged. Clearing logs targets only the selected type and reloads the first page.
+The top-level section is projected by `consolePanel.hidden`, `logPanel.hidden`, and the three navigation buttons' `aria-pressed` values. Console and log content are mutually exclusive. Request and error navigation share one `logPanel`; `logType` remains the single selected-type owner, while the title and live status are projections of it.
+
+`LOG_CURSOR` belongs to the current log type plus filter set. Starting a new query or changing filters resets it; “next” sends the opaque server cursor unchanged. `LOG_QUERY_ID` is a generation counter: every section switch and query invalidates earlier reads, and a response may render only when both its generation and captured type still match. Clearing logs captures the selected type before the asynchronous delete and reloads only when that same log section remains visible.
 
 ### 4. Validation & Error Matrix
 
@@ -181,6 +186,7 @@ Cross-layer changes must assert:
 - filtering/searching account rows or a blank-key row does not change which account is active;
 - preset preview/cancel/apply changes only allowed fields and round-trips through the normal save;
 - alias generation/save/reload and log type/filter/cursor/clear keep separate state owners;
+- top-level console/request/error sections remain mutually exclusive, request/error reuse one log owner, and stale reads or clears cannot update a different section;
 - invalid scope, malformed JSON, immutable ID changes, empty account lists, and invalid rule shapes return `400` without persistence;
 - account recovery clears displayed dynamic state after reload;
 - every server-controlled name, reason, model, provider, and trace note is HTML-escaped before `innerHTML` use;

@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/index.md","reason":"定位本任务适用的前端规范与已填充指南"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"约束账号抽屉密钥掩码、日志状态、可访问性与手动检查"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"约束账号完整快照、显隐状态及日志类型/游标状态所有权"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用现有密钥显隐与日志加载路径，避免复制状态和视图"}

@@ -1,0 +1,3 @@
+{"file":".trellis/spec/frontend/index.md","reason":"确认检查范围覆盖前端规范索引"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"检查账号抽屉、日志导航、渲染安全、可访问性及验证要求"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"检查显隐状态不污染草案、日志类型切换重置游标且保留既有行为"}

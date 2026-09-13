@@ -25,6 +25,7 @@ previewPreset()
 applyPreset()
 generateAliases()
 saveAliases()
+switchSection(section)
 loadLogs(nextPage)
 clearLogs()
 ```
@@ -58,6 +59,7 @@ The drawer:
 - moves focus into the form and returns focus to the opening control;
 - closes on Escape/backdrop/Close only after confirming dirty drafts;
 - masks account Key and proxy URL by default;
+- resets the Key visibility control and input type on every open, while excluding visibility-only state from the dirty-draft snapshot;
 - keeps proxy/error feedback in an `aria-live` region;
 - saves into the local complete account snapshot, then requires the explicit account-config save for persistence.
 
@@ -85,9 +87,11 @@ The alias editor uses one `alias = cline-pass/target` pair per line. Batch gener
 
 After successful save, reload the server snapshot. Do not optimistically claim aliases that the server rejected.
 
-#### Logs
+#### Top-level sections and logs
 
-Request and error tabs share bounded filter controls and cursor pagination. “Next” sends only the server-provided cursor. Changing a filter or type resets the cursor. Clear requires explicit confirmation and targets the selected log type only.
+The top navigation exposes three mutually exclusive sections: console, request logs, and error logs. The active native button uses `aria-pressed="true"`; the other buttons are false. Selecting a log section hides the complete console panel and shows the shared log panel immediately below the navigation. Do not implement log navigation with anchors, `scrollIntoView()`, or a duplicate log page/DOM.
+
+Request and error sections share one bounded filter, table, cursor, and clear implementation. `switchSection()` selects the type, updates the visible title/status, invalidates pending log reads, and starts a first-page load. `loadLogs()` ignores a response whose query generation or selected type is stale. “Next” sends only the server-provided cursor. Changing a filter or type resets the cursor. Clear captures the selected type before awaiting deletion, requires explicit confirmation naming that type, and reloads only if the same log section is still visible.
 
 Render only projected log fields. Never render raw request/response bodies, Header values, proxy URLs, account notes, or credential-like data in a log detail.
 
@@ -106,8 +110,9 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 | Preset is cancelled | no account or global field changes |
 | Preset is confirmed | submit a complete account snapshot through normal API |
 | Alias row lacks `=` or duplicates an alias | block save and identify the row/alias |
+| Top section changes while a log query is pending | invalidate the old query; it must not update hidden or newly selected log state |
 | Log filter changes | reset cursor before querying |
-| Clear log selected | confirm, delete only selected type, then reload first page |
+| Clear log selected | confirm with the captured type, delete only that type, and reload only if that same section remains visible |
 | API returns `401` | show login overlay and reject the operation |
 | Narrow viewport | maintain usable controls and horizontal table scrolling |
 
@@ -115,6 +120,7 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 
 - **Good:** open an account by its original table index after filtering, edit proxy/Header values, save the draft and full list, then reload without losing `id` or `perModel`.
 - **Good:** preview “保守防封”, inspect the capacity/rule changes, cancel, and observe an unchanged account snapshot.
+- **Good:** switch rapidly from request logs to errors and then console; only the current section remains visible and stale responses cannot replace its state.
 - **Base:** an old account shows weight 1, priority 100, direct proxy status, and empty note/Header fields.
 - **Base:** no log records renders an empty-state row and disables next page.
 - **Bad:** rebuild account objects from visible table cells; hidden routes/proxy/Header fields will be erased.
@@ -129,7 +135,8 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 - six bounded presets and forbidden-field absence from preset drafts;
 - labelled modal/drawer semantics, Escape handling, focus return, dirty confirmation, and `aria-live` feedback;
 - account snapshot preservation for new hidden fields;
-- log filters/pagination/clear controls and model-alias batch controls.
+- three mutually exclusive top sections with one shared log DOM, explicit active state, and no anchor/scroll shortcut;
+- log query invalidation, filters/pagination, captured-type clear controls, and model-alias batch controls.
 
 Manual browser review remains required for visual width, narrow-screen scrolling, focus order, keyboard-only drawer use, password masking, preview readability, and log/alias interaction. Static string tests must not be reported as visual browser automation.
 
