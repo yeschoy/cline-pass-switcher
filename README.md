@@ -10,8 +10,9 @@
 - 🎯 **精确钉住上游** —— 严格钉住 / 优先+回退两种模式，支持按最低成本、最快首字、最高吞吐排序
 - 🧬 **多上游优先级故障转移（2026-09-06 新增）** —— 勾选多个上游即按勾选顺序逐个尝试：第一个异常（报错 / 网络失败 / 超时）自动顺切下一个，全部失败才透传错误；每次尝试有独立 120s 超时与逐次尝试明细（请求头 X-Cline-Target-Upstream: a>b 与 X-Cline-Attempts，历史与测试台展示逐次尝试路径 upstream(502) 到 upstream(200)）
 - 🚫 **上游排除** —— 勾「排除」的渠道永不被使用：勾选模式下从候选中剔除；自动模式与优先+回退模式下把排除换算成 only 白名单（已知上游 - 排除项）注入，两类管道均实测生效；网关侧渠道清单更新导致白名单过期时，报错中附带的最新渠道清单会被自动学习合并
-- 👥 **账号池** —— 多账号管理、手动切换、轮询均衡、逐账号连通性测试与用量统计
-- 📊 **观测** —— 每条请求自动记录实际命中的渠道、背后模型、耗时（含流式）
+- 👥 **账号池** —— 多账号管理、手动切换、轮询均衡与基于会话的 HRW 粘性调度；支持每账号并发上限、冷却/封禁与手动恢复
+- 🔗 **账号级模型路由** —— 每个账号可为模型整项覆盖全局上游顺序、模式、排除、排序与重试上限，删除专属配置即可恢复继承
+- 📊 **观测** —— 每条请求记录账号/供应商尝试路径、实际渠道、规范化状态和处置动作（不记录会话原值或消息正文）
 - 🔑 **代理密钥** —— 给下游客户端发一把独立密钥，可随时在页面轮换
 - 🌐 **OpenAI 兼容** —— 任何 OpenAI 客户端 / Cline 扩展把 Base URL 指向代理即可，无侵入
 
@@ -92,14 +93,16 @@ location / {
 
 | 字段 | 说明 |
 |---|---|
-| `accounts` | 账号池：`[{ name, key, enabled }]` |
-| `accountMode` | `single` 手动指定 / `roundrobin` 轮询 |
+| `accounts` | 账号池：`[{ id, name, key, enabled, maxConcurrent, perModel }]`；`maxConcurrent: 0` 表示不限 |
+| `accountMode` | `single` 手动指定 / `roundrobin` 轮询 / `sticky` 会话 HRW 粘性 |
 | `activeAccount` | 单账号模式下使用的下标 |
+| `concurrencyWaitMs` | 容量等待时间，0～30000 ms，默认 2000 |
+| `accountErrorRules` | 全局账号处置规则，例如 `{"429":{"action":"cooldown","cooldownMs":1800000},"500":{"action":"ban"}}` |
 | `proxyKey` | 下游代理密钥；空 = 不鉴权 |
 | `publicBaseUrl` | 公网代理地址（控制台展示用） |
 | `exposeCatalog` | `true` 时代理的 `/v1/models` 会合并 Cline 公开目录模型；默认 `false` 只返回订阅模型（避免客户端模型列表被淹没） |
 | `knownModels` | 订阅模型清单（控制台主表） |
-| `perModel` | 每模型的钉住配置：`{ upstream, pinMode: strict|preferred, sort: cost|ttft|tps, maxRetries }` |
+| `perModel` | 每模型路由：`{ upstreams, exclude, pinMode, sort, maxRetries }`；`maxRetries` 是首试后的外层重试次数。账号内同名配置整项覆盖全局配置，不逐字段合并 |
 | `apiKey` | 旧版单 key 字段，启动时自动迁移进 `accounts` |
 
 ---
@@ -160,8 +163,15 @@ Cline Pass 订阅模型在 Cline 网关之后分成两条管道，钉住上游�
 | 请求历史 | 自动记录每条请求的账号、实际渠道、耗时、尝试序列（最近 100 条，含流式） |
 | 完整目录 | Cline 公开目录模型，`:free` 变体可精确钉住 |
 
-代理同时做了兼容性标准化：解包 Cline 的 `{"data":...}` 包装为标准 OpenAI 格式、错误统一为
-`{"error":{"message":...}}`、附加 `X-Cline-Target-Upstream / X-Cline-Actual-Upstream / X-Cline-Account` 等响应头。
+代理同时做了兼容性标准化：解包 Cline 的 `{"data":...}` 包装为标准 OpenAI 格式，并在可验证时保留真实上游 HTTP 状态；仅网络失败、非 JSON 或无有效状态的错误包使用 502。响应附加不含密钥/会话值的 `X-Cline-Target-Upstream / X-Cline-Actual-Upstream / X-Cline-Account` 等诊断头。
+
+## NewAPI、会话粘性与 Header 边界
+
+NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流式/非流式 OpenAI Chat Completions。下游 `Authorization` 只用于本代理鉴权，转发到 Cline 的始终是所选账号密钥。
+
+`sticky` 模式分别识别 Codex 的 parent thread / `prompt_cache_key` / session/thread 字段，以及 Claude Code 的 parent-agent / session / agent 字段；无显式会话时只对首个 system/developer 与首个 user 消息做本机 HMAC 路由指纹。原始会话值和消息不会持久化。客户端真实提供的 Codex、Claude 或通用会话/SDK Header 按允许列表透传；`Authorization`、`Proxy-Authorization`、Cookie、逐跳 Header、Installation ID 和 Attestation 始终剔除，也不会伪造 User-Agent、设备、浏览器或 TLS 指纹。
+
+账号错误规则默认空以兼容旧行为。`ignore` 保持账号可用；`cooldown` 到期自动恢复；`ban` 只能在控制台手动恢复。普通供应商故障转移固定使用同一账号，只有 cooldown/ban 且 SSE 尚未开始时最多换号一次。首期不提供 RPM、出口 IP 或指纹伪装。
 
 ---
 
@@ -189,7 +199,8 @@ Cline Pass 订阅模型在 Cline 网关之后分成两条管道，钉住上游�
 
 - `config.json` / `data/` 含明文密钥，已在 `.gitignore` 排除，**不要提交或分享**；
 - 对外部署务必设置 `proxyKey`（控制台可随时轮换）；
-- 「重试博弈」`maxRetries > 0` 时会放大请求量，注意额度消耗。
+- `maxRetries > 0` 会放大外层供应商尝试数量，注意额度消耗；缺失或 `null` 表示走完已配置候选序列。
+- 实际缓存命中必须以真实响应中的 `usage.prompt_tokens_details.cached_tokens`（或供应商等价字段）为准；本项目不会仅凭粘性配置宣称缓存成功。
 
 ## License
 

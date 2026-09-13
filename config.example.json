@@ -5,9 +5,20 @@
   "publicBaseUrl": "",
   "exposeCatalog": false,
   "upstreamBase": "https://api.cline.bot/api/v1",
-  "accounts": [],
+  "accounts": [
+    {
+      "id": "replace-with-stable-account-id",
+      "name": "账号1",
+      "key": "",
+      "enabled": true,
+      "maxConcurrent": 0,
+      "perModel": {}
+    }
+  ],
   "accountMode": "single",
   "activeAccount": 0,
+  "concurrencyWaitMs": 2000,
+  "accountErrorRules": {},
   "knownModels": [
     "cline-pass/glm-5.3-flash",
     "cline-pass/kimi-k3",
