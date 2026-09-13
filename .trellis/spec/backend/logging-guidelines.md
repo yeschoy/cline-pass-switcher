@@ -83,7 +83,7 @@ Each real failed provider/proxy attempt gets one error record. A request and all
 
 #### Sensitive-data boundary
 
-Before persistence, redaction covers configured account keys, proxy/admin keys, proxy URL/user/password components, every configured custom Header value, and request message text. Bearer-looking values are redacted generically. Reasons are flattened and capped.
+Before persistence, redaction covers configured account keys, proxy/admin keys, proxy URL/user/password components, every configured custom Header value, and request message text. Bearer-looking values are redacted generically. Reasons are flattened but retain the complete extracted upstream error so nested provider diagnostics are not lost. This does not permit persisting a raw response body: non-JSON/invalid error responses use a generic diagnostic instead.
 
 Never persist:
 
@@ -116,6 +116,8 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 | Clear requests | delete request segments only |
 | Clear errors | delete error segments only |
 | Candidate reason contains a known Key/Header value/message | persisted form contains `[REDACTED]`, never the source value |
+| Upstream returns a long structured error | persist the complete redacted error field, including its final nested provider cause |
+| Upstream returns a non-JSON/invalid error body | persist a generic diagnostic, never the raw response body |
 
 ### 5. Good / Base / Bad Cases
 
@@ -138,6 +140,7 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 - one request with multiple failures paginates every error exactly once;
 - unknown/invalid filters return `400`;
 - account keys, proxy credentials, custom Header values, account notes, raw sessions, messages, Authorization/Cookie, and upstream sensitive bodies do not occur in serialized log API results or files;
+- long structured SSE/JSON errors retain their final diagnostic text, and short message redaction does not corrupt unrelated words containing the same substring;
 - SSE, account replacement, proxy failure, capacity failure, and normal JSON responses finalize no more than one request record.
 
 Run `node --check lib/jsonl-log-store.js`, `npm test`, and `git diff --check` after changes.

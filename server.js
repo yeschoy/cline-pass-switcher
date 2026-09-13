@@ -290,15 +290,22 @@ const waiters = new Set();
 function notifyCapacityWaiters() { for (const resolve of [...waiters]) resolve(); }
 function getAccountState(id) { return (META.accountStates ||= {})[id] || null; }
 function safeReason(s, extraSecrets = []) {
-  let reason = redactSecrets(String(s || '').replace(/[\r\n\t]+/g, ' ').slice(0, 200));
-  for (const secret of extraSecrets) if (secret) reason = reason.split(secret).join('[REDACTED]');
+  let reason = redactSecrets(String(s || '').replace(/[\r\n\t]+/g, ' '));
+  for (const secret of extraSecrets) {
+    if (!secret) continue;
+    if (secret.length >= 8) reason = reason.split(secret).join('[REDACTED]');
+    else {
+      const escaped = secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      reason = reason.replace(new RegExp(`(^|[^A-Za-z0-9])${escaped}(?=$|[^A-Za-z0-9])`, 'g'), '$1[REDACTED]');
+    }
+  }
   return reason;
 }
 function sensitiveMessageValues(body) {
   const values = [];
   for (const message of Array.isArray(body?.messages) ? body.messages : []) {
-    if (typeof message?.content === 'string') values.push(message.content.slice(0, 200));
-    else if (Array.isArray(message?.content)) for (const part of message.content) if (typeof part?.text === 'string') values.push(part.text.slice(0, 200));
+    if (typeof message?.content === 'string') values.push(message.content);
+    else if (Array.isArray(message?.content)) for (const part of message.content) if (typeof part?.text === 'string') values.push(part.text);
   }
   return values.filter(Boolean);
 }
@@ -1143,7 +1150,7 @@ function redactSecrets(value) {
   s = s.replace(/(?:https?|socks5h?):\/\/[^\s]+/gi, '[REDACTED_PROXY]').replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, 'Bearer [REDACTED]');
   return s;
 }
-// 把上游错误信息归一成短字符串（用于学习与尝试日志）
+// 把上游错误信息归一成单行脱敏字符串（用于学习与尝试日志，保留完整原因）
 const errText = (e) => redactSecrets(e == null ? '' : typeof e === 'string' ? e : JSON.stringify(e));
 
 function resolveModelConfig(account, modelId) {
@@ -1233,7 +1240,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
                   const payload = eventText.split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.replace(/^data:\s?/, '')).join('\n');
                   const event = payload === '[DONE]' ? null : safeJsonParse(payload, 64 * 1024);
                   const eventError = upstreamErrorOf(event);
-                  if (eventError) { isSSE = false; netError = `stream error: ${safeReason(errText(eventError))}`; }
+                  if (eventError) { isSSE = false; netError = `stream error: ${errText(eventError)}`; }
                 }
               }
             } catch (e) { isSSE = false; netError = errText(e.message); }
@@ -1248,9 +1255,9 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
               if (dataLine) try { json = JSON.parse(dataLine.trimStart().replace(/^data:\s*/, '')); } catch {}
             }
             const inferred = normalizeStatus(up.status, json, normalizeStatus(0, { error: text }, 502));
-            const un = json ? unwrap(json, up.status) : { status: inferred, upstreamStatus: up.status, normalizedStatus: inferred, body: { error: { message: errText(text.slice(0, 400) || netError), type: 'upstream_error' } }, routing: {} };
-            const msg = errText(un.body?.error?.message || text || netError);
-            trace.push({ upstream: attempt.upstream, status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, ms, note: msg.slice(0, 160), account: account.name, accountId: account.id });
+            const un = json ? unwrap(json, up.status) : { status: inferred, upstreamStatus: up.status, normalizedStatus: inferred, body: { error: { message: netError || 'upstream returned an invalid error response', type: 'upstream_error' } }, routing: {} };
+            const msg = errText(un.body?.error?.message || netError);
+            trace.push({ upstream: attempt.upstream, status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, ms, note: msg, account: account.name, accountId: account.id });
             if (attempt.upstream) learnUpstreamStatus(modelId, attempt.upstream, msg);
             if (!attempt.upstream && (attempt.excludeList || []).length) learnAvailableProviders(modelId, msg);
             last = { status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing, acc: account, netError: null, accountAction: accountActionFor(un) };
@@ -1271,7 +1278,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
         }
         const r = await attemptOnce(modelId, body, attempt, account, forwardedHeaders, ctrl.signal);
         const ms = Date.now() - t1;
-        const note = r.netError || (r.status !== 200 ? errText(r.out?.error?.message).slice(0, 160) : 'ok');
+        const note = r.netError || (r.status !== 200 ? errText(r.out?.error?.message) : 'ok');
         trace.push({ upstream: attempt.upstream, status: r.status, upstreamStatus: r.upstreamStatus, normalizedStatus: r.normalizedStatus, ms, note, account: account.name, accountId: account.id });
         if (r.status !== 200 && attempt.upstream) learnUpstreamStatus(modelId, attempt.upstream, errText(r.out?.error?.message));
         if (r.status !== 200 && !attempt.upstream && (attempt.excludeList || []).length) learnAvailableProviders(modelId, r.netError || note);

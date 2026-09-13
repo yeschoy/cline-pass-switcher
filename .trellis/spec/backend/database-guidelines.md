@@ -109,7 +109,7 @@ Startup normalization preserves legacy behavior while making the schema explicit
 
 `routingSecret` is generated once and persisted so HRW mapping survives restart. `accountStates` entries for removed accounts are deleted; the deterministic environment-account ID remains valid while `CLINE_PASS_KEY` is present. Expired, non-banned cooldown entries are deleted when candidates are read. Ban/cooldown state persists until expiry or `POST /api/accounts/recover` removes it.
 
-Metadata may contain the identity source label (for example `message_hmac`) but must not contain account keys, proxy credentials, custom Header values, account notes, raw session values, HMAC fingerprints, or message text. Error reasons are redacted, flattened, and capped before persistence.
+Metadata may contain the identity source label (for example `message_hmac`) but must not contain account keys, proxy credentials, custom Header values, account notes, raw session values, HMAC fingerprints, or message text. Error reasons are redacted and flattened before persistence; structured upstream reasons remain complete so their final provider diagnostics are retained.
 
 Durable request/error diagnostics no longer grow `metadata.history`; they are separate bounded JSONL streams under `DATA_DIR/logs/` and follow `logging-guidelines.md`. The legacy history array remains compatibility-only.
 

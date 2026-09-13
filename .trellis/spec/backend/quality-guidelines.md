@@ -142,7 +142,7 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 | Session identity is over 512 characters or invalid | ignore it and continue identity fallback |
 | Upstream has an HTTP 4xx/5xx status | preserve it as `upstreamStatus` and normally as `normalizedStatus` |
 | HTTP 200 error envelope has a recognized status/message | normalize before applying `accountErrorRules`; otherwise `502` |
-| Error output/history contains a configured key or Bearer token | replace with `[REDACTED]`; truncate safe reasons to 200 characters |
+| Error output/history contains a configured key, Bearer token, or request message | replace with `[REDACTED]`; retain the complete structured error reason without substring-corrupting short-message redaction |
 | `/api/accounts` mode/wait/rules/id/name/key/capacity/route is invalid | `400`; do not save |
 | `/api/config` scope/action/account/model/route is invalid | `400`; do not save |
 

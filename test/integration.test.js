@@ -89,6 +89,11 @@ const stop = (child) => new Promise((resolve) => { child.once('exit', resolve); 
 
 test('account routing, header boundary, failover, state and streaming', async (t) => {
   const seen = [];
+  const diagnosticTail = 'vercel-diagnostic-tail-after-more-than-two-hundred-characters';
+  const longStreamError = JSON.stringify({
+    code: 'stream_initialization_failed',
+    message: `Failed to create stream: ${'provider routing context '.repeat(10)}failed to invoke model for request "ok": ${diagnosticTail}`,
+  });
   let upstreamAborted = false;
   let streamUpstreamAborted = false;
   const mock = http.createServer((req, res) => {
@@ -113,6 +118,10 @@ test('account routing, header boundary, failover, state and streaming', async (t
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
         res.write('data: {"choices":[{"delta":{"content":"started"}}]}\n\n');
         return setTimeout(() => res.end('data: {"data":{"error":{"message":"late wrapped stream limited","status":429}}}\n\ndata: [DONE]\n\n'), 5);
+      }
+      if (body.model === 'long-sse-error-model' && body.stream) {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        return res.end(`data: ${JSON.stringify({ error: longStreamError })}\n\n`);
       }
       if (body.model === 'ban-model' && auth === 'Bearer key-a') {
         res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'account failed', status: 500 } }));
@@ -160,7 +169,7 @@ test('account routing, header boundary, failover, state and streaming', async (t
     accounts: [
       { id: 'a', name: 'A', key: 'key-a', enabled: true, maxConcurrent: 0, perModel: {} },
       { id: 'b', name: 'B', key: 'key-b', enabled: true, maxConcurrent: 0, perModel: {} },
-    ], knownModels: ['test-model', 'planner-model', 'slow-model', 'abort-model', 'stream-abort-model', 'cooldown-model', 'wrapped-cooldown-model', 'wrapped-sse-error-model', 'post-start-wrapped-sse-error-model', 'double-cooldown-model', 'ban-model', 'sse-error-model'], perModel: {}, accountErrorRules: {},
+    ], knownModels: ['test-model', 'planner-model', 'slow-model', 'abort-model', 'stream-abort-model', 'cooldown-model', 'wrapped-cooldown-model', 'wrapped-sse-error-model', 'post-start-wrapped-sse-error-model', 'long-sse-error-model', 'double-cooldown-model', 'ban-model', 'sse-error-model'], perModel: {}, accountErrorRules: {},
   };
   const { child, dir } = await startSwitcher(baseConfig);
   t.after(async () => { await stop(child); await close(mock); fs.rmSync(dir, { recursive: true, force: true }); });
@@ -210,6 +219,20 @@ test('account routing, header boundary, failover, state and streaming', async (t
   assert.equal(retry.status, 200); assert.equal(seen.length, 2);
   assert.equal(seen[0].headers.authorization, seen[1].headers.authorization, 'supplier retries must keep one account');
   assert.deepEqual(seen.map((x) => x.body.provider.only[0]), ['first', 'second']);
+
+  const diagnostic = await rawJson(switchPort, '/v1/chat/completions', { model: 'long-sse-error-model', stream: true, messages: [{ role: 'user', content: 'ok' }] });
+  assert.equal(diagnostic.status, 502);
+  assert.ok(diagnostic.text.includes(diagnosticTail), 'client error must preserve the complete upstream diagnostic');
+  assert.ok(diagnostic.text.includes('invoke model'), 'short prompt redaction must not corrupt words containing the same substring');
+  assert.ok(diagnostic.text.includes('[REDACTED]'));
+  assert.equal(diagnostic.text.includes('request \\"ok\\"'), false, 'an echoed short prompt must still be redacted');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const diagnosticLogs = await (await fetch(`http://127.0.0.1:${switchPort}/api/logs/errors?requestedModel=long-sse-error-model`)).json();
+  assert.ok(diagnosticLogs.items[0].reason.includes(diagnosticTail), 'error logs must preserve the complete upstream diagnostic');
+  assert.ok(diagnosticLogs.items[0].reason.includes('invoke model'));
+  assert.ok(diagnosticLogs.items[0].reason.includes('[REDACTED]'));
+  assert.equal(diagnosticLogs.items[0].reason.includes('request \\"ok\\"'), false);
+
   seen.length = 0;
   await rawJson(switchPort, '/api/config', { scope: 'account', accountId: chosen.id, perModel: { 'test-model': { upstreams: ['fail-one', 'fail-two', 'third'], exclude: [], pinMode: 'strict', sort: null, maxRetries: 1 } } });
   const capped = await rawJson(switchPort, '/v1/chat/completions', { model: 'test-model', messages: [] }, { 'Session-Id': 'stable-session' });
