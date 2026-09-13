@@ -3,6 +3,7 @@ config.json
 metadata.json
 data/
 _testenv/
+167.114.158.4_ubuntu_49555_ed25519
 
 # 依赖与构建产物
 node_modules/

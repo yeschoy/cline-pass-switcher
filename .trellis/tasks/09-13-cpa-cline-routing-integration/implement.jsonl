@@ -1,0 +1,6 @@
+{"file":".trellis/tasks/09-13-cpa-cline-routing-integration/research/current-switcher-flow.md","reason":"当前账号选择、供应商注入、错误折叠、流式生命周期、API/UI 和兼容迁移证据"}
+{"file":".trellis/tasks/09-13-cpa-cline-routing-integration/research/session-identity-header-evidence.md","reason":"NewAPI 与 cpa-strategy 中已验证的 Codex/Claude 身份优先级及真实 Header 集"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"配置存储、后端 API 与单页控制台之间的跨层契约检查"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用现有路由注入、配置保存与控制台编辑路径，避免平行实现漂移"}
+{"file":".trellis/spec/backend/index.md","reason":"后端规范入口；当前子规范尚未完成时按任务研究与现有代码惯例实现"}
+{"file":".trellis/spec/frontend/index.md","reason":"前端规范入口；保持现有无框架单页控制台结构"}

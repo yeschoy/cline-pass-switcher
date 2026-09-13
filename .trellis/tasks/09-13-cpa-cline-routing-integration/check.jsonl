@@ -1,0 +1,6 @@
+{"file":".trellis/tasks/09-13-cpa-cline-routing-integration/research/current-switcher-flow.md","reason":"核对旧行为兼容、所有 Cline 调用点、原始状态和流式租约释放"}
+{"file":".trellis/tasks/09-13-cpa-cline-routing-integration/research/session-identity-header-evidence.md","reason":"核对 Codex/Claude 分离规则、父会话、允许列表与身份隐私"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查 config/metadata -> server -> API -> UI 的字段往返、校验和显示一致性"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"检查错误转换、状态保留和 API 错误响应边界；空白规范以任务设计和现有行为为准"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"检查账号 key、代理 key、会话值和敏感响应内容不进入日志/历史/诊断"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"检查控制台输入、HTML 转义、可访问性与保存失败回滚"}
