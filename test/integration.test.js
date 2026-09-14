@@ -87,6 +87,106 @@ async function startSwitcher(config, existingDir = null, extraEnv = {}) {
 
 const stop = (child) => new Promise((resolve) => { child.once('exit', resolve); child.kill('SIGTERM'); setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 1000).unref(); });
 
+function disconnectRequest(port, body, afterData = false, marker = '') {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ hostname: '127.0.0.1', port, path: '/v1/chat/completions', method: 'POST', headers: { 'Content-Type': 'application/json' } }, (res) => {
+      if (!afterData) return;
+      let received = '';
+      res.on('data', (chunk) => {
+        received += chunk.toString();
+        if (!marker || received.includes(marker)) { req.destroy(); resolve(); }
+      });
+    });
+    req.on('error', (error) => { if (error.code !== 'ECONNRESET') reject(error); });
+    req.end(JSON.stringify(body));
+    if (!afterData) setTimeout(() => { req.destroy(); resolve(); }, 20);
+  });
+}
+
+async function waitForRequestLogs(port, count) {
+  let page;
+  for (let i = 0; i < 100; i++) {
+    page = await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?limit=200`)).json();
+    if ((page.items || []).length >= count) return page.items;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  return page?.items || [];
+}
+
+test('API compatibility, message boundary and request outcomes are explicit', async (t) => {
+  const seen = [];
+  const mock = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString());
+      seen.push(body);
+      if (body.model === 'done-close') {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write('data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n');
+        return;
+      }
+      if (body.model === 'stream-cancel') {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write('data: {"choices":[{"delta":{"content":"started"}}],"usage":{"prompt_tokens":99,"completion_tokens":1,"total_tokens":100}}\n\n');
+        return;
+      }
+      if (body.model === 'nonstream-cancel') return;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }));
+    });
+  });
+  const upstreamPort = await listen(mock);
+  const switchPort = await new Promise(async (resolve) => { const server = http.createServer(); const port = await listen(server); await close(server); resolve(port); });
+  const config = { port: switchPort, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, maxConcurrent: 1, perModel: {} }], knownModels: ['valid-image', 'valid-tool', 'valid-function-call', 'done-close', 'stream-cancel', 'nonstream-cancel'], perModel: {}, accountErrorRules: { '502': { action: 'ban' } } };
+  const running = await startSwitcher(config);
+  t.after(async () => { await stop(running.child); await close(mock); fs.rmSync(running.dir, { recursive: true, force: true }); });
+
+  const beforeUnsupported = seen.length;
+  const unsupported = await rawJson(switchPort, '/v1/responses', { model: 'ignored' });
+  assert.equal(unsupported.status, 501);
+  assert.deepEqual(unsupported.json, { error: { message: 'OpenAI Responses API is not supported; use /v1/chat/completions instead', type: 'unsupported_api', param: null, code: 'unsupported_api' } });
+  assert.equal(seen.length, beforeUnsupported, 'unsupported API must not reach account routing or upstream');
+
+  const invalidContents = ['', '   ', null, [], [{ type: 'text', text: '  ' }], [{}], [{ type: 'image_url', image_url: false }], undefined];
+  for (const [index, content] of invalidContents.entries()) {
+    const message = { role: 'user' };
+    if (content !== undefined) message.content = content;
+    const response = await rawJson(switchPort, '/v1/chat/completions', { model: 'invalid-boundary', messages: [message] });
+    assert.equal(response.status, 400, `invalid content case ${index}`);
+    assert.deepEqual(response.json, { error: { message: 'messages.0.content must not be empty', type: 'invalid_request_error', param: 'messages.0.content', code: 'invalid_request_error' } });
+    assert.equal(response.text.includes('invalid-boundary'), false, 'validation response must contain only the safe field path');
+  }
+  assert.equal(seen.length, beforeUnsupported, 'invalid messages must be rejected before upstream');
+
+  assert.equal((await rawJson(switchPort, '/v1/chat/completions', { model: 'valid-image', messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.test/image.png' } }] }] })).status, 200);
+  assert.equal((await rawJson(switchPort, '/v1/chat/completions', { model: 'valid-tool', messages: [{ role: 'assistant', content: null, tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'lookup', arguments: '{}' } }] }] })).status, 200);
+  assert.equal((await rawJson(switchPort, '/v1/chat/completions', { model: 'valid-function-call', messages: [{ role: 'assistant', content: '', function_call: { name: 'lookup', arguments: '{}' } }] })).status, 200);
+
+  await disconnectRequest(switchPort, { model: 'done-close', stream: true, messages: [{ role: 'user', content: 'complete' }] }, true, '[DONE]');
+  await disconnectRequest(switchPort, { model: 'stream-cancel', stream: true, messages: [{ role: 'user', content: 'cancel' }] }, true);
+  await disconnectRequest(switchPort, { model: 'nonstream-cancel', messages: [{ role: 'user', content: 'cancel' }] });
+
+  const logs = await waitForRequestLogs(switchPort, 6);
+  assert.equal(logs.length, 6, 'each accepted request must finalize exactly once');
+  for (const model of ['valid-image', 'valid-tool', 'valid-function-call', 'done-close', 'stream-cancel', 'nonstream-cancel']) {
+    assert.equal(logs.filter((item) => item.requestedModel === model).length, 1, `${model} must have one final request record`);
+  }
+  const byModel = new Map(logs.map((item) => [item.requestedModel, item]));
+  assert.equal(byModel.get('done-close')?.status, 200); assert.equal(byModel.get('done-close')?.result, 'success');
+  assert.equal(byModel.get('stream-cancel')?.status, 499); assert.equal(byModel.get('stream-cancel')?.result, 'client_cancelled'); assert.equal(byModel.get('stream-cancel')?.errorCategory, null);
+  assert.equal(byModel.get('nonstream-cancel')?.status, 499); assert.equal(byModel.get('nonstream-cancel')?.result, 'client_cancelled'); assert.equal(byModel.get('nonstream-cancel')?.errorCategory, null);
+  assert.equal((await (await fetch(`http://127.0.0.1:${switchPort}/api/logs/requests?result=client_cancelled`)).json()).items.length, 2);
+  assert.equal((await (await fetch(`http://127.0.0.1:${switchPort}/api/logs/errors`)).json()).items.length, 0, 'client cancellation must not create attempt errors');
+  const statistics = await (await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json();
+  assert.equal(statistics.lifetime.global.requests, 6); assert.equal(statistics.lifetime.global.errors, 0);
+  assert.equal(statistics.lifetime.global.usageRequests, 0); assert.equal(statistics.lifetime.global.inputTokens, 0, 'usage observed before cancellation must be discarded');
+  assert.equal(statistics.accounts[0].health.results, 4, 'successful requests count for health; cancellations do not');
+  const accounts = (await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json()).accounts;
+  assert.equal(accounts[0].activeCount, 0);
+  assert.notEqual(accounts[0].state?.banned, true, 'abort-generated transport errors must not apply account rules');
+});
+
 test('account routing, header boundary, failover, state and streaming', async (t) => {
   const seen = [];
   const diagnosticTail = 'vercel-diagnostic-tail-after-more-than-two-hundred-characters';
@@ -228,6 +328,8 @@ test('account routing, header boundary, failover, state and streaming', async (t
   assert.equal(diagnostic.text.includes('request \\"ok\\"'), false, 'an echoed short prompt must still be redacted');
   await new Promise((resolve) => setTimeout(resolve, 20));
   const diagnosticLogs = await (await fetch(`http://127.0.0.1:${switchPort}/api/logs/errors?requestedModel=long-sse-error-model`)).json();
+  const diagnosticRequests = await (await fetch(`http://127.0.0.1:${switchPort}/api/logs/requests?requestedModel=long-sse-error-model`)).json();
+  assert.equal(diagnosticRequests.items[0].result, 'failed');
   assert.ok(diagnosticLogs.items[0].reason.includes(diagnosticTail), 'error logs must preserve the complete upstream diagnostic');
   assert.ok(diagnosticLogs.items[0].reason.includes('invoke model'));
   assert.ok(diagnosticLogs.items[0].reason.includes('[REDACTED]'));

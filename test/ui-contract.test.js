@@ -43,8 +43,12 @@ test('request and error sections share one log view and reset the selected type 
   assert.equal((html.match(/id="logPanel"/g) || []).length, 1);
   assert.equal((html.match(/id="logBody"/g) || []).length, 1);
   assert.equal((html.match(/id="logNext"/g) || []).length, 1);
-  assert.match(html, /id="logTitle"[^>]*>请求日志<\/h2>/);
+  assert.match(html, /id="logTitle"[^>]*>最终请求结果（每个请求一条）<\/h2>/);
   assert.match(html, /id="logSectionStatus"[^>]+aria-live="polite">当前板块：请求日志<\/span>/);
+  assert.match(html, /id="logDescription"[^>]*>展示最终请求结果，每个请求一条；旧记录可能缺少 result/);
+  assert.match(html, /上游失败尝试（同一请求可能多条）/);
+  assert.match(html, /数量不等于失败请求数/);
+  assert.match(html, /id="logResult"/);
   const switchSection = html.slice(html.indexOf('async function switchSection'), html.indexOf('async function loadLogs'));
   assert.match(switchSection, /LOG_QUERY_ID\+\+;STATISTICS_QUERY_ID\+\+;/);
   assert.match(switchSection, /\$\('#consolePanel'\)\.hidden=!isConsole;\$\('#statisticsPanel'\)\.hidden=!isStatistics;\$\('#logPanel'\)\.hidden=isConsole\|\|isStatistics/);
@@ -55,6 +59,9 @@ test('request and error sections share one log view and reset the selected type 
   assert.match(loadLogs, /const type=\$\('#logType'\)\.value; if\(!next\)LOG_CURSOR=null/);
   assert.match(loadLogs, /const queryId=\+\+LOG_QUERY_ID/);
   assert.match(loadLogs, /if\(LOG_CURSOR\)params\.set\('cursor',LOG_CURSOR\)/);
+  assert.match(loadLogs, /params\.set\('result',\$\('#logResult'\)\.value\)/);
+  assert.match(loadLogs, /x\.result\|\|legacyResult/);
+  assert.match(loadLogs, /legacy_failed/);
   assert.match(loadLogs, /api\(`\/api\/logs\/\$\{type\}\?\$\{params\}`\)/);
   assert.match(loadLogs, /if\(queryId!==LOG_QUERY_ID\|\|type!==\$\('#logType'\)\.value\)return/);
   const clearLogs = html.slice(html.indexOf('async function clearLogs'), html.indexOf('function accMsg'));

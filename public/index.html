@@ -127,8 +127,9 @@
 
   <section id="logPanel" aria-labelledby="logTitle" hidden>
     <div class="card">
-      <div class="toolbar"><h2 id="logTitle" style="margin:0">请求日志</h2><span id="logSectionStatus" class="badge green" aria-live="polite">当前板块：请求日志</span><input id="logType" type="hidden" value="requests"><input id="logFrom" type="datetime-local" title="开始时间"><input id="logTo" type="datetime-local" title="结束时间"><input id="logRequestId" placeholder="请求 ID"><input id="logModel" placeholder="模型"><input id="logAccount" placeholder="账号"><input id="logStatus" placeholder="状态码"><input id="logProvider" placeholder="供应商"><input id="logStrategy" placeholder="策略/错误类别"><select id="logStream"><option value="">流式：全部</option><option value="true">流式</option><option value="false">非流式</option></select><select id="logOverflow"><option value="">容量：全部</option><option value="true">容量溢出</option><option value="false">未溢出</option></select><select id="logSwitched"><option value="">换号：全部</option><option value="true">已换号</option><option value="false">未换号</option></select><button class="ghost" onclick="loadLogs()">筛选</button><button class="ghost" onclick="clearLogs()">清空当前日志</button></div>
-      <div class="table-wrap"><table style="min-width:1000px"><thead><tr><th>时间</th><th>请求 ID</th><th>请求/实际模型</th><th>账号</th><th>策略/原因</th><th>状态</th><th>供应商路径</th><th>详情</th></tr></thead><tbody id="logBody"><tr><td colspan="8" class="empty">暂无记录</td></tr></tbody></table></div>
+      <div class="toolbar"><h2 id="logTitle" style="margin:0">最终请求结果（每个请求一条）</h2><span id="logSectionStatus" class="badge green" aria-live="polite">当前板块：请求日志</span><input id="logType" type="hidden" value="requests"><input id="logFrom" type="datetime-local" title="开始时间"><input id="logTo" type="datetime-local" title="结束时间"><input id="logRequestId" placeholder="请求 ID"><input id="logModel" placeholder="模型"><input id="logAccount" placeholder="账号"><input id="logStatus" placeholder="状态码"><select id="logResult"><option value="">结果：全部</option><option value="success">成功</option><option value="client_cancelled">客户端取消</option><option value="failed">失败</option></select><input id="logProvider" placeholder="供应商"><input id="logStrategy" placeholder="策略/错误类别"><select id="logStream"><option value="">流式：全部</option><option value="true">流式</option><option value="false">非流式</option></select><select id="logOverflow"><option value="">容量：全部</option><option value="true">容量溢出</option><option value="false">未溢出</option></select><select id="logSwitched"><option value="">换号：全部</option><option value="true">已换号</option><option value="false">未换号</option></select><button class="ghost" onclick="loadLogs()">筛选</button><button class="ghost" onclick="clearLogs()">清空当前日志</button></div>
+      <p id="logDescription" class="dim">展示最终请求结果，每个请求一条；旧记录可能缺少 result，界面仅按历史状态显示 legacy_failed，不迁移或改写历史 JSONL。</p>
+      <div class="table-wrap"><table style="min-width:1000px"><thead><tr><th>时间</th><th>请求 ID</th><th>请求/实际模型</th><th>账号</th><th>策略/原因</th><th>状态 / 结果</th><th>供应商路径</th><th>详情</th></tr></thead><tbody id="logBody"><tr><td colspan="8" class="empty">暂无记录</td></tr></tbody></table></div>
       <button id="logNext" class="ghost" onclick="loadLogs(true)" style="margin-top:10px">下一页</button>
     </div>
   </section>
@@ -791,8 +792,10 @@ async function switchSection(section){
   for(const [name,id] of [['console','navConsole'],['statistics','navStatistics'],['requests','navRequests'],['errors','navErrors']])$('#'+id).setAttribute('aria-pressed',String(section===name));
   if(isConsole)return;if(isStatistics)return loadStatistics();
   $('#logType').value=type;
-  const title=type==='errors'?'错误日志':'请求日志';
-  $('#logTitle').textContent=title;$('#logSectionStatus').textContent=`当前板块：${title}`;
+  const title=type==='errors'?'上游失败尝试（同一请求可能多条）':'最终请求结果（每个请求一条）';
+  $('#logTitle').textContent=title;$('#logSectionStatus').textContent=`当前板块：${type==='errors'?'错误日志':'请求日志'}`;
+  $('#logDescription').textContent=type==='errors'?'展示上游失败尝试，同一最终请求可能对应多条；数量不等于失败请求数。':'展示最终请求结果，每个请求一条；旧记录可能缺少 result，界面仅按历史状态显示 legacy_failed，不迁移或改写历史 JSONL。';
+  $('#logResult').hidden=type==='errors';
   await loadLogs(false);
 }
 async function loadLogs(next=false){
@@ -802,12 +805,13 @@ async function loadLogs(next=false){
   for(const [k,v] of Object.entries(values))if(v.trim())params.set(k,v.trim());
   if($('#logFrom').value)params.set('from',String(new Date($('#logFrom').value).getTime()));if($('#logTo').value)params.set('to',String(new Date($('#logTo').value).getTime()));
   const strategy=$('#logStrategy').value.trim(); if(strategy)params.set(type==='errors'?'category':'strategy',strategy);
+  if(type==='requests'&&$('#logResult').value)params.set('result',$('#logResult').value);
   if(type==='requests'&&$('#logStream').value)params.set('stream',$('#logStream').value);
   if(type==='requests'&&$('#logOverflow').value)params.set('overflow',$('#logOverflow').value);
   if(type==='requests'&&$('#logSwitched').value)params.set('switched',$('#logSwitched').value);
   const r=await api(`/api/logs/${type}?${params}`),items=r.items||[];
   if(queryId!==LOG_QUERY_ID||type!==$('#logType').value)return;
-  $('#logBody').innerHTML=items.map(x=>`<tr><td>${escapeHtml(new Date(x.ts).toLocaleString())}</td><td class="mono">${escapeHtml(x.requestId)}</td><td class="mono">${escapeHtml(x.requestedModel||'—')}<br><span class="dim">${escapeHtml(x.resolvedModel||'—')}</span></td><td>${escapeHtml(x.accountName||'—')}</td><td>${escapeHtml(x.strategy||x.category||'—')}<br><span class="dim">${escapeHtml(x.selectionReason||x.accountAction||'')}</span></td><td>${escapeHtml(x.status??'—')} / ${escapeHtml(x.upstreamStatus??'—')}</td><td>${escapeHtml((x.targetProviders||x.providerPath||[]).join(' → ')||x.actualProvider||x.targetProvider||'—')}</td><td><details><summary>展开</summary><pre>${escapeHtml(JSON.stringify(x,null,2))}</pre></details></td></tr>`).join('')||'<tr><td colspan="8" class="empty">暂无记录</td></tr>';
+  $('#logBody').innerHTML=items.map(x=>{const legacyResult=Number(x.status)>=200&&Number(x.status)<400?'success':'legacy_failed';const status=type==='requests'?`${x.status??'—'} / ${x.result||legacyResult}`:`${x.status??'—'} / ${x.upstreamStatus??'—'}`;return `<tr><td>${escapeHtml(new Date(x.ts).toLocaleString())}</td><td class="mono">${escapeHtml(x.requestId)}</td><td class="mono">${escapeHtml(x.requestedModel||'—')}<br><span class="dim">${escapeHtml(x.resolvedModel||'—')}</span></td><td>${escapeHtml(x.accountName||'—')}</td><td>${escapeHtml(x.strategy||x.category||'—')}<br><span class="dim">${escapeHtml(x.selectionReason||x.accountAction||'')}</span></td><td>${escapeHtml(status)}</td><td>${escapeHtml((x.targetProviders||x.providerPath||[]).join(' → ')||x.actualProvider||x.targetProvider||'—')}</td><td><details><summary>展开</summary><pre>${escapeHtml(JSON.stringify(x,null,2))}</pre></details></td></tr>`;}).join('')||'<tr><td colspan="8" class="empty">暂无记录</td></tr>';
   LOG_CURSOR=r.nextCursor;$('#logNext').disabled=!LOG_CURSOR;
 }
 async function clearLogs(){const type=$('#logType').value,title=type==='errors'?'错误日志':'请求日志';if(!confirm(`确认清空${title}？此操作不可撤销。`))return;await api('/api/logs/'+type,null,'DELETE');if($('#logPanel').hidden||type!==$('#logType').value)return;await loadLogs();}

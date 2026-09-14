@@ -1041,7 +1041,8 @@ function healthProjection(account, now = Date.now()) {
 function record(modelId, info) {
   const ts = Date.now();
   META.models[modelId] = { ...(META.models[modelId] || {}), provider: info.provider, canonical: info.canonical, lastMs: info.ms };
-  const legacy = { ts, model: modelId, ...info };
+  const result = ['success', 'client_cancelled', 'failed'].includes(info.result) ? info.result : (info.error ? 'failed' : 'success');
+  const legacy = { ts, model: modelId, ...info, result };
   recentHistory.unshift(legacy); if (recentHistory.length > 100) recentHistory.length = 100;
   const request = {
     ts, requestId: info.requestId || crypto.randomUUID(), requestedModel: info.requestedModel || modelId,
@@ -1052,12 +1053,12 @@ function record(modelId, info) {
     pipelineSteps: Array.isArray(info.pipeline?.diagnostics) ? info.pipeline.diagnostics.slice(0, 8) : [], selectedQuotaPool: info.pipeline?.selectedQuota || null, selectedHealthLayer: info.pipeline?.selectedHealth || null, capacityFallback: !!info.pipeline?.capacityFallback,
     targetProviders: Array.isArray(info.targets) ? info.targets : [], actualProvider: info.provider || null,
     attempts: Array.isArray(info.trace) ? info.trace.map((t) => ({ provider: t.upstream || 'auto', status: t.status, upstreamStatus: t.upstreamStatus, ms: t.ms, account: t.account, action: t.action || null })) : [],
-    status: info.normalizedStatus || (info.error ? 502 : 200), upstreamStatus: info.upstreamStatus ?? null,
+    status: result === 'client_cancelled' ? 499 : result === 'success' ? 200 : (info.normalizedStatus || 502), result, upstreamStatus: info.upstreamStatus ?? null,
     durationMs: Number(info.ms) || 0, accountActions: info.accountActions || [], switched: (info.accountPath || []).length > 1, appliedHeaderNames: info.appliedHeaderNames || [],
-    errorCategory: info.error ? (info.proxyError ? 'proxy' : 'upstream') : null,
+    errorCategory: result === 'failed' && info.error ? (info.proxyError ? 'proxy' : 'upstream') : null,
   };
   const writes = [requestLogs.append(request)];
-  for (const [attemptIndex, attempt] of (info.trace || []).entries()) {
+  for (const [attemptIndex, attempt] of (result === 'client_cancelled' ? [] : (info.trace || [])).entries()) {
     if (attempt.status === 200 && !attempt.action) continue;
     writes.push(errorLogs.append({ ts, requestId: request.requestId, requestedModel: request.requestedModel, resolvedModel: request.resolvedModel,
       accountId: attempt.accountId || info.accountId || null, accountName: attempt.account || info.account || null, attemptIndex,
@@ -1297,10 +1298,11 @@ function scheduleQuotaRefresh() {
   quotaTimer = setTimeout(run, process.env.NODE_ENV === 'test' ? 10 : 1000 + (quotaCursor % 30) * 1000); quotaTimer.unref();
 }
 function createSseObserver(maxBytes = 64 * 1024) {
-  let pending = Buffer.alloc(0), discardTail = Buffer.alloc(0), discarding = false, usage = null, provider = null, canonical = null, error = null, normalizedStatus = null;
+  let pending = Buffer.alloc(0), discardTail = Buffer.alloc(0), discarding = false, usage = null, provider = null, canonical = null, error = null, normalizedStatus = null, done = false;
   const observeEvent = (buffer) => {
     const payload = buffer.toString('utf8').split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.replace(/^data:\s?/, '')).join('\n');
-    if (!payload || payload === '[DONE]') return;
+    if (!payload) return;
+    if (payload === '[DONE]') { done = true; return; }
     let event; try { event = JSON.parse(payload); } catch { return; }
     const raw = event?.data && (event.data.choices || event.data.error || event.data.usage) ? event.data : event;
     const normalized = normalizeUsage(raw?.usage); if (normalized) usage = normalized;
@@ -1324,7 +1326,7 @@ function createSseObserver(maxBytes = 64 * 1024) {
       }
       if (pending.length > maxBytes) { discardTail = pending.subarray(Math.max(0, pending.length - 3)); pending = Buffer.alloc(0); discarding = true; }
     },
-    result() { return { usage, provider, canonical, error, normalizedStatus }; },
+    result() { return { usage, provider, canonical, error, normalizedStatus, done }; },
   };
 }
 function readFirstSseEvent(stream, maxBytes = 64 * 1024) {
@@ -1631,14 +1633,14 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
             trace.push({ upstream: attempt.upstream, status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, terminalOrigin: up.status >= 400 ? 'upstream_http' : 'upstream_envelope', ms, note: msg, account: account.name, accountId: account.id });
             if (attempt.upstream) learnUpstreamStatus(modelId, attempt.upstream, msg);
             if (!attempt.upstream && (attempt.excludeList || []).length) learnAvailableProviders(modelId, msg);
-            last = { status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing, acc: account, netError: null, accountAction: accountActionFor(un) };
+            last = { status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing, acc: account, netError: null, accountAction: clientClosed ? null : accountActionFor(un) };
             trace[trace.length - 1].action = last.accountAction?.action || null;
             if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'ban') break;
             continue;
           }
           if (!up) {
             trace.push({ upstream: attempt.upstream, status: 502, upstreamStatus: 0, normalizedStatus: 502, terminalOrigin: /timeout/i.test(netError || '') ? 'timeout' : account.proxyUrl ? 'proxy' : 'network', ms, note: netError || 'no response', account: account.name, accountId: account.id });
-            last = { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${netError || 'no response'}`, type: 'upstream_error' } }, routing: {}, acc: account, netError: netError || 'no response', accountAction: accountActionFor({ normalizedStatus: 502 }) };
+            last = { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${netError || 'no response'}`, type: 'upstream_error' } }, routing: {}, acc: account, netError: netError || 'no response', accountAction: clientClosed ? null : accountActionFor({ normalizedStatus: 502 }) };
             trace[trace.length - 1].action = last.accountAction?.action || null;
             if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'ban') break;
             continue;
@@ -1653,7 +1655,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
         trace.push({ upstream: attempt.upstream, status: r.status, upstreamStatus: r.upstreamStatus, normalizedStatus: r.normalizedStatus, terminalOrigin: r.terminalOrigin, ms, note, account: account.name, accountId: account.id });
         if (r.status !== 200 && attempt.upstream) learnUpstreamStatus(modelId, attempt.upstream, errText(r.out?.error?.message));
         if (r.status !== 200 && !attempt.upstream && (attempt.excludeList || []).length) learnAvailableProviders(modelId, r.netError || note);
-        last = { ...r, accountAction: accountActionFor(r) };
+        last = { ...r, accountAction: clientClosed ? null : accountActionFor(r) };
         trace[trace.length - 1].action = last.accountAction?.action || null;
         if (r.status === 200) break;
         if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'ban') break;
@@ -1670,6 +1672,37 @@ function statisticsSegments(trace, finalAccountId, usage, clientDisconnect = fal
   for (const attempt of trace || []) { const list = grouped.get(attempt.accountId) || []; list.push(attempt); grouped.set(attempt.accountId, list); }
   return [...grouped.entries()].map(([accountId, attempts]) => { const success = !clientDisconnect && attempts.at(-1)?.status === 200; return { accountId, trace: attempts, success, error: !clientDisconnect && !success, usage: success && accountId === finalAccountId ? usage : null }; });
 }
+function hasMessageContent(value) {
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (Array.isArray(value)) return value.some(hasMessagePartContent);
+  return false;
+}
+function hasPayload(value) {
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (Array.isArray(value)) return value.some(hasPayload);
+  if (value && typeof value === 'object') return Object.values(value).some(hasPayload);
+  return false;
+}
+function hasMessagePartContent(part) {
+  if (!part || typeof part !== 'object' || Array.isArray(part)) return false;
+  if (part.type === 'text') return typeof part.text === 'string' && part.text.trim().length > 0;
+  if (typeof part.text === 'string' && part.text.trim()) return true;
+  return Object.entries(part).some(([key, value]) => key !== 'type' && key !== 'text' && hasPayload(value));
+}
+function allowsEmptyAssistantContent(message) {
+  if (message?.role !== 'assistant') return false;
+  if (Array.isArray(message.tool_calls) && message.tool_calls.some((call) => call && typeof call === 'object' && Object.keys(call).length)) return true;
+  const call = message.function_call;
+  return !!call && typeof call === 'object' && typeof call.name === 'string' && call.name.trim().length > 0;
+}
+function emptyMessageContentPath(body) {
+  if (!Array.isArray(body.messages)) return null;
+  for (let index = 0; index < body.messages.length; index++) {
+    const message = body.messages[index];
+    if (!hasMessageContent(message?.content) && !allowsEmptyAssistantContent(message)) return `messages.${index}.content`;
+  }
+  return null;
+}
 async function handleChat(req, res) {
   const requestId = crypto.randomUUID();
   res.setHeader('X-Cline-Request-Id', requestId);
@@ -1679,6 +1712,8 @@ async function handleChat(req, res) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return sendJSON(res, 400, { error: { message: 'JSON body must be an object' } });
   const requestedModel = typeof body.model === 'string' ? body.model.trim() : '';
   if (!requestedModel || requestedModel.length > 300) return sendJSON(res, 400, { error: { message: 'valid model is required' } });
+  const emptyContentPath = emptyMessageContentPath(body);
+  if (emptyContentPath) return sendJSON(res, 400, { error: { message: `${emptyContentPath} must not be empty`, type: 'invalid_request_error', param: emptyContentPath, code: 'invalid_request_error' } });
   const sensitiveValues = sensitiveMessageValues(body);
   let statisticsFinalized = false;
   const finalizeStatistics = (facts) => { if (statisticsFinalized) return; statisticsFinalized = true; try { commitStatistics(facts); } catch (error) { console.error(`[统计] 持久化失败：${safeReason(error.message)}`); } };
@@ -1747,47 +1782,63 @@ async function handleChat(req, res) {
     const observer = createSseObserver();
     if (chain.streamHead) { observer.push(chain.streamHead); res.write(chain.streamHead); }
     let finalized = false;
+    let onUpstreamError, onResponseClose;
     const finalize = (error = null, origin = null) => {
       if (finalized) return;
       finalized = true;
       chain.cleanupClientClose?.();
+      up.body.off('error', onUpstreamError);
+      res.off('close', onResponseClose);
       lease.release();
       const observed = observer.result();
-      let streamError = observed.error || (error ? safeReason(error) : null);
+      const transportFailed = !!error && origin !== 'client_disconnect';
+      const clientCancelled = origin === 'client_disconnect' && !observed.done && !observed.error;
+      const result = observed.error || transportFailed ? 'failed' : clientCancelled ? 'client_cancelled' : 'success';
+      const normalizedStatus = result === 'failed' ? (observed.error ? observed.normalizedStatus : 502) : result === 'client_cancelled' ? 499 : 200;
+      const streamError = result === 'failed' ? (observed.error || safeReason(error)) : null;
       if (observed.error) {
         const action = accountActionFor({ normalizedStatus: observed.normalizedStatus });
         if (action) { if (action.action !== 'ignore') persistAccountAction(acc, action, streamError); accountActions.push({ account: acc.name, action: action.action, statusCode: action.statusCode }); }
         const providerAttempt = chain.trace.at(-1);
         if (providerAttempt) { providerAttempt.action = action?.action || null; providerAttempt.normalizedStatus = observed.normalizedStatus; providerAttempt.status = observed.normalizedStatus; providerAttempt.terminalOrigin = 'upstream_envelope'; providerAttempt.note = 'stream error after response started'; }
-      } else if (error && origin !== 'client_disconnect') {
+      } else if (transportFailed) {
         const providerAttempt = chain.trace.at(-1); if (providerAttempt) { providerAttempt.status = 502; providerAttempt.normalizedStatus = 502; providerAttempt.terminalOrigin = acc.proxyUrl ? 'proxy' : 'network'; providerAttempt.note = 'stream transport error'; }
       }
-      const disconnected = origin === 'client_disconnect';
-      finalizeStatistics({ globalError: !!streamError && !disconnected, usage: streamError || disconnected ? null : observed.usage, clientDisconnect: disconnected, segments: statisticsSegments(chain.trace, acc.id, streamError || disconnected ? null : observed.usage, disconnected) });
-      record(modelId, { requestId, requestedModel, resolvedModel: modelId, provider: observed.provider, canonical: observed.canonical, ms: Date.now() - chain.t0, stream: true, error: streamError, account: acc.name, accountId: acc.id, attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, accountPath, accountActions, sessionSource: identity.source, strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, appliedHeaderNames: Object.keys(acc.headers || {}), proxyError: !!acc.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues });
+      const usage = result === 'success' ? observed.usage : null;
+      finalizeStatistics({ globalError: result === 'failed', usage, clientDisconnect: clientCancelled, segments: statisticsSegments(chain.trace, acc.id, usage, clientCancelled) });
+      record(modelId, { requestId, requestedModel, resolvedModel: modelId, provider: observed.provider, canonical: observed.canonical, ms: Date.now() - chain.t0, stream: true, result, normalizedStatus, error: streamError, account: acc.name, accountId: acc.id, attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, accountPath, accountActions, sessionSource: identity.source, strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, appliedHeaderNames: Object.keys(acc.headers || {}), proxyError: !!acc.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues });
     };
     const tap = new Transform({ transform(c, enc, cb) { observer.push(c); cb(null, c); }, flush(cb) { finalize(); cb(); } });
-    up.body.on('error', (e) => { finalize(e.message, 'upstream'); if (!res.destroyed) res.destroy(e); });
-    res.on('close', () => { if (!res.writableEnded) up.body.destroy(); finalize('client disconnected', 'client_disconnect'); });
+    onUpstreamError = (e) => { finalize(e.message, 'upstream'); if (!res.destroyed) res.destroy(e); };
+    onResponseClose = () => { if (res.writableEnded) return; finalize('client disconnected', 'client_disconnect'); if (!up.body.destroyed) up.body.destroy(); };
+    up.body.on('error', onUpstreamError);
+    res.on('close', onResponseClose);
     up.body.pipe(tap).pipe(res);
     return;
   }
 
   lease?.release();
   const { status, out, routing = {}, acc } = chain;
-  if (!out) { finalizeStatistics({ globalError: true, segments: statisticsSegments(chain.trace, null, null) }); return sendJSON(res, 502, { error: { message: 'no upstream response', type: 'upstream_error' } }); }
+  const disconnected = chain.clientDisconnected === true;
+  if (!out) {
+    const result = disconnected ? 'client_cancelled' : 'failed';
+    finalizeStatistics({ globalError: !disconnected, clientDisconnect: disconnected, segments: statisticsSegments(chain.trace, null, null, disconnected) });
+    record(modelId, { requestId, requestedModel, resolvedModel: modelId, stream: false, result, normalizedStatus: disconnected ? 499 : 502, error: disconnected ? null : 'no upstream response', trace: chain.trace, accountPath, accountActions, sessionSource: identity.source, strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, sensitiveValues });
+    if (res.destroyed) return;
+    return sendJSON(res, disconnected ? 499 : 502, { error: { message: disconnected ? 'client cancelled request' : 'no upstream response', type: disconnected ? 'client_cancelled' : 'upstream_error' } });
+  }
   if (status === 200 && /^cline-pass\//.test(modelId) && !config.knownModels.includes(modelId)) { config.knownModels.push(modelId); saveConfig(); }
   const safeOut = status === 200 ? out : { ...out, error: { ...(out.error || {}), message: safeReason(out?.error?.message || 'upstream error', sensitiveValues) } };
-  const disconnected = chain.clientDisconnected === true;
   const usage = status === 200 && !disconnected ? normalizeUsage(routing.usage) : null;
   finalizeStatistics({ globalError: status !== 200 && !disconnected, usage, clientDisconnect: disconnected, segments: statisticsSegments(chain.trace, acc?.id, usage, disconnected) });
   record(modelId, {
-    requestId, requestedModel, resolvedModel: modelId, provider: routing.finalProvider || null, canonical: routing.canonicalSlug || null, ms: Date.now() - chain.t0, stream: false,
-    attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, error: status !== 200 ? safeOut.error.message : null,
+    requestId, requestedModel, resolvedModel: modelId, provider: routing.finalProvider || null, canonical: routing.canonicalSlug || null, ms: Date.now() - chain.t0, stream: false, result: disconnected ? 'client_cancelled' : status === 200 ? 'success' : 'failed',
+    attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, error: disconnected ? null : status !== 200 ? safeOut.error.message : null,
     account: acc?.name || null, accountId: acc?.id || null, accountPath, accountActions, accountAction: chain.accountAction?.action || accountActions.at(-1)?.action || null, upstreamStatus: chain.upstreamStatus, normalizedStatus: chain.normalizedStatus, sessionSource: identity.source,
     strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, appliedHeaderNames: Object.keys(acc?.headers || {}), proxyError: !!acc?.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues,
   });
-  res.writeHead(status, {
+  if (res.destroyed) return;
+  res.writeHead(disconnected ? 499 : status, {
     'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*',
     'X-Cline-Target-Upstream': targets.length ? targets.join('>') : 'auto', 'X-Cline-Actual-Upstream': routing.finalProvider || 'unknown',
     'X-Cline-Canonical-Model': routing.canonicalSlug || '', 'X-Cline-Attempts': String(chain.trace.length), 'X-Cline-Account': headerSafe(acc?.name || ''),
@@ -1830,6 +1881,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (p.startsWith('/api/') || p.startsWith('/v1/') || CHAT_PATHS.has(p)) {
       if (!authOK(req)) return unauthorized(res);
+    }
+    if (req.method === 'POST' && p === '/v1/responses') {
+      return sendJSON(res, 501, { error: { message: 'OpenAI Responses API is not supported; use /v1/chat/completions instead', type: 'unsupported_api', param: null, code: 'unsupported_api' } });
     }
     if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -1896,7 +1950,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'DELETE') { await store.clear(); return sendJSON(res, 200, { ok: true }); }
       const allowed = p.endsWith('/errors')
         ? ['from','to','requestId','model','requestedModel','resolvedModel','account','accountId','accountName','status','upstreamStatus','category','provider','targetProvider','accountAction']
-        : ['from','to','requestId','model','requestedModel','resolvedModel','account','accountId','accountName','strategy','status','upstreamStatus','stream','provider','actualProvider','targetProviders','overflow','switched','accountAction','errorCategory'];
+        : ['from','to','requestId','model','requestedModel','resolvedModel','account','accountId','accountName','strategy','status','result','upstreamStatus','stream','provider','actualProvider','targetProviders','overflow','switched','accountAction','errorCategory'];
       const rawLimit = url.searchParams.get('limit') || '50', cursor = url.searchParams.get('cursor') || '';
       const allowedParams = new Set([...allowed, 'limit', 'cursor']);
       for (const key of url.searchParams.keys()) if (!allowedParams.has(key)) return sendJSON(res, 400, { error: { message: `unknown log filter: ${key}` } });
