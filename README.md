@@ -13,7 +13,9 @@ Node.js 本地/服务器代理 + 网页控制台，用于 [Cline Pass](https://c
 - 👥 **账号池** —— 支持单账号、轮询、HRW 粘性、最少连接、加权轮询和优先级容灾；六种安全预设可先预览再应用
 - 🛡️ **账号高级设置** —— 备注、并发、权重、优先级、安全自定义 Header，以及 HTTP/HTTPS/SOCKS5/SOCKS5H 出站代理（故障绝不回退直连）
 - 🔗 **账号级模型路由** —— 每个账号可为模型整项覆盖全局上游顺序、模式、排除、排序与重试上限，删除专属配置即可恢复继承
-- 📊 **观测** —— 独立滚动请求/错误 JSONL 日志，支持筛选、分页和清空；记录调度原因、别名解析与供应商路径
+- 📊 **可信统计与健康度** —— 独立统计板块展示累计/最近 24 小时请求、真实 usage Token、缓存 Token 双指标和账号健康；缺失字段显示无数据
+- 🌡️ **可解释调度流水线** —— 可选健康过滤、Cline 额度热池、健康分层和会话粘性；全部关闭时六种账号模式保持原行为
+- 📋 **观测** —— 独立滚动请求/错误 JSONL 日志，支持筛选、分页和清空；记录安全的调度原因、别名解析与供应商路径
 - 🏷️ **模型别名** —— 批量把 `cline-pass/*` 生成客户端短别名，原始模型仍保留
 - 🔑 **代理密钥** —— 给下游客户端发一把独立密钥，可随时在页面轮换
 - 🌐 **OpenAI 兼容** —— 任何 OpenAI 客户端 / Cline 扩展把 Base URL 指向代理即可，无侵入
@@ -100,7 +102,8 @@ location / {
 | `accountMode` | `single` / `roundrobin` / `sticky` / `least-connections` / `weighted-roundrobin` / `priority-failover` |
 | `activeAccount` | 单账号模式下使用的下标 |
 | `concurrencyWaitMs` | 容量等待时间，0～30000 ms，默认 2000 |
-| `accountErrorRules` | 全局账号处置规则，例如 `{"429":{"action":"cooldown","cooldownMs":1800000},"500":{"action":"ban"}}` |
+| `accountErrorRules` | 全局账号处置规则，例如 `{"429":{"action":"cooldown","cooldownMs":1800000},"500":{"action":"ban"}}`；控制台另提供五组可预览、合并或替换的快捷预设，高级 JSON 始终可编辑 |
+| `accountPipeline` | 可选叠加层：`{ quotaPool, excludeUnhealthy, healthSort, sticky }`；四项默认均为 `false` |
 | `proxyKey` | 下游代理密钥；空 = 不鉴权 |
 | `publicBaseUrl` | 公网代理地址（控制台展示用） |
 | `exposeCatalog` | `true` 时代理的 `/v1/models` 会合并 Cline 公开目录模型；默认 `false` 只返回订阅模型（避免客户端模型列表被淹没） |
@@ -159,7 +162,8 @@ Cline Pass 订阅模型在 Cline 网关之后分成两条管道，钉住上游�
 
 | 卡片 | 功能 |
 |---|---|
-| 账号管理 | 六种调度模式与预设、名称/备注搜索、右侧设置抽屉、代理测试和用量统计 |
+| 账号管理 | 六种调度模式、固定顺序流水线、错误规则快捷预设、名称/备注搜索、右侧设置抽屉和代理测试 |
+| 统计 | 累计/最近 24 小时真实 usage Token 与缓存覆盖、账号健康评分、Cline 5h/周/月额度及池状态 |
 | 访问与安全 | 修改下游代理密钥（即时生效）、公网代理地址、鉴权开关 |
 | 订阅模型 | 背后模型 / 渠道数 / 最近实际渠道；渠道下拉（带可用性标注）；严格钉住 / 优先+回退；排序 |
 | 操作按钮 | 探测（刷新渠道清单）、测试（单次钉住验证）、校验（全渠道实测地图） |
@@ -176,9 +180,15 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 
 `sticky` 模式分别识别 Codex 的 parent thread / `prompt_cache_key` / session/thread 字段，以及 Claude Code 的 parent-agent / session / agent 字段；无显式会话时只对首个 system/developer 与首个 user 消息做本机 HMAC 路由指纹。原始会话值和消息不会持久化。客户端真实提供的 Codex、Claude 或通用会话/SDK Header 按允许列表透传；`Authorization`、`Proxy-Authorization`、Cookie、逐跳 Header、Installation ID 和 Attestation 始终剔除，也不会伪造 User-Agent、设备、浏览器或 TLS 指纹。
 
-账号错误规则默认空以兼容旧行为。`ignore` 保持账号可用；`cooldown` 到期自动恢复；`ban` 只能在控制台手动恢复。普通供应商故障转移固定使用同一账号，只有 cooldown/ban 且 SSE 尚未开始时最多换号一次。首期不提供 RPM、出口 IP 或指纹伪装。
+账号错误规则默认空以兼容旧行为。快捷预设的 4xx 只处理 429；`ignore` 保持账号可用；`cooldown` 到期自动恢复；`ban` 只能在控制台手动恢复。普通供应商故障转移固定使用同一账号，只有 cooldown/ban 且 SSE 尚未开始时最多换号一次。
+
+调度流水线固定为硬过滤 → 可选健康过滤 → 可选额度池 → 可选健康分层 → 可选/隐式会话粘性 → 现有账号模式。额度通过账号 Bearer 后台读取半公开的 `GET /users/me/plan/usage-limits`，15 分钟后过期；失败、缺窗或接口变化均归为未知并回退普通调度，聊天请求不会等待额度刷新。健康度使用最近 24 小时每请求每账号最多一个终态结果；少于 5 个结果为数据不足，禁用/封禁/冷却优先覆盖评分。
+
+统计只接收客户端聊天的最终真实 `usage`：非流式取最终响应，流式只取最后一个累计 usage 快照，供应商重试不累加，换号后的 token 只归最终响应账号。缓存 Token 占比使用明确同时返回 cache/input 的配对数据，命中请求率只以明确返回 cache 字段的请求为分母。管理测试、探测、渠道校验、模型抓取和额度刷新不进入统计。动态统计保存在 `metadata.json` 的版本化、1440 分钟/50,000 账号分钟单元有界结构中；旧名称统计只作为可能含控制台测试的独立基线展示。首期不提供 RPM、统计重置、7 天趋势、出口 IP 或指纹伪装。
 
 ### 日志、代理和安全边界
+
+认证管理 API `GET /api/statistics` 返回累计、最近 24 小时、当前账号健康与严格投影的额度信息，不返回分钟桶、密钥、代理、Header、消息、会话或原始额度响应。
 
 请求与错误日志分别写入 `DATA_DIR/logs/requests-*.jsonl` 和 `errors-*.jsonl`。默认保留 30 天、请求 50,000 条、错误 10,000 条，两类合计不超过 100 MiB；查询 API 为 `GET /api/logs/{requests|errors}`（`limit` 1～200、`cursor` 游标和字段筛选），对应 `DELETE` 只清空指定类型。每个代理请求返回 `X-Cline-Request-Id`。
 

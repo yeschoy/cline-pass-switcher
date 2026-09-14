@@ -1,0 +1,11 @@
+{"file":".trellis/spec/backend/index.md","reason":"定位统计持久化、调度、传输和日志的后端规范"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"约束 config/META 迁移、稳定账号ID、原子保存和敏感数据边界"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"约束六模式租约语义、供应商重试、换号、SSE 生命周期和管理校验"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"约束流水线诊断投影、容量限制、幂等请求记录和脱敏"}
+{"file":".trellis/spec/frontend/index.md","reason":"定位控制台实现适用的前端规范"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"约束完整账号快照、顶层板块、异步查询和保存路径"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"约束预设预览、统计渲染、日志复用、可访问性和浏览器验收"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"统计、配置、API、调度和UI跨层数据流检查"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用现有租约、保存、预设和板块状态，避免并行实现漂移"}
+{"file":".trellis/tasks/09-14-error-presets-usage-health-pipeline/research/clinepass-usage-limits.md","reason":"ClinePass 5h/周/月额度端点、字段、认证和半公开契约证据"}
+{"file":".trellis/tasks/09-14-error-presets-usage-health-pipeline/research/architecture-analysis.md","reason":"usage exactly-once、健康分段、持久化、流水线兼容和测试风险分析"}

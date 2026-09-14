@@ -23,6 +23,11 @@ normalizeAccount(account, index, previousById, previousByName)
 normalizeProxyUrl(value, { strict = false })
 validateAndNormalizeHeaders(value, { strict = false })
 normalizeModelAliases(value)
+normalizeAccountPipeline(value, { strict = false })
+validateStatistics(statistics)
+normalizeStatistics()
+normalizeAccountQuotas()
+parseQuotaPayload(json, fetchedAt)
 normalizeConfigAndMeta({ persist = false })
 saveConfig() // atomicWriteJson(CONFIG_PATH, config)
 saveMeta()   // atomicWriteJson(META_PATH, META)
@@ -60,6 +65,12 @@ metadata.json   DATA_DIR/metadata.json
   accountErrorRules: {
     [httpStatus]: { action: "ignore" | "ban" } |
                   { action: "cooldown", cooldownMs }
+  },
+  accountPipeline: {
+    quotaPool: boolean,
+    excludeUnhealthy: boolean,
+    healthSort: boolean,
+    sticky: boolean
   },
   modelAliases: { [clientAlias]: "cline-pass/<known model>" },
   perModel: { [modelId]: RouteConfig }
@@ -103,13 +114,55 @@ Startup normalization preserves legacy behavior while making the schema explicit
   routingSecret,
   models,
   history,
-  stats
+  statistics: {
+    version: 1,
+    lifetime: { global: Aggregate, accounts: { [accountId]: Aggregate } },
+    minuteBuckets: [{
+      minute,
+      global: Aggregate,
+      accounts: { [accountId]: Aggregate },
+      health: { [accountId]: HealthDelta }
+    }],
+    recentCoverage: {
+      droppedAccountMinuteCells,
+      accountIncompleteAt: { [accountId]: minute }
+    },
+    migration: {
+      legacyStatsMigratedAt,
+      legacyRequests,
+      accountLegacyRequests: { [accountId]: requests },
+      ambiguousNames,
+      unmappedNames
+    }
+  },
+  accountQuotas: {
+    [accountId]: {
+      snapshot: null | {
+        limits: {
+          five_hour?: { percentUsed, resetsAt? },
+          weekly?: { percentUsed, resetsAt? },
+          monthly?: { percentUsed, resetsAt? }
+        },
+        fetchedAt
+      },
+      lastAttemptAt,
+      lastSuccessAt,
+      errorCategory: null | "auth" | "rate_limit" | "server" | "http" |
+                     "proxy" | "network" | "timeout" | "json" | "schema"
+    }
+  }
 }
 ```
 
 `routingSecret` is generated once and persisted so HRW mapping survives restart. `accountStates` entries for removed accounts are deleted; the deterministic environment-account ID remains valid while `CLINE_PASS_KEY` is present. Expired, non-banned cooldown entries are deleted when candidates are read. Ban/cooldown state persists until expiry or `POST /api/accounts/recover` removes it.
 
 Metadata may contain the identity source label (for example `message_hmac`) but must not contain account keys, proxy credentials, custom Header values, account notes, raw session values, HMAC fingerprints, or message text. Error reasons are redacted and flattened before persistence; structured upstream reasons remain complete so their final provider diagnostics are retained.
+
+`Aggregate` has fixed non-negative safe-integer counters for requests, errors, usage coverage, input/output/total tokens, and cache coverage/tokens. A counter that would overflow becomes `null` and its exact field name is added once to `overflowFields`; a `null` field without that marker, or a marker whose field is not `null`, is corrupt. Statistics retain at most 1,440 minute buckets and 50,000 union `(minute, accountId)` cells. Dropped account cells mark recent coverage incomplete rather than inventing zeroes.
+
+Legacy name-keyed `stats` is migration input only. It moves once into the separately labelled `migration` baseline and never fabricates exact chat, token, cache, recent-window, or health facts. Unknown newer statistics versions, malformed aggregates, unordered buckets, excess cells, invalid IDs, and malformed quota snapshots fail startup before any save.
+
+Quota state is keyed by stable account ID and stores only projected percentages, canonical ISO reset times, fetch timestamps, and a safe error enum. It never stores keys, Headers, proxy values, credential-bearing URLs, or raw provider payloads. Account deletion prunes account statistics, health coverage, state, and quota while retaining global history. Credential/proxy changes invalidate quota but retain local statistics.
 
 Durable request/error diagnostics no longer grow `metadata.history`; they are separate bounded JSONL streams under `DATA_DIR/logs/` and follow `logging-guidelines.md`. The legacy history array remains compatibility-only.
 
@@ -140,6 +193,10 @@ Durable request/error diagnostics no longer grow `metadata.history`; they are se
 | Model alias is invalid, duplicated, collides with an original ID, or targets an unknown/non-Cline model | `400`; no write |
 | Route has over 20 upstreams, over 50 exclusions, invalid slug/mode/sort, or `maxRetries` outside 0-20 | `400`; no write |
 | Error rule status outside 100-599, unknown action, or non-positive cooldown | `400`; no write |
+| `accountPipeline` is not an exact four-boolean object on management save | `400`; no write |
+| Existing statistics version is missing/unknown or its structure exceeds bounds | startup fails; original metadata bytes remain |
+| Aggregate overflow marker and `null` field disagree | startup fails; original metadata bytes remain |
+| Quota percentage is outside 0-100, reset time is not strict ISO, or a state field is unknown | startup fails; original metadata bytes remain |
 | Existing account ID is changed by management API | `400`; no write |
 | Duplicate account IDs | `400`; no write |
 | Rename/write fails | propagate the error; remove the temporary file when possible |
@@ -150,7 +207,9 @@ Startup normalization is permissive for legacy files; management APIs validate s
 
 - **Good:** a legacy account without an ID starts once, receives an ID, and retains that same ID and cooldown state after restart.
 - **Good:** an account route and global route both pass through `normalizeRouteConfig()`, so their persisted shapes stay identical.
-- **Base:** `accountErrorRules: {}` and `maxConcurrent: 0` preserve legacy no-action/unlimited behavior.
+- **Good:** a known counter overflow persists as `null` plus one matching `overflowFields` entry, and the statistics API renders it as unknown.
+- **Good:** changing an account key invalidates its quota generation/state while retaining that stable ID's local usage history.
+- **Base:** `accountErrorRules: {}`, all-false `accountPipeline`, and `maxConcurrent: 0` preserve legacy no-action/routing/unlimited behavior.
 - **Base:** a missing metadata file creates a routing secret and owner-only metadata on first migration save.
 - **Bad:** catching JSON parse failure and saving defaults; this destroys operator configuration.
 - **Bad:** using account name or key as the state-map key; renaming or credential rotation would orphan state.
@@ -167,6 +226,9 @@ Persistence changes must use a temporary `DATA_DIR` and assert:
 - `routingSecret` and cooldown state survive restart, and the cooled account is excluded afterward;
 - newly created `metadata.json` has mode `0600` on POSIX;
 - metadata serialization excludes known account keys and raw session values;
+- legacy name-keyed request counts migrate only into the labelled baseline without fabricating exact usage;
+- malformed/future statistics, inconsistent overflow markers, invalid quota timestamps, and more than 50,000 account-minute cells fail before save while preserving exact bytes;
+- pruning retains 1,440 minute buckets, marks dropped account coverage incomplete, and removes deleted-account statistics/quota state without deleting global history;
 - account removal deletes its `accountStates` entry;
 - invalid management payloads return `400` and leave the previous on-disk JSON unchanged.
 
@@ -198,3 +260,20 @@ function saveConfig() {
 ```
 
 Fallback is only for `ENOENT`; malformed or unreadable existing data remains untouched and fails startup.
+
+A statistics migration must validate before normalizing; it must not repair an unknown schema into apparently valid zeroes.
+
+#### Wrong
+
+```js
+META.statistics = { ...createStatistics(), ...META.statistics };
+```
+
+#### Correct
+
+```js
+if (META.statistics === undefined) META.statistics = createStatistics();
+else validateStatistics(META.statistics);
+```
+
+The same fail-closed rule applies to quota snapshots and overflow metadata.

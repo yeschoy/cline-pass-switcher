@@ -31,6 +31,9 @@ closeAccountDrawer(force)
 saveDrawer()
 previewPreset()
 applyPreset()
+previewErrorPreset()
+applyErrorPreset()
+loadStatistics()
 generateAliases()
 saveAliases()
 switchSection(section)
@@ -42,11 +45,22 @@ API signatures:
 
 ```text
 GET /api/accounts
-  -> { accounts, mode, active, concurrencyWaitMs, accountErrorRules, stats }
+  -> { accounts, mode, active, concurrencyWaitMs, accountErrorRules,
+       accountPipeline, stats }
 
 POST /api/accounts
-  <- { accounts, mode, active, concurrencyWaitMs, accountErrorRules }
+  <- { accounts, mode, active, concurrencyWaitMs, accountErrorRules,
+       accountPipeline? }
   -> { ok, accounts: <count>, mode, active }
+
+GET /api/statistics
+  -> {
+    generatedAt, window,
+    lifetime: { global: AggregateProjection },
+    recent24h: { global: AggregateProjection },
+    accounts: [{ id, name, enabled, lifetime, recent24h, health, quota }],
+    migration
+  }
 
 GET /api/models[?accountId=<id>]
   -> { subscription: [{ id, config, configSource, meta }], accountId, ... }
@@ -125,6 +139,8 @@ Editing any inherited field creates an account-owned route. `copyGlobalCfg()` ex
 
 The active radio is an array index in the submitted list. The server resolves the selected account ID before filtering empty-key rows, so a blank row before the selected row must not shift the active account.
 
+`ACCS.accountPipeline` is a complete snapshot with exactly `quotaPool`, `excludeUnhealthy`, `healthSort`, and `sticky`. `collectAccounts()` always sends all four booleans. The server preserves its current value only when an older client omits the whole field; it rejects partial, unknown, or non-boolean pipeline objects.
+
 #### Rendering and sensitive values
 
 All server-provided text used in HTML strings passes through `escapeHtml()` (or `jsArg()` where a JavaScript string argument is needed). Status regions use `aria-live="polite"`. Account keys are password inputs unless the operator explicitly enables “show keys.” This is display protection only; account data comes from the management API and must be protected by the configured proxy key.
@@ -139,7 +155,11 @@ Preset selection owns a temporary draft only. Confirm submits the complete ordin
 
 `ALIASES` owns the `/api/model-aliases` snapshot. Batch generation edits text locally; successful save reloads aliases and models. Alias targets are server-provided known `cline-pass/*` models.
 
-The top-level section is projected by `consolePanel.hidden`, `logPanel.hidden`, and the three navigation buttons' `aria-pressed` values. Console and log content are mutually exclusive. Request and error navigation share one `logPanel`; `logType` remains the single selected-type owner, while the title and live status are projections of it.
+Error-rule presets are separate from the six scheduling presets. The five rule presets (`standard`, `fast`, `conservative`, `observe`, and `clear`) read the current JSON textarea at preview time. Merge preserves custom status entries; replace computes deletions; clear is replace-only. The preview classifies preserve/add/modify/delete, cancel is a no-op, and confirm passes the draft through the ordinary authenticated full-account save. Among 4xx statuses, built-in rule presets may define only `429`.
+
+The top-level section is projected by `consolePanel.hidden`, `statisticsPanel.hidden`, `logPanel.hidden`, and four navigation buttons' `aria-pressed` values. Console, statistics, request logs, and error logs are mutually exclusive. Request and error navigation share one `logPanel`; `logType` remains the single selected-type owner, while the title and live status are projections of it.
+
+`STATISTICS_QUERY_ID` is independent of log state. `loadStatistics()` may render only when its captured generation still matches and `statisticsPanel` is visible. A coverage count of zero, `null` overflow, missing ratio, missing quota window, or insufficient health must render as unknown/no data rather than numeric zero. All account/provider text is escaped, and raw quota/provider payloads never become frontend state.
 
 `LOG_CURSOR` belongs to the current log type plus filter set. Starting a new query or changing filters resets it; “next” sends the opaque server cursor unchanged. `LOG_QUERY_ID` is a generation counter: every section switch and query invalidates earlier reads, and a response may render only when both its generation and captured type still match. Clearing logs captures the selected type before the asynchronous delete and reloads only when that same log section remains visible.
 
@@ -147,7 +167,12 @@ The top-level section is projected by `consolePanel.hidden`, `logPanel.hidden`, 
 
 | UI/API condition | Required behavior |
 |---|---|
-| Error-rules textarea is invalid JSON | stop in `saveAccounts()`; display an error; do not call API |
+| Error-rules textarea is invalid JSON | stop in `saveAccounts()` or preset preview; display an error; do not call API |
+| Error-rule preset is cancelled | discard `PENDING_ERROR_PRESET`; do not mutate textarea/server state |
+| Rule preset merge/replace/clear is confirmed | send the computed live draft through `saveAccounts()`; server validation remains authoritative |
+| `accountPipeline` is incomplete, contains unknown keys, or non-booleans | server `400`; retain/reload prior state |
+| Statistics response becomes stale after navigation | ignore it; do not update hidden/newly selected content |
+| Usage coverage is zero or a metric/ratio is `null` | render “no data”; do not render `0` |
 | No submitted account has a non-empty key | stop and display an error |
 | Account mode is not one of the six supported scheduling modes | server `400`; retain/reload prior state |
 | `concurrencyWaitMs` is not an integer in 0-30000 | server `400` |
@@ -170,6 +195,8 @@ Browser-side validation improves feedback but never replaces the server matrix.
 
 - **Good:** edit account A's name and capacity; `collectAccounts()` submits A's unchanged `id` and `perModel`, so its routes and cooldown/ban join key survive.
 - **Good:** select account A, copy a global model route, edit it, observe `configSource: "account"`, then restore inheritance and observe `"inherited"` after reload.
+- **Good:** merge a built-in error preset into a live custom `418` rule; preview marks `418` preserved and confirmation round-trips both through the normal save.
+- **Good:** leave the statistics panel before its request completes; the stale generation never renders, and a covered token value of zero remains distinguishable from no covered requests.
 - **Base:** global scope has no `accountId`; model saves update global `perModel` only.
 - **Base:** a new account row starts with `maxConcurrent: 0`, `weight: 1`, `priority: 100`, direct transport, empty note/Header fields, and `perModel: {}`.
 - **Bad:** construct account payloads from visible table columns only and omit `perModel`; this silently deletes account-specific routes.
@@ -184,9 +211,12 @@ Cross-layer changes must assert:
 - provider attempts use the selected account route, while an account without an own entry uses the global route;
 - posting `/api/accounts` with the full account snapshot preserves stable IDs, `perModel`, notes, proxy/Header fields, weight/priority, mode, active account, wait, and rules;
 - filtering/searching account rows or a blank-key row does not change which account is active;
-- preset preview/cancel/apply changes only allowed fields and round-trips through the normal save;
+- scheduling preset preview/cancel/apply changes only allowed fields and round-trips through the normal save;
+- every error-rule preset previews the live textarea for merge/replace/clear, preserves custom rules when merging, reports exact diff groups, and cancel changes nothing;
+- all four pipeline booleans survive a full account save; omission preserves the server snapshot while partial/unknown/non-boolean payloads fail without persistence;
+- statistics generation invalidation prevents stale rendering, coverage-zero/null values remain unknown, and all rendered server text is escaped;
 - alias generation/save/reload and log type/filter/cursor/clear keep separate state owners;
-- top-level console/request/error sections remain mutually exclusive, request/error reuse one log owner, and stale reads or clears cannot update a different section;
+- top-level console/statistics/request/error sections remain mutually exclusive, request/error reuse one log owner, and stale reads or clears cannot update a different section;
 - invalid scope, malformed JSON, immutable ID changes, empty account lists, and invalid rule shapes return `400` without persistence;
 - account recovery clears displayed dynamic state after reload;
 - every server-controlled name, reason, model, provider, and trace note is HTML-escaped before `innerHTML` use;
@@ -215,6 +245,12 @@ const accounts = ACCS.accounts.map((a, i) => ({
   name: readName(i),
   enabled: readEnabled(i)
 }));
+const accountPipeline = {
+  quotaPool: pipelineQuotaPool.checked,
+  excludeUnhealthy: pipelineExcludeUnhealthy.checked,
+  healthSort: pipelineHealthSort.checked,
+  sticky: pipelineSticky.checked
+};
 ```
 
-The full-list save preserves hidden server-owned associations instead of rebuilding accounts from visible cells alone.
+The full-list save preserves hidden server-owned associations instead of rebuilding accounts from visible cells alone. Statistics and logs keep separate query generations; neither may reuse a single stale-response owner.

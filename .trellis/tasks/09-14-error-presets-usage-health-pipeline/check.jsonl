@@ -1,0 +1,9 @@
+{"file":".trellis/spec/backend/index.md","reason":"确认全范围后端规范覆盖"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"检查统计/额度迁移、原子持久化、容量和敏感数据"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查六模式兼容、租约容量、重试换号和SSE exactly-once"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"检查流水线日志严格投影、去重、保留和秘密缺失"}
+{"file":".trellis/spec/frontend/index.md","reason":"确认前端规范范围"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"检查完整账号保存、四板块和异步状态所有权"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"检查预设自定义能力、统计未知语义、响应式和可访问性"}
+{"file":".trellis/tasks/09-14-error-presets-usage-health-pipeline/research/clinepass-usage-limits.md","reason":"核验额度实现未超出已验证外部契约"}
+{"file":".trellis/tasks/09-14-error-presets-usage-health-pipeline/research/architecture-analysis.md","reason":"按研究风险检查重复统计、伪精确、候选饥饿和旧模式回归"}

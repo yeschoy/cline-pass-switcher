@@ -60,13 +60,14 @@ A request record may contain only:
   strategy, sessionSource,
   preferredAccountId, preferredAccountName,
   accountId, accountName, selectionReason, overflow, switched,
+  pipelineSteps, selectedQuotaPool, selectedHealthLayer, capacityFallback,
   targetProviders, actualProvider, attempts,
   status, upstreamStatus, durationMs,
   accountActions, appliedHeaderNames, errorCategory
 }
 ```
 
-`attempts` is a projection of provider/status/timing/account/action facts. It is not the raw upstream object.
+`attempts` is a projection of provider/status/timing/account/action facts. It is not the raw upstream object. Pipeline fields are server-owned bounded values: `pipelineSteps` contains at most eight of `health-filtered`, `health-filter-fallback`, and `quota-all-unknown`; `selectedQuotaPool` is `ordinary`, `hot`, `warm`, `unknown`, or `reserve`; `selectedHealthLayer` is `ordinary`, `available-or-insufficient`, `degraded`, or `unhealthy`; and `capacityFallback` is boolean. Raw health buckets, quota payloads, percentages, identities, credentials, proxy data, and messages remain forbidden.
 
 An error record may contain only:
 
@@ -118,11 +119,14 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 | Candidate reason contains a known Key/Header value/message | persisted form contains `[REDACTED]`, never the source value |
 | Upstream returns a long structured error | persist the complete redacted error field, including its final nested provider cause |
 | Upstream returns a non-JSON/invalid error body | persist a generic diagnostic, never the raw response body |
+| Pipeline diagnostics contain a non-owned/raw value | omit it; persist only the bounded enum/boolean projection |
+| Diagnostic JSONL or metadata persistence fails | report only a redacted service error; do not change the chat response |
 
 ### 5. Good / Base / Bad Cases
 
 - **Good:** a request returns `X-Cline-Request-Id`; filtering errors by that ID returns each failed attempt once and the request page shows the final account/provider path.
 - **Good:** two stores exceed the combined limit; global cleanup keeps the newest records regardless of type.
+- **Good:** a capacity fallback records its bounded pipeline groups/reason without recording quota percentages or health buckets.
 - **Base:** a successful request creates one request record and no error record.
 - **Base:** a capacity rejection has no account but still records strategy, status, request ID, and safe reason category.
 - **Bad:** `JSON.stringify(req)`, `JSON.stringify(account)`, or persisting a raw upstream error object. These cross the trust boundary.
@@ -141,7 +145,9 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 - unknown/invalid filters return `400`;
 - account keys, proxy credentials, custom Header values, account notes, raw sessions, messages, Authorization/Cookie, and upstream sensitive bodies do not occur in serialized log API results or files;
 - long structured SSE/JSON errors retain their final diagnostic text, and short message redaction does not corrupt unrelated words containing the same substring;
-- SSE, account replacement, proxy failure, capacity failure, and normal JSON responses finalize no more than one request record.
+- SSE, account replacement, proxy failure, capacity failure, and normal JSON responses finalize no more than one request record;
+- pipeline diagnostics accept only the documented enum/boolean projection and contain no quota percentages, raw health data, or secrets;
+- simulated log/metadata write failures do not alter the already-determined chat status or body.
 
 Run `node --check lib/jsonl-log-store.js`, `npm test`, and `git diff --check` after changes.
 
@@ -163,6 +169,10 @@ await requestLogs.append({
   resolvedModel,
   accountId: account?.id || null,
   status: normalizedStatus,
+  pipelineSteps: safePipelineSteps.slice(0, 8),
+  selectedQuotaPool: safeQuotaPool,
+  selectedHealthLayer: safeHealthLayer,
+  capacityFallback: Boolean(capacityFallback),
   appliedHeaderNames: Object.keys(account?.headers || {})
 });
 ```
