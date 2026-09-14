@@ -367,7 +367,8 @@ test('account routing, header boundary, failover, state and streaming', async (t
   const after = await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json();
   assert.ok(after.accounts.every((a) => a.activeCount === 0));
 
-  // A downstream disconnect must abort the in-flight native request, stop supplier failover, and release its account lease.
+  // A downstream disconnect must abort the in-flight native request, stop supplier failover, release its lease, and never affect health.
+  const healthBeforeDisconnect = (await (await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json()).accounts.reduce((sum, account) => sum + account.health.results, 0);
   assert.equal((await rawJson(switchPort, '/api/config', { scope: 'global', perModel: { 'abort-model': { upstreams: ['first', 'second'], pinMode: 'strict' } } })).status, 200);
   const abortReq = http.request({ hostname: '127.0.0.1', port: switchPort, path: '/v1/chat/completions', method: 'POST', headers: { 'Content-Type': 'application/json' } });
   abortReq.on('error', () => {});
@@ -402,6 +403,8 @@ test('account routing, header boundary, failover, state and streaming', async (t
   }
   assert.ok(afterAbort.accounts.every((a) => a.activeCount === 0), 'post-start stream disconnect must release capacity');
   assert.equal(seen.filter((x) => x.body.model === 'stream-abort-model').length, 1, 'started SSE must not be replayed');
+  const healthAfterDisconnect = (await (await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json()).accounts.reduce((sum, account) => sum + account.health.results, 0);
+  assert.equal(healthAfterDisconnect, healthBeforeDisconnect, 'pre/post-stream client disconnects must not improve or penalize health');
 
   const oversized = await pausedOversizedJson(switchPort, '/v1/chat/completions');
   assert.equal(oversized.status, 413, `paused oversized clients must receive HTTP 413 instead of ECONNRESET: ${oversized.text}`);
@@ -543,7 +546,9 @@ test('legacy migration and cooldown state survive restart', async (t) => {
     perModel: {},
     accountErrorRules: { '429': { action: 'cooldown', cooldownMs: 60000 } },
   };
-  let running = await startSwitcher(legacy);
+  const legacyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-legacy-stats-'));
+  fs.writeFileSync(path.join(legacyDir, 'metadata.json'), JSON.stringify({ models: {}, history: [], accountStates: {}, routingSecret: 'legacy-routing-secret', stats: { 'Legacy A': { requests: 7, lastError: 'must-not-migrate' }, Ghost: { requests: 3 } } }), { mode: 0o600 });
+  let running = await startSwitcher(legacy, legacyDir);
   t.after(async () => {
     if (running?.child) await stop(running.child);
     await close(mock);
@@ -559,6 +564,12 @@ test('legacy migration and cooldown state survive restart', async (t) => {
   assert.equal(fs.statSync(metadataPath).mode & 0o777, 0o600, 'new metadata containing the routing secret must be owner-only');
   assert.ok(beforeRestart.routingSecret);
   assert.ok(beforeRestart.accountStates[migrated.accounts[0].id].cooldownUntil > Date.now());
+  assert.equal(beforeRestart.statistics.migration.legacyRequests, 10);
+  assert.equal(beforeRestart.statistics.migration.accountLegacyRequests[migrated.accounts[0].id], 7);
+  assert.equal(beforeRestart.statistics.migration.unmappedNames, 1);
+  assert.equal(beforeRestart.statistics.lifetime.global.requests, 1, 'legacy baseline must not be mixed into exact chat totals');
+  assert.equal(JSON.stringify(beforeRestart).includes('must-not-migrate'), false);
+  assert.equal(Object.hasOwn(beforeRestart, 'stats'), false);
 
   await stop(running.child);
   running = await startSwitcher(null, running.dir);
@@ -568,6 +579,7 @@ test('legacy migration and cooldown state survive restart', async (t) => {
   assert.deepEqual(seen, ['Bearer legacy-b']);
   const afterMeta = JSON.parse(fs.readFileSync(path.join(running.dir, 'metadata.json')));
   assert.equal(afterMeta.routingSecret, beforeRestart.routingSecret);
+  assert.deepEqual(afterMeta.statistics.migration, beforeRestart.statistics.migration, 'legacy stats migration must be idempotent across restart');
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(running.dir, 'config.json'))).accounts.map((a) => a.id), migrated.accounts.map((a) => a.id));
 });
 
@@ -619,23 +631,24 @@ test('new scheduling modes, account fields, model aliases and independent logs',
   assert.equal((await fetch(`http://127.0.0.1:${switchPort}/api/logs/requests`,{method:'DELETE'})).status,200);assert.equal((await (await fetch(`http://127.0.0.1:${switchPort}/api/logs/requests`)).json()).items.length,0);
 });
 
-test('account HTTP proxy is used and proxy failure never falls back to direct', async (t) => {
-  let upstreamHits=0, connects=0;
-  const upstream=http.createServer((req,res)=>{upstreamHits++;req.resume();req.on('end',()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));});});
+test('account HTTP proxy is used for chat and quota, and proxy failure never falls back to direct', async (t) => {
+  let chatHits=0,quotaHits=0,connects=0;
+  const upstream=http.createServer((req,res)=>{req.resume();req.on('end',()=>{res.writeHead(200,{'Content-Type':'application/json'});if(req.method==='GET'){quotaHits++;assert.equal(req.headers.authorization,'Bearer ka');assert.equal(req.headers['x-chat-only'],undefined);return res.end(JSON.stringify({success:true,data:{limits:[{type:'five_hour',percentUsed:1},{type:'weekly',percentUsed:2},{type:'monthly',percentUsed:3}]}}));}chatHits++;res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));});});
   const upstreamPort=await listen(upstream);
   const proxy=http.createServer();
   proxy.on('connect',(req,client,head)=>{connects++;const [host,port]=req.url.split(':');const target=net.connect(Number(port),host,()=>{client.write('HTTP/1.1 200 Connection Established\r\n\r\n');if(head.length)target.write(head);target.pipe(client);client.pipe(target);});target.on('error',()=>client.destroy());});
   const proxyPort=await listen(proxy);const socket=http.createServer();const switchPort=await listen(socket);await close(socket);
-  const config={port:switchPort,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'single',concurrencyWaitMs:0,accounts:[{id:'a',name:'A',key:'ka',enabled:true,proxyUrl:`http://127.0.0.1:${proxyPort}`,perModel:{}}],knownModels:['cline-pass/test'],perModel:{},accountErrorRules:{}};
-  const running=await startSwitcher(config);t.after(async()=>{await stop(running.child);await close(proxy);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
-  const ok=await rawJson(switchPort,'/v1/chat/completions',{model:'cline-pass/test',messages:[]});assert.equal(ok.status,200);assert.equal(connects,1);assert.equal(upstreamHits,1);
+  const config={port:switchPort,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'single',concurrencyWaitMs:0,accountPipeline:{quotaPool:true,excludeUnhealthy:false,healthSort:false,sticky:false},accounts:[{id:'a',name:'A',key:'ka',enabled:true,proxyUrl:`http://127.0.0.1:${proxyPort}`,headers:{'X-Chat-Only':'chat-value'},perModel:{}}],knownModels:['cline-pass/test'],perModel:{},accountErrorRules:{}};
+  const running=await startSwitcher(config,null,{NODE_ENV:'test',CLINE_PASS_TEST_QUOTA_SUCCESS_MS:'500'});t.after(async()=>{await stop(running.child);await close(proxy);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  await waitUntil(async()=>quotaHits>0);const ok=await rawJson(switchPort,'/v1/chat/completions',{model:'cline-pass/test',messages:[]});assert.equal(ok.status,200);assert.ok(connects>=2);assert.equal(chatHits,1);assert.equal(quotaHits,1);
   const accounts=(await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json()).accounts;
   const spare=http.createServer();const deadPort=await listen(spare);await close(spare);
   accounts[0].proxyUrl=`http://user:password@127.0.0.1:${deadPort}`;
   assert.equal((await rawJson(switchPort,'/api/accounts',{accounts,mode:'single',active:0,concurrencyWaitMs:0,accountErrorRules:{}})).status,200);
-  const failed=await rawJson(switchPort,'/v1/chat/completions',{model:'cline-pass/test',messages:[]});assert.equal(failed.status,502);assert.equal(upstreamHits,1,'a failed configured proxy must not retry direct');
+  const failed=await rawJson(switchPort,'/v1/chat/completions',{model:'cline-pass/test',messages:[]});assert.equal(failed.status,502);assert.equal(chatHits,1,'a failed configured proxy must not retry direct');
   await new Promise(r=>setTimeout(r,20));
   const logs=await (await fetch(`http://127.0.0.1:${switchPort}/api/logs/errors?category=proxy`)).json();assert.ok(logs.items.some(x=>x.category==='proxy'));assert.equal(JSON.stringify(logs).includes('password'),false);
+  const health=(await(await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json()).accounts[0].health;assert.equal(health.results,2);assert.equal(health.penaltyUnits,6,'proxy/network terminal failure has weight 0.6 while prior success has zero');
 });
 
 test('account HTTPS proxy uses a TLS CONNECT tunnel', async (t) => {
@@ -665,4 +678,249 @@ test('SOCKS5 and SOCKS5H account proxies tunnel requests', async (t) => {
   const running=await startSwitcher({port:switchPort,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'single',concurrencyWaitMs:0,accounts:[{...base,proxyUrl:`socks5://127.0.0.1:${socksPort}`}],knownModels:['cline-pass/test'],perModel:{},accountErrorRules:{}});t.after(async()=>{await stop(running.child);await close(socks);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
   for(const protocol of ['socks5','socks5h']){const accounts=(await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json()).accounts;accounts[0].proxyUrl=`${protocol}://127.0.0.1:${socksPort}`;assert.equal((await rawJson(switchPort,'/api/accounts',{accounts,mode:'single',active:0,concurrencyWaitMs:0,accountErrorRules:{}})).status,200);assert.equal((await rawJson(switchPort,'/v1/chat/completions',{model:'cline-pass/test',messages:[]})).status,200);}
   assert.equal(hits,2);assert.equal(socksConnections,2);
+});
+
+test('usage statistics, health, pipeline validation and quota refresh are bounded and truthful', async (t) => {
+  let quotaHits = 0;
+  const upstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      if (req.method === 'GET' && req.url.endsWith('/users/me/plan/usage-limits')) {
+        quotaHits++;
+        assert.equal(req.headers.authorization, 'Bearer stats-key');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ success: true, data: { limits: [
+          { type: 'five_hour', percentUsed: 20 }, { type: 'weekly', percentUsed: 30 }, { type: 'monthly', percentUsed: 40 }, { type: 'future', percentUsed: 99 },
+        ] } }));
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+      if (body.stream) {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write('data: {"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4,"prompt_tokens_details":{"cached_tokens":0}}}\n\n');
+        return setTimeout(() => {
+          res.write(`data: {"ignored":"${'x'.repeat(70 * 1024)}`);
+          setTimeout(() => { res.write('"}\r\n\r'); setTimeout(() => res.end('\ndata: {"usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10,"prompt_tokens_details":{"cached_tokens":4}}}\r\n\r\ndata: [DONE]\r\n\r\n'), 2); }, 2);
+        }, 5);
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      if (body.model === 'no-usage') return res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }));
+      res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15, prompt_tokens_details: { cached_tokens: 2 } } }));
+    });
+  });
+  const upstreamPort = await listen(upstream); const holder = http.createServer(); const switchPort = await listen(holder); await close(holder);
+  const running = await startSwitcher({ port: switchPort, upstreamBase: `http://127.0.0.1:${upstreamPort}/api/v1`, accountMode: 'single', concurrencyWaitMs: 0, accountPipeline: { quotaPool: true, excludeUnhealthy: false, healthSort: false, sticky: false }, accounts: [{ id: 'stats', name: 'Stats', key: 'stats-key', enabled: true, perModel: {} }], knownModels: ['stats-model', 'no-usage'], perModel: {}, accountErrorRules: {} }, null, { NODE_ENV: 'test', CLINE_PASS_TEST_QUOTA_SUCCESS_MS: '50', CLINE_PASS_TEST_QUOTA_STALE_MS: '500' });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  for (let i = 0; i < 5; i++) assert.equal((await rawJson(switchPort, '/v1/chat/completions', { model: 'stats-model', messages: [] })).status, 200);
+  const stream = await rawJson(switchPort, '/v1/chat/completions', { model: 'stats-model', stream: true, messages: [] }); assert.equal(stream.status, 200);
+  assert.equal((await rawJson(switchPort, '/v1/chat/completions', { model: 'no-usage', messages: [] })).status, 200);
+  await rawJson(switchPort, '/api/test', { model: 'stats-model' });
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const stats = await (await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json();
+  assert.equal(stats.lifetime.global.requests, 7, 'management test traffic is excluded while missing usage still counts as a chat');
+  assert.equal(stats.lifetime.global.inputTokens, 58, 'streaming skips one oversized CRLF event and keeps only the final cumulative usage snapshot');
+  assert.equal(stats.lifetime.global.inputKnownRequests, 6, 'missing usage is not reported as a known zero');
+  assert.equal(stats.lifetime.global.usageRequests, 6);
+  assert.equal(stats.lifetime.global.cachedTokens, 14);
+  assert.equal(stats.lifetime.global.cacheInputTokens, 58);
+  assert.equal(stats.lifetime.global.cacheInputCachedTokens, 14);
+  assert.equal(stats.lifetime.global.cacheKnownRequests, 6);
+  assert.equal(stats.accounts[0].health.status, 'available');
+  assert.equal(stats.accounts[0].health.results, 7);
+  assert.equal(stats.accounts[0].quota.pool, 'hot'); assert.ok(quotaHits >= 1);
+  const accountView = await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json();
+  const before = fs.readFileSync(path.join(running.dir, 'config.json'));
+  const invalid = await rawJson(switchPort, '/api/accounts', { accounts: accountView.accounts, mode: 'single', active: 0, concurrencyWaitMs: 0, accountErrorRules: {}, accountPipeline: { quotaPool: true, excludeUnhealthy: false, healthSort: false, sticky: 'yes' } });
+  assert.equal(invalid.status, 400); assert.deepEqual(fs.readFileSync(path.join(running.dir, 'config.json')), before);
+  const legacyClient = await rawJson(switchPort, '/api/accounts', { accounts: accountView.accounts, mode: 'single', active: 0, concurrencyWaitMs: 0, accountErrorRules: {} });
+  assert.equal(legacyClient.status, 200);
+  const preserved = await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json(); assert.equal(preserved.accountPipeline.quotaPool, true);
+  const persisted = JSON.stringify(JSON.parse(fs.readFileSync(path.join(running.dir, 'metadata.json'))));
+  assert.equal(persisted.includes('stats-key'), false); assert.equal(persisted.includes('Authorization'), false);
+});
+
+test('corrupt versioned statistics fail startup without overwriting metadata', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-corrupt-statistics-'));
+  const portHolder = http.createServer(); const port = await listen(portHolder); await close(portHolder);
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ port, accounts: [{ id: 'a', name: 'A', key: 'key', enabled: true, perModel: {} }], accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 0, accountErrorRules: {}, perModel: {}, knownModels: ['test'] }));
+  const metadataPath = path.join(dir, 'metadata.json');
+  const bytes = Buffer.from(JSON.stringify({ models: {}, history: [], routingSecret: 'secret', accountStates: {}, statistics: { version: 1, leakedRawResponse: 'must-not-survive-normalization' } }));
+  fs.writeFileSync(metadataPath, bytes);
+  const child = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: { ...process.env, DATA_DIR: dir, BIND_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = ''; child.stderr.on('data', (chunk) => { output += chunk; }); child.stdout.on('data', (chunk) => { output += chunk; });
+  const code = await new Promise((resolve) => child.once('exit', resolve));
+  assert.notEqual(code, 0); assert.match(output, /invalid statistics structure/); assert.deepEqual(fs.readFileSync(metadataPath), bytes);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('overflow markers must exactly match null counters and corrupt metadata bytes remain unchanged', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-corrupt-overflow-'));
+  const holder = http.createServer(); const port = await listen(holder); await close(holder);
+  const config = { port, accounts: [{ id: 'a', name: 'A', key: 'key', enabled: true, perModel: {} }], accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 0, accountErrorRules: {}, perModel: {}, knownModels: ['test'] };
+  const running = await startSwitcher(config, dir); await stop(running.child);
+  const metadataPath = path.join(dir, 'metadata.json'); const metadata = JSON.parse(fs.readFileSync(metadataPath));
+  metadata.statistics.lifetime.global.requests = 1; metadata.statistics.lifetime.global.overflowFields = ['requests'];
+  const bytes = Buffer.from(JSON.stringify(metadata)); fs.writeFileSync(metadataPath, bytes);
+  const child = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: { ...process.env, DATA_DIR: dir, BIND_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = ''; child.stderr.on('data', (chunk) => { output += chunk; }); child.stdout.on('data', (chunk) => { output += chunk; });
+  const code = await new Promise((resolve) => child.once('exit', resolve));
+  assert.notEqual(code, 0); assert.match(output, /invalid statistics lifetime\.global\.requests/); assert.deepEqual(fs.readFileSync(metadataPath), bytes);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('health filtering removes only scored unhealthy accounts and emits safe pipeline diagnostics', async (t) => {
+  const seen = [];let goodTraining=0;
+  const upstream = http.createServer((req, res) => { const chunks=[];req.on('data',(c)=>chunks.push(c));req.on('end',()=>{const body=JSON.parse(Buffer.concat(chunks).toString()||'{}');seen.push(req.headers.authorization);if(body.model==='train'&&(req.headers.authorization==='Bearer bad'||(req.headers.authorization==='Bearer good'&&goodTraining++<4))){res.writeHead(401,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:'unauthorized',status:401}}));}res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));}); });
+  const upstreamPort=await listen(upstream);const holder=http.createServer();const switchPort=await listen(holder);await close(holder);
+  const config={port:switchPort,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'single',activeAccount:0,concurrencyWaitMs:0,accounts:[{id:'bad',name:'Bad',key:'bad',enabled:true,perModel:{}},{id:'good',name:'Good',key:'good',enabled:true,perModel:{}},{id:'disabled',name:'Disabled',key:'disabled-secret',enabled:false,perModel:{}}],knownModels:['train','serve'],perModel:{},accountErrorRules:{},accountPipeline:{quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:false}};
+  const running=await startSwitcher(config);t.after(async()=>{await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  for(let i=0;i<5;i++)assert.equal((await rawJson(switchPort,'/v1/chat/completions',{model:'train',messages:[]})).status,401);
+  let stats=await(await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json();assert.equal(stats.accounts.find(a=>a.id==='bad').health.status,'unhealthy');
+  const accounts=(await(await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json()).accounts;
+  assert.equal((await rawJson(switchPort,'/api/accounts',{accounts,mode:'roundrobin',active:0,concurrencyWaitMs:0,accountErrorRules:{},accountPipeline:{quotaPool:false,excludeUnhealthy:true,healthSort:true,sticky:false}})).status,200);
+  seen.length=0;const served=await rawJson(switchPort,'/v1/chat/completions',{model:'serve',messages:[]});assert.equal(served.status,200);assert.deepEqual(seen,['Bearer good']);
+  await new Promise(r=>setTimeout(r,20));let logs=await(await fetch(`http://127.0.0.1:${switchPort}/api/logs/requests?requestedModel=serve`)).json();assert.ok(logs.items[0].pipelineSteps.includes('health-filtered'));assert.equal(JSON.stringify(logs).includes('bad'),false,'pipeline logs contain no key values');assert.equal(seen.includes('Bearer disabled-secret'),false,'disabled accounts never enter pipeline fallback');
+  assert.equal((await rawJson(switchPort,'/api/accounts',{accounts,mode:'single',active:1,concurrencyWaitMs:0,accountErrorRules:{},accountPipeline:{quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:false}})).status,200);for(let i=0;i<5;i++)await rawJson(switchPort,'/v1/chat/completions',{model:'train',messages:[]});stats=await(await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json();assert.equal(stats.accounts.find(a=>a.id==='good').health.status,'unhealthy');
+  assert.equal((await rawJson(switchPort,'/api/accounts',{accounts,mode:'roundrobin',active:0,concurrencyWaitMs:0,accountErrorRules:{},accountPipeline:{quotaPool:false,excludeUnhealthy:true,healthSort:true,sticky:false}})).status,200);seen.length=0;assert.equal((await rawJson(switchPort,'/v1/chat/completions',{model:'serve',messages:[]})).status,200);assert.deepEqual(seen,['Bearer good'],'all-unhealthy fallback keeps only the highest score');await new Promise(r=>setTimeout(r,20));logs=await(await fetch(`http://127.0.0.1:${switchPort}/api/logs/requests?requestedModel=serve&limit=1`)).json();assert.ok(logs.items[0].pipelineSteps.includes('health-filter-fallback'));
+});
+
+const waitUntil = async (predicate, timeoutMs = 2000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) { const value = await predicate(); if (value) return value; await new Promise((resolve) => setTimeout(resolve, 10)); }
+  throw new Error('condition timed out');
+};
+
+const emptyAggregateFixture = () => ({
+  requests:0,errors:0,usageRequests:0,inputKnownRequests:0,inputTokens:0,outputKnownRequests:0,outputTokens:0,totalKnownRequests:0,totalTokens:0,
+  cacheKnownRequests:0,cacheHitRequests:0,cachedTokens:0,cacheInputKnownRequests:0,cacheInputTokens:0,cacheInputCachedTokens:0,lastUsedAt:0,lastErrorAt:0,overflowFields:[],
+});
+const emptyHealthFixture = () => ({ results:0,penaltyUnits:0,errors:0,auth:0,rateLimit:0,networkProxy:0,server:0,other:0 });
+
+async function unusedPort() { const holder = http.createServer(); const port = await listen(holder); await close(holder); return port; }
+
+test('all explicit usage aliases, precedence, cache ratios, stream snapshots, retries and account replacement are exactly-once', async (t) => {
+  const usageByModel = {
+    u1:{prompt_tokens:10,completion_tokens:2,total_tokens:12,prompt_tokens_details:{cached_tokens:3}},
+    u2:{input_tokens:20,output_tokens:4,total_tokens:24,input_tokens_details:{cached_tokens:5}},
+    u3:{inputTokens:30,outputTokens:6,totalTokens:36,cache_read_input_tokens:7},
+    u4:{prompt_tokens:40,completion_tokens:8,total_tokens:48,cached_input_tokens:9},
+    u5:{prompt_tokens:50,completion_tokens:10,total_tokens:60,cachedInputTokens:11},
+    zero:{prompt_tokens:0,completion_tokens:0,total_tokens:0,prompt_tokens_details:{cached_tokens:0}},
+    invalid:{prompt_tokens:'10',input_tokens:999,completion_tokens:-1,output_tokens:999,total_tokens:2,prompt_tokens_details:{cached_tokens:'3'},cache_read_input_tokens:999},
+    retry:{prompt_tokens:13,completion_tokens:3,total_tokens:16,prompt_tokens_details:{cached_tokens:6}},
+    switch:{prompt_tokens:17,completion_tokens:4,total_tokens:21,prompt_tokens_details:{cached_tokens:8}},
+  };
+  const seen = [];
+  const upstream = http.createServer((req,res)=>{const chunks=[];req.on('data',c=>chunks.push(c));req.on('end',()=>{
+    const body=JSON.parse(Buffer.concat(chunks).toString()||'{}'), auth=req.headers.authorization, only=body.provider?.only?.[0]||body.providerOptions?.gateway?.only?.[0]; seen.push({model:body.model,auth,only});
+    if(body.model==='switch'&&auth==='Bearer key-a'){res.writeHead(429,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:'limited',status:429}}));}
+    if(body.model==='retry'&&only==='first'){res.writeHead(500,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:'retry',status:500}}));}
+    if(body.model==='stream'){res.writeHead(200,{'Content-Type':'text/event-stream'});return res.end('data: {"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4,"prompt_tokens_details":{"cached_tokens":1}}}\n\ndata: {"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6,"prompt_tokens_details":{"cached_tokens":2}}}\n\ndata: {"usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10,"prompt_tokens_details":{"cached_tokens":4}}}\n\ndata: [DONE]\n\n');}
+    res.writeHead(200,{'Content-Type':'application/json'});const payload={choices:[{message:{content:'OK'}}]};if(body.model!=='missing')payload.usage=usageByModel[body.model];res.end(JSON.stringify(payload));
+  });});
+  const upstreamPort=await listen(upstream), switchPort=await unusedPort();
+  const models=[...Object.keys(usageByModel),'missing','stream'];
+  const config={port:switchPort,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'single',activeAccount:0,concurrencyWaitMs:0,accounts:[{id:'a',name:'A',key:'key-a',enabled:true,perModel:{}},{id:'b',name:'B',key:'key-b',enabled:true,perModel:{}}],knownModels:models,perModel:{retry:{upstreams:['first','second'],pinMode:'strict'}},accountErrorRules:{429:{action:'cooldown',cooldownMs:60000}}};
+  let running=await startSwitcher(config);t.after(async()=>{if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  for(const model of ['u1','u2','u3','u4','u5','zero','invalid','missing','retry'])assert.equal((await rawJson(switchPort,'/v1/chat/completions',{model,messages:[]})).status,200);
+  assert.equal((await rawJson(switchPort,'/v1/chat/completions',{model:'stream',stream:true,messages:[]})).status,200);
+  assert.equal((await rawJson(switchPort,'/v1/chat/completions',{model:'switch',messages:[]})).status,200);
+  await rawJson(switchPort,'/api/test',{model:'u1'});
+  let stats=await(await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json(), global=stats.lifetime.global;
+  assert.deepEqual({requests:global.requests,usageRequests:global.usageRequests,inputKnownRequests:global.inputKnownRequests,inputTokens:global.inputTokens,outputKnownRequests:global.outputKnownRequests,outputTokens:global.outputTokens,totalKnownRequests:global.totalKnownRequests,totalTokens:global.totalTokens,cacheKnownRequests:global.cacheKnownRequests,cacheHitRequests:global.cacheHitRequests,cachedTokens:global.cachedTokens},
+    {requests:11,usageRequests:10,inputKnownRequests:9,inputTokens:188,outputKnownRequests:9,outputTokens:39,totalKnownRequests:10,totalTokens:229,cacheKnownRequests:9,cacheHitRequests:8,cachedTokens:53});
+  assert.equal(global.cacheInputKnownRequests,9);assert.equal(global.cacheInputTokens,188);assert.equal(global.cacheInputCachedTokens,53);assert.equal(global.cacheTokenRatio,53/188);assert.equal(global.cacheHitRequestRate,8/9);
+  assert.equal(seen.filter(x=>x.model==='retry').length,2,'provider retry must not duplicate usage');
+  const a=stats.accounts.find(x=>x.id==='a'),b=stats.accounts.find(x=>x.id==='b');assert.equal(a.lifetime.inputTokens,171);assert.equal(b.lifetime.inputTokens,17);assert.equal(a.lifetime.requests,11);assert.equal(b.lifetime.requests,1);assert.equal(a.health.results,11);assert.equal(a.health.penaltyUnits,7);assert.equal(b.health.results,1);assert.equal(b.health.penaltyUnits,0,'A→B replacement records one independent terminal health result per account');
+  const globalBeforeRestart=stats.lifetime.global;await stop(running.child);running.child=null;running=await startSwitcher(null,running.dir);stats=await(await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json();assert.deepEqual(stats.lifetime.global,globalBeforeRestart,'statistics must survive restart exactly');
+  const accountView=await(await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json();assert.equal((await rawJson(switchPort,'/api/accounts',{accounts:accountView.accounts.filter(x=>x.id==='a'),mode:'single',active:0,concurrencyWaitMs:0,accountErrorRules:{}})).status,200);
+  stats=await(await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json();assert.equal(stats.accounts.some(x=>x.id==='b'),false);assert.deepEqual(stats.lifetime.global,globalBeforeRestart,'deleting an account retains global history');
+});
+
+test('health terminal classes, retry success, exact score boundaries and 24-hour expiry are deterministic', async (t) => {
+  const sequences={available:[403,200,200,200,200],degraded:[401,429,500,500,200]};
+  for(const [expected,statuses] of Object.entries(sequences)){
+    let index=0;
+    const upstream=http.createServer((req,res)=>{const chunks=[];req.on('data',c=>chunks.push(c));req.on('end',()=>{const body=JSON.parse(Buffer.concat(chunks).toString()||'{}');let status=statuses[Math.min(index++,statuses.length-1)];const only=body.provider?.only?.[0]||body.providerOptions?.gateway?.only?.[0];if(body.model==='retry-success')status=only==='first'?500:200;if(body.model==='parameter')status=418;if(body.model==='late'){res.writeHead(200,{'Content-Type':'text/event-stream'});return res.end('data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: {"error":{"message":"late","status":429}}\n\ndata: [DONE]\n\n');}res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(status===200?{choices:[{message:{content:'OK'}}]}:{error:{message:'failure',status}}));});});
+    const upstreamPort=await listen(upstream),port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-health-'));
+    const cfg={port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'single',activeAccount:0,concurrencyWaitMs:0,accounts:[{id:'a',name:'A',key:'ka',enabled:true,perModel:{}}],knownModels:['score','parameter','retry-success','late'],perModel:{'retry-success':{upstreams:['first','second'],pinMode:'strict'}},accountErrorRules:{}};
+    let running=await startSwitcher(cfg,dir);try{
+      for(let i=0;i<5;i++)await rawJson(port,'/v1/chat/completions',{model:'score',messages:[]});
+      let stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json(),health=stats.accounts[0].health;assert.equal(health.status,expected);assert.equal(health.score,expected==='available'?80:50);assert.equal(health.results,5);
+      const before=health.results;await rawJson(port,'/v1/chat/completions',{model:'parameter',messages:[]});stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();assert.equal(stats.accounts[0].health.results,before,'ordinary 4xx must not enter health denominator');
+      await rawJson(port,'/v1/chat/completions',{model:'retry-success',messages:[]});stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();assert.equal(stats.accounts[0].health.results,before+1);assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'metadata.json'))).statistics.minuteBuckets.at(-1).health.a.server,expected==='available'?0:2,'failed provider attempt must not penalize a later same-account success');
+      await rawJson(port,'/v1/chat/completions',{model:'late',stream:true,messages:[]});stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();assert.equal(stats.accounts[0].health.results,before+2,'late SSE error is recorded once');
+      await stop(running.child);running.child=null;const metadataPath=path.join(dir,'metadata.json'),metadata=JSON.parse(fs.readFileSync(metadataPath));for(const bucket of metadata.statistics.minuteBuckets)bucket.minute-=1440;fs.writeFileSync(metadataPath,JSON.stringify(metadata));running=await startSwitcher(null,dir);stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();assert.equal(stats.accounts[0].health.status,'insufficient');assert.equal(stats.accounts[0].health.score,null);assert.equal(stats.accounts[0].health.results,0,'results expire naturally after 1440 minutes');
+    }finally{if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});}
+  }
+});
+
+test('runtime counter overflow becomes null with an exact marker', async (t) => {
+  const upstream=http.createServer((req,res)=>{req.resume();req.on('end',()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));});}),upstreamPort=await listen(upstream),port=await unusedPort();
+  let running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'single',accounts:[{id:'a',name:'A',key:'ka',enabled:true,perModel:{}}],knownModels:['m'],perModel:{},accountErrorRules:{}});t.after(async()=>{if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  await stop(running.child);running.child=null;const metadataPath=path.join(running.dir,'metadata.json'),metadata=JSON.parse(fs.readFileSync(metadataPath));metadata.statistics.lifetime.global.requests=Number.MAX_SAFE_INTEGER;fs.writeFileSync(metadataPath,JSON.stringify(metadata));running=await startSwitcher(null,running.dir);assert.equal((await rawJson(port,'/v1/chat/completions',{model:'m',messages:[]})).status,200);
+  const stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json(),persisted=JSON.parse(fs.readFileSync(metadataPath));assert.equal(stats.lifetime.global.requests,null);assert.deepEqual(persisted.statistics.lifetime.global.overflowFields,['requests']);
+});
+
+test('missing and explicit all-false pipelines preserve all six mode sequences, reasons, capacity and lease release', async (t) => {
+  let slowStarted=0;
+  const upstream=http.createServer((req,res)=>{const chunks=[];req.on('data',c=>chunks.push(c));req.on('end',()=>{const body=JSON.parse(Buffer.concat(chunks).toString()||'{}');const reply=()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));};if(body.model==='slow'){slowStarted++;setTimeout(reply,80);}else reply();});}),upstreamPort=await listen(upstream);t.after(()=>close(upstream));
+  const run=async(mode,explicit)=>{const port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-legacy-equivalence-')),accounts=[{id:'a',name:'A',key:'ka',enabled:true,maxConcurrent:1,weight:1,priority:1,perModel:{}},{id:'b',name:'B',key:'kb',enabled:true,maxConcurrent:1,weight:3,priority:10,perModel:{}}],cfg={port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:mode,activeAccount:0,concurrencyWaitMs:0,accounts,knownModels:['fast','slow'],perModel:{},accountErrorRules:{}};if(explicit)cfg.accountPipeline={quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:false};fs.writeFileSync(path.join(dir,'metadata.json'),JSON.stringify({models:{},history:[],accountStates:{},routingSecret:'fixed-equivalence-secret',stats:{}}));const running=await startSwitcher(cfg,dir);try{const sequence=[];for(let i=0;i<8;i++){const r=await rawJson(port,'/v1/chat/completions',{model:'fast',messages:[]});sequence.push(r.headers['x-cline-account']);}let expectedSlowStarts=slowStarted+1;const p1=rawJson(port,'/v1/chat/completions',{model:'slow',messages:[]});await waitUntil(()=>slowStarted>=expectedSlowStarts);expectedSlowStarts++;const p2=rawJson(port,'/v1/chat/completions',{model:'slow',messages:[]});if(mode!=='single')await waitUntil(()=>slowStarted>=expectedSlowStarts);const p3=rawJson(port,'/v1/chat/completions',{model:'slow',messages:[]});const capacity=(await Promise.all([p1,p2,p3])).map(r=>({status:r.status,retry:r.headers['retry-after']||null}));const view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json(),logs=await waitUntil(async()=>{const page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestedModel=fast&limit=20`)).json();return page.items.length>=8&&page;});return{sequence,capacity,reasons:logs.items.map(x=>x.selectionReason).sort(),active:view.accounts.map(x=>x.activeCount),pipeline:view.accountPipeline};}finally{await stop(running.child);fs.rmSync(dir,{recursive:true,force:true});}};
+  for(const mode of ['single','roundrobin','sticky','least-connections','weighted-roundrobin','priority-failover']){const legacy=await run(mode,false),allFalse=await run(mode,true);assert.deepEqual(allFalse.sequence,legacy.sequence,`${mode} selection sequence changed`);assert.deepEqual(allFalse.capacity,legacy.capacity,`${mode} wait/429 behavior changed`);assert.deepEqual(allFalse.reasons,legacy.reasons,`${mode} diagnostic reason changed`);assert.deepEqual(allFalse.active,[0,0]);assert.deepEqual(legacy.active,[0,0]);assert.deepEqual(legacy.pipeline,{quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:false});}
+});
+
+test('enabled quota layers honor 80/95 boundaries, unknown ordering and immediate capacity fallback', async (t) => {
+  const seen=[];const upstream=http.createServer((req,res)=>{const chunks=[];req.on('data',c=>chunks.push(c));req.on('end',()=>{if(req.method==='GET'){res.writeHead(500);return res.end('{}');}const body=JSON.parse(Buffer.concat(chunks).toString()||'{}');seen.push(req.headers.authorization);const reply=()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));};body.model==='slow'?setTimeout(reply,100):reply();});}),upstreamPort=await listen(upstream),port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-quota-layers-'));
+  const pools=[['hot',79.999],['warm',80],['warm2',94.999],['unknown',null],['reserve',95]],accounts=pools.map(([id])=>({id,name:id,key:`key-${id}`,enabled:true,maxConcurrent:1,perModel:{}})),fetchedAt=Date.now(),accountQuotas={};for(const[id,percent]of pools)if(percent!==null)accountQuotas[id]={snapshot:{limits:{five_hour:{percentUsed:percent},weekly:{percentUsed:percent},monthly:{percentUsed:percent}},fetchedAt},lastAttemptAt:fetchedAt,lastSuccessAt:fetchedAt,errorCategory:null};
+  fs.writeFileSync(path.join(dir,'metadata.json'),JSON.stringify({models:{},history:[],accountStates:{},routingSecret:'quota-layer-secret',stats:{},accountQuotas}));
+  const cfg={port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'roundrobin',activeAccount:0,concurrencyWaitMs:0,accounts,knownModels:['fast','slow'],perModel:{},accountErrorRules:{},accountPipeline:{quotaPool:true,excludeUnhealthy:false,healthSort:false,sticky:false}};
+  const running=await startSwitcher(cfg,dir);t.after(async()=>{await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
+  const stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();assert.deepEqual(Object.fromEntries(stats.accounts.map(a=>[a.id,a.quota.pool])),{hot:'hot',warm:'warm',warm2:'warm',unknown:'unknown',reserve:'reserve'});
+  const pending=[];for(let i=0;i<5;i++){pending.push(rawJson(port,'/v1/chat/completions',{model:'slow',messages:[]}));await waitUntil(()=>seen.length>=i+1);}assert.ok((await Promise.all(pending)).every(r=>r.status===200));assert.equal(seen[0],'Bearer key-hot');assert.deepEqual(new Set(seen.slice(1,3)),new Set(['Bearer key-warm','Bearer key-warm2']));assert.deepEqual(seen.slice(3,5),['Bearer key-unknown','Bearer key-reserve']);
+  await new Promise(r=>setTimeout(r,20));const capacityLogs=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestedModel=slow&limit=20`)).json();assert.ok(capacityLogs.items.some(x=>x.selectedQuotaPool==='reserve'&&x.capacityFallback===true));
+  const view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();for(const account of view.accounts)account.key+='-rotated';assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'roundrobin',active:0,concurrencyWaitMs:0,accountErrorRules:{},accountPipeline:view.accountPipeline})).status,200);seen.length=0;for(let i=0;i<5;i++)await rawJson(port,'/v1/chat/completions',{model:'fast',messages:[]});assert.deepEqual(seen,['Bearer key-hot-rotated','Bearer key-warm-rotated','Bearer key-warm2-rotated','Bearer key-unknown-rotated','Bearer key-reserve-rotated'],'all-unknown quota must be ordinary round-robin');await new Promise(r=>setTimeout(r,20));const unknownLogs=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestedModel=fast&limit=20`)).json();assert.ok(unknownLogs.items.every(x=>x.pipelineSteps.includes('quota-all-unknown')));
+  const stickyView=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal((await rawJson(port,'/api/accounts',{accounts:stickyView.accounts,mode:'single',active:0,concurrencyWaitMs:0,accountErrorRules:{},accountPipeline:{quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:true}})).status,200);
+  let stickySession=null,stickyAccount=null;for(let i=0;i<30;i++){const session=`pipeline-sticky-${i}`,r=await rawJson(port,'/v1/chat/completions',{model:'fast',messages:[]},{'Session-Id':session});if(r.headers['x-cline-account']!=='hot'){stickySession=session;stickyAccount=r.headers['x-cline-account'];break;}}assert.ok(stickySession,'pipeline affinity must be able to override single active account');const repeat=await rawJson(port,'/v1/chat/completions',{model:'fast',messages:[]},{'Session-Id':stickySession});assert.equal(repeat.headers['x-cline-account'],stickyAccount);
+  const heldSeen=seen.length;const held=rawJson(port,'/v1/chat/completions',{model:'slow',messages:[]},{'Session-Id':stickySession});await waitUntil(()=>seen.length>heldSeen);const blocked=await rawJson(port,'/v1/chat/completions',{model:'slow',messages:[]},{'Session-Id':stickySession});assert.equal(blocked.status,429,'single plus pipeline sticky waits only for its one HRW primary');assert.equal((await held).headers['x-cline-account'],stickyAccount);await new Promise(r=>setTimeout(r,20));const stickyLogs=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestedModel=slow&limit=20`)).json();assert.ok(stickyLogs.items.some(x=>x.selectionReason==='pipeline-sticky-primary'));
+});
+
+test('the 50,000 account-minute union cap evicts an aggregate/health cell atomically and marks coverage', async (t) => {
+  const upstream=http.createServer((req,res)=>{req.resume();req.on('end',()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));});}),upstreamPort=await listen(upstream),port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-cell-cap-'));
+  const accounts=Array.from({length:50001},(_,i)=>({id:`a${i}`,name:`A${i}`,key:`k${i}`,enabled:true,perModel:{}}));
+  const minute=Math.floor(Date.now()/60000),health={},accountCells={};for(let i=0;i<50000;i++){health[`a${i}`]=emptyHealthFixture();accountCells[`a${i}`]=emptyAggregateFixture();}
+  const statistics={version:1,lifetime:{global:emptyAggregateFixture(),accounts:{}},minuteBuckets:[{minute,global:emptyAggregateFixture(),accounts:accountCells,health}],recentCoverage:{droppedAccountMinuteCells:0,accountIncompleteAt:{}},migration:{legacyStatsMigratedAt:Date.now(),legacyRequests:0,accountLegacyRequests:{},ambiguousNames:0,unmappedNames:0}};
+  fs.writeFileSync(path.join(dir,'metadata.json'),JSON.stringify({models:{},history:[],accountStates:{},accountQuotas:{},routingSecret:'cell-cap-secret',statistics}));
+  let running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'single',activeAccount:50000,concurrencyWaitMs:0,accounts,knownModels:['m'],perModel:{},accountErrorRules:{}},dir);t.after(async()=>{if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
+  assert.equal((await rawJson(port,'/v1/chat/completions',{model:'m',messages:[]})).status,200);const persisted=JSON.parse(fs.readFileSync(path.join(dir,'metadata.json'))),bucket=persisted.statistics.minuteBuckets[0];
+  const cells=new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health)]);assert.equal(cells.size,50000);assert.equal(bucket.accounts.a0,undefined);assert.equal(bucket.health.a0,undefined);assert.ok(bucket.accounts.a50000);assert.ok(bucket.health.a50000);assert.equal(persisted.statistics.recentCoverage.droppedAccountMinuteCells,1);assert.equal(persisted.statistics.recentCoverage.accountIncompleteAt.a0,minute);
+});
+
+test('quota scheduler is bounded, strict, fail-open and discards stale credential generations', async (t) => {
+  let phase='success',active=0,maxActive=0;const quotaRequests=[];
+  const goodPayload={success:true,data:{limits:[{type:'five_hour',percentUsed:79.9,resetsAt:'2026-09-15T08:00:00+08:00'},{type:'weekly',percentUsed:80},{type:'monthly',percentUsed:95},{type:'future',percentUsed:1}]}};
+  const upstream=http.createServer((req,res)=>{
+    if(req.method==='GET'){
+      active++;maxActive=Math.max(maxActive,active);quotaRequests.push({url:req.url,auth:req.headers.authorization,custom:req.headers['x-chat-only'],at:Date.now(),phase});
+      const finish=()=>{active--;if(phase==='hold')return;if(phase==='rate'){res.writeHead(429);return res.end('{}');}if(phase==='duplicate'){res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify({success:true,data:{limits:[{type:'weekly',percentUsed:1},{type:'weekly',percentUsed:2}]}}));}if(phase==='oversize'){res.writeHead(200,{'Content-Type':'application/json'});return res.end(' '.repeat(257*1024));}res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(goodPayload));};return setTimeout(finish,30);
+    }
+    req.resume();req.on('end',()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));});
+  });
+  const upstreamPort=await listen(upstream),port=await unusedPort(),accounts=['a','b','c'].map(id=>({id,name:id.toUpperCase(),key:`key-${id}`,enabled:true,headers:{'X-Chat-Only':'secret'},perModel:{}}));
+  const cfg={port,upstreamBase:`http://127.0.0.1:${upstreamPort}/api/v1`,accountMode:'roundrobin',concurrencyWaitMs:0,accounts,knownModels:['m'],perModel:{},accountErrorRules:{},accountPipeline:{quotaPool:true,excludeUnhealthy:false,healthSort:false,sticky:false}};
+  let running=await startSwitcher(cfg,null,{NODE_ENV:'test',CLINE_PASS_TEST_QUOTA_SUCCESS_MS:'50',CLINE_PASS_TEST_QUOTA_FAILURE_MS:'50',CLINE_PASS_TEST_QUOTA_TIMEOUT_MS:'80',CLINE_PASS_TEST_QUOTA_STALE_MS:'120'});t.after(async()=>{if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  let stats=await waitUntil(async()=>{const x=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();return x.accounts.every(a=>a.quota.status==='fresh')&&x;},3000);
+  assert.ok(maxActive<=2,`quota concurrency exceeded 2: ${maxActive}`);assert.ok(quotaRequests.every(x=>x.url==='/api/v1/users/me/plan/usage-limits'));assert.deepEqual(new Set(quotaRequests.map(x=>x.auth)),new Set(['Bearer key-a','Bearer key-b','Bearer key-c']));assert.ok(quotaRequests.every(x=>x.custom===undefined),'chat custom headers must not reach quota endpoint');
+  assert.ok(stats.accounts.every(a=>a.quota.pool==='reserve'),'maximum of the three windows owns the quota pool');assert.ok(stats.accounts.every(a=>a.quota.limits.five_hour.resetsAt==='2026-09-15T00:00:00.000Z'),'quota reset timestamps are stored as canonical ISO projections');
+  const successRetry=await waitUntil(async()=>{for(const auth of ['Bearer key-a','Bearer key-b','Bearer key-c']){const rows=quotaRequests.filter(x=>x.phase==='success'&&x.auth===auth);if(rows.length>=2)return rows;}return null;},3000);assert.ok(successRetry[1].at-successRetry[0].at>=45,'successful refreshes respect the configured success interval');
+  phase='rate';stats=await waitUntil(async()=>{const x=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();return x.accounts.every(a=>a.quota.errorCategory==='rate_limit')&&x;},3000);assert.ok(stats.accounts.every(a=>a.quota.status==='unknown'&&a.quota.limits.monthly.percentUsed===95),'failure is immediately unknown while last-good remains diagnostic');
+  const rateRetry=await waitUntil(async()=>{for(const auth of ['Bearer key-a','Bearer key-b','Bearer key-c']){const rows=quotaRequests.filter(x=>x.phase==='rate'&&x.auth===auth);if(rows.length>=2)return rows;}return null;},3000);assert.ok(rateRetry[1].at-rateRetry[0].at>=90,'failed refreshes use exponential backoff instead of the success interval');
+  phase='duplicate';await waitUntil(async()=>{const x=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();return x.accounts.some(a=>a.quota.errorCategory==='schema');},3000);
+  phase='oversize';await waitUntil(async()=>quotaRequests.some(x=>x.phase==='oversize'),3000);await new Promise(r=>setTimeout(r,120));stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();assert.ok(stats.accounts.some(a=>a.quota.errorCategory==='schema'));
+  phase='hold';const aRotationHoldStart=quotaRequests.length;await waitUntil(()=>quotaRequests.slice(aRotationHoldStart).some(x=>x.phase==='hold'&&x.auth==='Bearer key-a'),3000);const view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();view.accounts[0].key='key-a-rotated';assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:view.mode,active:view.active,concurrencyWaitMs:view.concurrencyWaitMs,accountErrorRules:view.accountErrorRules,accountPipeline:view.accountPipeline})).status,200);
+  assert.equal((await rawJson(port,'/v1/chat/completions',{model:'m',messages:[]})).status,200);assert.ok(active>0,'chat must complete while a quota request is still in flight instead of awaiting it');
+  phase='success';stats=await waitUntil(async()=>{const x=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();return x.accounts.find(a=>a.id==='a')?.quota.status==='fresh'&&x;},3000);assert.ok(quotaRequests.some(x=>x.auth==='Bearer key-a-rotated'));let serialized=fs.readFileSync(path.join(running.dir,'metadata.json'),'utf8');assert.equal(serialized.includes('key-a'),false);assert.equal(serialized.includes('X-Chat-Only'),false);
+  phase='hold';const bHoldStart=quotaRequests.length;await waitUntil(async()=>quotaRequests.slice(bHoldStart).some(x=>x.auth==='Bearer key-b'&&x.phase==='hold'),3000);let current=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal((await rawJson(port,'/api/accounts',{accounts:current.accounts.filter(a=>a.id!=='b'),mode:current.mode,active:0,concurrencyWaitMs:current.concurrencyWaitMs,accountErrorRules:current.accountErrorRules,accountPipeline:current.accountPipeline})).status,200);await new Promise(r=>setTimeout(r,120));assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(path.join(running.dir,'metadata.json'))).accountQuotas,'b'),false,'deleted account generation cannot be resurrected by an in-flight refresh');
+  const cHoldStart=quotaRequests.length;await waitUntil(async()=>quotaRequests.slice(cHoldStart).some(x=>x.auth==='Bearer key-c'&&x.phase==='hold'),3000);current=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();const dead=await unusedPort();current.accounts.find(a=>a.id==='c').proxyUrl=`http://127.0.0.1:${dead}`;assert.equal((await rawJson(port,'/api/accounts',{accounts:current.accounts,mode:current.mode,active:0,concurrencyWaitMs:current.concurrencyWaitMs,accountErrorRules:current.accountErrorRules,accountPipeline:current.accountPipeline})).status,200);stats=await waitUntil(async()=>{const x=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();return x.accounts.find(a=>a.id==='c')?.quota.errorCategory==='proxy'&&x;},3000);assert.equal(stats.accounts.find(a=>a.id==='c').quota.status,'unknown','proxy rotation invalidates the old generation and never falls back direct');
+  phase='hold';const aHoldStart=quotaRequests.length;await waitUntil(async()=>quotaRequests.slice(aHoldStart).some(x=>x.auth==='Bearer key-a-rotated'&&x.phase==='hold'),3000);current=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();const beforeDisable=JSON.parse(fs.readFileSync(path.join(running.dir,'metadata.json')).toString()).accountQuotas.a;assert.equal((await rawJson(port,'/api/accounts',{accounts:current.accounts,mode:current.mode,active:0,concurrencyWaitMs:current.concurrencyWaitMs,accountErrorRules:current.accountErrorRules,accountPipeline:{quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:false}})).status,200);await new Promise(r=>setTimeout(r,120));assert.deepEqual(JSON.parse(fs.readFileSync(path.join(running.dir,'metadata.json')).toString()).accountQuotas.a,beforeDisable,'closing quota routing discards in-flight completion');
+  await stop(running.child);running.child=null;const metadataPath=path.join(running.dir,'metadata.json'),metadata=JSON.parse(fs.readFileSync(metadataPath));for(const q of Object.values(metadata.accountQuotas)){if(q.snapshot)q.snapshot.fetchedAt-=1000;q.lastSuccessAt=q.snapshot?.fetchedAt||q.lastSuccessAt;q.lastAttemptAt=q.lastSuccessAt;q.errorCategory=null;}const config=JSON.parse(fs.readFileSync(path.join(running.dir,'config.json')));config.accountPipeline.quotaPool=false;fs.writeFileSync(metadataPath,JSON.stringify(metadata));fs.writeFileSync(path.join(running.dir,'config.json'),JSON.stringify(config));running=await startSwitcher(null,running.dir,{NODE_ENV:'test',CLINE_PASS_TEST_QUOTA_STALE_MS:'120'});stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();assert.ok(stats.accounts.every(a=>a.quota.status==='unknown'),'stale last-good snapshots cannot route');
 });

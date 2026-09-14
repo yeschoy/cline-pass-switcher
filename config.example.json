@@ -24,6 +24,12 @@
   "activeAccount": 0,
   "concurrencyWaitMs": 2000,
   "accountErrorRules": {},
+  "accountPipeline": {
+    "quotaPool": false,
+    "excludeUnhealthy": false,
+    "healthSort": false,
+    "sticky": false
+  },
   "modelAliases": {
     "glm-5.3-flash": "cline-pass/glm-5.3-flash"
   },
