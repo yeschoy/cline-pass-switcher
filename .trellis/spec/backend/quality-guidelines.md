@@ -44,6 +44,7 @@ Chat endpoints:
 POST /chat/completions
 POST /v1/chat/completions
 POST /api/v1/chat/completions
+POST /v1/responses  // authenticated, deliberate 501 unsupported_api; never routed upstream
 ```
 
 Management endpoints relevant to routing:
@@ -126,12 +127,21 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - `requestedModel` is preserved for diagnostics. `resolvedModel = modelAliases[requestedModel] || requestedModel` replaces outbound `body.model` and owns global/account `perModel` lookup. Aliases are not chained.
 - `/v1/models` exposes the de-duplicated union of original visible models and aliases so old clients remain compatible.
 
+#### Chat input boundary
+
+- After object/model validation and before session extraction or account selection, every item in `messages` must have non-empty content.
+- Strings must contain non-whitespace text. Content arrays must contain non-empty text or a non-text part with a non-empty payload; empty arrays, `null`, missing content, whitespace-only text, and empty parts return `400 invalid_request_error` naming only `messages.<index>.content`.
+- An assistant message with a non-empty `tool_calls` array or named legacy `function_call` may have empty content. `messages: []` remains compatible.
+- `POST /v1/responses` returns authenticated `501 unsupported_api` directing callers to `/v1/chat/completions`, without reading/routing the payload or acquiring an account.
+
 #### Abort and SSE lifecycle
 
 - A client socket close aborts the active upstream request.
 - The stream path buffers at most the first 64 KiB while waiting for a complete first SSE event. A pre-response error event is normalized and may still trigger provider/account failover.
 - After a valid SSE response is exposed (`started: true`), the request is never replayed. A later SSE error may update future cooldown/ban state only.
-- The account lease stays held until normal stream flush, upstream error, or downstream close. Stream finalization and lease release are idempotent.
+- The SSE observer records a complete `data: [DONE]` event. A downstream close after `[DONE]` finalizes once as `200 / success`; a close before `[DONE]` finalizes once as `499 / client_cancelled`.
+- An observed SSE error or upstream transport error takes precedence over `[DONE]` and remains a real failure. A client cancellation creates no error attempt, usage, error statistic, health result, or account action.
+- The account lease stays held until normal stream flush, upstream error, or downstream close. Stream finalization, listener cleanup, statistics submission, and lease release are idempotent.
 
 #### Usage, statistics, and health
 
@@ -158,6 +168,8 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 |---|---|
 | Chat JSON is malformed or not an object | `400`; no upstream request |
 | Chat `model` is missing, blank, non-string, or over 300 characters | `400` |
+| `messages.<index>.content` is empty without an assistant tool-call exception | `400 invalid_request_error`; report the path only; no account/upstream request |
+| `POST /v1/responses` | authenticated `501 unsupported_api`; no account/upstream request |
 | Request body exceeds 50 MiB | Reject promptly with `413` as soon as the limit is crossed, even if the client pauses before request end; discard/drain the remaining body without buffering or destroying the socket |
 | No statically available account | `503` with a redacted error |
 | Accounts exist but required capacity is unavailable after waiting | `429`, `Retry-After` integer clamped to 1-30 seconds |
@@ -216,7 +228,9 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - sticky capacity overflows temporarily, all-full returns `429` plus `Retry-After`, and all `activeCount` values return to zero;
 - fragmented first-event SSE errors are normalized before output; valid SSE contains data and `[DONE]`;
 - a wrapped error after SSE output starts updates the existing provider trace and future account state without replaying or adding a pseudo-attempt;
-- downstream disconnect before or after SSE starts aborts the upstream request, stops supplier failover, and releases capacity;
+- a downstream close after observed `[DONE]` is `200 / success`; a close before `[DONE]` and a non-streaming cancellation are `499 / client_cancelled`, abort upstream work, stop failover, release capacity, and add no error attempt, usage, error/health result, or account action;
+- empty/whitespace/null/missing/empty-array message content is rejected before account/upstream work, while assistant tool calls and non-empty non-text parts remain accepted; errors expose only the indexed field path;
+- authenticated `POST /v1/responses` returns the stable 501 `unsupported_api` shape without account selection or upstream traffic;
 - oversized clients receive prompt `413` before request end while request buffering remains bounded;
 - persisted history contains no account key or raw session value;
 - non-stream and fragmented/oversized streaming responses count only explicit usage, preserve known zero versus missing, and finalize once across success, failure, and disconnect;
@@ -225,7 +239,7 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - quota projection rejects oversized/malformed/non-canonical responses, never uses a stale generation, stays outside the chat path, and applies bounded retry/concurrency;
 - `/api/statistics` is authenticated, coverage-labelled, bounded, stable-ID keyed, and contains no sensitive/raw provider data.
 
-The current integration suite directly covers stable identities, provider/account failover, capacity overflow, valid SSE, fragmented pre-response SSE errors, wrapped post-start SSE errors without replay, non-streaming and post-start SSE downstream disconnects, prompt oversized-body rejection, HRW input-order independence, minimal remapping after account removal, missing usage, oversized CRLF SSE recovery, statistics corruption rejection, and quota generation invalidation.
+The current integration suite directly covers stable identities, provider/account failover, capacity overflow, valid SSE, fragmented pre-response SSE errors, wrapped post-start SSE errors without replay, `[DONE]`-then-close success, streaming/non-streaming client cancellation projections, empty-content rejection and exceptions, deliberate Responses API rejection, prompt oversized-body rejection, HRW input-order independence, minimal remapping after account removal, missing usage, oversized CRLF SSE recovery, statistics corruption rejection, and quota generation invalidation.
 
 Run `node --check server.js`, `npm test`, and `git diff --check` after changing this boundary.
 

@@ -99,7 +99,9 @@ The top navigation exposes four mutually exclusive sections: console, statistics
 
 The statistics panel owns an `aria-live` status, horizontally wrapped table, and independent request generation. It renders authenticated projected lifetime/24-hour usage, cache coverage, health, and quota data. Missing/overflowed values and zero coverage render as no data; a known numeric zero remains zero. Account/provider text is escaped, and Keys, proxy/Header/note values, raw traces/messages/sessions, and raw quota responses never render.
 
-Request and error sections share one bounded filter, table, cursor, and clear implementation. `switchSection()` selects the type, updates the visible title/status, invalidates pending log reads, and starts a first-page load. `loadLogs()` ignores a response whose query generation or selected type is stale. “Next” sends only the server-provided cursor. Changing a filter or type resets the cursor. Clear captures the selected type before awaiting deletion, requires explicit confirmation naming that type, and reloads only if the same log section is still visible.
+Request and error sections share one bounded filter, table, cursor, and clear implementation. The request view is labelled “最终请求结果（每个请求一条）”; the error view is labelled “上游失败尝试（同一请求可能多条）” and explicitly warns that attempt count is not failed-request count. `switchSection()` selects the type, updates the visible title/status/description, invalidates pending log reads, and starts a first-page load. `loadLogs()` ignores a response whose query generation or selected type is stale. “Next” sends only the server-provided cursor. Changing a filter or type resets the cursor. Clear captures the selected type before awaiting deletion, requires explicit confirmation naming that type, and reloads only if the same log section is still visible.
+
+Request status renders `status / result` and offers the request-only `result` filter. Historical rows without `result` display `success` for 2xx/3xx or `legacy_failed` otherwise; this fallback does not rewrite or claim to correct historical JSONL. Error status continues to render attempt status/upstream status.
 
 Render only projected log fields. Never render raw request/response bodies, Header values, proxy URLs, account notes, or credential-like data in a log detail.
 
@@ -150,7 +152,7 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 - account snapshot preservation for new hidden fields and all four pipeline booleans;
 - four mutually exclusive top sections with one statistics panel, one shared log DOM, explicit active state, and no anchor/scroll shortcut;
 - statistics stale-response guards, escaped server text, unknown/known-zero rendering, table wrapping, and forbidden sensitive fields;
-- log query invalidation, filters/pagination, captured-type clear controls, and model-alias batch controls.
+- log query invalidation, filters/pagination, captured-type clear controls, request-only result filtering, safe historical fallback, explicit final-request versus failed-attempt wording, and model-alias batch controls.
 
 Manual browser review remains required for visual width, narrow-screen scrolling, focus order, keyboard-only drawer use, password masking, preview readability, and log/alias interaction. Static string tests must not be reported as visual browser automation.
 

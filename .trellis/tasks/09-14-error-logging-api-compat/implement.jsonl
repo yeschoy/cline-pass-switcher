@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Chat lifecycle, abort, SSE, statistics, health, input boundary"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Request/error JSONL projections, retention, redaction, cursor compatibility"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Shared log UI, accessibility, escaping, stale query behavior"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Cross-layer log API and shared console state ownership"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "New request result field crosses transport, JSONL, API and UI"}
+{"file": ".trellis/tasks/09-14-error-logging-api-compat/research/production-error-analysis.md", "reason": "Production evidence and verified failure signatures"}

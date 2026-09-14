@@ -161,7 +161,7 @@ The top-level section is projected by `consolePanel.hidden`, `statisticsPanel.hi
 
 `STATISTICS_QUERY_ID` is independent of log state. `loadStatistics()` may render only when its captured generation still matches and `statisticsPanel` is visible. A coverage count of zero, `null` overflow, missing ratio, missing quota window, or insufficient health must render as unknown/no data rather than numeric zero. All account/provider text is escaped, and raw quota/provider payloads never become frontend state.
 
-`LOG_CURSOR` belongs to the current log type plus filter set. Starting a new query or changing filters resets it; “next” sends the opaque server cursor unchanged. `LOG_QUERY_ID` is a generation counter: every section switch and query invalidates earlier reads, and a response may render only when both its generation and captured type still match. Clearing logs captures the selected type before the asynchronous delete and reloads only when that same log section remains visible.
+`LOG_CURSOR` belongs to the current log type plus filter set. Starting a new query or changing filters resets it; “next” sends the opaque server cursor unchanged. The request type alone owns the `result` filter and renders `status / result`; missing historical results derive only the display label `success` or `legacy_failed` without mutating storage. The shared description distinguishes one-row-per-final-request from potentially-many-upstream-attempts. `LOG_QUERY_ID` is a generation counter: every section switch and query invalidates earlier reads, and a response may render only when both its generation and captured type still match. Clearing logs captures the selected type before the asynchronous delete and reloads only when that same log section remains visible.
 
 ### 4. Validation & Error Matrix
 
@@ -216,6 +216,7 @@ Cross-layer changes must assert:
 - all four pipeline booleans survive a full account save; omission preserves the server snapshot while partial/unknown/non-boolean payloads fail without persistence;
 - statistics generation invalidation prevents stale rendering, coverage-zero/null values remain unknown, and all rendered server text is escaped;
 - alias generation/save/reload and log type/filter/cursor/clear keep separate state owners;
+- request logs alone filter/render `result`, historical rows without it use a display-only fallback, and the shared description distinguishes one final request from potentially many failed attempts;
 - top-level console/statistics/request/error sections remain mutually exclusive, request/error reuse one log owner, and stale reads or clears cannot update a different section;
 - invalid scope, malformed JSON, immutable ID changes, empty account lists, and invalid rule shapes return `400` without persistence;
 - account recovery clears displayed dynamic state after reload;

@@ -62,10 +62,12 @@ A request record may contain only:
   accountId, accountName, selectionReason, overflow, switched,
   pipelineSteps, selectedQuotaPool, selectedHealthLayer, capacityFallback,
   targetProviders, actualProvider, attempts,
-  status, upstreamStatus, durationMs,
+  status, result, upstreamStatus, durationMs,
   accountActions, appliedHeaderNames, errorCategory
 }
 ```
+
+`result` is exactly `success`, `client_cancelled`, or `failed`. `status` remains the final request status; client cancellation is `499`, has `errorCategory: null`, and suppresses all error-log attempt projection even when abort plumbing produced an internal transport trace. Older JSONL rows without `result` remain readable and are never migrated.
 
 `attempts` is a projection of provider/status/timing/account/action facts. It is not the raw upstream object. Pipeline fields are server-owned bounded values: `pipelineSteps` contains at most eight of `health-filtered`, `health-filter-fallback`, and `quota-all-unknown`; `selectedQuotaPool` is `ordinary`, `hot`, `warm`, `unknown`, or `reserve`; `selectedHealthLayer` is `ordinary`, `available-or-insufficient`, `degraded`, or `unhealthy`; and `capacityFallback` is boolean. Raw health buckets, quota payloads, percentages, identities, credentials, proxy data, and messages remain forbidden.
 
@@ -98,7 +100,7 @@ Only `sessionSource` and applied safe Header names may be recorded.
 
 #### Query and cursor
 
-Filters are endpoint-specific allowlists. Shared aliases `model`, `account`, and `provider` search the documented projected fields. Numeric and boolean filters are parsed strictly; unknown parameters return `400` instead of being ignored.
+Filters are endpoint-specific allowlists. Shared aliases `model`, `account`, and `provider` search the documented projected fields. Request logs additionally allow `result`; historical rows without the field simply do not match a non-empty result filter. Numeric and boolean filters are parsed strictly; unknown parameters return `400` instead of being ignored.
 
 The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line number. Segment/line disambiguation is required because one request may have multiple error attempts with equal timestamps.
 
@@ -127,7 +129,8 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 - **Good:** a request returns `X-Cline-Request-Id`; filtering errors by that ID returns each failed attempt once and the request page shows the final account/provider path.
 - **Good:** two stores exceed the combined limit; global cleanup keeps the newest records regardless of type.
 - **Good:** a capacity fallback records its bounded pipeline groups/reason without recording quota percentages or health buckets.
-- **Base:** a successful request creates one request record and no error record.
+- **Base:** a successful request creates one `200 / success` request record and no error record.
+- **Base:** a client cancellation creates one `499 / client_cancelled` request record and no error record.
 - **Base:** a capacity rejection has no account but still records strategy, status, request ID, and safe reason category.
 - **Bad:** `JSON.stringify(req)`, `JSON.stringify(account)`, or persisting a raw upstream error object. These cross the trust boundary.
 - **Bad:** unlinking old segments before replacement segments are durable; a rename failure would lose diagnostics.
@@ -146,6 +149,8 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 - account keys, proxy credentials, custom Header values, account notes, raw sessions, messages, Authorization/Cookie, and upstream sensitive bodies do not occur in serialized log API results or files;
 - long structured SSE/JSON errors retain their final diagnostic text, and short message redaction does not corrupt unrelated words containing the same substring;
 - SSE, account replacement, proxy failure, capacity failure, and normal JSON responses finalize no more than one request record;
+- a downstream close after observed `[DONE]` records one `200 / success`, while pre-DONE streaming and non-streaming cancellations each record one `499 / client_cancelled`, no error attempt, and no error/usage/health effect;
+- request `result` filtering returns only explicit new records, while historical rows without `result` remain readable and unmodified;
 - pipeline diagnostics accept only the documented enum/boolean projection and contain no quota percentages, raw health data, or secrets;
 - simulated log/metadata write failures do not alter the already-determined chat status or body.
 

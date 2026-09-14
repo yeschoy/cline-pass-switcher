@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify lifecycle, cancellation, health and trust boundary contracts"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify projections, redaction, history compatibility and exactly-once logs"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Verify UI wording, shared DOM and safe rendering"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Verify API/UI result field round trip and stale query ownership"}
+{"file": ".trellis/tasks/09-14-error-logging-api-compat/research/production-error-analysis.md", "reason": "Check fixes against observed NewAPI and switcher production evidence"}
