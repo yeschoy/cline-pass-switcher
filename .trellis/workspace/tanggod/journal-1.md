@@ -72,3 +72,38 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: 完成错误预设、统计与健康调度流水线
+
+**Date**: 2026-09-14
+**Task**: 完成错误预设、统计与健康调度流水线
+**Branch**: `main`
+
+### Summary
+
+实现错误规则预设、可信 usage/token/cache 统计、24 小时健康评分、Cline 额度后台刷新、兼容调度流水线及统计控制台；补齐 27 项自动化测试、桌面与 500px 浏览器验收和跨层规范。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `526df4d` | (see git log) |
+| `3aa9c02` | (see git log) |
+| `0265bb5` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
