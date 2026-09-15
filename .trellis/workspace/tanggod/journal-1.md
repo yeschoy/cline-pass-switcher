@@ -141,3 +141,28 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 5: 完成诊断、调度与额度功能并部署生产
+<!-- trellis-session: v=2 fp=a5c1a403f3cd2bb3 -->
+
+**Date**: 2026-09-15
+**Task**: 完成诊断、调度与额度功能并部署生产
+**Branch**: `main`
+
+### Summary
+
+完成批量账号并发、调度原始 JSON、详细请求日志和统计额度展示；最终全量 129/129、独立复审 OK、Chrome 152 验收通过。归档父子任务并部署 release 20260915-114348-diagnostics-quota 到 167.114.158.4，容器 healthy、配置哈希不变；公网域名 DNS 预存故障已记录。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `930e27e` | feat: 增加详细日志与账号额度管理 |
+| `54babd7` | docs: 记录诊断与额度刷新契约 |
+| `6d995a2` | chore(task): 记录诊断与调度功能验证 |
+| `3e14bdd` | docs: 记录远程部署目标 |
+
+### Status
+
+[OK] **Completed**
