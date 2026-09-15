@@ -80,6 +80,15 @@ These commands define the final four-child integration gate; individual complete
 - Verified contracts are now recorded in backend quality/persistence/logging specs and frontend state/quality specs. Repository hygiene remains intact: no staging, commit, push, merge, archive, reset, live operator-data access or live config mutation.
 - **Verdict: READY** for the separate commit review gate; commit/push/archive remain unapproved.
 
+## Production Deployment Record — 2026-09-15
+
+- The canonical target/key-path contract is now persisted in `.trellis/spec/backend/deployment-guidelines.md`: `ubuntu@167.114.158.4:49555` using the gitignored mode-0600 repository-local identity path. Private-key contents were never read, printed, copied or committed.
+- The first release attempt, `20260915-113007-diagnostics-quota`, built and became healthy but the remote host could not resolve `clinepass.yeschoy.com`; the transaction restored `compose.yml` and the previous `20260914-0802-error-log-api-compat` container returned healthy with zero restarts. Both the deploy host and independent local/fetch clients reproduced the pre-existing DNS failure.
+- After the owner reconfirmed this fixed server target, release `20260915-114348-diagnostics-quota` from committed HEAD `3e14bdd56432e11f85be91631d0f2ab22d98200c` was installed under `/opt/cline-pass-switcher/releases/` and activated as image `cline-pass-switcher:20260915-114348-diagnostics-quota`.
+- Post-switch state: container `running/healthy`, RestartCount 0; `/api/meta` reports configured/authenticated with the existing proxy base; authenticated models, statistics, request logs, detailed settings and quota-refresh validation routes passed; statistics projects quota refresh state for all 9 persisted accounts; the `ai-internal` service alias resolves.
+- Production `data/config.json` remained byte-identical at SHA-256 `968cf8a0a4581cf3431501e33a4a4357cadedf85c3ece37cdc249b893a7d8c64`; account count remains 9, mode remains `sticky`, and the proxy key remains configured without being exposed. Dynamic metadata changed during normal startup/runtime and has versioned pre-switch backups.
+- Public ingress is recorded as `dns_unavailable_preexisting`, not an application-health failure. No old release, image, build cache, backup, log or operator data was deleted. Remote evidence: `/opt/cline-pass-switcher/verification/deploy-20260915-114348-diagnostics-quota/report.json` and sibling build, hashes, API projections and backups.
+
 ## Evidence to Collect
 
 - AC1: DC1–DC8 results, route coverage, body/credential boundaries, independent retention/clear, failure/backpressure/memory evidence.
