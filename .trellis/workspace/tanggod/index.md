@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 5
+- **Total Sessions**: 6
 - **Last Active**: 2026-09-15
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~168 | Active |
+| `journal-1.md` | ~191 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 6 | 2026-09-15 | 完成项目开发规范引导 | `3bbd814`, `05169a0` | `main` |
 | 5 | 2026-09-15 | 完成诊断、调度与额度功能并部署生产 | `930e27e`, `54babd7`, `6d995a2`, `3e14bdd` | `main` |
 | 4 | 2026-09-14 | 完成错误日志与 API 兼容修复 | `c9681ea`, `29aa11c` | `main` |
 | 3 | 2026-09-14 | 完成错误预设、统计与健康调度流水线 | `526df4d`, `3aa9c02`, `0265bb5` | `main` |

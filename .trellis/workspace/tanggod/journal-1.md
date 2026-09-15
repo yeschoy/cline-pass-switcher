@@ -166,3 +166,26 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 6: 完成项目开发规范引导
+<!-- trellis-session: v=2 fp=775895706c0047d0 -->
+
+**Date**: 2026-09-15
+**Task**: 完成项目开发规范引导
+**Branch**: `main`
+
+### Summary
+
+基于实际 ESM Node 服务、lib 模块、单文件前端、测试与生产部署流程完善 backend/frontend/guides 规范；删除不适用的组件、Hook 和 TypeScript 模板。全量测试 129/129，独立复审 OK。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3bbd814` | docs: 完善项目开发规范 |
+| `05169a0` | chore(task): 完成项目规范引导 |
+
+### Status
+
+[OK] **Completed**
