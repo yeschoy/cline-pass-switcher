@@ -173,7 +173,7 @@ Startup normalization preserves legacy behavior while making the schema explicit
 
 Legacy name-keyed `stats` is migration input only. It moves once into the separately labelled `migration` baseline and never fabricates exact chat, token, cache, recent-window, or health facts. Unknown newer statistics versions, malformed aggregates, unordered buckets, excess cells, invalid IDs, and malformed quota snapshots fail startup before any save.
 
-Quota state is keyed by stable account ID and stores only projected percentages, canonical ISO reset times, `lastAttemptAt`, `lastSuccessAt`, and a safe error enum. A successful partial snapshot replaces the complete prior snapshot and is cacheable without becoming routing-fresh; a failed attempt retains the last-good snapshot while recording only its safe category/time. It never stores keys, Headers, proxy values, credential-bearing URLs, raw provider payloads, page-owner tokens, routing epochs, generations, queues or success-version counters. Account deletion prunes account statistics, health coverage, state and quota while retaining global history. Credential/proxy changes clear quota but retain local statistics; disabling an account retains last-good quota for diagnostic display while preventing refresh/publication.
+Quota state is keyed by stable account ID and stores only projected percentages, canonical ISO reset times, `lastAttemptAt`, `lastSuccessAt`, and a safe error enum. Upstream reset times accept RFC3339 timestamps with an optional 1–9 digit fractional second and mandatory `Z` or numeric offset, reject impossible Gregorian calendar dates, and normalize through `Date#toISOString()` to millisecond UTC before persistence. A successful partial snapshot replaces the complete prior snapshot and is cacheable without becoming routing-fresh; a failed attempt retains the last-good snapshot while recording only its safe category/time. It never stores keys, Headers, proxy values, credential-bearing URLs, raw provider payloads, page-owner tokens, routing epochs, generations, queues or success-version counters. Account deletion prunes account statistics, health coverage, state and quota while retaining global history. Credential/proxy changes clear quota but retain local statistics; disabling an account retains last-good quota for diagnostic display while preventing refresh/publication.
 
 Durable request/error diagnostics no longer grow `metadata.history`; they are separate bounded JSONL streams under `DATA_DIR/logs/` and follow `logging-guidelines.md`. The legacy history array remains compatibility-only.
 
@@ -209,7 +209,8 @@ Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/
 | `accountPipeline` is not an exact four-boolean object on management save | `400`; no write |
 | Existing statistics version is missing/unknown or its structure exceeds bounds | startup fails; original metadata bytes remain |
 | Aggregate overflow marker and `null` field disagree | startup fails; original metadata bytes remain |
-| Quota percentage is outside 0-100, reset time is not strict ISO, or a state field is unknown | startup fails; original metadata bytes remain |
+| Quota percentage is outside 0-100, persisted reset time is not canonical millisecond UTC, or a state field is unknown | startup fails; original metadata bytes remain |
+| Upstream reset time has no timezone, over 9 fractional digits, or an impossible Gregorian date | refresh records safe `schema`; retain the complete last-good snapshot |
 | Quota refresh fails after an earlier success | Retain the previous snapshot/last-success and persist only safe attempt/error metadata; routing treats it as unknown |
 | Account key/proxy changes, is disabled, or is deleted during quota work | Runtime fences prevent stale publication; key/proxy/delete clear persisted quota, while disable retains last-good diagnostic state |
 | Existing account ID is changed by management API | `400`; no write |
@@ -243,6 +244,7 @@ Persistence changes must use a temporary `DATA_DIR` and assert:
 - metadata serialization excludes known account keys and raw session values;
 - legacy name-keyed request counts migrate only into the labelled baseline without fabricating exact usage;
 - malformed/future statistics, inconsistent overflow markers, invalid quota timestamps, and more than 50,000 account-minute cells fail before save while preserving exact bytes;
+- upstream quota reset times with 1, 3, 6 and 9 fractional digits plus numeric offsets normalize to millisecond UTC, while missing timezone, over-precision and impossible dates fail as `schema` and retain the prior snapshot;
 - partial quota success replaces older windows, failure retains last-good values, and metadata never persists owner/generation/queue/controller or raw quota state;
 - key/proxy rotation clears stale quota, disable retains last-good display data without allowing stale publication, and pruning removes deleted-account statistics/quota state without deleting global history;
 - pruning retains 1,440 minute buckets and marks dropped account coverage incomplete;

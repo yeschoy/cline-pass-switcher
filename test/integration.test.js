@@ -1009,6 +1009,47 @@ test('the 50,000 account-minute union cap evicts an aggregate/health cell atomic
   const cells=new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health)]);assert.equal(cells.size,50000);assert.equal(bucket.accounts.a0,undefined);assert.equal(bucket.health.a0,undefined);assert.ok(bucket.accounts.a50000);assert.ok(bucket.health.a50000);assert.equal(persisted.statistics.recentCoverage.droppedAccountMinuteCells,1);assert.equal(persisted.statistics.recentCoverage.accountIncompleteAt.a0,minute);
 });
 
+test('quota reset timestamps accept one through nine fractional digits and reject unsafe variants', async (t) => {
+  const types=['five_hour','weekly','monthly'];
+  const validResetTimes={
+    one:['2026-09-16T01:41:26.5Z','2026-09-19T15:02:26.5Z','2026-10-12T15:02:26.5Z'],
+    three:['2026-09-16T09:41:26.123+08:00','2026-09-19T23:02:26.456+08:00','2026-10-12T23:02:26.789+08:00'],
+    six:['2026-09-16T01:41:26.552188Z','2026-09-19T15:02:26.554459Z','2026-10-12T15:02:26.556754Z'],
+    nine:['2026-09-16T01:41:26.552188975Z','2026-09-19T15:02:26.554459647Z','2026-10-12T15:02:26.556754049Z'],
+  };
+  const invalidResetTimes={
+    'invalid-date':'2026-02-30T01:41:26.123Z',
+    'missing-zone':'2026-09-16T01:41:26.123',
+    'over-precision':'2026-09-16T01:41:26.1234567890Z',
+  };
+  const payloads={};
+  for(const [id,resets] of Object.entries(validResetTimes))payloads[id]={success:true,data:{limits:types.map((type,index)=>({type,percentUsed:(index+1)*10,resetsAt:resets[index]}))}};
+  for(const [id,resetsAt] of Object.entries(invalidResetTimes))payloads[id]={success:true,data:{limits:types.map((type,index)=>({type,percentUsed:91+index,resetsAt:index===0?resetsAt:'2026-09-16T01:41:26.123Z'}))}};
+  const upstream=http.createServer((req,res)=>{req.resume();const id=req.headers.authorization?.replace(/^Bearer key-/,'');res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(payloads[id]));});
+  const upstreamPort=await listen(upstream),port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-quota-reset-precision-'));
+  const ids=[...Object.keys(validResetTimes),...Object.keys(invalidResetTimes)],accounts=ids.map(id=>({id,name:id,key:`key-${id}`,enabled:true,perModel:{}})),fetchedAt=Date.now()-1000;
+  const retainedQuota=(percentUsed)=>({snapshot:{limits:Object.fromEntries(types.map(type=>[type,{percentUsed} ])),fetchedAt},lastAttemptAt:fetchedAt,lastSuccessAt:fetchedAt,errorCategory:null});
+  const accountQuotas=Object.fromEntries(Object.keys(invalidResetTimes).map((id,index)=>[id,retainedQuota(40+index)]));
+  fs.writeFileSync(path.join(dir,'metadata.json'),JSON.stringify({models:{},history:[],accountStates:{},routingSecret:'quota-reset-precision-secret',stats:{},accountQuotas}));
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts,accountMode:'single',activeAccount:0,knownModels:['m'],perModel:{},accountErrorRules:{},accountPipeline:{quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:false}},dir,{NODE_ENV:'test'});
+  t.after(async()=>{await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
+
+  const result=await rawJson(port,'/api/statistics/quota-refresh',{force:true});
+  assert.equal(result.status,200);assert.deepEqual(result.json,{ok:true,refreshed:4,cached:0,deferred:0,skipped:0,failed:3,cancelled:0});
+  const stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json(),byId=Object.fromEntries(stats.accounts.map(account=>[account.id,account.quota]));
+  const expectedResetTimes={
+    one:['2026-09-16T01:41:26.500Z','2026-09-19T15:02:26.500Z','2026-10-12T15:02:26.500Z'],
+    three:['2026-09-16T01:41:26.123Z','2026-09-19T15:02:26.456Z','2026-10-12T15:02:26.789Z'],
+    six:['2026-09-16T01:41:26.552Z','2026-09-19T15:02:26.554Z','2026-10-12T15:02:26.556Z'],
+    nine:['2026-09-16T01:41:26.552Z','2026-09-19T15:02:26.554Z','2026-10-12T15:02:26.556Z'],
+  };
+  for(const [id,resets] of Object.entries(expectedResetTimes)){assert.equal(byId[id].status,'fresh');assert.equal(byId[id].errorCategory,null);assert.deepEqual(types.map(type=>byId[id].limits[type].percentUsed),[10,20,30]);assert.deepEqual(types.map(type=>byId[id].limits[type].resetsAt),resets);}
+  for(const [index,id] of Object.keys(invalidResetTimes).entries()){assert.equal(byId[id].status,'unknown');assert.equal(byId[id].errorCategory,'schema');assert.equal(byId[id].lastSuccessAt,fetchedAt);assert.deepEqual(types.map(type=>byId[id].limits[type].percentUsed),[40+index,40+index,40+index]);}
+  const persisted=JSON.parse(fs.readFileSync(path.join(dir,'metadata.json'))).accountQuotas;
+  for(const [id,resets] of Object.entries(expectedResetTimes))assert.deepEqual(types.map(type=>persisted[id].snapshot.limits[type].resetsAt),resets,'accepted reset times persist in canonical millisecond UTC form');
+  for(const [index,id] of Object.keys(invalidResetTimes).entries())assert.deepEqual(types.map(type=>persisted[id].snapshot.limits[type].percentUsed),[40+index,40+index,40+index],'schema failure retains the complete last-good snapshot');
+});
+
 test('quota scheduler is bounded, strict, fail-open and discards stale credential generations', async (t) => {
   let phase='hold',active=0,maxActive=0;const quotaRequests=[];
   const goodPayload={success:true,data:{limits:[{type:'five_hour',percentUsed:79.9,resetsAt:'2026-09-15T08:00:00+08:00'},{type:'weekly',percentUsed:80},{type:'monthly',percentUsed:95},{type:'future',percentUsed:1}]}};

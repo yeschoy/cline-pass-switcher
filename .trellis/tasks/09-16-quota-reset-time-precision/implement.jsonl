@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "加载后端改动前置检查与验证门禁"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "约束额度快照规范化、持久化和未知值语义"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "约束额度解析、刷新、退避、并发和 fail-open 行为"}
+{"file": ".trellis/tasks/09-16-quota-reset-time-precision/research/live-reset-time-shape.md", "reason": "提供线上九位小数秒格式的脱敏实证"}

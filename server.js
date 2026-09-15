@@ -309,8 +309,14 @@ function normalizeStatistics() {
 const QUOTA_TYPES = ['five_hour','weekly','monthly'];
 const QUOTA_STALE_MS = process.env.NODE_ENV === 'test' ? Math.max(50, Number(process.env.CLINE_PASS_TEST_QUOTA_STALE_MS) || 15 * 60e3) : 15 * 60e3;
 function canonicalIsoTimestamp(value) {
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value) || !Number.isFinite(Date.parse(value))) return null;
-  return new Date(value).toISOString();
+  const match = typeof value === 'string' && /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.exec(value);
+  if (!match) return null;
+  const year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  const timestamp = Date.parse(value);
+  if (!daysInMonth || day < 1 || day > daysInMonth || !Number.isFinite(timestamp)) return null;
+  return new Date(timestamp).toISOString();
 }
 function validateQuotaSnapshot(snapshot) {
   if (!isPlainObject(snapshot) || Object.keys(snapshot).some((key) => !['limits','fetchedAt'].includes(key)) || !Number.isSafeInteger(snapshot.fetchedAt) || snapshot.fetchedAt <= 0 || !isPlainObject(snapshot.limits)) throw new Error('invalid quota snapshot');

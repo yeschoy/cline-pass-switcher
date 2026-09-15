@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "检查后端质量门禁"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "检查快照和持久化契约"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "检查额度刷新及聊天隔离契约"}
+{"file": ".trellis/tasks/09-16-quota-reset-time-precision/research/live-reset-time-shape.md", "reason": "核对真实故障格式已覆盖"}
