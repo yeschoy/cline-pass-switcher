@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verify global quota admission/dedupe/backoff, native proxy isolation, routing freshness and no chat/statistics side effects."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Check credential/proxy/deletion/disable invalidation, retained last-good data and no unapproved persistent schema or keyless-account changes."}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Check entry/timer/manual/cancel and stale catch/finally ownership, truthful quota states and draft preservation."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Check used/remaining/reset labels, disabled/unconfigured/unknown display, safe text, keyboard and responsive evidence."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Quota requests and raw quota payloads stay outside ordinary/detailed chat logs and credential-bearing diagnostics."}
+{"file":".trellis/tasks/09-14-account-quota-statistics/research/quota-refresh-ownership.md","reason":"Challenge overlapping scheduler runs, source withdrawal, slow-drip/early-close settlement, A-to-B-to-A identity races and misleading synthetic concurrency counters."}

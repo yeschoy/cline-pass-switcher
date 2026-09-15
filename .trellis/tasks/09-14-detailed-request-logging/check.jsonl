@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Check ordinary streams and metadata never gain bodies/credentials; detailed capture follows its separately reviewed exception."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Audit true attempt counts, auth/input boundaries, unchanged retries, transport bytes, backpressure, cancellation and finalization."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Check toggle write failure, file permissions, startup preservation and no operator-data mutation in tests."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Verify safe arbitrary text, keyboard/copy/clear, independent details navigation and manual-vs-automated evidence."}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Check stale-response guards and diagnostic actions preserve account/raw/bulk drafts."}
+{"file":".trellis/tasks/09-14-detailed-request-logging/research/capture-boundaries.md","reason":"Challenge unsafe reuse of whole-store JSONL algorithms, missing early/SSE-head capture, secret fragments and clear-generation races."}

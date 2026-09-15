@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Verify editor labels, keyboard/focus/discard semantics, responsive display and escaped reference names."}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Verify raw projection/apply/cancel does not mutate accounts or erase bulk/scheduling drafts."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Cross-check all local raw-field validators with authoritative server domains and full-list preservation."}
+{"file":".trellis/tasks/09-14-bulk-account-concurrency/research/account-draft-flow.md","reason":"Check no duplicate state store, no new persistence path and combined raw/bulk save evidence."}

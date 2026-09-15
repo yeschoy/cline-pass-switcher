@@ -1,0 +1,5 @@
+{"file":".trellis/spec/frontend/index.md","reason":"Frontend layer scope and guideline routing."}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Complete account payloads, stable identities, draft owners and ordinary explicit save."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Responsive account controls, escaping, accessibility and preset compatibility."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Existing concurrency domain, zero-unlimited behavior and authoritative account validation."}
+{"file":".trellis/tasks/09-14-bulk-account-concurrency/research/account-draft-flow.md","reason":"Verified rendering/hydration callers and the minimal common-path correction; executable fixture anchors."}

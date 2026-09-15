@@ -1,0 +1,8 @@
+{"file":".trellis/spec/frontend/state-management.md","reason":"Verify combined pending account/raw/bulk drafts survive detail navigation/toggle/read/clear and explicit save."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Check final keyboard/focus/responsive/copy/selection behavior and evidence honesty."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Check ordinary log schemas, redaction and retention remain unchanged with details enabled."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verify end-to-end traffic/routing/SSE behavior and all existing trust boundaries."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Verify atomic setting saves, restart/rollback safety and isolated test data."}
+{"file":".trellis/tasks/09-14-bulk-account-concurrency/research/account-draft-flow.md","reason":"Check all redraw callers and full hidden-field payload coverage."}
+{"file":".trellis/tasks/09-14-detailed-request-logging/research/capture-boundaries.md","reason":"Audit detailed body limits, actual-call coverage, independent storage and failure/clear boundaries."}
+{"file":".trellis/tasks/09-14-account-quota-statistics/research/quota-refresh-ownership.md","reason":"Verify statistics refresh stays outside chat logs/stats, preserves drafts and obeys global concurrency plus credential/source fences."}

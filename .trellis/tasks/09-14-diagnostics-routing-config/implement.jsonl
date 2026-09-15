@@ -1,0 +1,8 @@
+{"file":".trellis/spec/frontend/state-management.md","reason":"Parent integration authority for one shared account/scheduling draft and full-account persistence."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Cross-feature accessible navigation, selection, raw editor and safe diagnostics display."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Ordinary projections remain restricted alongside the explicitly approved detailed exception."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Routing, authentication and transport invariants across all child changes."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Configuration atomicity and operator-data preservation."}
+{"file":".trellis/tasks/09-14-bulk-account-concurrency/research/account-draft-flow.md","reason":"Common hydration/rendering dependency shared by bulk and raw children."}
+{"file":".trellis/tasks/09-14-detailed-request-logging/research/capture-boundaries.md","reason":"Detailed capture/storage risk and source evidence for final integration review."}
+{"file":".trellis/tasks/09-14-account-quota-statistics/research/quota-refresh-ownership.md","reason":"Independent quota-page lifetime, shared global admission and account/source invalidation required for four-feature integration."}

@@ -1,0 +1,8 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend layer scope and guideline routing."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Ordinary request/error projections, sensitive-data exclusions and retention remain intact; only the reviewed detailed-store/view feature is an explicit exception."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Native transport, authentication, input limits, retry/account ownership, SSE abort and exactly-once results."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Atomic candidate configuration writes, owner-only files, safe startup and metadata exclusions."}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Preserve account/raw/bulk drafts and existing independent navigation/query owners."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Accessible independent details navigation, safe text/copy/clear; ordinary log-view restrictions remain unchanged."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Capture, redaction, persistence, metadata-only queries and on-demand body display form one cross-layer contract."}
+{"file":".trellis/tasks/09-14-detailed-request-logging/research/capture-boundaries.md","reason":"Source-verified actual call/stream seams, existing store limitations, credential hazards and runnable test anchors."}

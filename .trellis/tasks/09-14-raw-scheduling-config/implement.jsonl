@@ -1,0 +1,6 @@
+{"file":".trellis/spec/frontend/index.md","reason":"Frontend layer guideline routing."}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Existing DOM/account draft ownership, destructive full-account save and exact pipeline payload."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Native accessible editor, dirty-close/focus behavior, safe text and preset compatibility."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Authoritative mode/wait/rule/pipeline validation domains; do not bypass the existing API."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Raw JSON to DOM to ordinary account API round-trip boundaries."}
+{"file":".trellis/tasks/09-14-bulk-account-concurrency/research/account-draft-flow.md","reason":"Required preceding-child hydration/rendering contract and reusable production-script test harness approach."}

@@ -1,0 +1,7 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend guideline routing for the shared quota fetch, metadata and account-save paths."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Preserve parser/transport/fresh-routing/statistics invariants while adding the explicitly approved independent page refresh source."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Reuse strict quota metadata schema, stable account identity and atomic persistence; do not change keyless-account save semantics."}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Existing statistics projection/query ownership, unknown-versus-zero rules and preservation of account/raw/bulk drafts."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Accessible refresh/status controls, safe account text, narrow scrolling and honest browser-test coverage."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Trace page/source lifetime through shared admission, identity fencing, projected metadata and quota rendering."}
+{"file":".trellis/tasks/09-14-account-quota-statistics/research/quota-refresh-ownership.md","reason":"Verified global-cap and disable-publication gaps, routing-epoch separation, request-owned cancellation and runnable evidence anchors."}

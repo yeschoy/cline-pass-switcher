@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Check labelled native selection, responsive layout, safe rendering and honest browser-test claims."}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Check target-only draft mutation, full hidden-field round trip, active identity and existing presets."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verify strict concurrency boundaries against existing server behavior without changing routing."}
+{"file":".trellis/tasks/09-14-bulk-account-concurrency/research/account-draft-flow.md","reason":"Audit every shared redraw caller and no-persistence draft regression evidence."}
