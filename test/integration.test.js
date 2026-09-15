@@ -50,7 +50,7 @@ function pausedOversizedJson(port, pathname) {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('error', (error) => finish(reject, error));
-      res.on('end', () => finish(resolve, { status: res.statusCode, text: Buffer.concat(chunks).toString() }));
+      res.on('end', () => finish(resolve, { status: res.statusCode, headers: res.headers, text: Buffer.concat(chunks).toString() }));
     });
     const timer = setTimeout(() => finish(reject, new Error('oversized request did not receive a prompt response before request end')), 3000);
     req.on('error', (error) => {
@@ -82,7 +82,7 @@ async function startSwitcher(config, existingDir = null, extraEnv = {}) {
     const poll = setInterval(() => { if (output.includes('OpenAI 兼容代理地址')) { clearInterval(poll); clearTimeout(deadline); resolve(); } }, 20);
     child.once('exit', (code) => { clearInterval(poll); clearTimeout(deadline); reject(new Error(`switcher exited ${code}: ${output}`)); });
   });
-  return { dir, child };
+  return { dir, child, output: () => output };
 }
 
 const stop = (child) => new Promise((resolve) => { child.once('exit', resolve); child.kill('SIGTERM'); setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 1000).unref(); });
@@ -725,6 +725,18 @@ test('new scheduling modes, account fields, model aliases and independent logs',
   assert.equal((await rawJson(switchPort,'/api/accounts',{accounts,mode:'single',active:0,concurrencyWaitMs:20,accountErrorRules:{}})).status,200);
   const leaked=await rawJson(switchPort,'/v1/chat/completions',{model:'leak',messages:[{role:'user',content:'message-secret-value'}]});assert.equal(leaked.status,500);assert.equal(leaked.text.includes('message-secret-value'),false);assert.equal(leaked.text.includes('header-secret-value'),false);
   await new Promise(r=>setTimeout(r,20));const redactedErrors=await(await fetch(`http://127.0.0.1:${switchPort}/api/logs/errors?requestedModel=leak`)).json();assert.equal(JSON.stringify(redactedErrors).includes('message-secret-value'),false);assert.equal(JSON.stringify(redactedErrors).includes('header-secret-value'),false);
+  // Ordinary full-list save must round-trip a combined bulk/drawer/scheduling draft.
+  const draftAccounts=accounts.map((a,i)=>({...a,maxConcurrent:i===0?100000:0,
+    ...(i===0?{note:'pending drawer note',proxyUrl:'http://127.0.0.1:1/',perModel:{'cline-pass/target':{upstream:'Mock',upstreams:['Mock'],exclude:[],pinMode:'preferred',sort:null,maxRetries:null}}}:{})}));
+  const pipeline={quotaPool:false,excludeUnhealthy:true,healthSort:true,sticky:false};
+  const rules={429:{action:'ignore'}};
+  assert.equal((await rawJson(switchPort,'/api/accounts',{accounts:draftAccounts,mode:'sticky',active:1,concurrencyWaitMs:987,accountErrorRules:rules,accountPipeline:pipeline})).status,200);
+  const roundTrip=await(await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json();
+  for(let i=0;i<draftAccounts.length;i++)for(const field of ['id','name','note','key','enabled','maxConcurrent','weight','priority','proxyUrl','headers'])assert.deepEqual(roundTrip.accounts[i][field],draftAccounts[i][field],`round-trip ${i}.${field}`);
+  assert.deepEqual(roundTrip.accounts[0].perModel,draftAccounts[0].perModel);
+  assert.deepEqual(roundTrip.accounts[1].perModel,draftAccounts[1].perModel);
+  assert.equal(roundTrip.mode,'sticky');assert.equal(roundTrip.active,1);assert.equal(roundTrip.concurrencyWaitMs,987);
+  assert.deepEqual(roundTrip.accountErrorRules,rules);assert.deepEqual(roundTrip.accountPipeline,pipeline);
   const bytes=fs.readFileSync(path.join(running.dir,'config.json'));
   const invalidHeader=await rawJson(switchPort,'/api/accounts',{accounts:[{...accounts[0],headers:{Authorization:'bad'}},accounts[1]],mode:'single',active:0,concurrencyWaitMs:20,accountErrorRules:{}});assert.equal(invalidHeader.status,400);assert.deepEqual(fs.readFileSync(path.join(running.dir,'config.json')),bytes);
   const invalidProxy=await rawJson(switchPort,'/api/accounts',{accounts:[{...accounts[0],proxyUrl:'ftp://user:pass@example.test'},accounts[1]],mode:'single',active:0,concurrencyWaitMs:20,accountErrorRules:{}});assert.equal(invalidProxy.status,400);
@@ -998,18 +1010,38 @@ test('the 50,000 account-minute union cap evicts an aggregate/health cell atomic
 });
 
 test('quota scheduler is bounded, strict, fail-open and discards stale credential generations', async (t) => {
-  let phase='success',active=0,maxActive=0;const quotaRequests=[];
+  let phase='hold',active=0,maxActive=0;const quotaRequests=[];
   const goodPayload={success:true,data:{limits:[{type:'five_hour',percentUsed:79.9,resetsAt:'2026-09-15T08:00:00+08:00'},{type:'weekly',percentUsed:80},{type:'monthly',percentUsed:95},{type:'future',percentUsed:1}]}};
   const upstream=http.createServer((req,res)=>{
     if(req.method==='GET'){
-      active++;maxActive=Math.max(maxActive,active);quotaRequests.push({url:req.url,auth:req.headers.authorization,custom:req.headers['x-chat-only'],at:Date.now(),phase});
-      const finish=()=>{active--;if(phase==='hold')return;if(phase==='rate'){res.writeHead(429);return res.end('{}');}if(phase==='duplicate'){res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify({success:true,data:{limits:[{type:'weekly',percentUsed:1},{type:'weekly',percentUsed:2}]}}));}if(phase==='oversize'){res.writeHead(200,{'Content-Type':'application/json'});return res.end(' '.repeat(257*1024));}res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(goodPayload));};return setTimeout(finish,30);
+      active++;maxActive=Math.max(maxActive,active);
+      const row={url:req.url,auth:req.headers.authorization,custom:req.headers['x-chat-only'],at:Date.now(),phase,res,held:false};quotaRequests.push(row);
+      let settled=false,timer;
+      const cleanup=()=>{if(settled)return;settled=true;clearTimeout(timer);active--;};
+      res.once('finish',cleanup);res.once('error',cleanup);res.once('close',cleanup);
+      const finish=()=>{if(settled)return;if(phase==='hold'){row.held=true;return;}if(phase==='rate'){res.writeHead(429);return res.end('{}');}if(phase==='duplicate'){res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify({success:true,data:{limits:[{type:'weekly',percentUsed:1},{type:'weekly',percentUsed:2}]}}));}if(phase==='oversize'){res.writeHead(200,{'Content-Type':'application/json'});return res.end(' '.repeat(257*1024));}res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(goodPayload));};timer=setTimeout(finish,30);return;
     }
     req.resume();req.on('end',()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));});
   });
   const upstreamPort=await listen(upstream),port=await unusedPort(),accounts=['a','b','c'].map(id=>({id,name:id.toUpperCase(),key:`key-${id}`,enabled:true,headers:{'X-Chat-Only':'secret'},perModel:{}}));
   const cfg={port,upstreamBase:`http://127.0.0.1:${upstreamPort}/api/v1`,accountMode:'roundrobin',concurrencyWaitMs:0,accounts,knownModels:['m'],perModel:{},accountErrorRules:{},accountPipeline:{quotaPool:true,excludeUnhealthy:false,healthSort:false,sticky:false}};
-  let running=await startSwitcher(cfg,null,{NODE_ENV:'test',CLINE_PASS_TEST_QUOTA_SUCCESS_MS:'50',CLINE_PASS_TEST_QUOTA_FAILURE_MS:'50',CLINE_PASS_TEST_QUOTA_TIMEOUT_MS:'80',CLINE_PASS_TEST_QUOTA_STALE_MS:'120'});t.after(async()=>{if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  // Prove causal independence with the normal quota timeout, separately from the
+  // deliberately accelerated timeout/backoff/freshness checks below.
+  let running=await startSwitcher(cfg);const witnessDir=running.dir;
+  t.after(async()=>{if(running?.child)await stop(running.child);await close(upstream);for(const dir of new Set([witnessDir,running.dir]))fs.rmSync(dir,{recursive:true,force:true});});
+  const held=await waitUntil(()=>{const rows=quotaRequests.filter(row=>row.held);return rows.length===2&&rows;},3000);
+  await new Promise(r=>setTimeout(r,120)); // A held response must outlive the old 30ms counter window.
+  assert.equal(active,2);assert.equal(maxActive,2);
+  assert.ok(held.every(({res})=>!res.writableEnded&&!res.destroyed));
+  const chat=await rawJson(port,'/v1/chat/completions',{model:'m',messages:[]});
+  assert.equal(chat.status,200);assert.equal(chat.json.choices[0].message.content,'OK');
+  assert.equal(active,2);assert.ok(held.every(({res})=>!res.writableEnded&&!res.destroyed),'chat must finish before either held quota response is released or closed');
+  t.diagnostic('quota barrier: chat 200 with the same two native responses still open after 120ms; release follows chat completion');
+  for(const {res} of held){res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(goodPayload));}
+  await waitUntil(()=>active===0); // Native finish + close must not decrement twice.
+  await stop(running.child);running.child=null;
+  phase='success';quotaRequests.length=0;maxActive=0;
+  running=await startSwitcher(cfg,null,{NODE_ENV:'test',CLINE_PASS_TEST_QUOTA_SUCCESS_MS:'50',CLINE_PASS_TEST_QUOTA_FAILURE_MS:'50',CLINE_PASS_TEST_QUOTA_TIMEOUT_MS:'80',CLINE_PASS_TEST_QUOTA_STALE_MS:'120'});
   let stats=await waitUntil(async()=>{const x=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();return x.accounts.every(a=>a.quota.status==='fresh')&&x;},3000);
   assert.ok(maxActive<=2,`quota concurrency exceeded 2: ${maxActive}`);assert.ok(quotaRequests.every(x=>x.url==='/api/v1/users/me/plan/usage-limits'));assert.deepEqual(new Set(quotaRequests.map(x=>x.auth)),new Set(['Bearer key-a','Bearer key-b','Bearer key-c']));assert.ok(quotaRequests.every(x=>x.custom===undefined),'chat custom headers must not reach quota endpoint');
   assert.ok(stats.accounts.every(a=>a.quota.pool==='reserve'),'maximum of the three windows owns the quota pool');assert.ok(stats.accounts.every(a=>a.quota.limits.five_hour.resetsAt==='2026-09-15T00:00:00.000Z'),'quota reset timestamps are stored as canonical ISO projections');
@@ -1019,10 +1051,681 @@ test('quota scheduler is bounded, strict, fail-open and discards stale credentia
   phase='duplicate';await waitUntil(async()=>{const x=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();return x.accounts.some(a=>a.quota.errorCategory==='schema');},3000);
   phase='oversize';await waitUntil(async()=>quotaRequests.some(x=>x.phase==='oversize'),3000);await new Promise(r=>setTimeout(r,120));stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();assert.ok(stats.accounts.some(a=>a.quota.errorCategory==='schema'));
   phase='hold';const aRotationHoldStart=quotaRequests.length;await waitUntil(()=>quotaRequests.slice(aRotationHoldStart).some(x=>x.phase==='hold'&&x.auth==='Bearer key-a'),3000);const view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();view.accounts[0].key='key-a-rotated';assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:view.mode,active:view.active,concurrencyWaitMs:view.concurrencyWaitMs,accountErrorRules:view.accountErrorRules,accountPipeline:view.accountPipeline})).status,200);
-  assert.equal((await rawJson(port,'/v1/chat/completions',{model:'m',messages:[]})).status,200);assert.ok(active>0,'chat must complete while a quota request is still in flight instead of awaiting it');
+  assert.equal((await rawJson(port,'/v1/chat/completions',{model:'m',messages:[]})).status,200); // Rotation still fails open; the explicit barrier above proves non-waiting.
   phase='success';stats=await waitUntil(async()=>{const x=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();return x.accounts.find(a=>a.id==='a')?.quota.status==='fresh'&&x;},3000);assert.ok(quotaRequests.some(x=>x.auth==='Bearer key-a-rotated'));let serialized=fs.readFileSync(path.join(running.dir,'metadata.json'),'utf8');assert.equal(serialized.includes('key-a'),false);assert.equal(serialized.includes('X-Chat-Only'),false);
   phase='hold';const bHoldStart=quotaRequests.length;await waitUntil(async()=>quotaRequests.slice(bHoldStart).some(x=>x.auth==='Bearer key-b'&&x.phase==='hold'),3000);let current=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal((await rawJson(port,'/api/accounts',{accounts:current.accounts.filter(a=>a.id!=='b'),mode:current.mode,active:0,concurrencyWaitMs:current.concurrencyWaitMs,accountErrorRules:current.accountErrorRules,accountPipeline:current.accountPipeline})).status,200);await new Promise(r=>setTimeout(r,120));assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(path.join(running.dir,'metadata.json'))).accountQuotas,'b'),false,'deleted account generation cannot be resurrected by an in-flight refresh');
   const cHoldStart=quotaRequests.length;await waitUntil(async()=>quotaRequests.slice(cHoldStart).some(x=>x.auth==='Bearer key-c'&&x.phase==='hold'),3000);current=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();const dead=await unusedPort();current.accounts.find(a=>a.id==='c').proxyUrl=`http://127.0.0.1:${dead}`;assert.equal((await rawJson(port,'/api/accounts',{accounts:current.accounts,mode:current.mode,active:0,concurrencyWaitMs:current.concurrencyWaitMs,accountErrorRules:current.accountErrorRules,accountPipeline:current.accountPipeline})).status,200);stats=await waitUntil(async()=>{const x=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();return x.accounts.find(a=>a.id==='c')?.quota.errorCategory==='proxy'&&x;},3000);assert.equal(stats.accounts.find(a=>a.id==='c').quota.status,'unknown','proxy rotation invalidates the old generation and never falls back direct');
   phase='hold';const aHoldStart=quotaRequests.length;await waitUntil(async()=>quotaRequests.slice(aHoldStart).some(x=>x.auth==='Bearer key-a-rotated'&&x.phase==='hold'),3000);current=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();const beforeDisable=JSON.parse(fs.readFileSync(path.join(running.dir,'metadata.json')).toString()).accountQuotas.a;assert.equal((await rawJson(port,'/api/accounts',{accounts:current.accounts,mode:current.mode,active:0,concurrencyWaitMs:current.concurrencyWaitMs,accountErrorRules:current.accountErrorRules,accountPipeline:{quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:false}})).status,200);await new Promise(r=>setTimeout(r,120));assert.deepEqual(JSON.parse(fs.readFileSync(path.join(running.dir,'metadata.json')).toString()).accountQuotas.a,beforeDisable,'closing quota routing discards in-flight completion');
   await stop(running.child);running.child=null;const metadataPath=path.join(running.dir,'metadata.json'),metadata=JSON.parse(fs.readFileSync(metadataPath));for(const q of Object.values(metadata.accountQuotas)){if(q.snapshot)q.snapshot.fetchedAt-=1000;q.lastSuccessAt=q.snapshot?.fetchedAt||q.lastSuccessAt;q.lastAttemptAt=q.lastSuccessAt;q.errorCategory=null;}const config=JSON.parse(fs.readFileSync(path.join(running.dir,'config.json')));config.accountPipeline.quotaPool=false;fs.writeFileSync(metadataPath,JSON.stringify(metadata));fs.writeFileSync(path.join(running.dir,'config.json'),JSON.stringify(config));running=await startSwitcher(null,running.dir,{NODE_ENV:'test',CLINE_PASS_TEST_QUOTA_STALE_MS:'120'});stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();assert.ok(stats.accounts.every(a=>a.quota.status==='unknown'),'stale last-good snapshots cannot route');
+  assert.equal(active,0);assert.ok(maxActive<=2,`quota concurrency exceeded 2 across refresh/configuration phases: ${maxActive}`);
+});
+
+test('statistics quota refresh is authenticated, strict, routing-independent, cache-aware and truthful', async (t) => {
+  let phase='full';const hits=[];
+  const upstream=http.createServer((req,res)=>{req.resume();req.on('end',()=>{if(req.method!=='GET'){res.writeHead(200,{'Content-Type':'application/json'});return res.end('{"choices":[{"message":{"content":"OK"}}]}');}hits.push({auth:req.headers.authorization,path:req.url,phase});if(phase==='rate'){res.writeHead(429);return res.end('{}');}const limits=phase==='partial'?[{type:'weekly',percentUsed:25}]:[{type:'five_hour',percentUsed:0,resetsAt:'2026-09-15T00:00:00.000Z'},{type:'weekly',percentUsed:37.5},{type:'monthly',percentUsed:100,resetsAt:'2026-10-01T00:00:00.000Z'}];res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({success:true,data:{limits}}));});});
+  const upstreamPort=await listen(upstream),port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-stat-quota-')),fetchedAt=Date.now()-1000;
+  const accounts=[{id:'a',name:'<Enabled>',key:'enabled-key',enabled:true,perModel:{}},{id:'disabled',name:'Disabled',key:'disabled-key',enabled:false,perModel:{}}];
+  const disabledQuota={snapshot:{limits:{five_hour:{percentUsed:20},weekly:{percentUsed:40},monthly:{percentUsed:60}},fetchedAt},lastAttemptAt:fetchedAt,lastSuccessAt:fetchedAt,errorCategory:null};
+  fs.writeFileSync(path.join(dir,'metadata.json'),JSON.stringify({models:{},history:[],accountStates:{},routingSecret:'statistics-quota-secret',stats:{},accountQuotas:{disabled:disabledQuota}}));
+  const fault=path.join(dir,'quota-meta-fault'),loader=path.join(dir,'quota-meta-loader.mjs');fs.writeFileSync(loader,`import fs from 'node:fs';const rename=fs.renameSync;fs.renameSync=(a,b)=>{if(String(b).endsWith('/metadata.json')&&fs.existsSync(${JSON.stringify(fault)}))throw Error('fixture quota metadata write failure');return rename(a,b);};`);
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}/api/v1`,proxyKey:'quota-admin',detailedLogging:true,accounts,accountMode:'single',activeAccount:0,knownModels:['m'],perModel:{},accountErrorRules:{},accountPipeline:{quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:false}},dir,{NODE_ENV:'test',NODE_OPTIONS:`--import=${loader}`,CLINE_PASS_TEST_QUOTA_SUCCESS_MS:'500',CLINE_PASS_TEST_QUOTA_FAILURE_MS:'100'});
+  t.after(async()=>{await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
+  const auth={'X-Admin-Key':'quota-admin'},refresh=(body,pathName='/api/statistics/quota-refresh')=>rawJson(port,pathName,body,auth);
+  const configBefore=fs.readFileSync(path.join(dir,'config.json'));
+  let stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`,{headers:auth})).json();assert.equal(hits.length,0,'GET statistics remains a projection');
+  assert.equal(stats.accounts.find(a=>a.id==='disabled').quota.refresh.reason,'disabled');assert.equal(stats.accounts.find(a=>a.id==='disabled').quota.limits.monthly.percentUsed,60);
+  assert.equal((await rawJson(port,'/api/statistics/quota-refresh',{force:false})).status,401);
+  for(const body of [null,[],{}, {force:'false'},{force:false,extra:true}])assert.equal((await refresh(body)).status,400);
+  assert.equal((await refresh({force:false},'/api/statistics/quota-refresh?accountId=a')).status,400);assert.equal(hits.length,0);
+  let result=await refresh({force:false});assert.equal(result.status,200);assert.deepEqual(result.json,{ok:true,refreshed:1,cached:0,deferred:0,skipped:1,failed:0,cancelled:0});assert.equal(hits.length,1);assert.deepEqual(hits[0],{auth:'Bearer enabled-key',path:'/api/v1/users/me/plan/usage-limits',phase:'full'});
+  stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`,{headers:auth})).json();const enabled=stats.accounts.find(a=>a.id==='a'),disabled=stats.accounts.find(a=>a.id==='disabled');
+  assert.equal(enabled.quota.status,'fresh');assert.deepEqual(Object.fromEntries(Object.entries(enabled.quota.limits).map(([key,value])=>[key,value.percentUsed])),{five_hour:0,weekly:37.5,monthly:100});assert.equal(enabled.quota.lastSuccessAt,enabled.quota.fetchedAt);assert.deepEqual(enabled.quota.refresh,{eligible:true,reason:null,state:'idle',nextAttemptAt:enabled.quota.lastSuccessAt+500});
+  assert.equal(disabled.quota.lastSuccessAt,fetchedAt);assert.equal(disabled.quota.refresh.eligible,false);assert.equal(disabled.quota.refresh.nextAttemptAt,null);
+  result=await refresh({force:false});assert.equal(result.json.cached,1);assert.equal(result.json.skipped,1);assert.equal(hits.length,1,'automatic refresh reuses the successful five-minute cache');
+  phase='partial';fs.writeFileSync(fault,'');result=await refresh({force:true});assert.equal(result.json.refreshed,1);assert.match(running.output(),/\[额度\] 持久化失败/);fs.unlinkSync(fault);assert.equal(hits.length,2);stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`,{headers:auth})).json();assert.deepEqual(Object.keys(stats.accounts.find(a=>a.id==='a').quota.limits),['weekly'],'a partial success replaces rather than fills old windows');assert.equal(stats.accounts.find(a=>a.id==='a').quota.status,'unknown');
+  phase='rate';result=await refresh({force:true});assert.equal(result.json.failed,1);const afterFailureHits=hits.length;result=await refresh({force:true});assert.equal(result.json.deferred,1);assert.equal(hits.length,afterFailureHits,'manual refresh never bypasses failure backoff');
+  stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`,{headers:auth})).json();const failed=stats.accounts.find(a=>a.id==='a').quota;assert.equal(failed.errorCategory,'rate_limit');assert.equal(failed.limits.weekly.percentUsed,25);assert.ok(failed.refresh.nextAttemptAt>failed.lastAttemptAt);
+  assert.deepEqual(fs.readFileSync(path.join(dir,'config.json')),configBefore,'quota display/refresh never changes scheduling configuration');
+  assert.equal((await(await fetch(`http://127.0.0.1:${port}/api/logs/requests`,{headers:auth})).json()).items.length,0);assert.equal((await(await fetch(`http://127.0.0.1:${port}/api/logs/details`,{headers:auth})).json()).items.length,0,'statistics/quota traffic remains outside detailed chat capture');
+});
+
+test('shared quota admission coalesces page owners, enforces two live transports and uses an absolute deadline', {timeout:10000}, async (t) => {
+  let phase='hold',active=0,maxActive=0,total=0;const rows=[];
+  const payload=(percent=10)=>JSON.stringify({success:true,data:{limits:[{type:'five_hour',percentUsed:percent},{type:'weekly',percentUsed:percent+1},{type:'monthly',percentUsed:percent+2}]}});
+  const upstream=http.createServer((req,res)=>{if(req.method!=='GET'){req.resume();return req.on('end',()=>res.end('{"choices":[{"message":{"content":"OK"}}]}'));}total++;active++;maxActive=Math.max(maxActive,active);const row={auth:req.headers.authorization,res,phase,closed:false,interval:null};rows.push(row);const done=()=>{if(row.closed)return;row.closed=true;active--;clearInterval(row.interval);};res.once('finish',done);res.once('close',done);res.once('error',done);if(phase==='slow'){res.writeHead(200,{'Content-Type':'application/json'});res.write('{');row.interval=setInterval(()=>res.write(' '),10);}else if(phase==='respond'){res.writeHead(200,{'Content-Type':'application/json'});res.end(payload(88));}req.resume();});
+  const upstreamPort=await listen(upstream),port=await unusedPort(),accounts=['a','b','c','d'].map(id=>({id,name:id,key:`key-${id}`,enabled:true,perModel:{}}));
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts,accountMode:'single',activeAccount:0,knownModels:['m'],perModel:{},accountErrorRules:{},accountPipeline:{quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:false}},null,{NODE_ENV:'test',CLINE_PASS_TEST_QUOTA_TIMEOUT_MS:'80',CLINE_PASS_TEST_QUOTA_SUCCESS_MS:'500',CLINE_PASS_TEST_QUOTA_FAILURE_MS:'50'});
+  t.after(async()=>{await stop(running.child);for(const row of rows)row.res.destroy();await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  const request=(controller)=>fetch(`http://127.0.0.1:${port}/api/statistics/quota-refresh`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{"force":true}',signal:controller.signal}).then(async response=>({status:response.status,json:await response.json()}));
+  const controllers=[new AbortController(),new AbortController(),new AbortController()],pending=controllers.map(controller=>request(controller).catch(error=>({aborted:error.name==='AbortError'})));
+  await waitUntil(()=>active===2);assert.equal(total,2);const liveStats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json(),refreshStates=liveStats.accounts.map(account=>account.quota.refresh.state);assert.equal(refreshStates.filter(state=>state==='fetching').length,2);assert.equal(refreshStates.filter(state=>state==='queued').length,2);controllers[0].abort();await new Promise(r=>setTimeout(r,20));assert.equal(active,2,'one page leaving must not cancel work owned by other pages');controllers[1].abort();await new Promise(r=>setTimeout(r,20));assert.equal(active,2);
+  for(let index=0;index<4;index+=2){const batch=rows.slice(index,index+2);for(const row of batch){row.res.writeHead(200,{'Content-Type':'application/json'});row.res.end(payload(10+index));}if(index===0)await waitUntil(()=>rows.length===4);}
+  const survivor=await pending[2];await Promise.all(pending.slice(0,2));assert.equal(survivor.status,200);assert.equal(survivor.json.refreshed,4);assert.equal(total,4,'same-account page demand is coalesced');assert.equal(maxActive,2);
+  const limitControllers=Array.from({length:17},()=>new AbortController()),statuses=[];const limited=limitControllers.map(controller=>request(controller).then(value=>{statuses.push(value.status);return value;},error=>({aborted:error.name==='AbortError'})));await waitUntil(()=>statuses.includes(429));assert.equal(statuses.filter(status=>status===429).length,1);for(const controller of limitControllers)controller.abort();await Promise.all(limited);await waitUntil(()=>active===0);assert.ok(maxActive<=2,'batch overload never widens upstream admission');
+  phase='slow';const started=Date.now(),slow=await request(new AbortController());const elapsed=Date.now()-started;assert.equal(slow.status,200);assert.equal(slow.json.failed,4);assert.ok(elapsed<500,`absolute quota deadline took ${elapsed}ms`);assert.ok(maxActive<=2);
+  const stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();assert.ok(stats.accounts.every(account=>account.quota.errorCategory==='timeout'));
+  await new Promise(r=>setTimeout(r,110));phase='hold';const before=stats.accounts.find(account=>account.id==='a').quota,disableController=new AbortController(),disabling=request(disableController);await waitUntil(()=>rows.some(row=>row.phase==='hold'&&row.auth==='Bearer key-a'&&!row.closed));
+  const view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();view.accounts.find(account=>account.id==='a').enabled=false;assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:view.mode,active:view.active,concurrencyWaitMs:view.concurrencyWaitMs,accountErrorRules:view.accountErrorRules,accountPipeline:view.accountPipeline})).status,200);
+  phase='respond';for(const row of rows.filter(row=>row.phase==='hold'&&!row.closed)){if(!row.res.destroyed){row.res.writeHead(200,{'Content-Type':'application/json'});row.res.end(payload(88));}}
+  await disabling;const after=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json(),disabled=after.accounts.find(account=>account.id==='a').quota;assert.equal(disabled.refresh.reason,'disabled');assert.equal(disabled.lastSuccessAt,before.lastSuccessAt);assert.equal(disabled.limits.five_hour.percentUsed,before.limits.five_hour.percentUsed,'disable retains last-good data but cannot publish held work');assert.ok(maxActive<=2);
+  await new Promise(r=>setTimeout(r,510));phase='hold';let routeView=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal((await rawJson(port,'/api/accounts',{accounts:routeView.accounts,mode:routeView.mode,active:routeView.active,concurrencyWaitMs:routeView.concurrencyWaitMs,accountErrorRules:routeView.accountErrorRules,accountPipeline:{quotaPool:true,excludeUnhealthy:false,healthSort:false,sticky:false}})).status,200);await waitUntil(()=>rows.some(row=>row.phase==='hold'&&row.auth==='Bearer key-b'&&!row.closed));
+  const shared=request(new AbortController());await new Promise(r=>setTimeout(r,20));routeView=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal((await rawJson(port,'/api/accounts',{accounts:routeView.accounts,mode:routeView.mode,active:routeView.active,concurrencyWaitMs:routeView.concurrencyWaitMs,accountErrorRules:routeView.accountErrorRules,accountPipeline:{quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:false}})).status,200);phase='respond';for(const row of rows.filter(row=>row.phase==='hold'&&!row.closed)){if(!row.res.destroyed){row.res.writeHead(200,{'Content-Type':'application/json'});row.res.end(payload(77));}}
+  const sharedResult=await shared;assert.equal(sharedResult.status,200);assert.equal(sharedResult.json.refreshed,3);const sharedStats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();assert.equal(sharedStats.accounts.find(account=>account.id==='b').quota.limits.five_hour.percentUsed,77,'routing off withdraws only routing ownership while the page-owned completion publishes');assert.equal((await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json()).accountPipeline.quotaPool,false);const totalAfterRoutingOff=total;await new Promise(r=>setTimeout(r,100));assert.equal(total,totalAfterRoutingOff,'an obsolete routing callback cannot rearm after routing is disabled');assert.ok(maxActive<=2);
+});
+
+test('quota force-cache bypass belongs only to live manual page owners', async (t) => {
+  let active=0;const rows=[];
+  const payload=JSON.stringify({success:true,data:{limits:[{type:'five_hour',percentUsed:10},{type:'weekly',percentUsed:20},{type:'monthly',percentUsed:30}]}});
+  const upstream=http.createServer((req,res)=>{if(req.method!=='GET'){req.resume();return req.on('end',()=>res.end('{"choices":[{"message":{"content":"OK"}}]}'));}active++;const row={auth:req.headers.authorization,res,closed:false};rows.push(row);const done=()=>{if(row.closed)return;row.closed=true;active--;};res.once('finish',done);res.once('close',done);res.once('error',done);req.resume();});
+  const upstreamPort=await listen(upstream),port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-quota-force-owner-')),fetchedAt=Date.now();
+  const accounts=['a','b','c'].map(id=>({id,name:id,key:`key-${id}`,enabled:true,perModel:{}}));
+  const cached={snapshot:{limits:{five_hour:{percentUsed:1},weekly:{percentUsed:2},monthly:{percentUsed:3}},fetchedAt},lastAttemptAt:fetchedAt,lastSuccessAt:fetchedAt,errorCategory:null};
+  fs.writeFileSync(path.join(dir,'metadata.json'),JSON.stringify({models:{},history:[],accountStates:{},routingSecret:'quota-force-owner-secret',stats:{},accountQuotas:{c:cached}}));
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts,accountMode:'single',activeAccount:0,knownModels:['m'],perModel:{},accountErrorRules:{},accountPipeline:{quotaPool:true,excludeUnhealthy:false,healthSort:false,sticky:false}},dir,{NODE_ENV:'test',CLINE_PASS_TEST_QUOTA_TIMEOUT_MS:'1000',CLINE_PASS_TEST_QUOTA_SUCCESS_MS:'1000'});
+  t.after(async()=>{await stop(running.child);for(const row of rows)row.res.destroy();await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
+  const request=(force,controller)=>fetch(`http://127.0.0.1:${port}/api/statistics/quota-refresh`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force}),signal:controller?.signal}).then(async response=>({status:response.status,json:await response.json()}));
+  await waitUntil(()=>active===2);assert.deepEqual(new Set(rows.map(row=>row.auth)),new Set(['Bearer key-a','Bearer key-b']));
+  const manualController=new AbortController(),manual=request(true,manualController).catch(error=>({aborted:error.name==='AbortError'}));
+  await waitUntil(async()=>{const stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();return stats.accounts.find(account=>account.id==='c').quota.refresh.state==='queued';});
+  const automatic=request(false);await new Promise(resolve=>setTimeout(resolve,30));manualController.abort();await new Promise(resolve=>setTimeout(resolve,30));
+  for(const row of rows)if(!row.closed){row.res.writeHead(200,{'Content-Type':'application/json'});row.res.end(payload);}
+  const result=await automatic;await manual;
+  assert.equal(result.status,200);assert.equal(result.json.refreshed,2);assert.equal(result.json.cached,1);assert.equal(rows.length,2,'a departed manual owner must not force a cache-valid queued account for an automatic owner');
+});
+
+test('forced quota batch reuses a success published after its request was accepted but before body admission', async (t) => {
+  let quotaRequests=0,heldResponse=null;
+  const payload=JSON.stringify({success:true,data:{limits:[{type:'five_hour',percentUsed:10},{type:'weekly',percentUsed:20},{type:'monthly',percentUsed:30}]}});
+  const upstream=http.createServer((req,res)=>{req.resume();if(req.method!=='GET')return req.on('end',()=>res.end('{"choices":[{"message":{"content":"OK"}}]}'));quotaRequests++;if(quotaRequests===1)heldResponse=res;else{res.writeHead(200,{'Content-Type':'application/json'});res.end(payload);}});
+  const upstreamPort=await listen(upstream),port=await unusedPort();
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts:[{id:'a',name:'A',key:'key-a',enabled:true,perModel:{}}],accountMode:'single',activeAccount:0,knownModels:['m'],perModel:{},accountErrorRules:{},accountPipeline:{quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:false}},null,{NODE_ENV:'test',CLINE_PASS_TEST_QUOTA_TIMEOUT_MS:'1000',CLINE_PASS_TEST_QUOTA_SUCCESS_MS:'1000'});
+  t.after(async()=>{await stop(running.child);heldResponse?.destroy();await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  const first=rawJson(port,'/api/statistics/quota-refresh',{force:true});await waitUntil(()=>heldResponse);
+  const body='{"force":true}';let delayedRequest;
+  const delayed=new Promise((resolve,reject)=>{delayedRequest=http.request({hostname:'127.0.0.1',port,path:'/api/statistics/quota-refresh',method:'POST',headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(body)}},res=>{const chunks=[];res.on('data',chunk=>chunks.push(chunk));res.on('end',()=>resolve({status:res.statusCode,json:JSON.parse(Buffer.concat(chunks).toString())}));});delayedRequest.on('error',reject);delayedRequest.write('{"force":');});
+  await new Promise(resolve=>setTimeout(resolve,50));heldResponse.writeHead(200,{'Content-Type':'application/json'});heldResponse.end(payload);
+  const firstResult=await first;assert.equal(firstResult.status,200);assert.equal(firstResult.json.refreshed,1);
+  delayedRequest.end('true}');const delayedResult=await delayed;assert.equal(delayedResult.status,200);assert.equal(delayedResult.json.cached,1);assert.equal(delayedResult.json.refreshed,0);assert.equal(quotaRequests,1,'a forced batch must reuse a success published since that batch started');
+});
+
+test('forced quota baseline remains monotonic across identity rotation and reuses the new identity success', async (t) => {
+  let active=0,maxActive=0;const rows=[];
+  const upstream=http.createServer((req,res)=>{req.resume();if(req.method!=='GET')return req.on('end',()=>res.end('{"choices":[{"message":{"content":"OK"}}]}'));const row={auth:req.headers.authorization,res,closed:false};rows.push(row);active++;maxActive=Math.max(maxActive,active);const done=()=>{if(row.closed)return;row.closed=true;active--;};res.once('finish',done);res.once('close',done);res.once('error',done);const percent=row.auth==='Bearer key-b'?70:10;res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({success:true,data:{limits:[{type:'five_hour',percentUsed:percent},{type:'weekly',percentUsed:percent+1},{type:'monthly',percentUsed:percent+2}]}}));});
+  const upstreamPort=await listen(upstream),port=await unusedPort();
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts:[{id:'a',name:'A',key:'key-a',enabled:true,perModel:{}}],accountMode:'single',activeAccount:0,knownModels:['m'],perModel:{},accountErrorRules:{},accountPipeline:{quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:false}},null,{NODE_ENV:'test',CLINE_PASS_TEST_QUOTA_TIMEOUT_MS:'1000',CLINE_PASS_TEST_QUOTA_SUCCESS_MS:'1000'});
+  t.after(async()=>{await stop(running.child);for(const row of rows)row.res.destroy();await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  const refresh=()=>rawJson(port,'/api/statistics/quota-refresh',{force:true});
+  for(let i=0;i<3;i++){const result=await refresh();assert.equal(result.status,200);assert.equal(result.json.refreshed,1);}await waitUntil(()=>active===0);assert.equal(rows.filter(row=>row.auth==='Bearer key-a').length,3);
+  const body='{"force":true}';let delayedRequest;
+  const delayed=new Promise((resolve,reject)=>{delayedRequest=http.request({hostname:'127.0.0.1',port,path:'/api/statistics/quota-refresh',method:'POST',headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(body)}},res=>{const chunks=[];res.on('data',chunk=>chunks.push(chunk));res.on('end',()=>resolve({status:res.statusCode,json:JSON.parse(Buffer.concat(chunks).toString())}));});delayedRequest.on('error',reject);delayedRequest.write('{"force":');});
+  await new Promise(resolve=>setTimeout(resolve,50));const view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();view.accounts[0].key='key-b';assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:view.mode,active:view.active,concurrencyWaitMs:view.concurrencyWaitMs,accountErrorRules:view.accountErrorRules,accountPipeline:view.accountPipeline})).status,200);
+  const newIdentity=await refresh();assert.equal(newIdentity.status,200);assert.equal(newIdentity.json.refreshed,1);await waitUntil(()=>active===0);assert.equal(rows.filter(row=>row.auth==='Bearer key-b').length,1);
+  delayedRequest.end('true}');const result=await delayed;assert.equal(result.status,200);assert.equal(result.json.cached,1);assert.equal(result.json.refreshed,0);assert.equal(rows.filter(row=>row.auth==='Bearer key-b').length,1,'the delayed batch must reuse the new-identity success');assert.equal(maxActive,1);
+  const quota=(await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json()).accounts[0].quota;assert.equal(quota.limits.five_hour.percentUsed,70);assert.equal(quota.errorCategory,null);assert.equal(quota.status,'fresh');
+});
+
+test('quota body cancellation and key A-to-B-to-A rotation settle without stale publication or backoff', async (t) => {
+  let phase='hold-body';const rows=[];
+  const payload=JSON.stringify({success:true,data:{limits:[{type:'five_hour',percentUsed:55},{type:'weekly',percentUsed:56},{type:'monthly',percentUsed:57}]}});
+  const upstream=http.createServer((req,res)=>{req.resume();if(req.method!=='GET')return req.on('end',()=>res.end('{"choices":[{"message":{"content":"OK"}}]}'));const row={auth:req.headers.authorization,res,closed:false};rows.push(row);res.once('close',()=>{row.closed=true;});if(phase==='hold-body'){res.writeHead(200,{'Content-Type':'application/json'});res.write('{"success":true,"data":{"limits":[');}else{res.writeHead(200,{'Content-Type':'application/json'});res.end(payload);}});
+  const upstreamPort=await listen(upstream),port=await unusedPort(),account={id:'a',name:'A',key:'key-a',enabled:true,perModel:{}};
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts:[account],accountMode:'single',activeAccount:0,knownModels:['m'],perModel:{},accountErrorRules:{},accountPipeline:{quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:false}},null,{NODE_ENV:'test',CLINE_PASS_TEST_QUOTA_TIMEOUT_MS:'1000',CLINE_PASS_TEST_QUOTA_FAILURE_MS:'1000'});
+  t.after(async()=>{await stop(running.child);for(const row of rows)row.res.destroy();await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  const refresh=()=>rawJson(port,'/api/statistics/quota-refresh',{force:true});
+  const held=refresh();await waitUntil(()=>rows.length===1);assert.equal(rows[0].auth,'Bearer key-a');assert.equal(rows[0].res.writableEnded,false);
+  const view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json(),save=()=>rawJson(port,'/api/accounts',{accounts:view.accounts,mode:view.mode,active:view.active,concurrencyWaitMs:view.concurrencyWaitMs,accountErrorRules:view.accountErrorRules,accountPipeline:view.accountPipeline});
+  view.accounts[0].key='key-b';assert.equal((await save()).status,200);view.accounts[0].key='key-a';assert.equal((await save()).status,200);
+  phase='respond';const replacement=refresh(),cancelled=await held;assert.equal(cancelled.status,200);assert.equal(cancelled.json.cancelled,1);await waitUntil(()=>rows[0].closed);
+  const result=await replacement;assert.equal(result.status,200);assert.equal(result.json.refreshed,1);assert.equal(rows.length,2);assert.equal(rows[1].auth,'Bearer key-a');
+  const quota=(await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json()).accounts[0].quota;assert.equal(quota.limits.five_hour.percentUsed,55);assert.equal(quota.errorCategory,null);assert.equal(quota.status,'fresh');
+});
+
+test('detailed logging settings, route matrix, actual-call groups and credential boundaries', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = []; req.on('data', (c) => chunks.push(c)); req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); seen.push({ method: req.method, path: req.url, body, headers: req.headers });
+      res.setHeader('Content-Type', 'application/json'); res.setHeader('X-Ordinary-Response', 'ordinary response'); res.setHeader('Set-Cookie', 'session=upstream-cookie-secret');
+      res.setHeader('X-Earlier-Echo', 'response-header-password'); res.setHeader('Location', 'https://example.org/?api_key=response-header-password');
+      if (req.method === 'GET') return res.end(JSON.stringify({ data: [{ id: 'cline-pass/model' }] }));
+      const only = body.provider?.only?.[0] || body.providerOptions?.gateway?.only?.[0];
+      if (only === '__probe__') { res.statusCode = 400; return res.end(JSON.stringify({ error: 'Available providers are: one, two, three, four, five, six.' })); }
+      if (only === 'first') { res.statusCode = 500; return res.end(JSON.stringify({ error: { message: 'retry mock failure', status: 500 } })); }
+      const content = body.model === 'probe' ? 'OK' : 'retained output <script>alert(1)</script> incoming-cookie-secret upstream-cookie-secret response-header-password ' + (body.echo || '') + req.headers.authorization.replace(/^Bearer /, '');
+      const out = { choices: [{ message: { content, ...(body.model === 'probe' ? { provider_metadata: { gateway: { routing: { finalProvider: 'one', fallbacksAvailable: ['one', 'two', 'three', 'four', 'five', 'six'] } } } } : {}) } }] };
+      res.end(JSON.stringify({ data: out, rawOnly: 'upstream wrapper only' }));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  let running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, proxyKey: 'detail-admin-secret', exposeCatalog: true, accounts: [{ id: 'a', name: 'Detail account', key: 'saved-detail-secret', enabled: true, perModel: {} }], knownModels: ['cline-pass/model', 'retry', 'probe'], modelAliases: { alias: 'cline-pass/model' }, perModel: { retry: { upstreams: ['first', 'second'], pinMode: 'strict' } }, accountErrorRules: {} });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const auth = { 'X-Admin-Key': 'detail-admin-secret', Cookie: 'session=incoming-cookie-secret' };
+  const get = async (route, method = 'GET') => { const response = await fetch(`http://127.0.0.1:${port}${route}`, { method, headers: auth }); return { response, json: await response.json() }; };
+  const list = async () => (await get('/api/logs/details?limit=200')).json.items;
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/logs/settings`)).status, 401);
+  assert.equal((await get('/api/logs/settings')).json.detailedLogging, false);
+  await rawJson(port, '/v1/chat/completions', { model: 'alias', messages: [] }, auth);
+  assert.equal((await list()).length, 0);
+  const settingsBefore = fs.readFileSync(path.join(running.dir, 'config.json'));
+  for (const value of [null, [], {}, { detailedLogging: 1 }, { detailedLogging: true, extra: 1 }]) assert.equal((await rawJson(port, '/api/logs/settings', value, auth)).status, 400);
+  assert.deepEqual(fs.readFileSync(path.join(running.dir, 'config.json')), settingsBefore);
+  assert.equal((await rawJson(port, '/api/logs/settings', { detailedLogging: true }, auth)).status, 200);
+  let expected = 0;
+  const groupAfter = async (request) => {
+    const response = await request; expected++;
+    const rows = await waitUntil(async () => { const rows = await list(); return rows.length === expected && rows.every((row) => row.state !== 'open') && rows; });
+    const id = response.headers?.['x-cline-request-id'] || rows[0].requestId;
+    const { json: group } = await get('/api/logs/details/' + id);
+    assert.equal(group.request.requestId, id); return { response, group };
+  };
+  for (const route of ['/chat/completions', '/v1/chat/completions', '/api/v1/chat/completions']) {
+    const { response, group } = await groupAfter(rawJson(port, route, { model: 'alias', echo: 'ingress-header-password', messages: [{ role: 'user', content: 'retained prompt' }] }, { ...auth, Cookie: 'session=incoming-cookie-secret', 'X-Ordinary': 'ordinary ingress', 'X-Earlier-Echo': 'ingress-header-password', Referer: 'https://user:ingress-header-password@example.org/' }));
+    assert.equal(response.status, 200); assert.equal(group.attempts.length, 1);
+    assert.equal(group.attempts[0].headers.host, `127.0.0.1:${upstreamPort}`);
+    assert.equal(group.request.headers['x-ordinary'], 'ordinary ingress');
+    assert.equal(group.request.headers.cookie, '[REDACTED]');
+    const body = async (id) => { const r = await fetch(`http://127.0.0.1:${port}/api/logs/details/${group.request.requestId}/bodies/${id}`, { headers: auth }); assert.equal(r.headers.get('cache-control'), 'no-store'); assert.equal(r.headers.get('x-content-type-options'), 'nosniff'); return r.text(); };
+    assert.match(await body(group.request.requestBody), /"model": "alias"/);
+    assert.match(await body(group.attempts[0].requestBody), /"model": "cline-pass\/model"/);
+    assert.match(await body(group.attempts[0].responseBody), /upstream wrapper only/);
+    assert.doesNotMatch(await body(group.request.responseBody), /upstream wrapper only/);
+    assert.match(await body(group.request.responseBody), /retained output/);
+    assert.doesNotMatch(JSON.stringify(group), /ingress-header-password|response-header-password/);
+    for (const descriptor of group.bodies) assert.doesNotMatch(await body(descriptor.bodyId), /ingress-header-password|response-header-password/);
+  }
+  const retry = await groupAfter(rawJson(port, '/v1/chat/completions', { model: 'retry', messages: [] }, auth));
+  assert.deepEqual(retry.group.attempts.map((a) => a.status), [500, 200]); assert.equal(new Set(retry.group.attempts.map((a) => a.callId)).size, 2);
+  const invalid = await groupAfter(rawJson(port, '/v1/chat/completions', { model: 'alias', messages: [{ role: 'user', content: '' }] }, auth));
+  assert.equal(invalid.response.status, 400); assert.equal(invalid.group.attempts.length, 0);
+  const unauthorized = await groupAfter(rawJson(port, '/v1/chat/completions', { key: 'unread-secret' }));
+  assert.equal(unauthorized.response.status, 401); assert.equal(unauthorized.group.bodies[0].state, 'unread');
+  const unsupported = await groupAfter(rawJson(port, '/v1/responses', { key: 'unread-secret' }, auth));
+  assert.equal(unsupported.response.status, 501); assert.equal(unsupported.group.bodies[0].state, 'unread');
+  const consoleTest = await groupAfter(rawJson(port, '/api/test', { model: 'alias' }, auth)); assert.equal(consoleTest.group.attempts.length, 1);
+  const probe = await groupAfter(rawJson(port, '/api/probe', { model: 'probe' }, auth)); assert.equal(probe.group.attempts.length, 2);
+  const validation = await groupAfter(rawJson(port, '/api/validate-upstreams', { model: 'probe' }, auth)); assert.equal(validation.group.attempts.length, 6); assert.equal(new Set(validation.group.attempts.map((a) => a.callId)).size, 6);
+  const accountTest = await groupAfter(rawJson(port, '/api/accounts/test', { key: 'ephemeral-detail-secret' }, auth)); assert.equal(accountTest.group.attempts.length, 1);
+  const badProxyPort = await unusedPort();
+  const proxyTest = await groupAfter(rawJson(port, '/api/accounts/proxy-test', { accountId: 'a', proxyUrl: `http://user:ephemeral-proxy-password@127.0.0.1:${badProxyPort}` }, auth));
+  assert.equal(proxyTest.group.attempts.length, 1); assert.equal(proxyTest.group.attempts[0].accountId, 'a'); assert.equal(proxyTest.group.attempts[0].state, 'transport-failed'); assert.equal(proxyTest.group.bodies.at(-1).state, 'unread');
+  for (const [index, route] of ['/v1/models', '/api/v1/models', '/models'].entries()) {
+    const value = await groupAfter(get(route)); assert.equal(value.group.attempts.length, index === 0 ? 1 : 0); if (index === 0) assert.equal(value.group.attempts[0].accountId, 'a');
+  }
+  for (const route of ['/api/accounts', '/api/models', '/api/meta', '/api/security', '/api/statistics', '/api/logs/requests', '/api/logs/errors', '/']) await fetch(`http://127.0.0.1:${port}${route}`, { headers: auth });
+  assert.equal((await list()).length, expected);
+  for (const query of ['unknown=x', 'limit=0', 'status=x', 'requestId=../x', 'cursor=bad', 'cursor=']) assert.equal((await get('/api/logs/details?' + query)).response.status, 400);
+  const allText = (dir) => fs.readdirSync(dir, { withFileTypes: true }).map((entry) => entry.isDirectory() ? allText(path.join(dir, entry.name)) : fs.readFileSync(path.join(dir, entry.name), 'utf8')).join('\n');
+  const persisted = allText(path.join(running.dir, 'detailed-logs'));
+  for (const secret of ['saved-detail-secret', 'detail-admin-secret', 'incoming-cookie-secret', 'upstream-cookie-secret', 'ephemeral-detail-secret', 'ephemeral-proxy-password', 'unread-secret', 'ingress-header-password', 'response-header-password']) assert.equal(persisted.includes(secret), false, secret);
+  const ordinary = allText(path.join(running.dir, 'logs')) + fs.readFileSync(path.join(running.dir, 'metadata.json'), 'utf8');
+  assert.doesNotMatch(ordinary, /retained prompt|retained output|incoming-cookie-secret|saved-detail-secret/);
+  assert.doesNotMatch(running.output(), /saved-detail-secret|detail-admin-secret|incoming-cookie-secret|ephemeral-detail-secret|ephemeral-proxy-password/);
+  const countBeforeRestart = (await list()).length;
+  await stop(running.child); running = await startSwitcher(null, running.dir);
+  assert.equal((await get('/api/logs/settings')).json.detailedLogging, true); assert.equal((await list()).length, countBeforeRestart);
+  const ordinaryBefore = allText(path.join(running.dir, 'logs'));
+  await get('/api/logs/details', 'DELETE'); assert.equal((await list()).length, 0); assert.equal(allText(path.join(running.dir, 'logs')), ordinaryBefore);
+  await rawJson(port, '/api/logs/settings', { detailedLogging: false }, auth);
+  await stop(running.child); running = await startSwitcher(null, running.dir); assert.equal((await get('/api/logs/settings')).json.detailedLogging, false);
+  await stop(running.child);
+  const invalidConfig = JSON.parse(fs.readFileSync(path.join(running.dir, 'config.json'), 'utf8')); invalidConfig.detailedLogging = 'true';
+  fs.writeFileSync(path.join(running.dir, 'config.json'), JSON.stringify(invalidConfig));
+  running = await startSwitcher(null, running.dir); assert.equal((await get('/api/logs/settings')).json.detailedLogging, false);
+});
+
+test('detailed logging removes structured credential component echoes from JSON/SSE groups, APIs and files', async (t) => {
+  const encoded = Buffer.from('fixture-basic-user:fixture-basic-password').toString('base64');
+  const secrets = ['fixture-bearer-secret', 'fixture-basic-user', 'fixture-basic-password', encoded, 'fixture-cookie-secret', 'fixture-second-cookie', 'fixture-set-cookie', 'fixture-query-first', 'fixture-query-second', 'fixture-query-password', 'fixture-quoted-cookie', 'fixture-quoted-set-cookie', 'fixture-header-cookie', 'fixture-header-set-cookie'];
+  const echo = secrets.join(' ');
+  const credentials = { AUTHORIZATION: 'Bearer fixture-bearer-secret', proxyAuthorization: 'Basic ' + encoded, COOKIE: 'a=fixture-cookie-secret; b=fixture-second-cookie; quoted="fixture-quoted-cookie"', setCookie: { nested: ['session=fixture-set-cookie; Path=/ordinary-path; Max-Age=12; SameSite=Lax', 'session="fixture-quoted-set-cookie"; Path=/ordinary-path; Max-Age=12; SameSite=Lax'] }, link: 'https://example.org/?api_key=fixture-query-first&api_key=fixture-query-second&password=fixture-query-password' };
+  const ordinary = { message: 'ordinary prompt /ordinary-path Lax', max_tokens: 12, usage: { prompt_tokens: 12, completion_tokens: 0, total_tokens: 12 } };
+  const upstream = http.createServer((req, res) => {
+    const chunks = []; req.on('data', (chunk) => chunks.push(chunk)); req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString());
+      assert.equal(body.echo, echo, 'diagnostic sanitization must not change outbound traffic');
+      assert.equal(req.headers.cookie, undefined, 'client Cookie remains outside the forwarding allowlist');
+      res.setHeader('X-Earlier-Echo', echo);
+      res.setHeader('Set-Cookie', 'session="fixture-header-set-cookie"; Path=/ordinary-path; Max-Age=12; SameSite=Lax');
+      if (body.stream) {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: echo } }], ...ordinary }) + '\n\n');
+        const tail = 'data: ' + JSON.stringify(credentials) + '\n\ndata: [DONE]\n\n';
+        const cut = tail.indexOf('fixture-quoted-cookie') + 8;
+        res.write(tail.slice(0, cut)); return setImmediate(() => res.end(tail.slice(cut)));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: echo } }], ...credentials, ...ordinary }));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, detailedLogging: true, proxyKey: 'component-admin-key', accounts: [{ id: 'a', name: 'A', key: 'component-account-key', enabled: true, perModel: {} }], knownModels: ['components'], perModel: {}, accountErrorRules: {} });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const auth = { 'X-Admin-Key': 'component-admin-key', Cookie: 'session="fixture-header-cookie"' };
+  const get = (route) => fetch(`http://127.0.0.1:${port}${route}`, { headers: auth });
+  for (const stream of [false, true]) {
+    const response = await rawJson(port, '/v1/chat/completions', { model: 'components', messages: [], echo, ...ordinary, stream }, auth);
+    assert.equal(response.status, 200);
+    for (const secret of secrets) assert.equal(response.text.includes(secret), true, 'client traffic is unchanged: ' + secret);
+    const route = '/api/logs/details/' + response.headers['x-cline-request-id'];
+    const group = await waitUntil(async () => { const group = await (await get(route)).json(); return group.request?.state === 'complete' && group; });
+    assert.equal(group.attempts.length, 1); assert.equal(group.bodies.length, 4);
+    for (const secret of secrets) assert.equal(JSON.stringify(group).includes(secret), false, secret);
+    for (const descriptor of group.bodies) {
+      const text = await (await get(route + '/bodies/' + descriptor.bodyId)).text();
+      assert.equal(descriptor.state, 'complete');
+      for (const secret of secrets) assert.equal(text.includes(secret), false, secret);
+      assert.match(text, /ordinary prompt \/ordinary-path Lax/);
+      if (stream && [group.request.responseBody, group.attempts[0].responseBody].includes(descriptor.bodyId)) {
+        assert.equal((text.match(/\[DONE\]/g) || []).length, 1);
+        const first = JSON.parse(text.split('\n\n')[0].slice(6));
+        assert.deepEqual(first.usage, ordinary.usage); assert.equal(first.max_tokens, 12);
+      } else { const json = JSON.parse(text); assert.deepEqual(json.usage, ordinary.usage); assert.equal(json.max_tokens, 12); }
+    }
+  }
+  const allText = (dir) => fs.readdirSync(dir, { withFileTypes: true }).map((entry) => entry.isDirectory() ? allText(path.join(dir, entry.name)) : fs.readFileSync(path.join(dir, entry.name), 'utf8')).join('\n');
+  const persisted = allText(path.join(running.dir, 'detailed-logs')) + allText(path.join(running.dir, 'logs')) + fs.readFileSync(path.join(running.dir, 'metadata.json'), 'utf8');
+  const listing = await (await get('/api/logs/details')).text();
+  for (const secret of secrets) for (const output of [persisted, listing, running.output()]) assert.equal(output.includes(secret), false, secret);
+});
+
+test('detailed logging discovers original credential syntax and bounds assignment work through authenticated APIs', async (t) => {
+  const secret = 'prefix-fixture-long-secret';
+  for (const [known, header, value, requestCredential = false] of [
+    ['https', 'X-Debug', `https://example.test/?api_key=${secret}`],
+    ['Bearer', 'X-Debug', `Bearer ${secret}`],
+    ['api_key', 'X-Debug', `https://example.test/?api_key=${secret}`],
+    ['prefix-', 'X-Credential', `https://example.test/?api_key=${secret}`],
+    ['nested-debug-fixture', 'X-Debug', `Bearer https://example.test/?api_key=${secret}`],
+    ['nested-header-fixture', 'X-Credential', `Bearer https://example.test/?api_key=${secret}`],
+    ['assignment-header-fixture', 'X-Credential', `Bearer api_key=${secret}`, true]
+  ]) await t.test(`${known}/${header}`, async (t) => {
+    const seen = [];
+    const upstream = http.createServer((req, res) => {
+      const chunks = []; req.on('data', (chunk) => chunks.push(chunk)); req.on('end', () => {
+        const input = Buffer.concat(chunks).toString(); seen.push(input); const body = JSON.parse(input);
+        const payload = JSON.stringify({ choices: [{ message: { content: secret } }], message: 'ordinary output' });
+        res.writeHead(200, { [header]: value, 'X-Earlier-Echo': secret, 'Content-Type': body.stream ? 'text/event-stream' : 'application/json' });
+        res.end(body.stream ? 'data: ' + payload + '\n\ndata: [DONE]\n\n' : payload);
+      });
+    });
+    const upstreamPort = await listen(upstream), port = await unusedPort();
+    const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, proxyKey: 'p1-admin-fixture', accounts: [{ id: 'a', name: 'A', key: known, enabled: true, perModel: {} }], knownModels: ['p1'], perModel: {}, accountErrorRules: {} });
+    t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+    const auth = { 'X-Admin-Key': 'p1-admin-fixture' }, get = (route) => fetch(`http://127.0.0.1:${port}${route}`, { headers: auth });
+    assert.equal((await fetch(`http://127.0.0.1:${port}/api/logs/details`)).status, 401);
+    for (const stream of [false, true]) for (const count of known === 'https' ? [0, 16384, 16385] : [0]) {
+      const input = { model: 'p1', messages: [], stream, echo: secret, message: 'ordinary prompt', ...(count ? { assignments: 'key=x;'.repeat(count) } : {}) };
+      const requestHeaders = { ...auth, 'X-Earlier-Echo': secret, ...(requestCredential ? { [header]: value } : {}) };
+      assert.equal((await rawJson(port, '/api/logs/settings', { detailedLogging: false }, auth)).status, 200);
+      const off = await rawJson(port, '/v1/chat/completions', input, requestHeaders);
+      assert.equal((await rawJson(port, '/api/logs/settings', { detailedLogging: true }, auth)).status, 200);
+      const on = await rawJson(port, '/v1/chat/completions', input, requestHeaders);
+      assert.equal(on.status, 200); assert.equal(on.status, off.status); assert.equal(on.text, off.text); assert.equal(seen.at(-1), seen.at(-2));
+      assert.ok(on.text.includes(secret), 'only diagnostics are sanitized');
+      const route = '/api/logs/details/' + on.headers['x-cline-request-id'];
+      const group = await waitUntil(async () => { const group = await (await get(route)).json(); return group.request && group.request.state !== 'open' && group; });
+      assert.equal(group.request.state, count > 16384 ? 'resource-limited' : 'complete');
+      assert.equal(group.request.result, 'success'); assert.equal(group.request.complete, true);
+      assert.equal(group.attempts.length, 1); assert.equal(group.bodies.length, 4);
+      assert.equal(JSON.stringify(group).includes('fixture-long-secret'), false);
+      assert.equal((await fetch(`http://127.0.0.1:${port}${route}/bodies/${group.request.requestBody}`)).status, 401);
+      for (const descriptor of group.bodies) {
+        const response = await get(route + '/bodies/' + descriptor.bodyId); assert.equal(response.status, 200);
+        const text = await response.text(); assert.equal(text.includes('fixture-long-secret'), false); assert.equal(descriptor.complete, true);
+        if (count > 16384) { assert.equal(text, ''); assert.equal(descriptor.state, 'resource-limited'); }
+        else {
+          assert.equal(descriptor.state, 'complete'); assert.match(text, /ordinary (?:prompt|output)/);
+          if (count && descriptor.bodyId === group.request.requestBody) assert.equal(JSON.parse(text).assignments, 'key=[REDACTED];'.repeat(count));
+        }
+      }
+    }
+    const allText = (dir) => fs.readdirSync(dir, { withFileTypes: true }).map((entry) => entry.isDirectory() ? allText(path.join(dir, entry.name)) : fs.readFileSync(path.join(dir, entry.name), 'utf8')).join('\n');
+    const persisted = allText(path.join(running.dir, 'detailed-logs')) + allText(path.join(running.dir, 'logs')) + fs.readFileSync(path.join(running.dir, 'metadata.json'), 'utf8');
+    for (const output of [persisted, await (await get('/api/logs/details')).text(), running.output()]) assert.equal(output.includes('fixture-long-secret'), false);
+    assert.ok((await (await get('/api/accounts')).json()).accounts.every((account) => account.activeCount === 0));
+    await waitUntil(async () => (await (await get('/api/logs/settings')).json()).health.retainedPayloadBytes === 0);
+  });
+});
+
+test('outer scheme shadowing never exposes inner credentials through authenticated detail APIs or files', async (t) => {
+  const fixtures = [
+    ['prefix-fixture;tail-fixture', 'Bearer https://example.test/?api_key=prefix-fixture;tail-fixture'],
+    ['prefix-fixture,tail-fixture', 'Bearer https://example.test/?api_key=prefix-fixture,tail-fixture'],
+    ['fixture-nested-secret', 'Bearer api_key=fixture-nested-secret']
+  ], seen = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = []; req.on('data', (chunk) => chunks.push(chunk)); req.on('end', () => {
+      const input = Buffer.concat(chunks).toString(); seen.push(input); const body = JSON.parse(input), [secret, syntax] = fixtures[body.caseIndex];
+      const payload = JSON.stringify({ choices: [{ message: { content: secret } }], message: 'ordinary output' });
+      res.writeHead(200, { 'X-Earlier-Echo': secret, 'X-Debug': syntax, 'Content-Type': body.stream ? 'text/event-stream' : 'application/json' });
+      res.end(body.stream ? 'data: ' + payload + '\n\ndata: [DONE]\n\n' : payload);
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, proxyKey: 'shadow-admin-fixture', accounts: [{ id: 'a', name: 'A', key: 'shadow-account-fixture', enabled: true, perModel: {} }], knownModels: ['shadow'], perModel: {}, accountErrorRules: {} });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const auth = { 'X-Admin-Key': 'shadow-admin-fixture' }, get = (route) => fetch(`http://127.0.0.1:${port}${route}`, { headers: auth });
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/logs/details`)).status, 401);
+  for (const [caseIndex, [secret]] of fixtures.entries()) await t.test(`shape ${caseIndex}`, async () => {
+    for (const stream of [false, true]) {
+      const input = { model: 'shadow', messages: [], caseIndex, stream, echo: secret, message: 'ordinary prompt' };
+      assert.equal((await rawJson(port, '/api/logs/settings', { detailedLogging: false }, auth)).status, 200);
+      const off = await rawJson(port, '/v1/chat/completions', input, { ...auth, 'X-Earlier-Echo': secret });
+      assert.equal((await rawJson(port, '/api/logs/settings', { detailedLogging: true }, auth)).status, 200);
+      const on = await rawJson(port, '/v1/chat/completions', input, { ...auth, 'X-Earlier-Echo': secret });
+      assert.equal(on.status, 200); assert.equal(on.status, off.status); assert.equal(on.text, off.text); assert.equal(seen.at(-1), seen.at(-2));
+      assert.ok(on.text.includes(secret), 'forwarding is not diagnostic sanitization');
+      const route = '/api/logs/details/' + on.headers['x-cline-request-id'];
+      const group = await waitUntil(async () => { const group = await (await get(route)).json(); return group.request && group.request.state !== 'open' && group; });
+      assert.equal(group.request.state, 'complete'); assert.equal(group.request.result, 'success');
+      assert.equal(group.attempts.length, 1); assert.equal(group.bodies.length, 4);
+      for (const forbidden of [secret, 'tail-fixture', 'fixture-nested-secret']) assert.equal(JSON.stringify(group).includes(forbidden), false);
+      assert.equal((await fetch(`http://127.0.0.1:${port}${route}/bodies/${group.request.requestBody}`)).status, 401);
+      for (const descriptor of group.bodies) {
+        const response = await get(route + '/bodies/' + descriptor.bodyId); assert.equal(response.status, 200); const text = await response.text();
+        assert.equal(descriptor.state, 'complete'); assert.equal(descriptor.complete, true); assert.match(text, /ordinary (?:prompt|output)/);
+        for (const forbidden of [secret, 'tail-fixture', 'fixture-nested-secret']) assert.equal(text.includes(forbidden), false);
+      }
+    }
+  });
+  const allText = (dir) => fs.readdirSync(dir, { withFileTypes: true }).map((entry) => entry.isDirectory() ? allText(path.join(dir, entry.name)) : fs.readFileSync(path.join(dir, entry.name), 'utf8')).join('\n');
+  const persisted = allText(path.join(running.dir, 'detailed-logs')) + allText(path.join(running.dir, 'logs')) + fs.readFileSync(path.join(running.dir, 'metadata.json'), 'utf8');
+  for (const output of [persisted, await (await get('/api/logs/details')).text(), running.output()]) assert.doesNotMatch(output, /tail-fixture|fixture-nested-secret/);
+  assert.ok((await (await get('/api/accounts')).json()).accounts.every((account) => account.activeCount === 0));
+  await waitUntil(async () => (await (await get('/api/logs/settings')).json()).health.retainedPayloadBytes === 0);
+});
+
+test('detailed logging fences ambiguous escaped credential discovery across APIs/files without changing JSON/SSE traffic', async (t) => {
+  const secret = 'fixture-escaped-secret', escaped = 'password=\\u0066ixture-escaped-secret', seen = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = []; req.on('data', (chunk) => chunks.push(chunk)); req.on('end', () => {
+      const input = Buffer.concat(chunks).toString(); seen.push(input); const body = JSON.parse(input);
+      const payload = { choices: [{ message: { content: secret } }], ...(body.model !== 'header' ? { nested: { message: escaped } } : {}) };
+      res.setHeader('X-Earlier-Echo', secret);
+      if (body.model === 'header') res.setHeader('X-Diagnostic', escaped);
+      res.setHeader('Content-Type', body.stream ? 'text/event-stream' : 'application/json');
+      res.end(body.stream ? 'data: ' + JSON.stringify(payload) + '\n\ndata: [DONE]\n\n' : JSON.stringify(payload));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'escaped-account-key', enabled: true, perModel: {} }], knownModels: ['header', 'json', 'sse'], perModel: {}, accountErrorRules: {} });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const get = (route) => fetch(`http://127.0.0.1:${port}${route}`);
+  for (const model of ['header', 'json', 'sse']) {
+    const input = { model, stream: model === 'sse', messages: [], echo: secret };
+    await rawJson(port, '/api/logs/settings', { detailedLogging: false });
+    const off = await rawJson(port, '/v1/chat/completions', input, { 'X-Earlier-Echo': secret });
+    await rawJson(port, '/api/logs/settings', { detailedLogging: true });
+    const on = await rawJson(port, '/v1/chat/completions', input, { 'X-Earlier-Echo': secret });
+    assert.equal(on.status, off.status); assert.equal(on.text, off.text); assert.equal(seen.at(-1), seen.at(-2));
+    assert.match(on.text, /fixture-escaped-secret/, 'traffic retains the original content');
+    const route = '/api/logs/details/' + on.headers['x-cline-request-id'];
+    const group = await waitUntil(async () => { const group = await (await get(route)).json(); return group.request?.state === 'incomplete' && group; });
+    assert.equal(group.attempts.length, 1); assert.equal(group.bodies.length, 4);
+    assert.equal(group.request.complete, true); assert.equal(group.request.result, 'success');
+    assert.equal(JSON.stringify(group).includes(secret), false);
+    for (const body of group.bodies) {
+      assert.equal(body.state, 'omitted-for-safety'); assert.equal(body.complete, true); assert.equal(body.capturedBytes, 0);
+      const response = await get(route + '/bodies/' + body.bodyId); assert.equal(response.status, 200); assert.equal(await response.text(), '');
+    }
+  }
+  const allText = (dir) => fs.readdirSync(dir, { withFileTypes: true }).map((entry) => entry.isDirectory() ? allText(path.join(dir, entry.name)) : fs.readFileSync(path.join(dir, entry.name), 'utf8')).join('\n');
+  const persisted = allText(path.join(running.dir, 'detailed-logs')) + allText(path.join(running.dir, 'logs')) + fs.readFileSync(path.join(running.dir, 'metadata.json'), 'utf8');
+  for (const output of [persisted, await (await get('/api/logs/details')).text(), running.output()]) assert.equal(output.includes(secret), false);
+  assert.ok((await (await get('/api/accounts')).json()).accounts.every((account) => account.activeCount === 0));
+});
+
+test('detailed logging fails closed across APIs and files on capped or interrupted credential discovery without changing traffic', { timeout: 30000 }, async (t) => {
+  const secret = 'sk-demo-secret-capture', forbidden = [secret, 'demo-secret-capture', 'secret-capture'];
+  const cap = 5 * 1024 * 1024, seen = [], fixtures = new Map();
+  for (const kind of ['cap', 'interrupted']) for (const stream of [false, true]) for (const field of ['api_key', 'Cookie']) {
+    const model = `${kind}-${stream ? 'sse' : 'json'}-${field}`;
+    const value = field === 'Cookie' ? `session="${secret}"` : secret;
+    const head = stream ? 'data: ' + JSON.stringify({ choices: [{ delta: { content: secret } }] }) + '\n\ndata: ' : '';
+    const json = (padding) => JSON.stringify({ choices: [{ message: { content: secret } }], padding, [field]: value });
+    const bare = head + json('');
+    const padding = kind === 'cap' ? 'x'.repeat(cap - bare.lastIndexOf(secret) - 3) : '';
+    const full = head + json(padding) + (stream ? '\n\ndata: [DONE]\n\n' : '');
+    const wire = kind === 'interrupted' ? full.slice(0, full.lastIndexOf(secret) + 3) : full;
+    fixtures.set(model, { kind, stream, wire });
+  }
+  // A partial data field is not necessarily JSON. Never learn an unfinished
+  // plain-text Bearer value as though its observed prefix were the whole token.
+  for (const kind of ['cap', 'interrupted']) {
+    const sse = (padding) => 'data: ' + JSON.stringify({ choices: [{ delta: { content: secret } }] }) + '\n\n: ' + padding + '\n\ndata: Bearer ' + secret + '\n\n';
+    const bare = sse(''), full = sse(kind === 'cap' ? 'x'.repeat(cap - bare.lastIndexOf(secret) - 3) : '');
+    const wire = kind === 'interrupted' ? full.slice(0, full.lastIndexOf(secret) + 3) : full;
+    fixtures.set(`${kind}-sse-prose`, { kind, stream: true, wire });
+  }
+  const upstream = http.createServer((req, res) => {
+    const chunks = []; req.on('data', (chunk) => chunks.push(chunk)); req.on('end', () => {
+      const input = Buffer.concat(chunks).toString(); seen.push(input);
+      const body = JSON.parse(input), fixture = fixtures.get(body.model);
+      assert.equal(body.echo, secret);
+      res.writeHead(200, { 'Content-Type': fixture.stream ? 'text/event-stream' : 'application/json', 'X-Earlier-Echo': secret });
+      if (fixture.kind === 'interrupted') { res.write(fixture.wire); return setTimeout(() => res.destroy(), 30); }
+      res.end(fixture.wire);
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'cap-account-key', enabled: true, perModel: {} }], knownModels: [...fixtures.keys()], perModel: {}, accountErrorRules: {} });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const get = (route) => fetch(`http://127.0.0.1:${port}${route}`);
+  const responseFor = (model, stream) => new Promise((resolve, reject) => {
+    const req = http.request({ hostname: '127.0.0.1', port, path: '/v1/chat/completions', method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Earlier-Echo': secret } }, (res) => {
+      const chunks = []; res.on('data', (chunk) => chunks.push(chunk));
+      const finish = () => resolve({ status: res.statusCode, headers: res.headers, text: Buffer.concat(chunks).toString(), complete: res.complete });
+      res.on('end', finish); res.on('aborted', finish); res.on('error', (error) => { if (error.code !== 'ECONNRESET') reject(error); });
+    });
+    req.on('error', reject); req.end(JSON.stringify({ model, messages: [], stream, echo: secret }));
+  });
+  for (const [model, fixture] of fixtures) {
+    await rawJson(port, '/api/logs/settings', { detailedLogging: false });
+    const off = await responseFor(model, fixture.stream);
+    await rawJson(port, '/api/logs/settings', { detailedLogging: true });
+    const on = await responseFor(model, fixture.stream);
+    assert.equal(on.status, off.status); assert.equal(on.text, off.text); assert.equal(on.complete, off.complete);
+    assert.equal(seen.at(-1), seen.at(-2), 'actual upstream request bytes unchanged');
+    if (fixture.kind === 'cap' || fixture.stream) assert.equal(on.text, fixture.wire);
+    const route = '/api/logs/details/' + on.headers['x-cline-request-id'];
+    const group = await waitUntil(async () => { const group = await (await get(route)).json(); return group.request?.state === 'incomplete' && group; }, 5000);
+    assert.equal(group.attempts.length, 1); assert.equal(group.bodies.length, 4);
+    const upstreamBody = group.bodies.find((body) => body.bodyId === group.attempts[0].responseBody);
+    assert.equal(upstreamBody.observedBytes, Buffer.byteLength(fixture.wire));
+    assert.equal(upstreamBody.complete, fixture.kind === 'cap'); assert.equal(upstreamBody.truncated, fixture.kind === 'cap');
+    for (const descriptor of group.bodies) {
+      assert.equal(descriptor.state, 'omitted-for-safety'); assert.equal(descriptor.capturedBytes, 0);
+      const response = await get(route + '/bodies/' + descriptor.bodyId); assert.equal(response.status, 200); assert.equal(await response.text(), '');
+    }
+    for (const headers of [group.request.headers, group.request.responseHeaders, group.attempts[0].headers, group.attempts[0].responseHeaders]) assert.match(JSON.stringify(headers), /OMITTED/);
+    for (const value of forbidden) assert.equal(JSON.stringify(group).includes(value), false);
+  }
+  const allText = (dir) => fs.readdirSync(dir, { withFileTypes: true }).map((entry) => entry.isDirectory() ? allText(path.join(dir, entry.name)) : fs.readFileSync(path.join(dir, entry.name), 'utf8')).join('\n');
+  const persisted = allText(path.join(running.dir, 'detailed-logs')) + allText(path.join(running.dir, 'logs')) + fs.readFileSync(path.join(running.dir, 'metadata.json'), 'utf8');
+  for (const value of forbidden) for (const output of [persisted, await (await get('/api/logs/details')).text(), running.output()]) assert.equal(output.includes(value), false, value);
+  assert.ok((await (await get('/api/accounts')).json()).accounts.every((account) => account.activeCount === 0));
+});
+
+test('detailed logging preserves JSON/SSE bytes, cancellation, retries, snapshots and active clear', { timeout: 20000 }, async (t) => {
+  const held = new Map(), seen = [];
+  const sse = 'data: {"choices":[{"delta":{"content":"你好 stream-detail-secret"}}]}\n\ndata: [DONE]\n\n';
+  const upstream = http.createServer((req, res) => {
+    const chunks = []; req.on('data', (c) => chunks.push(c)); req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); seen.push(body);
+      if (body.model === 'network') return res.destroy();
+      if (body.model === 'nonstream-cancel') { held.set(body.model, res); return; }
+      if (body.model === 'replace' && req.headers.authorization === 'Bearer stream-detail-secret') { res.writeHead(429, { 'Content-Type': 'application/json' }); return res.end('{"error":{"message":"retry replacement","status":429}}'); }
+      if (body.stream) {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        if (body.model === 'hold' || body.model === 'cancel') { res.write('data: {"choices":[{"delta":{"content":"safe partial output"}}]}\n\n'); held.set(body.mark || body.model, res); return; }
+        if (body.model === 'done-close') return res.write(sse);
+        if (body.model === 'late') return res.end('data: {"choices":[{"delta":{"content":"started"}}]}\n\ndata: {"error":{"message":"late failure","status":502}}\n\ndata: [DONE]\n\n');
+        const bytes = Buffer.from(sse); res.write(bytes.subarray(0, 49)); return setImmediate(() => res.end(bytes.subarray(49)));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: body.model === 'large' ? 'x'.repeat(5 * 1024 * 1024 + 100) : 'unchanged output' } }] }));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'stream-detail-secret', enabled: true, perModel: {} }, { id: 'b', name: 'B', key: 'other-detail-secret', enabled: true, perModel: {} }], knownModels: ['sse', 'hold', 'cancel', 'large', 'late', 'replace', 'network'], perModel: {}, accountErrorRules: { 429: { action: 'cooldown', cooldownMs: 60000 } } });
+  t.after(async () => { await stop(running.child); for (const res of held.values()) res.destroy(); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const api = async (route, method = 'GET') => (await fetch(`http://127.0.0.1:${port}${route}`, { method })).json();
+  const settings = (mode) => rawJson(port, '/api/logs/settings', { detailedLogging: mode });
+  const groupFor = async (id) => waitUntil(async () => { const group = await api('/api/logs/details/' + id); return group.request && group.request.state !== 'open' && group; }, 5000);
+  const bodyFor = async (group, id) => (await fetch(`http://127.0.0.1:${port}/api/logs/details/${group.request.requestId}/bodies/${id}`)).text();
+  const off = await rawJson(port, '/v1/chat/completions', { model: 'sse', messages: [], stream: true });
+  await settings(true);
+  const on = await rawJson(port, '/v1/chat/completions', { model: 'sse', messages: [], stream: true });
+  assert.equal(on.text, off.text); assert.equal(on.text, sse); assert.deepEqual(seen[0], seen[1]);
+  const streamed = await groupFor(on.headers['x-cline-request-id']);
+  assert.equal(streamed.attempts.length, 1);
+  for (const id of [streamed.request.responseBody, streamed.attempts[0].responseBody]) {
+    const descriptor = streamed.bodies.find((b) => b.bodyId === id);
+    assert.equal(descriptor.observedBytes, Buffer.byteLength(sse)); assert.equal(descriptor.complete, true);
+    const text = await bodyFor(streamed, id); assert.match(text, /你好/); assert.doesNotMatch(text, /stream-detail-secret/); assert.equal((text.match(/\[DONE\]/g) || []).length, 1);
+  }
+  const pending = rawJson(port, '/v1/chat/completions', { model: 'hold', mark: 'snapshot', messages: [], stream: true });
+  await waitUntil(() => held.has('snapshot')); await settings(false); held.get('snapshot').end('data: [DONE]\n\n');
+  const snapshot = await pending; assert.equal((await groupFor(snapshot.headers['x-cline-request-id'])).attempts.length, 1);
+  const disabled = await rawJson(port, '/v1/chat/completions', { model: 'sse', messages: [], stream: true });
+  assert.equal((await api('/api/logs/details/' + disabled.headers['x-cline-request-id'])).error.message, 'detailed record unavailable');
+  await settings(true);
+  const clearing = rawJson(port, '/v1/chat/completions', { model: 'hold', mark: 'clear', messages: [], stream: true });
+  await waitUntil(() => held.has('clear')); await api('/api/logs/details', 'DELETE'); held.get('clear').end('data: [DONE]\n\n'); const cleared = await clearing;
+  await new Promise((r) => setTimeout(r, 30)); assert.equal((await api('/api/logs/details')).items.length, 0);
+  assert.equal((await api('/api/logs/details/' + cleared.headers['x-cline-request-id'])).error.message, 'detailed record unavailable');
+  for (const model of ['cancel', 'done-close', 'nonstream-cancel']) {
+    const streaming = model !== 'nonstream-cancel';
+    await disconnectRequest(port, { model, stream: streaming, messages: [] }, streaming, model === 'done-close' ? '[DONE]' : 'safe partial output');
+    const row = await waitUntil(async () => (await api('/api/logs/details')).items.find((row) => row.model === model && row.state !== 'open'));
+    const group = await groupFor(row.requestId); assert.equal(group.request.complete, false);
+    assert.equal(group.request.result, model === 'done-close' ? 'success' : 'client_cancelled');
+    if (streaming) assert.match(await bodyFor(group, group.request.responseBody), model === 'done-close' ? /\[DONE\]/ : /safe partial output/);
+    else { assert.equal(group.request.status, null); assert.equal(group.bodies.find((body) => body.bodyId === group.request.responseBody).state, 'unread'); }
+    const ordinary = await waitUntil(async () => (await api('/api/logs/requests?model=' + model)).items[0]);
+    assert.equal(ordinary.result, model === 'done-close' ? 'success' : 'client_cancelled');
+  }
+  for (const model of ['late', 'network', 'replace', 'large']) {
+    const response = await rawJson(port, '/v1/chat/completions', { model, messages: [], ...(model === 'late' ? { stream: true } : {}) });
+    const group = await groupFor(response.headers['x-cline-request-id']);
+    if (model === 'replace') assert.deepEqual(group.attempts.map((a) => a.accountId), ['a', 'b']);
+    if (model === 'network') { assert.equal(group.attempts[0].state, 'transport-failed'); assert.equal(group.bodies.at(-1).state, 'unread'); }
+    if (model === 'large') {
+      assert.equal(response.json.choices[0].message.content.length, 5 * 1024 * 1024 + 100);
+      await settings(false); const withoutDetails = await rawJson(port, '/v1/chat/completions', { model, messages: [] }); await settings(true);
+      assert.equal(response.text, withoutDetails.text, 'large JSON forwarding must be byte-equivalent with capture off');
+      for (const id of [group.request.responseBody, group.attempts[0].responseBody]) { const body = group.bodies.find((b) => b.bodyId === id); assert.equal(body.truncated, true); assert.equal(body.capturedBytes, 5 * 1024 * 1024); assert.match(await bodyFor(group, id), /xxxxx/); }
+    }
+  }
+  const malformed = await new Promise((resolve, reject) => {
+    const req = http.request({ hostname: '127.0.0.1', port, path: '/v1/chat/completions', method: 'POST' }, (res) => { res.resume(); res.on('end', () => resolve({ status: res.statusCode, id: res.headers['x-cline-request-id'] })); }); req.on('error', reject); req.end('{"key":"unsafe partial');
+  });
+  assert.equal(malformed.status, 400); assert.equal((await groupFor(malformed.id)).bodies[0].state, 'omitted-for-safety');
+  const declared = await new Promise((resolve, reject) => {
+    const req = http.request({ hostname: '127.0.0.1', port, path: '/v1/chat/completions', method: 'POST', headers: { 'Content-Length': 51 * 1024 * 1024, Connection: 'close' } }, (res) => { res.resume(); res.on('end', () => { req.destroy(); resolve({ status: res.statusCode, id: res.headers['x-cline-request-id'] }); }); }); req.on('error', reject); req.end('{}');
+  });
+  assert.equal(declared.status, 413); assert.equal((await groupFor(declared.id)).bodies[0].state, 'unread');
+  const oversized = await pausedOversizedJson(port, '/v1/chat/completions'); assert.equal(oversized.status, 413);
+  const oversizedGroup = await groupFor(oversized.headers['x-cline-request-id']); assert.equal(oversizedGroup.bodies[0].truncated, true); assert.equal(oversizedGroup.bodies[0].complete, false);
+  assert.ok((await api('/api/accounts')).accounts.every((a) => a.activeCount === 0));
+});
+
+test('detailed clear reports abandoned-temp deletion failures and recovers without changing authenticated traffic', async (t) => {
+  const upstream = http.createServer((req, res) => { req.resume(); req.on('end', () => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"choices":[{"message":{"content":"sanitized fixture output"}}]}'); }); });
+  const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-detail-p1-fault-'));
+  const loader = path.join(dir, 'fault-loader.mjs'), fault = path.join(dir, 'fault');
+  fs.writeFileSync(loader, `import fs from 'node:fs'; import fsp from 'node:fs/promises'; import path from 'node:path';
+const rename=fsp.rename, rm=fsp.rm;
+fsp.rename=async(a,b)=>{if(b.includes('/detailed-logs/')&&b.endsWith('/manifest.json')&&fs.existsSync(${JSON.stringify(fault)}))throw Error('PRIVATE final publication failure');return rename(a,b);};
+fsp.rm=async(a,...args)=>{if(String(a).includes('/detailed-logs/')&&path.basename(a).startsWith('.tmp-')&&fs.existsSync(${JSON.stringify(fault)}))throw Error('PRIVATE temporary cleanup failure');return rm(a,...args);};`);
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, proxyKey: 'clear-admin-fixture', accounts: [{ id: 'a', name: 'A', key: 'clear-account-fixture', enabled: true, perModel: {} }], knownModels: ['p1'], perModel: {}, accountErrorRules: {} }, dir, { NODE_OPTIONS: `--import=${loader}` });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  const auth = { 'X-Admin-Key': 'clear-admin-fixture' }, api = (route, method = 'GET') => fetch(`http://127.0.0.1:${port}${route}`, { headers: auth, method });
+  const input = { model: 'p1', messages: [], message: 'sanitized fixture prompt' };
+  const off = await rawJson(port, '/v1/chat/completions', input, auth);
+  await rawJson(port, '/api/logs/settings', { detailedLogging: true }, auth);
+  const successful = await rawJson(port, '/v1/chat/completions', input, auth), successfulRoute = '/api/logs/details/' + successful.headers['x-cline-request-id'];
+  await waitUntil(async () => (await (await api(successfulRoute)).json()).request?.state === 'complete');
+  const detailsDir = path.join(dir, 'detailed-logs'), temps = () => fs.readdirSync(detailsDir).filter((name) => name.startsWith('.tmp-'));
+  for (const boundary of ['maintenance', 'clear']) {
+    fs.writeFileSync(fault, '');
+    const failures = (await (await api('/api/logs/settings')).json()).health.failures;
+    const response = await rawJson(port, '/v1/chat/completions', input, auth);
+    assert.equal(response.status, off.status); assert.equal(response.text, off.text);
+    await waitUntil(async () => { const health = (await (await api('/api/logs/settings')).json()).health; return health.failures >= failures + 2 && health.retainedPayloadBytes === 0; });
+    assert.equal(temps().length, 1);
+    if (boundary === 'clear') {
+      assert.equal((await fetch(`http://127.0.0.1:${port}/api/logs/details`, { method: 'DELETE' })).status, 401);
+      const failed = await api('/api/logs/details', 'DELETE'); assert.equal(failed.status, 503);
+      assert.deepEqual(await failed.json(), { error: { message: 'detailed storage unavailable' } });
+      assert.equal(temps().length, 1);
+    }
+    fs.unlinkSync(fault);
+    if (boundary === 'maintenance') {
+      assert.equal((await api('/api/logs/details')).status, 200);
+      assert.equal((await (await api(successfulRoute)).json()).request.state, 'complete');
+    } else {
+      assert.equal((await api('/api/logs/details', 'DELETE')).status, 200); assert.deepEqual(fs.readdirSync(detailsDir), []);
+    }
+    assert.equal(temps().length, 0);
+  }
+  const fresh = await rawJson(port, '/v1/chat/completions', input, auth); assert.equal(fresh.text, off.text);
+  await waitUntil(async () => (await (await api('/api/logs/details/' + fresh.headers['x-cline-request-id'])).json()).request?.state === 'complete');
+  assert.ok((await (await api('/api/logs/requests')).json()).items.length >= 4, 'detail clear never clears ordinary logs');
+  assert.ok((await (await api('/api/accounts')).json()).accounts.every((account) => account.activeCount === 0));
+  assert.doesNotMatch(running.output(), /PRIVATE|clear-account-fixture|clear-admin-fixture/);
+});
+
+test('detailed logging persists open roots across process interruption and keeps config/traffic safe on IO failure', { timeout: 20000 }, async (t) => {
+  const held = [];
+  const upstream = http.createServer((req, res) => { req.resume(); req.on('end', () => { if (req.headers['x-hold']) { held.push(res); return; } res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"choices":[{"message":{"content":"still works"}}]}'); }); });
+  const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-detail-fault-'));
+  const loader = path.join(dir, 'fault-loader.mjs'), configFault = path.join(dir, 'config-fault'), detailFault = path.join(dir, 'detail-fault'), slow = path.join(dir, 'slow-write');
+  fs.writeFileSync(loader, `import fs from 'node:fs'; import fsp from 'node:fs/promises';
+const syncRename=fs.renameSync, rename=fsp.rename, write=fsp.writeFile;
+fs.renameSync=(a,b)=>{if(b.endsWith('/config.json')&&fs.existsSync(${JSON.stringify(configFault)}))throw Error('MOCK PRIVATE ENOSPC');return syncRename(a,b);};
+fsp.rename=async(a,b)=>{if(b.includes('/detailed-logs/')&&fs.existsSync(${JSON.stringify(detailFault)}))throw Error('MOCK PRIVATE ENOSPC');return rename(a,b);};
+fsp.writeFile=async(a,...args)=>{while(String(a).endsWith('.txt')&&fs.existsSync(${JSON.stringify(slow)}))await new Promise(r=>setTimeout(r,5));return write(a,...args);};`);
+  const extra = { NODE_OPTIONS: `--import=${loader}` };
+  let running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, detailedLogging: true, accounts: [{ id: 'a', name: 'A', key: 'fault-secret', enabled: true, headers: { 'X-Hold': 'yes' }, perModel: {} }], knownModels: ['hold'], perModel: {}, accountErrorRules: {} }, dir, extra);
+  t.after(async () => { await stop(running.child); for (const res of held) res.destroy(); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  const pending = rawJson(port, '/v1/chat/completions', { model: 'hold', messages: [] }).catch(() => null);
+  await waitUntil(() => held.length > 0);
+  const rows = await waitUntil(async () => { const rows = (await (await fetch(`http://127.0.0.1:${port}/api/logs/details`)).json()).items; return rows.length && rows; });
+  assert.equal(rows[0].state, 'open');
+  await stop(running.child); await pending;
+  const config = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8')); config.accounts[0].headers = {};
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config));
+  running = await startSwitcher(null, dir, extra);
+  const recovered = await (await fetch(`http://127.0.0.1:${port}/api/logs/details/${rows[0].requestId}`)).json();
+  assert.equal(recovered.request.state, 'interrupted'); assert.equal(recovered.request.complete, false); assert.equal(recovered.bodies.length, 0);
+  const before = fs.readFileSync(path.join(dir, 'config.json'));
+  fs.writeFileSync(configFault, '');
+  assert.equal((await rawJson(port, '/api/logs/settings', { detailedLogging: false })).status, 500);
+  assert.deepEqual(fs.readFileSync(path.join(dir, 'config.json')), before);
+  assert.equal((await (await fetch(`http://127.0.0.1:${port}/api/logs/settings`)).json()).detailedLogging, true);
+  fs.unlinkSync(configFault);
+  fs.writeFileSync(detailFault, '');
+  const failed = await rawJson(port, '/v1/chat/completions', { model: 'hold', messages: [] }); assert.equal(failed.status, 200); assert.match(failed.text, /still works/);
+  await waitUntil(async () => (await (await fetch(`http://127.0.0.1:${port}/api/logs/settings`)).json()).health.failures > 0);
+  fs.unlinkSync(detailFault);
+  fs.writeFileSync(slow, '');
+  const t0 = Date.now(), normal = await rawJson(port, '/v1/chat/completions', { model: 'hold', messages: [] });
+  assert.equal(normal.status, 200); assert.ok(Date.now() - t0 < 1000, 'model completion must not await blocked diagnostic writes');
+  const memory = (await (await fetch(`http://127.0.0.1:${port}/api/logs/settings`)).json()).health.retainedPayloadBytes;
+  assert.ok(memory > 0 && memory <= 64 * 1024 * 1024);
+  fs.unlinkSync(slow);
+  assert.doesNotMatch(running.output(), /MOCK PRIVATE|fault-secret/);
+  await waitUntil(async () => { const group = await (await fetch(`http://127.0.0.1:${port}/api/logs/details/${normal.headers['x-cline-request-id']}`)).json(); return group.request?.state === 'complete'; });
+  for (const size of [16, 16385]) {
+    const pathological = await rawJson(port, '/v1/chat/completions', { model: 'hold', messages: [], password: ['A', 'D', 'E', 'R', 'T', 'C', '[', ']'], echo: 'A'.repeat(size) });
+    assert.equal(pathological.status, normal.status); assert.equal(pathological.text, normal.text, 'sanitizer work must not change traffic');
+    const state = size === 16 ? 'complete' : 'resource-limited';
+    const group = await waitUntil(async () => { const group = await (await fetch(`http://127.0.0.1:${port}/api/logs/details/${pathological.headers['x-cline-request-id']}`)).json(); return group.request?.state === state && group; });
+    if (size === 16) {
+      const input = await (await fetch(`http://127.0.0.1:${port}/api/logs/details/${group.request.requestId}/bodies/${group.request.requestBody}`)).json();
+      assert.equal(input.echo, '[REDACTED]'.repeat(16), 'small inputs must retain single, nonrecursive markers');
+    } else assert.ok(group.bodies.every((body) => body.state === 'resource-limited' && body.capturedBytes === 0));
+    assert.ok((await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json()).accounts.every((account) => account.activeCount === 0));
+  }
 });

@@ -106,6 +106,7 @@ location / {
 | `accountPipeline` | 可选叠加层：`{ quotaPool, excludeUnhealthy, healthSort, sticky }`；四项默认均为 `false` |
 | `proxyKey` | 下游代理密钥；空 = 不鉴权 |
 | `publicBaseUrl` | 公网代理地址（控制台展示用） |
+| `detailedLogging` | 默认 `false`；详细日志独立开关，也可在“详细日志”页面即时保存 |
 | `exposeCatalog` | `true` 时代理的 `/v1/models` 会合并 Cline 公开目录模型；默认 `false` 只返回订阅模型（避免客户端模型列表被淹没） |
 | `knownModels` | 订阅模型清单（控制台主表） |
 | `modelAliases` | 客户端别名到现有 `cline-pass/*` 模型的映射；路由按解析后的模型执行 |
@@ -194,7 +195,21 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 
 账号代理支持 `http://`、`https://`、`socks5://`、`socks5h://` 和可选 URL 用户名/密码，只应用于该账号的 Cline 请求；代理失败进入网络/代理错误记录，并且不会回退直连。账号 Header 在客户端协议白名单之后合并，随后由系统强制覆盖 `Content-Type` 和账号 `Authorization`。Authorization、Cookie、逐跳 Header、会话/线程/设备身份及凭据类 Header 均禁止配置。
 
-日志仅保存允许字段和已应用 Header 名称，不保存账号 Key、代理 URL/认证值、Header 值、备注、原始会话、消息正文或敏感上游正文。旧配置缺少新字段时会自动补安全默认值。
+普通请求/错误日志仅保存允许字段和已应用 Header 名称，不保存账号 Key、代理 URL/认证值、Header 值、备注、原始会话、消息正文或敏感上游正文。旧配置缺少新字段时会自动补安全默认值。
+
+### 详细日志（默认关闭）
+
+进入独立的 **详细日志** 板块，启用开关后立即独立保存 `detailedLogging`，无需保存账号配置，也不改变账号、批量并发或原始调度草稿。只有配置写入成功后新请求才使用新模式；已开始的请求保持原模式。启用后会持续记录提示词、普通 Header、会话与响应内容，直到手动关闭。**请先设置代理/管理密钥**；未配置时页面明确警告详细内容没有密钥保护。
+
+- 按请求查看原始客户端输入、最终客户端响应及每次真实上游调用；正文按需加载，可复制脱敏文本。聊天 UUID 与普通请求日志一致；重试、换号和并行探测有独立调用 ID。`status` 是提交的 HTTP 状态，`result`（有值时）来自普通聊天终态；写出字节不证明客户端已收到。
+- 包含三种聊天别名、控制台测试/探测/渠道校验、账号/代理测试、模型列表及已有的 Responses 501/认证/验证拒绝。配置、日志查询、静态文件、后台额度及公开目录补充请求不记录；不捕获网关内部重试或代理/TLS 线缆数据。
+- Header 名称/值、结构化凭据字段、Bearer/Basic、Cookie、URL 认证/凭据查询参数及当前请求已知凭据回显会脱敏，原值不可恢复。普通模型参数与 usage 计数保留。无法识别任意自由文本中的未知秘密；不要把此功能当作通用数据脱敏或备份工具。
+- 每个请求/响应正文独立捕获最多 **5 MiB**，不截断实际流量。保留安全文本/JSON 前缀及完整 SSE 事件；缺失尾部、截断、未读、中断、无效编码或无法安全解释的片段有明确状态。部分 JSON 可能补齐结构后脱敏，因此不是可重放的原始请求。
+- 文件独立存于 `DATA_DIR/detailed-logs/`（目录 0700、文件 0600），按最早请求整组清理，最多 **7 天 / 1 GiB**，高流量可能提前淘汰。查询仅扫描有界元数据，正文单独读取；游标按时间/UUID 继续，即使前页已淘汰也不会把路径当作游标。
+- “清空详细日志”仅清除此存储；清空前的活动请求不能重新写回，清空后新请求仍可记录。普通日志和统计不受影响。启动时把已落盘的 `open` 请求身份标记为 `interrupted`；未完成正文不会被伪装成完整记录。早期元数据尚未落盘就退出的请求仍可能丢失。
+- 诊断文件写入不阻塞模型完成。内部保留负载预算为 64 MiB（不是精确 RSS 上限），并限制活动捕获/队列及脱敏工作量；超限只丢弃诊断并报告 `resource-limited`/计数，不改变流量。临时存储失败通过安全健康状态报告，恢复后后续请求可继续记录；不可读/损坏组不会被当作有效完整记录或自动删除。
+
+管理 API（沿用现有密钥边界，返回 `Cache-Control: no-store`）：`GET/POST /api/logs/settings`，POST 仅接受 `{ "detailedLogging": true|false }`；`GET/DELETE /api/logs/details`；`GET /api/logs/details/<requestId>`；`GET /api/logs/details/<requestId>/bodies/<bodyId>`（脱敏 `text/plain`，`nosniff`）。列表支持 `limit` 1–200、`cursor`、`requestId`、`from`/`to` 毫秒时间戳、`model`、`account`、`status`；错误参数返回 400，过期/已清空/缺失正文返回安全 404。
 
 ---
 

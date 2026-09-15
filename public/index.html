@@ -114,13 +114,14 @@
     <button id="navStatistics" class="ghost" type="button" aria-pressed="false" aria-controls="statisticsPanel" onclick="switchSection('statistics')">统计</button>
     <button id="navRequests" class="ghost" type="button" aria-pressed="false" aria-controls="logPanel" onclick="switchSection('requests')">请求日志</button>
     <button id="navErrors" class="ghost" type="button" aria-pressed="false" aria-controls="logPanel" onclick="switchSection('errors')">错误日志</button>
+    <button id="navDetails" class="ghost" type="button" aria-pressed="false" aria-controls="detailsPanel" onclick="switchSection('details')">详细日志</button>
   </nav>
 
   <section id="statisticsPanel" aria-labelledby="statisticsTitle" hidden>
-    <div class="card"><div class="toolbar"><h2 id="statisticsTitle" style="margin:0">使用量与账号健康统计</h2><button class="ghost" type="button" onclick="loadStatistics()">↻ 刷新</button><span id="statisticsStatus" class="dim" aria-live="polite">尚未加载</span></div>
-      <p class="dim" style="font-size:12px;margin-bottom:12px">仅统计客户端聊天请求；Token/缓存仅来自上游明确 usage。换号时账号处理数之和可能大于全局请求数。</p>
+    <div class="card"><div class="toolbar"><h2 id="statisticsTitle" style="margin:0">使用量与账号健康统计</h2><button id="statisticsRefresh" class="ghost" type="button" aria-describedby="statisticsQuotaHelp" onclick="refreshStatisticsQuota(true)">↻ 手动刷新额度与统计</button><span id="statisticsStatus" class="dim" aria-live="polite">尚未加载</span></div>
+      <p id="statisticsQuotaHelp" class="dim" style="font-size:12px;margin-bottom:12px">仅统计客户端聊天请求；Token/缓存仅来自上游明确 usage。进入本页及停留期间每 5 分钟刷新启用且已配置的账号额度；查看额度不会启用额度池路由。换号时账号处理数之和可能大于全局请求数。</p>
       <div id="statisticsSummary" class="kvs"></div>
-      <div class="table-wrap"><table style="min-width:1250px"><thead><tr><th>账号</th><th>运行/健康</th><th>累计请求/错误</th><th>24h 请求/错误</th><th>累计 / 24h input·output·total</th><th>累计 / 24h 缓存 Token·占比·命中率</th><th>健康样本/分数</th><th>额度 5h/周/月</th><th>额度池/抓取</th></tr></thead><tbody id="statisticsBody"><tr><td colspan="9" class="empty">进入统计板块后加载</td></tr></tbody></table></div>
+      <div class="table-wrap"><table style="min-width:1500px"><thead><tr><th>账号</th><th>运行/健康</th><th>累计请求/错误</th><th>24h 请求/错误</th><th>累计 / 24h input·output·total</th><th>累计 / 24h 缓存 Token·占比·命中率</th><th>健康样本/分数</th><th>额度 5 小时/周/月</th><th>额度状态/路由池</th></tr></thead><tbody id="statisticsBody"><tr><td colspan="9" class="empty">进入统计板块后加载</td></tr></tbody></table></div>
       <div id="statisticsLegacy" class="dim" style="font-size:12px;margin-top:10px"></div>
     </div>
   </section>
@@ -131,6 +132,23 @@
       <p id="logDescription" class="dim">展示最终请求结果，每个请求一条；旧记录可能缺少 result，界面仅按历史状态显示 legacy_failed，不迁移或改写历史 JSONL。</p>
       <div class="table-wrap"><table style="min-width:1000px"><thead><tr><th>时间</th><th>请求 ID</th><th>请求/实际模型</th><th>账号</th><th>策略/原因</th><th>状态 / 结果</th><th>供应商路径</th><th>详情</th></tr></thead><tbody id="logBody"><tr><td colspan="8" class="empty">暂无记录</td></tr></tbody></table></div>
       <button id="logNext" class="ghost" onclick="loadLogs(true)" style="margin-top:10px">下一页</button>
+    </div>
+  </section>
+
+  <section id="detailsPanel" aria-labelledby="detailsTitle" hidden>
+    <div class="card">
+      <h2 id="detailsTitle">详细日志</h2>
+      <p class="banner">默认关闭。启用后持续保存提示词、普通 Header 与响应内容，直到手动关闭；识别到的凭据会脱敏，无法查看原值。每个正文最多 5 MiB；独立保留最多 7 天 / 1 GiB，高流量可能缩短保留期。截断、未读或不安全的片段可能整段省略。正文在请求结束后可查询；进程中断后仅恢复已落盘的请求身份与 interrupted 状态。</p>
+      <p id="detailsAuth" role="status">正在确认认证状态…</p>
+      <div class="toolbar"><label for="detailedLogging"><input id="detailedLogging" type="checkbox" disabled onchange="toggleDetailedLogging()"> 启用详细日志（立即独立保存，不提交账号草稿）</label><button class="ghost" type="button" onclick="loadDetails()">刷新 / 筛选</button><button class="ghost" type="button" onclick="clearDetails()">清空详细日志</button></div>
+      <div class="toolbar"><label>请求 ID <input id="detailsRequestId"></label><label>模型 <input id="detailsModel"></label><label>账号 <input id="detailsAccount"></label><label>状态码 <input id="detailsStatusFilter" type="number" min="100" max="599"></label><label>开始时间 <input id="detailsFrom" type="datetime-local"></label><label>结束时间 <input id="detailsTo" type="datetime-local"></label></div>
+      <p id="detailsStatus" aria-live="polite"></p>
+      <div class="table-wrap"><table><thead><tr><th>时间 / 请求</th><th>模型 / 账号</th><th>状态 / 完整性</th><th>操作</th></tr></thead><tbody id="detailsList"></tbody></table></div>
+      <button id="detailsNext" class="ghost" type="button" disabled onclick="loadDetails(true)">下一页</button>
+      <h3>请求与实际调用（正文按需加载）</h3><pre id="detailsMetadata" style="max-height:24rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+      <div id="detailsBodies" class="toolbar"></div>
+      <label for="detailsText">已脱敏正文 / 不完整原因</label><textarea id="detailsText" readonly rows="16" style="width:100%;max-height:36rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere"></textarea>
+      <button id="detailsCopy" class="ghost" type="button" disabled onclick="copyDetailBody()">复制已加载正文</button>
     </div>
   </section>
 
@@ -163,21 +181,29 @@
     <h2>账号管理（Cline Pass 账号池）</h2>
     <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px; flex-wrap:wrap;">
       <label class="dim" style="font-size:13px">模式：</label>
-      <select id="accMode">
+      <select id="accMode" onchange="renderAccounts()">
         <option value="single">单账号（手动指定）</option><option value="roundrobin">账号池轮询</option><option value="sticky">会话粘性（HRW）</option>
         <option value="least-connections">最少连接</option><option value="weighted-roundrobin">加权轮询</option><option value="priority-failover">主备优先级</option>
       </select>
       <label class="dim" style="font-size:12px">容量等待(ms) <input id="concurrencyWaitMs" type="number" min="0" max="30000" value="2000" style="width:90px"></label>
       <select id="preset"><option value="">策略预设…</option><option value="stable">会话稳定</option><option value="throughput">最大吞吐</option><option value="even">均匀分摊</option><option value="quota">按额度分摊</option><option value="failover">主备容灾</option><option value="safe">保守防封</option></select>
       <button class="ghost" onclick="previewPreset()">预览应用</button>
-      <input id="accSearch" placeholder="搜索名称或备注" oninput="renderAccounts()" style="background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px">
+      <input id="accSearch" placeholder="搜索名称或备注" oninput="clearBulkSelection()" style="background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px">
       <button class="ghost" onclick="addAccountRow()">＋ 添加账号</button>
       <button onclick="saveAccounts()">保存账号配置</button>
       <span class="dim" style="font-size:12px" id="accMsg" aria-live="polite"></span>
     </div>
+    <div class="toolbar">
+      <label><input id="bulkSelectAll" type="checkbox" onchange="selectAllAccounts(this.checked)"> 选择当前搜索结果全部账号</label>
+      <label for="bulkConcurrency">统一并发（0 = 不限）</label><input id="bulkConcurrency" type="number" min="0" max="100000" step="1" style="width:110px">
+      <button id="bulkApply" type="button" onclick="applyBulkConcurrency()" disabled>应用到所选账号草稿</button>
+    </div>
+    <div id="bulkSummary" aria-live="polite" style="max-height:120px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere"></div>
+    <p class="dim">批量应用仅更新草稿，尚未生效；请点击“保存账号配置”使其生效。更改搜索条件会清空选择，不会丢弃草稿。</p>
+    <div id="bulkFeedback" aria-live="polite"></div>
     <div class="table-wrap"><table style="min-width:980px">
-      <thead><tr><th>使用</th><th>名称</th><th>备注</th><th>启用</th><th>并发</th><th>权重/优先级</th><th>代理</th><th>运行状态</th><th>请求数</th><th>操作</th></tr></thead>
-      <tbody id="accBody"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
+      <thead><tr><th>批量选择</th><th>使用</th><th>名称</th><th>备注</th><th>启用</th><th>并发</th><th>权重/优先级</th><th>代理</th><th>运行状态</th><th>请求数</th><th>操作</th></tr></thead>
+      <tbody id="accBody"><tr><td colspan="11" class="empty">加载中…</td></tr></tbody>
     </table></div>
     <div style="margin-top:12px">
       <div class="toolbar"><label class="dim" for="errorRulePreset">错误规则快捷预设：</label><select id="errorRulePreset"><option value="standard">标准限流保护</option><option value="fast">快速恢复</option><option value="conservative">保守保护</option><option value="observe">只观察不处置</option><option value="clear">清空全部规则</option></select><label class="dim"><input id="errorPresetReplace" type="checkbox"> 完整替换（默认合并）</label><button class="ghost" type="button" onclick="previewErrorPreset()">预览应用</button></div>
@@ -185,6 +211,17 @@
       <textarea id="accountErrorRules" rows="3" style="width:100%;margin-top:5px;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:Consolas,monospace"></textarea>
     </div>
     <fieldset style="border:1px solid var(--border);padding:10px;margin-top:12px"><legend class="dim">固定顺序账号调度流水线（可选）</legend><label><input id="pipelineExcludeUnhealthy" type="checkbox"> 1. 排除已评分不健康账号</label>　<label><input id="pipelineQuotaPool" type="checkbox"> 2. Cline 额度热池</label>　<label><input id="pipelineHealthSort" type="checkbox"> 3. 健康度分层</label>　<label><input id="pipelineSticky" type="checkbox"> 4. 会话粘性</label><p class="dim" style="font-size:12px;margin-top:8px">硬过滤始终最先执行；数据不足仍可采样；额度未知不阻塞；高层满载可跨层回退。sticky 模式已隐式启用粘性。</p></fieldset>
+    <button id="rawSchedulingOpen" type="button" class="ghost" onclick="openRawScheduling(this)">查看/编辑原始配置</button>
+    <p class="dim">原始配置仅编辑当前调度草稿；应用后仍需点击“保存账号配置”。</p>
+    <div id="rawSchedulingFeedback" aria-live="polite"></div>
+    <dialog id="rawSchedulingDialog" aria-labelledby="rawSchedulingTitle" aria-describedby="rawSchedulingHelp" style="width:min(760px,calc(100% - 24px));max-height:90vh;overflow:auto;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:16px">
+      <h2 id="rawSchedulingTitle">原始调度配置 · 当前页面草稿</h2>
+      <p id="rawSchedulingHelp" class="dim">策略全局适用于账号池；accountNames 为全部账号的只读参考名称（可重复），不可修改。实际选择仍受启用状态、健康和容量影响。应用不会立即生效；请另行保存账号配置。</p>
+      <label for="rawSchedulingJson">调度草稿 JSON</label>
+      <textarea id="rawSchedulingJson" rows="20" spellcheck="false" style="width:100%;max-width:100%;background:var(--card2);color:var(--text);font-family:Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere"></textarea>
+      <div id="rawSchedulingError" aria-live="polite"></div>
+      <div class="toolbar"><button type="button" onclick="applyRawScheduling()">应用到页面草稿</button><button type="button" class="ghost" onclick="closeRawScheduling()">取消</button></div>
+    </dialog>
     <div id="accLive" aria-live="polite" class="dim" style="font-size:12px"></div>
   </div>
 
@@ -276,12 +313,13 @@ const escapeHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '
 const jsArg = (s) => escapeHtml(JSON.stringify(String(s ?? '')));
 const fmt = (ts) => new Date(ts).toLocaleTimeString();
 
-async function api(path, body, method) {
+async function api(path, body, method, asText=false, options={}) {
   const headers = body ? { 'Content-Type': 'application/json' } : {};
   if (AUTH_KEY) headers['X-Admin-Key'] = AUTH_KEY;
   const verb = method || (body ? 'POST' : 'GET');
-  const res = await fetch(path, { method: verb, headers, ...(body ? { body: JSON.stringify(body) } : {}) });
+  const res = await fetch(path, { method: verb, headers, ...(body ? { body: JSON.stringify(body) } : {}), ...(options.signal ? { signal: options.signal } : {}) });
   if (res.status === 401) { showLogin(); throw new Error('unauthorized'); }
+  if(asText){if(!res.ok)throw Error('正文已过期、清空或暂不可用');return res.text();}
   return res.json();
 }
 
@@ -444,6 +482,10 @@ async function loadAll() {
   const [models, accs, sec, meta, aliases] = await Promise.all([api('/api/models' + (accountId ? '?accountId=' + encodeURIComponent(accountId) : '')), api('/api/accounts'), api('/api/security'), api('/api/meta'), api('/api/model-aliases')]);
   DATA = models;
   ACCS = accs; ALIASES = aliases;
+  $('#accMode').value = ACCS.mode; $('#concurrencyWaitMs').value = ACCS.concurrencyWaitMs ?? 2000; $('#accountErrorRules').value = JSON.stringify(ACCS.accountErrorRules || {}, null, 2);
+  $('#pipelineQuotaPool').checked=!!ACCS.accountPipeline?.quotaPool;$('#pipelineExcludeUnhealthy').checked=!!ACCS.accountPipeline?.excludeUnhealthy;$('#pipelineHealthSort').checked=!!ACCS.accountPipeline?.healthSort;$('#pipelineSticky').checked=!!ACCS.accountPipeline?.sticky;
+  BULK_SELECTION.clear(); $('#bulkFeedback').textContent = '';
+  $('#rawSchedulingFeedback').textContent = '';
   $('#aliasEditor').value = Object.entries(aliases.aliases || {}).map(([a,t]) => `${a} = ${t}`).join('\n');
   const testAccount = $('#testAccount');
   if (testAccount) { const selectedTest = testAccount.value; testAccount.innerHTML = '<option value="">按调度策略选号</option>' + accs.accounts.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`).join(''); testAccount.value = selectedTest; }
@@ -742,19 +784,123 @@ function bulkUp(id, action) {
 }
 
 let ACCS = null, ALIASES = null, DRAWER_INDEX = -1, DRAWER_SNAPSHOT = '', DRAWER_RETURN = null, PENDING_PRESET = null, PENDING_ERROR_PRESET = null, LOG_CURSOR = null, LOG_QUERY_ID = 0, STATISTICS_QUERY_ID = 0;
+let STATISTICS_VISIT_ID = 0, STATISTICS_TIMER = null, STATISTICS_REFRESH_CONTROLLER = null, STATISTICS_REFRESH_PROMISE = null, STATISTICS_REFRESH_VISIT = 0;
+const STATISTICS_REFRESH_MS = 5 * 60 * 1000, STATISTICS_STALE_MS = 15 * 60 * 1000;
+const BULK_SELECTION = new Set();
+function visibleAccountRows() {
+  const q = ($('#accSearch').value || '').toLowerCase();
+  return (ACCS?.accounts || []).map((a,i) => ({a,i})).filter(({a}) => !q || `${a.name} ${a.note || ''}`.toLowerCase().includes(q));
+}
+function updateBulkSelection() {
+  const rows = visibleAccountRows(), visible = new Set(rows.map(({a}) => a));
+  for (const a of BULK_SELECTION) if (!visible.has(a)) BULK_SELECTION.delete(a);
+  const targets = rows.filter(({a}) => BULK_SELECTION.has(a)).map(({a}) => a);
+  const all = $('#bulkSelectAll');
+  all.disabled = !rows.length; all.checked = !!rows.length && targets.length === rows.length;
+  all.indeterminate = targets.length > 0 && targets.length < rows.length;
+  $('#bulkApply').disabled = !targets.length;
+  $('#bulkSummary').textContent = `已选择 ${targets.length} 个账号：\n${targets.map(a => a.name).join('\n') || '—'}`;
+  return targets;
+}
+function clearBulkSelection() { BULK_SELECTION.clear(); renderAccounts(); }
+function selectAccount(i, checked) {
+  const a = ACCS.accounts[i];
+  if (checked && visibleAccountRows().some(row => row.a === a)) BULK_SELECTION.add(a);
+  else BULK_SELECTION.delete(a);
+  updateBulkSelection();
+}
+function selectAllAccounts(checked) {
+  for (const {a} of visibleAccountRows()) { if (checked) BULK_SELECTION.add(a); else BULK_SELECTION.delete(a); }
+  renderAccounts();
+}
+function applyBulkConcurrency() {
+  const targets = updateBulkSelection(), raw = $('#bulkConcurrency').value.trim(), value = Number(raw);
+  if (!targets.length) { $('#bulkFeedback').textContent = '请先选择账号'; return; }
+  if (!raw || !Number.isFinite(value) || !Number.isInteger(value) || value < 0 || value > 100000) {
+    $('#bulkFeedback').textContent = '并发必须为 0–100000 的整数（0 = 不限）'; return;
+  }
+  for (const a of targets) a.maxConcurrent = value;
+  renderAccounts();
+  $('#bulkFeedback').textContent = '草稿已更新，尚未生效；请保存账号配置';
+}
 function renderAccounts() {
   if (!ACCS) return;
-  $('#accMode').value = ACCS.mode; $('#concurrencyWaitMs').value = ACCS.concurrencyWaitMs ?? 2000; $('#accountErrorRules').value = JSON.stringify(ACCS.accountErrorRules || {}, null, 2);
-  $('#pipelineQuotaPool').checked=!!ACCS.accountPipeline?.quotaPool;$('#pipelineExcludeUnhealthy').checked=!!ACCS.accountPipeline?.excludeUnhealthy;$('#pipelineHealthSort').checked=!!ACCS.accountPipeline?.healthSort;$('#pipelineSticky').checked=!!ACCS.accountPipeline?.sticky;
-  const q = ($('#accSearch').value || '').toLowerCase();
-  const rows = ACCS.accounts.map((a, i) => ({a,i})).filter(({a}) => !q || `${a.name} ${a.note || ''}`.toLowerCase().includes(q)).map(({a,i}) => {
-    const usage=(ACCS.stats||{})[a.name]||{}, checked=ACCS.mode==='single'&&i===ACCS.active;
+  updateBulkSelection();
+  const rows = visibleAccountRows().map(({a,i}) => {
+    const usage=(ACCS.stats||{})[a.name]||{}, checked=$('#accMode').value==='single'&&i===ACCS.active;
     const state=a.state?.banned?'封禁':a.state?.cooldownUntil>Date.now()?`冷却至 ${new Date(a.state.cooldownUntil).toLocaleTimeString()}`:'健康';
     let proxy='直连'; try { if(a.proxyUrl) proxy=new URL(a.proxyUrl).protocol.replace(':','').toUpperCase(); } catch {}
     const note=String(a.note||'').replace(/\s+/g,' ').slice(0,50);
-    return `<tr><td><input type="radio" name="accActive" data-i="${i}" ${checked?'checked':''} ${ACCS.mode!=='single'?'disabled':''} onchange="ACCS.active=${i}"></td><td class="account-name" title="${escapeHtml(a.name)}">${escapeHtml(a.name)}</td><td class="dim">${escapeHtml(note||'—')}</td><td><input type="checkbox" ${a.enabled!==false?'checked':''} onchange="ACCS.accounts[${i}].enabled=this.checked"></td><td>${a.maxConcurrent||0} / ${a.activeCount||0}</td><td>${a.weight||1} / ${a.priority||100}</td><td><span class="badge">${escapeHtml(proxy)}</span></td><td><span class="badge ${state==='健康'?'green':'orange'}">${escapeHtml(state)}</span></td><td>${usage.requests===null?'无数据':Number(usage.requests)||0}</td><td><div class="row-actions"><button class="ghost" onclick="openAccountDrawer(${i},this)">设置</button><button class="ghost" onclick="testAccount(${i},this)">测试</button>${a.state?`<button class="ghost" onclick="recoverAccount(${jsArg(a.id)})">恢复</button>`:''}<button class="ghost" onclick="delAccount(${i})">删除</button></div></td></tr>`;
+    return `<tr><td><input type="checkbox" aria-label="批量选择 ${escapeHtml(a.name)}" ${BULK_SELECTION.has(a)?'checked':''} onchange="selectAccount(${i},this.checked)"></td><td><input type="radio" name="accActive" data-i="${i}" ${checked?'checked':''} ${$('#accMode').value!=='single'?'disabled':''} onchange="ACCS.active=${i}"></td><td class="account-name" title="${escapeHtml(a.name)}">${escapeHtml(a.name)}</td><td class="dim">${escapeHtml(note||'—')}</td><td><input type="checkbox" ${a.enabled!==false?'checked':''} onchange="ACCS.accounts[${i}].enabled=this.checked"></td><td>${a.maxConcurrent||0} / ${a.activeCount||0}</td><td>${a.weight||1} / ${a.priority||100}</td><td><span class="badge">${escapeHtml(proxy)}</span></td><td><span class="badge ${state==='健康'?'green':'orange'}">${escapeHtml(state)}</span></td><td>${usage.requests===null?'无数据':Number(usage.requests)||0}</td><td><div class="row-actions"><button class="ghost" onclick="openAccountDrawer(${i},this)">设置</button><button class="ghost" onclick="testAccount(${i},this)">测试</button>${a.state?`<button class="ghost" onclick="recoverAccount(${jsArg(a.id)})">恢复</button>`:''}<button class="ghost" onclick="delAccount(${i})">删除</button></div></td></tr>`;
   }).join('');
-  $('#accBody').innerHTML=rows||'<tr><td colspan="10" class="empty">无匹配账号</td></tr>';
+  $('#accBody').innerHTML=rows||'<tr><td colspan="11" class="empty">无匹配账号</td></tr>';
+}
+// Editor snapshots detect stale sources; existing controls remain the scheduling draft owner.
+let RAW_SCHEDULING = null;
+const RAW_PIPELINE_CONTROLS = {quotaPool:'pipelineQuotaPool',excludeUnhealthy:'pipelineExcludeUnhealthy',healthSort:'pipelineHealthSort',sticky:'pipelineSticky'};
+function rawSchedulingControls() {
+  return {accountMode:$('#accMode').value, concurrencyWaitMs:$('#concurrencyWaitMs').value,
+    accountErrorRules:$('#accountErrorRules').value,
+    accountPipeline:Object.fromEntries(Object.entries(RAW_PIPELINE_CONTROLS).map(([key,id]) => [key,$('#'+id).checked]))};
+}
+function validateRawScheduling(value, names) {
+  const object = x => x !== null && typeof x === 'object' && !Array.isArray(x);
+  const exact = (x,keys) => object(x) && Object.keys(x).length === keys.length && keys.every(key => Object.hasOwn(x,key));
+  if (!exact(value,['accountMode','concurrencyWaitMs','accountErrorRules','accountPipeline','accountNames'])) throw Error('根对象必须且只能包含五个指定字段');
+  if (!Array.from($('#accMode').options).some(option => option.value === value.accountMode)) throw Error('accountMode 无效');
+  if (!Number.isInteger(value.concurrencyWaitMs) || value.concurrencyWaitMs < 0 || value.concurrencyWaitMs > 30000) throw Error('concurrencyWaitMs 必须为 0–30000 的整数');
+  if (!exact(value.accountPipeline,Object.keys(RAW_PIPELINE_CONTROLS))) throw Error('accountPipeline 必须包含且仅包含四个开关');
+  for (const key of Object.keys(RAW_PIPELINE_CONTROLS)) if (typeof value.accountPipeline[key] !== 'boolean') throw Error(`accountPipeline.${key} 必须为 boolean`);
+  if (!object(value.accountErrorRules)) throw Error('accountErrorRules 必须为对象');
+  for (const [code,rule] of Object.entries(value.accountErrorRules)) {
+    if (!/^[1-5][0-9]{2}$/.test(code)) throw Error('accountErrorRules 状态码必须为 100–599');
+    const field = `accountErrorRules.${code}`;
+    if (!object(rule) || !['ignore','cooldown','ban'].includes(rule.action)) throw Error(`${field}.action 无效`);
+    if (!exact(rule,rule.action === 'cooldown' ? ['action','cooldownMs'] : ['action'])) throw Error(`${field} 包含缺失或不支持的字段`);
+    if (rule.action === 'cooldown' && (!Number.isSafeInteger(rule.cooldownMs) || rule.cooldownMs < 1 || rule.cooldownMs > 2592000000)) throw Error(`${field}.cooldownMs 必须为 1–2592000000 的整数`);
+  }
+  if (!Array.isArray(value.accountNames) || !value.accountNames.every(name => typeof name === 'string') || JSON.stringify(value.accountNames) !== JSON.stringify(names)) throw Error('accountNames 仅供参考，不可修改');
+}
+function openRawScheduling(button) {
+  if (!ACCS || RAW_SCHEDULING) return;
+  const controls = rawSchedulingControls(), names = ACCS.accounts.map(a => a.name);
+  let rules;
+  try { rules = JSON.parse(controls.accountErrorRules); }
+  catch { $('#rawSchedulingFeedback').textContent = 'accountErrorRules 不是有效 JSON；原草稿未改变'; return; }
+  const value = {...controls,concurrencyWaitMs:Number(controls.concurrencyWaitMs),accountErrorRules:rules,accountNames:names};
+  try {
+    if (!controls.concurrencyWaitMs.trim()) throw Error('concurrencyWaitMs 不可为空');
+    validateRawScheduling(value,names);
+  } catch (e) { $('#rawSchedulingFeedback').textContent = e.message; return; }
+  const text = JSON.stringify(value,null,2);
+  RAW_SCHEDULING = {source:ACCS,accounts:[...ACCS.accounts],names,controls:JSON.stringify(controls),text,opener:button||document.activeElement};
+  $('#rawSchedulingJson').value = text; $('#rawSchedulingError').textContent = ''; $('#rawSchedulingFeedback').textContent = '';
+  $('#rawSchedulingDialog').showModal(); $('#rawSchedulingJson').focus();
+}
+function closeRawScheduling(force=false) {
+  if (!RAW_SCHEDULING) return;
+  if (!force && $('#rawSchedulingJson').value !== RAW_SCHEDULING.text && !confirm('存在未应用的 JSON 变更，确认丢弃？')) return;
+  const opener = RAW_SCHEDULING.opener;
+  RAW_SCHEDULING = null; $('#rawSchedulingDialog').close(); opener?.focus?.();
+}
+$('#rawSchedulingDialog').addEventListener('cancel',event => { event.preventDefault(); closeRawScheduling(); });
+function applyRawScheduling() {
+  const snapshot = RAW_SCHEDULING;
+  if (!snapshot) return;
+  if (ACCS !== snapshot.source || JSON.stringify(rawSchedulingControls()) !== snapshot.controls ||
+      ACCS.accounts.length !== snapshot.accounts.length || ACCS.accounts.some((a,i) => a !== snapshot.accounts[i] || a.name !== snapshot.names[i])) {
+    $('#rawSchedulingError').textContent = '页面草稿已改变，请关闭并重新打开原始配置'; return;
+  }
+  let value;
+  try { value = JSON.parse($('#rawSchedulingJson').value); }
+  catch { $('#rawSchedulingError').textContent = '调度草稿不是有效 JSON'; return; }
+  try { validateRawScheduling(value,snapshot.names); }
+  catch (e) { $('#rawSchedulingError').textContent = e.message; return; }
+  $('#accMode').value = value.accountMode; $('#concurrencyWaitMs').value = String(value.concurrencyWaitMs);
+  $('#accountErrorRules').value = JSON.stringify(value.accountErrorRules,null,2);
+  for (const [key,id] of Object.entries(RAW_PIPELINE_CONTROLS)) $('#'+id).checked = value.accountPipeline[key];
+  renderAccounts(); closeRawScheduling(true);
+  $('#rawSchedulingFeedback').textContent = '草稿已更新，尚未生效；请保存账号配置';
 }
 function collectAccounts(){return {accounts:ACCS.accounts.map(a=>({id:a.id,name:a.name,note:a.note||'',key:a.key||'',enabled:a.enabled!==false,maxConcurrent:Number(a.maxConcurrent)||0,weight:Number(a.weight)||1,priority:Number(a.priority)||100,proxyUrl:a.proxyUrl||'',headers:a.headers||{},perModel:a.perModel||{}})),mode:$('#accMode').value,active:ACCS.active||0,accountPipeline:{quotaPool:$('#pipelineQuotaPool').checked,excludeUnhealthy:$('#pipelineExcludeUnhealthy').checked,healthSort:$('#pipelineHealthSort').checked,sticky:$('#pipelineSticky').checked}};}
 async function saveAccounts(payload=null){payload||=collectAccounts();payload.concurrencyWaitMs=Number($('#concurrencyWaitMs').value);try{payload.accountErrorRules||=JSON.parse($('#accountErrorRules').value||'{}');}catch{return accMsg('错误规则不是有效 JSON',true);}if(!payload.accounts.some(a=>a.key))return accMsg('至少需要一个 key 非空的账号',true);const r=await api('/api/accounts',payload);if(!r.ok)return accMsg(r.error?.message||'保存失败',true);accMsg(`已保存：${r.accounts} 个账号 · ${r.mode}`);await loadAll();}
@@ -781,22 +927,81 @@ function generateAliases(){const pre=$('#aliasPrefix').value,suf=$('#aliasSuffix
 async function saveAliases(){try{const r=await api('/api/model-aliases',{aliases:parseAliases()});$('#aliasMsg').textContent=r.ok?`已保存 ${r.count} 条`:r.error?.message;if(r.ok)await loadAll();}catch(e){$('#aliasMsg').textContent=e.message;}}
 function statisticValue(value,coverage){return value===null||value===undefined||(coverage!==undefined&&Number(coverage)===0)?'无数据':`${Number(value).toLocaleString()}${coverage!==undefined?`（${Number(coverage)} 请求有数据）`:''}`;}
 function statisticPercent(value){return value===null||value===undefined?'无数据':`${(Number(value)*100).toFixed(1)}%`;}
-function quotaLimit(quota,type){const value=quota?.limits?.[type];return value?`${Number(value.percentUsed).toFixed(1)}%${value.resetsAt?' · '+new Date(value.resetsAt).toLocaleString():''}`:'未知';}
+function quotaLimit(quota,type,label){const value=quota?.limits?.[type],used=value?.percentUsed;if(typeof used!=='number'||!Number.isFinite(used)||used<0||used>100)return `${label}：未知 · 重置时间未提供`;const resetValue=value.resetsAt,validReset=typeof resetValue==='string'&&/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(resetValue)&&Number.isFinite(Date.parse(resetValue))&&new Date(resetValue).toISOString()===resetValue,reset=validReset?new Date(resetValue).toLocaleString():'未提供';return `${label}：已用 ${used.toFixed(1)}% · 剩余 ${(100-used).toFixed(1)}%<br><span class="dim">重置时间 ${escapeHtml(reset)}</span>`;}
+function quotaState(a,generatedAt){const q=a.quota||{},refresh=q.refresh||{},known=['five_hour','weekly','monthly'].filter(type=>typeof q.limits?.[type]?.percentUsed==='number'&&Number.isFinite(q.limits[type].percentUsed)&&q.limits[type].percentUsed>=0&&q.limits[type].percentUsed<=100).length,hasSnapshot=known>0&&Number.isSafeInteger(q.fetchedAt)&&q.fetchedAt>0,stale=hasSnapshot&&(q.lastSuccessAt!==q.fetchedAt||!Number.isSafeInteger(q.lastAttemptAt)||q.lastAttemptAt>q.lastSuccessAt||q.fetchedAt>generatedAt||generatedAt-q.fetchedAt>STATISTICS_STALE_MS),errorLabel=({auth:'认证',rate_limit:'限流',server:'上游服务',http:'HTTP',proxy:'代理',network:'网络',timeout:'超时',json:'JSON',schema:'数据格式'})[q.errorCategory]||'其他';const parts=[];if(refresh.reason==='unconfigured')parts.push('未配置');else{if(refresh.reason==='disabled')parts.push(hasSnapshot?'已禁用 · 上次额度':'已禁用 · 未知');else if(!hasSnapshot)parts.push('未知 · 尚未获取');if(hasSnapshot){let diagnostic=false;if(q.errorCategory){parts.push(`刷新失败（${escapeHtml(errorLabel)}） · 显示上次成功额度`);diagnostic=true;}if(stale){parts.push('过期 · 上次快照');diagnostic=true;}if(known<3){parts.push('部分可用');diagnostic=true;}if(!diagnostic&&refresh.reason!=='disabled')parts.push('额度快照可用');}else if(q.errorCategory)parts.push(`刷新失败（${escapeHtml(errorLabel)}） · 尚无成功额度`);}if(refresh.state==='queued')parts.push('等待刷新');else if(refresh.state==='fetching')parts.push('刷新中');else if(refresh.eligible&&refresh.nextAttemptAt&&refresh.nextAttemptAt<=generatedAt)parts.push('待刷新');if(q.lastSuccessAt)parts.push(`上次成功 ${escapeHtml(new Date(q.lastSuccessAt).toLocaleString())}`);if(q.lastAttemptAt&&q.lastAttemptAt!==q.lastSuccessAt)parts.push(`上次尝试 ${escapeHtml(new Date(q.lastAttemptAt).toLocaleString())}`);parts.push(`额度路由池 ${escapeHtml(a.quota.pool)}（${escapeHtml(q.status||'unknown')}）`);return parts.join('<br>');}
 function cacheMetrics(x){return `缓存 ${statisticValue(x.cachedTokens,x.cacheKnownRequests)} · Token 占比 ${statisticPercent(x.cacheTokenRatio)}（${statisticValue(x.cacheInputCachedTokens)}/${statisticValue(x.cacheInputTokens)}） · 命中请求率 ${statisticPercent(x.cacheHitRequestRate)}（${statisticValue(x.cacheHitRequests)}/${statisticValue(x.cacheKnownRequests)}）`;}
 function statisticsRange(label,x){return `<div><b>${label}</b><br>请求/错误 ${statisticValue(x.requests)} / ${statisticValue(x.errors)}<br>input ${statisticValue(x.inputTokens,x.inputKnownRequests)} · output ${statisticValue(x.outputTokens,x.outputKnownRequests)} · total ${statisticValue(x.totalTokens,x.totalKnownRequests)}<br>${cacheMetrics(x)}</div>`;}
-async function loadStatistics(){const queryId=++STATISTICS_QUERY_ID;$('#statisticsStatus').textContent='加载中…';try{const data=await api('/api/statistics');if(queryId!==STATISTICS_QUERY_ID||$('#statisticsPanel').hidden)return;const l=data.lifetime.global,r=data.recent24h.global;$('#statisticsSummary').innerHTML=statisticsRange('累计',l)+statisticsRange('最近 24 小时',r);$('#statisticsBody').innerHTML=(data.accounts||[]).map(a=>`<tr><td>${escapeHtml(a.name)}<br><span class="mono dim">${escapeHtml(a.id)}</span></td><td>${escapeHtml(a.health.status)}</td><td>${statisticValue(a.lifetime.requests)} / ${statisticValue(a.lifetime.errors)}</td><td>${statisticValue(a.recent24h.requests)} / ${statisticValue(a.recent24h.errors)}</td><td>累计 ${statisticValue(a.lifetime.inputTokens,a.lifetime.inputKnownRequests)} · ${statisticValue(a.lifetime.outputTokens,a.lifetime.outputKnownRequests)} · ${statisticValue(a.lifetime.totalTokens,a.lifetime.totalKnownRequests)}<br>24h ${statisticValue(a.recent24h.inputTokens,a.recent24h.inputKnownRequests)} · ${statisticValue(a.recent24h.outputTokens,a.recent24h.outputKnownRequests)} · ${statisticValue(a.recent24h.totalTokens,a.recent24h.totalKnownRequests)}</td><td>累计 ${cacheMetrics(a.lifetime)}<br>24h ${cacheMetrics(a.recent24h)}</td><td>${Number(a.health.results)||0} / ${a.health.score===null?'无数据':Number(a.health.score).toFixed(1)}</td><td>${quotaLimit(a.quota,'five_hour')}<br>${quotaLimit(a.quota,'weekly')}<br>${quotaLimit(a.quota,'monthly')}</td><td>${escapeHtml(a.quota.pool)}<br>${a.quota.fetchedAt?escapeHtml(new Date(a.quota.fetchedAt).toLocaleString()):'无数据'}${a.quota.errorCategory?'<br>'+escapeHtml(a.quota.errorCategory):''}</td></tr>`).join('')||'<tr><td colspan="9" class="empty">暂无账号统计</td></tr>';$('#statisticsLegacy').textContent=`旧版请求基线（可能含控制台测试，不计入精确聊天总量）：${Number(data.migration?.legacyRequests)||0}`;$('#statisticsStatus').textContent=`生成于 ${new Date(data.generatedAt).toLocaleString()}`;}catch{$('#statisticsStatus').textContent='统计加载失败';}}
+async function loadStatistics(visitId=STATISTICS_VISIT_ID,announce=true){const queryId=++STATISTICS_QUERY_ID;if(announce&&!$('#statisticsPanel').hidden)$('#statisticsStatus').textContent='加载统计中…';try{const data=await api('/api/statistics');if(queryId!==STATISTICS_QUERY_ID||visitId!==STATISTICS_VISIT_ID||$('#statisticsPanel').hidden)return null;const l=data.lifetime.global,r=data.recent24h.global;$('#statisticsSummary').innerHTML=statisticsRange('累计',l)+statisticsRange('最近 24 小时',r);$('#statisticsBody').innerHTML=(data.accounts||[]).map(a=>`<tr><td>${escapeHtml(a.name)}<br><span class="mono dim">${escapeHtml(a.id)}</span></td><td>${escapeHtml(a.health.status)}</td><td>${statisticValue(a.lifetime.requests)} / ${statisticValue(a.lifetime.errors)}</td><td>${statisticValue(a.recent24h.requests)} / ${statisticValue(a.recent24h.errors)}</td><td>累计 ${statisticValue(a.lifetime.inputTokens,a.lifetime.inputKnownRequests)} · ${statisticValue(a.lifetime.outputTokens,a.lifetime.outputKnownRequests)} · ${statisticValue(a.lifetime.totalTokens,a.lifetime.totalKnownRequests)}<br>24h ${statisticValue(a.recent24h.inputTokens,a.recent24h.inputKnownRequests)} · ${statisticValue(a.recent24h.outputTokens,a.recent24h.outputKnownRequests)} · ${statisticValue(a.recent24h.totalTokens,a.recent24h.totalKnownRequests)}</td><td>累计 ${cacheMetrics(a.lifetime)}<br>24h ${cacheMetrics(a.recent24h)}</td><td>${Number(a.health.results)||0} / ${a.health.score===null?'无数据':Number(a.health.score).toFixed(1)}</td><td>${quotaLimit(a.quota,'five_hour','5 小时')}<br>${quotaLimit(a.quota,'weekly','每周')}<br>${quotaLimit(a.quota,'monthly','每月')}</td><td>${quotaState(a,data.generatedAt)}</td></tr>`).join('')||'<tr><td colspan="9" class="empty">暂无账号统计</td></tr>';$('#statisticsLegacy').textContent=`旧版请求基线（可能含控制台测试，不计入精确聊天总量）：${Number(data.migration?.legacyRequests)||0}`;$('#statisticsStatus').textContent=`生成于 ${new Date(data.generatedAt).toLocaleString()}`;return data;}catch{if(queryId===STATISTICS_QUERY_ID&&visitId===STATISTICS_VISIT_ID&&!$('#statisticsPanel').hidden)$('#statisticsStatus').textContent='统计加载失败；已显示的数据未改变';return null;}}
+function quotaRefreshSummary(data){return `额度刷新完成：更新 ${Number(data.refreshed)||0} · 缓存 ${Number(data.cached)||0} · 延后 ${Number(data.deferred)||0} · 跳过 ${Number(data.skipped)||0} · 失败 ${Number(data.failed)||0} · 取消 ${Number(data.cancelled)||0}`;}
+async function refreshStatisticsQuota(force=false,visitId=STATISTICS_VISIT_ID){if($('#statisticsPanel').hidden||visitId!==STATISTICS_VISIT_ID)return null;if(STATISTICS_REFRESH_PROMISE&&STATISTICS_REFRESH_VISIT===visitId)return STATISTICS_REFRESH_PROMISE;const controller=new AbortController(),button=$('#statisticsRefresh');STATISTICS_REFRESH_CONTROLLER=controller;STATISTICS_REFRESH_VISIT=visitId;button.disabled=true;button.textContent='额度刷新中…';$('#statisticsStatus').textContent='额度刷新中…';const promise=(async()=>{try{const data=await api('/api/statistics/quota-refresh',{force},undefined,false,{signal:controller.signal});if(data.error)throw Error('额度刷新失败');if(visitId!==STATISTICS_VISIT_ID||controller!==STATISTICS_REFRESH_CONTROLLER||$('#statisticsPanel').hidden)return null;await loadStatistics(visitId,false);if(visitId===STATISTICS_VISIT_ID&&controller===STATISTICS_REFRESH_CONTROLLER&&!$('#statisticsPanel').hidden)$('#statisticsStatus').textContent=quotaRefreshSummary(data);return data;}catch(e){if(e?.name!=='AbortError'&&visitId===STATISTICS_VISIT_ID&&controller===STATISTICS_REFRESH_CONTROLLER&&!$('#statisticsPanel').hidden)$('#statisticsStatus').textContent='额度刷新失败；保留上次额度与时间';return null;}finally{if(visitId===STATISTICS_VISIT_ID&&controller===STATISTICS_REFRESH_CONTROLLER){STATISTICS_REFRESH_CONTROLLER=null;STATISTICS_REFRESH_PROMISE=null;button.disabled=false;button.textContent='↻ 手动刷新额度与统计';}}})();STATISTICS_REFRESH_PROMISE=promise;return promise;}
+function armStatisticsTimer(visitId){clearTimeout(STATISTICS_TIMER);STATISTICS_TIMER=setTimeout(async()=>{if(visitId!==STATISTICS_VISIT_ID||$('#statisticsPanel').hidden)return;await refreshStatisticsQuota(false,visitId);if(visitId===STATISTICS_VISIT_ID&&!$('#statisticsPanel').hidden)armStatisticsTimer(visitId);},STATISTICS_REFRESH_MS);}
+function stopStatisticsVisit(){STATISTICS_VISIT_ID++;STATISTICS_QUERY_ID++;clearTimeout(STATISTICS_TIMER);STATISTICS_TIMER=null;STATISTICS_REFRESH_CONTROLLER?.abort();STATISTICS_REFRESH_CONTROLLER=null;STATISTICS_REFRESH_PROMISE=null;const button=$('#statisticsRefresh');if(button){button.disabled=false;button.textContent='↻ 手动刷新额度与统计';}}
+async function startStatisticsVisit(){const visitId=++STATISTICS_VISIT_ID;armStatisticsTimer(visitId);await loadStatistics(visitId);if(visitId===STATISTICS_VISIT_ID&&!$('#statisticsPanel').hidden)return refreshStatisticsQuota(false,visitId);return null;}
+function restoreStatisticsVisit(){if(!$('#statisticsPanel').hidden&&STATISTICS_TIMER===null)return startStatisticsVisit();return null;}
+if(typeof window!=='undefined'){window.addEventListener('pagehide',stopStatisticsVisit);window.addEventListener('pageshow',restoreStatisticsVisit);}
 async function switchSection(section){
   const isConsole=section==='console',isStatistics=section==='statistics',type=section==='errors'?'errors':'requests';
-  LOG_QUERY_ID++;STATISTICS_QUERY_ID++;
-  $('#consolePanel').hidden=!isConsole;$('#statisticsPanel').hidden=!isStatistics;$('#logPanel').hidden=isConsole||isStatistics;
-  for(const [name,id] of [['console','navConsole'],['statistics','navStatistics'],['requests','navRequests'],['errors','navErrors']])$('#'+id).setAttribute('aria-pressed',String(section===name));
-  if(isConsole)return;if(isStatistics)return loadStatistics();
+  stopStatisticsVisit();LOG_QUERY_ID++;STATISTICS_QUERY_ID++;DETAIL_LIST_ID++;DETAIL_SELECTION_ID++;DETAIL_NAV_ID++;
+  $('#consolePanel').hidden=!isConsole;$('#statisticsPanel').hidden=!isStatistics;$('#logPanel').hidden=isConsole||isStatistics||section==='details';$('#detailsPanel').hidden=section!=='details';
+  for(const [name,id] of [['console','navConsole'],['statistics','navStatistics'],['requests','navRequests'],['errors','navErrors'],['details','navDetails']])$('#'+id).setAttribute('aria-pressed',String(section===name));
+  if(isConsole)return;if(isStatistics)return startStatisticsVisit();if(section==='details'){const nav=DETAIL_NAV_ID;await loadDetailSettings();if(nav===DETAIL_NAV_ID&&detailVisible())return loadDetails();return;}
   $('#logType').value=type;
   const title=type==='errors'?'上游失败尝试（同一请求可能多条）':'最终请求结果（每个请求一条）';
   $('#logTitle').textContent=title;$('#logSectionStatus').textContent=`当前板块：${type==='errors'?'错误日志':'请求日志'}`;
   $('#logDescription').textContent=type==='errors'?'展示上游失败尝试，同一最终请求可能对应多条；数量不等于失败请求数。':'展示最终请求结果，每个请求一条；旧记录可能缺少 result，界面仅按历史状态显示 legacy_failed，不迁移或改写历史 JSONL。';
   $('#logResult').hidden=type==='errors';
   await loadLogs(false);
+}
+let DETAIL_SETTINGS_ID=0,DETAIL_BODY_TEXT=null,DETAIL_LIST_ID=0,DETAIL_SELECTION_ID=0,DETAIL_NAV_ID=0,DETAIL_CURSOR=null,DETAIL_REQUEST=null,DETAIL_CONFIRMED=false,DETAIL_TOGGLE_PENDING=false;
+const detailVisible=()=>!$('#detailsPanel').hidden;
+async function detailJSON(path,body,method){const result=await api(path,body,method);if(result.error)throw Error(result.error.message||'详细日志操作失败');return result;}
+async function loadDetailSettings(){
+  const nav=DETAIL_NAV_ID,version=++DETAIL_SETTINGS_ID;
+  try{const data=await detailJSON('/api/logs/settings');if(nav!==DETAIL_NAV_ID||version!==DETAIL_SETTINGS_ID||!detailVisible())return;
+    $('#detailsAuth').textContent=data.authRequired?'管理 API 已启用密钥认证。':'警告：未配置代理/管理密钥，当前详细内容没有密钥保护！';
+    if(!DETAIL_TOGGLE_PENDING){DETAIL_CONFIRMED=data.detailedLogging;$('#detailedLogging').checked=DETAIL_CONFIRMED;$('#detailedLogging').disabled=false;}
+  }catch{if(nav===DETAIL_NAV_ID&&version===DETAIL_SETTINGS_ID&&detailVisible())$('#detailsStatus').textContent='日志设置加载失败';}
+}
+async function toggleDetailedLogging(){
+  if(DETAIL_TOGGLE_PENDING)return;DETAIL_TOGGLE_PENDING=true;DETAIL_SETTINGS_ID++;const nav=DETAIL_NAV_ID,next=$('#detailedLogging').checked;$('#detailedLogging').disabled=true;
+  try{const data=await detailJSON('/api/logs/settings',{detailedLogging:next});DETAIL_CONFIRMED=data.detailedLogging;if(nav===DETAIL_NAV_ID&&detailVisible())$('#detailsStatus').textContent='详细日志设置已保存；账号草稿未改变';}
+  catch{if(nav===DETAIL_NAV_ID&&detailVisible())$('#detailsStatus').textContent='设置保存失败，已恢复上次确认状态';}
+  finally{DETAIL_TOGGLE_PENDING=false;DETAIL_SETTINGS_ID++;$('#detailedLogging').checked=DETAIL_CONFIRMED;$('#detailedLogging').disabled=false;}
+}
+function resetDetailSelection(){DETAIL_SELECTION_ID++;DETAIL_REQUEST=null;DETAIL_BODY_TEXT=null;$('#detailsCopy').disabled=true;$('#detailsMetadata').textContent='';$('#detailsBodies').innerHTML='';$('#detailsText').value='';}
+for(const id of ['detailsRequestId','detailsModel','detailsAccount','detailsStatusFilter','detailsFrom','detailsTo'])$('#'+id).addEventListener('input',()=>{
+  DETAIL_LIST_ID++;DETAIL_CURSOR=null;resetDetailSelection();$('#detailsList').innerHTML='';$('#detailsNext').disabled=true;$('#detailsStatus').textContent='筛选已改变，请点击刷新 / 筛选';
+});
+async function loadDetails(next=false){
+  const id=++DETAIL_LIST_ID;resetDetailSelection();$('#detailsList').innerHTML='';$('#detailsNext').disabled=true;
+  if(!next)DETAIL_CURSOR=null;const params=new URLSearchParams({limit:'50'});if(DETAIL_CURSOR)params.set('cursor',DETAIL_CURSOR);
+  for(const [key,element] of [['requestId','detailsRequestId'],['model','detailsModel'],['account','detailsAccount'],['status','detailsStatusFilter']])if($('#'+element).value.trim())params.set(key,$('#'+element).value.trim());
+  for(const [key,element] of [['from','detailsFrom'],['to','detailsTo']])if($('#'+element).value)params.set(key,String(new Date($('#'+element).value).getTime()));
+  $('#detailsStatus').textContent='加载中…';
+  try{const data=await detailJSON('/api/logs/details?'+params);if(id!==DETAIL_LIST_ID||!detailVisible())return;
+    $('#detailsList').innerHTML=data.items.map(row=>`<tr><td>${escapeHtml(new Date(row.ts).toLocaleString())}<br>${escapeHtml(row.requestId)}</td><td>${escapeHtml(row.model)}<br>${escapeHtml((row.accounts||[]).join(', '))}</td><td>${escapeHtml(row.status)} / ${escapeHtml(row.state)} · ${escapeHtml(row.attemptCount)} 次调用</td><td><button type="button" class="ghost" onclick="selectDetail(${jsArg(row.requestId)})">查看请求</button></td></tr>`).join('')||'<tr><td colspan="4">暂无详细日志</td></tr>';
+    DETAIL_CURSOR=data.nextCursor;$('#detailsNext').disabled=!DETAIL_CURSOR;$('#detailsStatus').textContent=`存储失败 ${data.health.failures} · 诊断丢弃 ${data.health.dropped} · 损坏记录 ${data.health.corrupt}`;
+  }catch(error){if(id===DETAIL_LIST_ID&&detailVisible())$('#detailsStatus').textContent=error.message;}
+}
+async function selectDetail(requestId){
+  const id=++DETAIL_SELECTION_ID;DETAIL_REQUEST=requestId;DETAIL_BODY_TEXT=null;$('#detailsCopy').disabled=true;$('#detailsText').value='';$('#detailsMetadata').textContent='加载中…';$('#detailsBodies').innerHTML='';
+  try{const group=await detailJSON('/api/logs/details/'+encodeURIComponent(requestId));if(id!==DETAIL_SELECTION_ID||!detailVisible())return;
+    $('#detailsMetadata').textContent=JSON.stringify({request:group.request,attempts:group.attempts,bodies:group.bodies},null,2);
+    const labels=new Map([[group.request.requestBody,'客户端请求'],[group.request.responseBody,'最终客户端响应']]);for(const [index,attempt] of group.attempts.entries()){labels.set(attempt.requestBody,`调用 ${index+1} 请求`);labels.set(attempt.responseBody,`调用 ${index+1} 响应`);}
+    $('#detailsBodies').innerHTML=group.bodies.map(body=>`<button type="button" class="ghost" onclick="loadDetailBody(${jsArg(requestId)},${jsArg(body.bodyId)},${jsArg(body.state)})">${escapeHtml(labels.get(body.bodyId)||'正文')} · ${escapeHtml(body.state)} · ${escapeHtml(body.capturedBytes)}/${escapeHtml(body.observedBytes)} bytes</button>`).join('');
+  }catch(error){if(id===DETAIL_SELECTION_ID&&detailVisible())$('#detailsMetadata').textContent=error.message;}
+}
+async function loadDetailBody(requestId,bodyId,state){
+  const id=++DETAIL_SELECTION_ID;DETAIL_BODY_TEXT=null;$('#detailsCopy').disabled=true;$('#detailsText').value='加载中…';
+  try{const text=await api('/api/logs/details/'+encodeURIComponent(requestId)+'/bodies/'+encodeURIComponent(bodyId),null,'GET',true);if(id!==DETAIL_SELECTION_ID||requestId!==DETAIL_REQUEST||!detailVisible())return;DETAIL_BODY_TEXT=text;$('#detailsText').value=text;$('#detailsCopy').disabled=false;$('#detailsStatus').textContent='正文状态：'+state;}
+  catch(error){if(id===DETAIL_SELECTION_ID&&detailVisible()){$('#detailsText').value='';$('#detailsStatus').textContent=error.message;}}
+}
+async function copyDetailBody(){if(DETAIL_BODY_TEXT===null)return;const id=DETAIL_SELECTION_ID,text=DETAIL_BODY_TEXT;try{await navigator.clipboard.writeText(text);if(id===DETAIL_SELECTION_ID&&detailVisible())$('#detailsStatus').textContent='已复制脱敏正文';}catch{if(id===DETAIL_SELECTION_ID&&detailVisible()){$('#detailsStatus').textContent='复制失败，请在文本框中选择并复制';$('#detailsText').focus();$('#detailsText').select();}}}
+async function clearDetails(){
+  if(!confirm('确认清空详细日志？不影响普通请求/错误日志，此操作不可撤销。'))return;
+  const nav=DETAIL_NAV_ID;DETAIL_LIST_ID++;DETAIL_SELECTION_ID++;DETAIL_REQUEST=null;DETAIL_BODY_TEXT=null;$('#detailsCopy').disabled=true;$('#detailsText').value='';$('#detailsMetadata').textContent='';$('#detailsBodies').innerHTML='';
+  try{await detailJSON('/api/logs/details',null,'DELETE');if(nav===DETAIL_NAV_ID&&detailVisible())await loadDetails();}
+  catch(error){if(nav===DETAIL_NAV_ID&&detailVisible())$('#detailsStatus').textContent=error.message;}
 }
 async function loadLogs(next=false){
   if(!$('#logBody'))return; const type=$('#logType').value; if(!next)LOG_CURSOR=null; const queryId=++LOG_QUERY_ID;

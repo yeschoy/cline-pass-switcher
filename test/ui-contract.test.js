@@ -23,13 +23,15 @@ test('account drawer key visibility is explicit, masked on every open, and exclu
   assert.match(openDrawer, /\$\('#drawerKey'\)\.type='password'/);
 });
 
-test('top navigation switches four mutually exclusive panels without anchor or scroll shortcuts', () => {
+test('top navigation switches five mutually exclusive sections without anchor or scroll shortcuts', () => {
   assert.match(html, /<nav class="section-nav" aria-label="顶层板块">/);
-  for (const [id, section, pressed, label] of [['navConsole','console','true','控制台'],['navStatistics','statistics','false','统计'],['navRequests','requests','false','请求日志'],['navErrors','errors','false','错误日志']]) {
+  for (const [id, section, pressed, label] of [['navConsole','console','true','控制台'],['navStatistics','statistics','false','统计'],['navRequests','requests','false','请求日志'],['navErrors','errors','false','错误日志'],['navDetails','details','false','详细日志']]) {
     assert.match(html, new RegExp(`<button id="${id}"[^>]+type="button"[^>]+aria-pressed="${pressed}"[^>]+onclick="switchSection\\('${section}'\\)"[^>]*>${label}<\\/button>`));
   }
   assert.equal((html.match(/id="consolePanel"/g) || []).length, 1);
   assert.equal((html.match(/id="statisticsPanel"/g) || []).length, 1);
+  assert.equal((html.match(/id="detailsPanel"/g) || []).length, 1);
+  assert.match(html, /<section id="detailsPanel" aria-labelledby="detailsTitle" hidden>/);
   assert.equal((html.match(/id="logPanel"/g) || []).length, 1);
   assert.match(html, /<section id="statisticsPanel" aria-labelledby="statisticsTitle" hidden>/);
   assert.match(html, /<section id="logPanel" aria-labelledby="logTitle" hidden>/);
@@ -99,4 +101,55 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   const statistics = html.slice(html.indexOf('function statisticValue'), html.indexOf('async function switchSection'));
   assert.match(statistics, /escapeHtml\(a\.name\)/);assert.match(statistics, /escapeHtml\(a\.id\)/);assert.match(statistics, /escapeHtml\(a\.health\.status\)/);assert.match(statistics, /escapeHtml\(a\.quota\.pool\)/);
   assert.doesNotMatch(statistics, /\.key\b|proxyUrl|\.headers\b|\.note\b|rawResponse|rawTrace|session|message/);
+});
+
+test('statistics quota controls expose labelled lifecycle, truthful units and cancellation guards', () => {
+  assert.match(html, /id="statisticsRefresh"[^>]+type="button"[^>]+aria-describedby="statisticsQuotaHelp"[^>]+onclick="refreshStatisticsQuota\(true\)"/);
+  assert.match(html, /进入本页及停留期间每 5 分钟刷新启用且已配置的账号额度/);assert.match(html,/查看额度不会启用额度池路由/);
+  assert.match(html, /额度 5 小时\/周\/月/);assert.match(html, /table style="min-width:1500px"/);
+  const statistics=html.slice(html.indexOf('function statisticValue'),html.indexOf('async function switchSection'));
+  for(const label of ['已用','剩余','重置时间','未提供','未知','部分可用','刷新失败','过期 · 上次快照','已禁用 · 上次额度','未配置','上次成功','等待刷新','刷新中'])assert.ok(statistics.includes(label),label);
+  assert.match(statistics,/typeof used!==['"]number['"]\|\|!Number\.isFinite\(used\)\|\|used<0\|\|used>100/);
+  assert.match(statistics,/\(100-used\)\.toFixed\(1\)/);assert.match(statistics,/api\('\/api\/statistics\/quota-refresh',\{force\}/);
+  assert.match(statistics,/new AbortController\(\)/);assert.match(statistics,/signal:controller\.signal/);assert.match(html,/async function api\(path, body, method, asText=false, options=\{\}\)/);
+  assert.match(html,/STATISTICS_REFRESH_MS = 5 \* 60 \* 1000/);assert.match(statistics,/window\.addEventListener\('pagehide',stopStatisticsVisit\)/);assert.match(statistics,/window\.addEventListener\('pageshow',restoreStatisticsVisit\)/);
+  assert.match(statistics,/STATISTICS_TIMER===null\)return startStatisticsVisit\(\)/);assert.match(statistics,/STATISTICS_REFRESH_CONTROLLER\?\.abort\(\)/);assert.match(statistics,/visitId!==STATISTICS_VISIT_ID/);
+  assert.match(statistics,/controller!==STATISTICS_REFRESH_CONTROLLER/);assert.match(statistics,/STATISTICS_REFRESH_PROMISE&&STATISTICS_REFRESH_VISIT===visitId/);
+});
+
+test('bulk concurrency uses labelled native controls, bounded input and persistent draft guidance', () => {
+  assert.match(html, /id="bulkSelectAll" type="checkbox" onchange="selectAllAccounts\(this.checked\)"> 选择当前搜索结果全部账号/);
+  assert.match(html, /<label for="bulkConcurrency">/);
+  assert.match(html, /id="bulkConcurrency" type="number" min="0" max="100000" step="1"/);
+  assert.match(html, /id="bulkApply" type="button"[^>]+ disabled/);
+  assert.match(html, /aria-label="批量选择 \$\{escapeHtml\(a.name\)\}"/);
+  for (const id of ['bulkSummary','bulkFeedback']) assert.match(html, new RegExp(`id="${id}" aria-live="polite"`));
+  assert.match(html, /批量应用仅更新草稿，尚未生效/);
+  assert.match(html, /id="accSearch"[^>]+oninput="clearBulkSelection\(\)"/);
+  assert.match(html, /id="accMode" onchange="renderAccounts\(\)"/);
+});
+
+
+test('raw scheduling editor uses a labelled native modal, draft guidance and announced feedback', () => {
+  assert.match(html, /id="rawSchedulingOpen" type="button"[^>]+onclick="openRawScheduling\(this\)"/);
+  assert.match(html, /<dialog id="rawSchedulingDialog" aria-labelledby="rawSchedulingTitle" aria-describedby="rawSchedulingHelp"/);
+  assert.match(html, /<label for="rawSchedulingJson">/);
+  assert.match(html, /id="rawSchedulingJson"[^>]+overflow-wrap:anywhere/);
+  for (const id of ['rawSchedulingError','rawSchedulingFeedback']) assert.match(html,new RegExp(`id="${id}" aria-live="polite"`));
+  assert.match(html,/accountNames 为全部账号的只读参考名称（可重复），不可修改/);
+  assert.match(html,/策略全局适用于账号池/);
+});
+
+test('detailed logs have independent labelled controls, privacy/retention guidance and safe on-demand text', () => {
+  assert.match(html, /<label for="detailedLogging"><input id="detailedLogging" type="checkbox" disabled/);
+  assert.match(html, /5 MiB/); assert.match(html, /7 天 \/ 1 GiB/); assert.match(html, /不提交账号草稿/);
+  assert.match(html, /id="detailsStatus" aria-live="polite"/);
+  assert.match(html, /<label for="detailsText">/); assert.match(html, /<textarea id="detailsText" readonly/);
+  assert.match(html, /id="detailsCopy"[^>]+disabled/);
+  const detailCode = html.slice(html.indexOf('let DETAIL_SETTINGS_ID'), html.indexOf('async function loadLogs'));
+  assert.doesNotMatch(detailCode, /loadAll\(|saveAccounts\(/);
+  assert.match(detailCode, /DETAIL_LIST_ID/); assert.match(detailCode, /DETAIL_SELECTION_ID/); assert.match(detailCode, /DETAIL_SETTINGS_ID/);
+  assert.match(detailCode, /detailsMetadata'\)\.textContent=JSON\.stringify/);
+  assert.match(detailCode, /detailsText'\)\.value=text/);
+  assert.match(detailCode, /navigator\.clipboard\.writeText\(text\)/);
 });

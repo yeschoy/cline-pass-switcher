@@ -15,6 +15,8 @@ import { fileURLToPath } from 'node:url';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { JsonlLogStore, enforceCombinedLimit } from './lib/jsonl-log-store.js';
+import { DetailRoot, detailContext, detailRoute, observeStream, MAX_BODY_BYTES, captureBudget } from './lib/detailed-log-capture.js';
+import { DetailedLogStore, parseDetailQuery, MAX_AGE_MS, MAX_TOTAL_BYTES } from './lib/detailed-log-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || __dirname;
@@ -28,6 +30,7 @@ const DEFAULT_CONFIG = {
   apiKey: '',
   proxyKey: '',
   publicBaseUrl: '',
+  detailedLogging: false,
   exposeCatalog: false,    // true 时 /v1/models 合并完整目录模型（默认仅订阅模型）
   upstreamBase: 'https://api.cline.bot/api/v1',
   accounts: [],            // { id, name, key, enabled, maxConcurrent, perModel } —— Cline Pass 账号池
@@ -85,6 +88,7 @@ const saveMeta = () => atomicWriteJson(META_PATH, META);
 const requestLogs = new JsonlLogStore({ dir: LOG_DIR, prefix: 'requests', maxRecords: 50000 });
 const errorLogs = new JsonlLogStore({ dir: LOG_DIR, prefix: 'errors', maxRecords: 10000 });
 enforceCombinedLimit(LOG_DIR, 100 * 1024 * 1024);
+const detailedLogs = new DetailedLogStore({ dir: path.join(DATA_DIR, 'detailed-logs') });
 const recentHistory = Array.isArray(META.history) ? [...META.history] : [];
 
 function randomId(prefix = 'acc') {
@@ -571,6 +575,15 @@ function quotaProjection(accountId, now = Date.now()) {
   const maximum = Math.max(...Object.values(snapshot.limits).map((limit) => limit.percentUsed));
   return { status: 'fresh', pool: maximum < 80 ? 'hot' : maximum < 95 ? 'warm' : 'reserve', fetchedAt: snapshot.fetchedAt, limits: snapshot.limits, errorCategory: null };
 }
+function statisticsQuotaProjection(account, now = Date.now()) {
+  const quota = quotaProjection(account.id, now), state = META.accountQuotas?.[account.id];
+  const reason = !account.key ? 'unconfigured' : account.enabled === false ? 'disabled' : null;
+  const job = quotaJobs.get(account.id), activeJob = job && quotaJobAccount(job) && quotaJobHasOwner(job) ? job : null;
+  let nextAttemptAt = null;
+  if (!reason && state?.errorCategory && state.lastAttemptAt) nextAttemptAt = state.lastAttemptAt + quotaFailureDelay(account.id);
+  else if (!reason) { const successAt = successfulQuotaTime(state, now); if (successAt) nextAttemptAt = successAt + QUOTA_SUCCESS_MS; }
+  return { ...quota, lastAttemptAt: state?.lastAttemptAt || null, lastSuccessAt: state?.lastSuccessAt || null, refresh: { eligible: reason === null, reason, state: activeJob ? (activeJob.state === 'running' ? 'fetching' : 'queued') : 'idle', nextAttemptAt } };
+}
 function buildPipelineGroups(list) {
   const diagnostics = [];
   let candidates = list.map((account) => ({ account, health: healthProjection(account), quota: quotaProjection(account.id) }));
@@ -675,12 +688,16 @@ async function accountFetchJSON(url, opts = {}, timeoutMs = 60000, account = nul
   let json = null; try { json = JSON.parse(result.text); } catch { json = { raw: result.text }; }
   return { status: result.status, json };
 }
-async function fetchJSON(url, opts = {}, timeoutMs = 60000) {
+async function fetchJSON(url, opts = {}, timeoutMs = 60000, account = null) {
+  const root = detailContext.getStore();
+  const attempt = root?.method === 'GET' && url === `${config.upstreamBase}/models` ? root.attempt({ url, method: 'GET', headers: opts.headers || {}, account }) : null;
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(url, { ...opts, signal: ctrl.signal });
+    if (attempt) { attempt.status = res.status; attempt.responseHeaders = Object.fromEntries(res.headers); attempt.url = root.redactor.text(root.redactor.url(res.url)); attempt.redirected = res.redirected; }
     const text = await res.text();
+    if (attempt) { attempt.output.add(text); attempt.output.end(); }
     let json = null;
     try { json = JSON.parse(text); } catch { json = { raw: text }; }
     return { status: res.status, json };
@@ -1038,7 +1055,7 @@ function healthProjection(account, now = Date.now()) {
   if (account.enabled === false) status = 'disabled'; else if (state?.banned) status = 'banned'; else if (state?.cooldownUntil > now) status = 'cooling'; else if (incomplete || health.results < 5) { status = 'insufficient'; score = null; } else if (score >= 80) status = 'available'; else if (score >= 50) status = 'degraded'; else status = 'unhealthy';
   return { status, score, results: health.results, penaltyUnits: health.penaltyUnits, coverageComplete: !incomplete };
 }
-function record(modelId, info) {
+function record(modelId, info, detail = detailContext.getStore()) {
   const ts = Date.now();
   META.models[modelId] = { ...(META.models[modelId] || {}), provider: info.provider, canonical: info.canonical, lastMs: info.ms };
   const result = ['success', 'client_cancelled', 'failed'].includes(info.result) ? info.result : (info.error ? 'failed' : 'success');
@@ -1057,6 +1074,7 @@ function record(modelId, info) {
     durationMs: Number(info.ms) || 0, accountActions: info.accountActions || [], switched: (info.accountPath || []).length > 1, appliedHeaderNames: info.appliedHeaderNames || [],
     errorCategory: result === 'failed' && info.error ? (info.proxyError ? 'proxy' : 'upstream') : null,
   };
+  if (detail?.requestId === request.requestId) detail.result = result;
   const writes = [requestLogs.append(request)];
   for (const [attemptIndex, attempt] of (result === 'client_cancelled' ? [] : (info.trace || [])).entries()) {
     if (attempt.status === 200 && !attempt.action) continue;
@@ -1208,6 +1226,8 @@ function clineRequestJSON(url, { headers = {}, body, signal, timeoutMs = 120000,
   return clineRequest(url, { headers, body, signal, timeoutMs, account, proxyUrl, method }).then(async (res) => ({ status: res.status, headers: res.headers, text: await streamToString(res.body, maxResponseBytes) }));
 }
 function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, account = null, proxyUrl = '', method = 'POST' } = {}) {
+  const root = detailContext.getStore();
+  const attempt = method === 'POST' && url === `${config.upstreamBase}/chat/completions` ? root?.attempt({ url, method, headers, body: body || '', account, proxyUrl }) : null;
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const lib = u.protocol === 'https:' ? https : http;
@@ -1219,12 +1239,16 @@ function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, acc
     const fail = (error) => { cleanup(); if (!settled) { settled = true; reject(error); } };
     const agent = proxyAgentFor(proxyUrl || account?.proxyUrl || '');
     const requestHeaders = { ...headers }; if (method !== 'GET') requestHeaders['Content-Length'] = data.length;
+    if (attempt) attempt.headers = requestHeaders;
     const req = lib.request({ protocol: u.protocol, hostname: u.hostname, port: u.port, path: `${u.pathname}${u.search}`, method, headers: requestHeaders, ...(agent ? { agent } : {}) }, (res) => {
       response = res;
       res.once('end', cleanup);
       res.once('close', cleanup);
-      if (!settled) { settled = true; resolve({ status: res.statusCode || 502, headers: res.headers, body: res }); }
+      if (attempt) { attempt.status = res.statusCode || 502; attempt.responseHeaders = res.headers; }
+      const responseBody = attempt ? observeStream(res, attempt.output) : res;
+      if (!settled) { settled = true; resolve({ status: res.statusCode || 502, headers: res.headers, body: responseBody }); }
     });
+    if (attempt) attempt.headers = req.getHeaders();
     req.on('error', fail);
     req.setTimeout(timeoutMs, () => req.destroy(new Error('upstream timeout')));
     if (signal) {
@@ -1232,70 +1256,218 @@ function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, acc
       else signal.addEventListener('abort', onAbort, { once: true });
     }
     req.end(method === 'GET' ? undefined : data);
-  });
+  }).catch((error) => { if (attempt) attempt.state = 'transport-failed'; throw error; });
 }
 function streamToString(stream, maxBytes = Infinity) {
-  if (stream.readableEnded || stream.destroyed) return Promise.resolve('');
+  if (stream.readableEnded) return Promise.resolve('');
+  if (stream.destroyed) return Promise.reject(new Error('upstream response closed early'));
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0, settled = false;
-    stream.on('data', (c) => {
-      if (settled) return;
+    const cleanup = () => { stream.off('data', onData); stream.off('end', onEnd); stream.off('error', onError); stream.off('close', onClose); };
+    const finish = (fn, value) => { if (settled) return; settled = true; cleanup(); fn(value); };
+    const onData = (c) => {
       const chunk = Buffer.from(c); size += chunk.length;
-      if (size > maxBytes) { settled = true; const error = new Error('upstream response exceeds limit'); error.code = 'RESPONSE_TOO_LARGE'; stream.destroy(); reject(error); return; }
+      if (size > maxBytes) { const error = new Error('upstream response exceeds limit'); error.code = 'RESPONSE_TOO_LARGE'; finish(reject, error); stream.destroy(); return; }
       chunks.push(chunk);
-    });
-    stream.on('end', () => { if (!settled) { settled = true; resolve(Buffer.concat(chunks).toString('utf8')); } });
-    stream.on('error', (error) => { if (!settled) { settled = true; reject(error); } });
-    stream.resume();
+    };
+    const onEnd = () => finish(resolve, Buffer.concat(chunks).toString('utf8'));
+    const onError = (error) => finish(reject, error);
+    const onClose = () => { if (!stream.readableEnded) finish(reject, new Error('upstream response closed early')); };
+    stream.on('data', onData); stream.once('end', onEnd); stream.once('error', onError); stream.once('close', onClose); stream.resume();
   });
 }
-const quotaGenerations = new Map(), quotaInflight = new Set(), quotaFailureCounts = new Map();
-let quotaTimer = null, quotaCursor = 0;
+const quotaGenerations = new Map(), quotaFailureCounts = new Map(), quotaSuccessVersions = new Map(), quotaJobs = new Map(), quotaQueue = [];
+let quotaTimer = null, quotaCursor = 0, quotaRunning = 0, quotaRoutingEpoch = 1, quotaScheduleVersion = 0, quotaPageBatches = 0;
 const QUOTA_TIMEOUT_MS = process.env.NODE_ENV === 'test' ? Math.max(20, Number(process.env.CLINE_PASS_TEST_QUOTA_TIMEOUT_MS) || 15000) : 15000;
 const QUOTA_SUCCESS_MS = process.env.NODE_ENV === 'test' ? Math.max(50, Number(process.env.CLINE_PASS_TEST_QUOTA_SUCCESS_MS) || 300000) : 300000;
 const QUOTA_FAILURE_MS = process.env.NODE_ENV === 'test' ? Math.max(50, Number(process.env.CLINE_PASS_TEST_QUOTA_FAILURE_MS) || 60000) : 60000;
+const QUOTA_GLOBAL_LIMIT = 2, QUOTA_PAGE_BATCH_LIMIT = 16;
 function quotaFailureCategory(error, status, account) {
   if (status === 401 || status === 403) return 'auth'; if (status === 429) return 'rate_limit'; if (status >= 500) return 'server'; if (status) return 'http';
   if (error?.code === 'RESPONSE_TOO_LARGE') return 'schema';
   if (/timeout/i.test(error?.message || '')) return 'timeout'; return account.proxyUrl ? 'proxy' : 'network';
 }
-async function refreshQuota(account) {
-  if (!config.accountPipeline.quotaPool || quotaInflight.has(account.id)) return;
-  quotaInflight.add(account.id);
-  const generation = quotaGenerations.get(account.id) || 0, key = account.key, proxyUrl = account.proxyUrl || '', attemptedAt = Date.now();
-  let snapshot = null, errorCategory = null;
+function quotaFailureDelay(id) { return Math.min(15 * QUOTA_FAILURE_MS, QUOTA_FAILURE_MS * (2 ** (quotaFailureCounts.get(id) || 0))); }
+function successfulQuotaTime(q, now = Date.now()) {
+  const value = q?.lastSuccessAt;
+  return Number.isSafeInteger(value) && value > 0 && value <= now && value === q?.snapshot?.fetchedAt ? value : null;
+}
+function quotaPageOwnerHasNewSuccess(token, id, lastSuccessAt) {
+  return !!lastSuccessAt && (quotaSuccessVersions.get(id) || 0) > (token.successVersions.get(id) || 0);
+}
+function quotaPageOwnerRequiresForce(token, id, lastSuccessAt) {
+  return token.active && token.force && !quotaPageOwnerHasNewSuccess(token, id, lastSuccessAt);
+}
+function quotaDemandOutcome(account, { force = false, pageToken = null } = {}, now = Date.now()) {
+  if (!account?.key) return 'skipped';
+  if (account.enabled === false) return 'skipped';
+  const q = META.accountQuotas?.[account.id];
+  if (q?.errorCategory && q.lastAttemptAt && now < q.lastAttemptAt + quotaFailureDelay(account.id)) return 'deferred';
+  const lastSuccessAt = successfulQuotaTime(q, now);
+  const pageSuccess = pageToken?.force && quotaPageOwnerHasNewSuccess(pageToken, account.id, lastSuccessAt);
+  const forceRequired = pageToken ? quotaPageOwnerRequiresForce(pageToken, account.id, lastSuccessAt) : force;
+  if (pageSuccess || (!forceRequired && lastSuccessAt && now - lastSuccessAt < QUOTA_SUCCESS_MS)) return 'cached';
+  return null;
+}
+function quotaJobAccount(job) {
+  const account = config.accounts.find((item) => item.id === job.id);
+  return account && account.enabled !== false && account.key && account.key === job.key && (account.proxyUrl || '') === job.proxyUrl && (quotaGenerations.get(job.id) || 0) === job.generation ? account : null;
+}
+function quotaJobHasOwner(job) {
+  if (job.cancelled) return false;
+  if (job.routingEpoch === quotaRoutingEpoch && config.accountPipeline.quotaPool) return true;
+  for (const token of job.pageOwners) if (token.active) return true;
+  return false;
+}
+function detachQuotaJob(job) {
+  for (const token of job.pageOwners) token.jobs.delete(job);
+  job.pageOwners.clear(); job.routingEpoch = null;
+}
+function finishQueuedQuotaJob(job, outcome = 'cancelled') {
+  if (job.state !== 'queued') return;
+  job.state = 'done';
+  const queuedIndex = quotaQueue.indexOf(job); if (queuedIndex >= 0) quotaQueue.splice(queuedIndex, 1);
+  if (quotaJobs.get(job.id) === job) quotaJobs.delete(job.id);
+  detachQuotaJob(job); job.resolve(outcome);
+}
+function cancelQuotaJob(job) {
+  if (!job || job.cancelled) return;
+  job.cancelled = true;
+  if (job.state === 'queued') finishQueuedQuotaJob(job);
+  else if (job.state === 'running') job.controller?.abort();
+}
+function invalidateQuotaAccount(id, { clearSnapshot = false, deleted = false } = {}) {
+  quotaGenerations.set(id, (quotaGenerations.get(id) || 0) + 1);
+  quotaFailureCounts.delete(id);
+  const job = quotaJobs.get(id);
+  if (job) { detachQuotaJob(job); cancelQuotaJob(job); }
+  if (clearSnapshot) delete META.accountQuotas[id];
+  if (deleted) quotaSuccessVersions.delete(id);
+}
+function withdrawRoutingQuotaOwnership() {
+  for (const job of quotaJobs.values()) if (job.routingEpoch !== null) {
+    job.routingEpoch = null;
+    if (!quotaJobHasOwner(job)) cancelQuotaJob(job);
+  }
+}
+function advanceQuotaRoutingEpoch() { quotaRoutingEpoch++; withdrawRoutingQuotaOwnership(); }
+function attachQuotaOwner(job, source) {
+  if (source.pageToken) {
+    if (!source.pageToken.active) return false;
+    source.pageToken.force = !!source.force;
+    job.pageOwners.add(source.pageToken); source.pageToken.jobs.add(job);
+  } else if (source.routingEpoch === quotaRoutingEpoch && config.accountPipeline.quotaPool) job.routingEpoch = source.routingEpoch;
+  else return false;
+  return true;
+}
+function awaitQuotaJob(job, source) {
+  return source.pageToken ? Promise.race([job.promise, source.pageToken.cancelPromise.then(() => 'cancelled')]) : job.promise;
+}
+async function requestQuota(id, source) {
+  while (true) {
+    if (source.pageToken && !source.pageToken.active) return 'cancelled';
+    const account = config.accounts.find((item) => item.id === id);
+    if (!account || !account.key || account.enabled === false) return 'skipped';
+    const generation = quotaGenerations.get(id) || 0;
+    const existing = quotaJobs.get(id);
+    if (existing) {
+      if (existing.cancelled || existing.generation !== generation || existing.key !== account.key || existing.proxyUrl !== (account.proxyUrl || '')) {
+        const result = await awaitQuotaJob(existing, source);
+        if (result === 'cancelled' && source.pageToken && !source.pageToken.active) return result;
+        continue;
+      }
+      if (!attachQuotaOwner(existing, source)) return 'cancelled';
+      return await awaitQuotaJob(existing, source);
+    }
+    const immediate = quotaDemandOutcome(account, source);
+    if (immediate) return immediate;
+    let resolve;
+    const job = { id, generation, key: account.key, proxyUrl: account.proxyUrl || '', state: 'queued', cancelled: false, controller: null, pageOwners: new Set(), routingEpoch: null, promise: null, resolve: null };
+    job.promise = new Promise((done) => { resolve = done; }); job.resolve = resolve;
+    if (!attachQuotaOwner(job, source)) return 'cancelled';
+    quotaJobs.set(id, job); quotaQueue.push(job); pumpQuotaQueue();
+    return await awaitQuotaJob(job, source);
+  }
+}
+async function runQuotaJob(job, account) {
+  const attemptedAt = Date.now();
+  let snapshot = null, errorCategory = null, timedOut = false;
+  job.controller = new AbortController();
+  const deadline = setTimeout(() => { timedOut = true; job.controller.abort(); }, QUOTA_TIMEOUT_MS); deadline.unref?.();
   try {
-    const result = await clineRequestJSON(`${config.upstreamBase.replace(/\/$/,'')}/users/me/plan/usage-limits`, { method: 'GET', headers: { Accept: 'application/json', Authorization: `Bearer ${key}` }, timeoutMs: QUOTA_TIMEOUT_MS, account, proxyUrl, maxResponseBytes: 256 * 1024 });
+    const result = await clineRequestJSON(`${config.upstreamBase.replace(/\/$/,'')}/users/me/plan/usage-limits`, { method: 'GET', headers: { Accept: 'application/json', Authorization: `Bearer ${job.key}` }, signal: job.controller.signal, timeoutMs: QUOTA_TIMEOUT_MS, account, proxyUrl: job.proxyUrl, maxResponseBytes: 256 * 1024 });
     if (result.status < 200 || result.status >= 300) errorCategory = quotaFailureCategory(null, result.status, account);
     else {
       let json;
       try { json = JSON.parse(result.text); } catch { errorCategory = 'json'; }
       if (!errorCategory) try { snapshot = parseQuotaPayload(json, Date.now()); } catch { errorCategory = 'schema'; }
     }
-  } catch (error) { errorCategory = quotaFailureCategory(error, 0, account); }
-  finally {
-    quotaInflight.delete(account.id);
-    const current = config.accounts.find((item) => item.id === account.id);
-    const currentGeneration = quotaGenerations.get(account.id) || 0;
-    if (!config.accountPipeline.quotaPool || !current || current.key !== key || (current.proxyUrl || '') !== proxyUrl || currentGeneration !== generation) return;
-    const state = (META.accountQuotas[account.id] ||= { snapshot: null, lastAttemptAt: 0, lastSuccessAt: 0, errorCategory: null });
-    state.lastAttemptAt = attemptedAt;
-    if (snapshot) { state.snapshot = snapshot; state.lastSuccessAt = snapshot.fetchedAt; state.errorCategory = null; quotaFailureCounts.delete(account.id); }
-    else { state.errorCategory = errorCategory || 'schema'; quotaFailureCounts.set(account.id, Math.min(4, (quotaFailureCounts.get(account.id) || 0) + 1)); }
-    try { saveMeta(); } catch (error) { console.error(`[额度] 持久化失败：${safeReason(error.message)}`); }
+  } catch (error) { errorCategory = timedOut ? 'timeout' : quotaFailureCategory(error, 0, account); }
+  finally { clearTimeout(deadline); }
+  if (!quotaJobAccount(job) || !quotaJobHasOwner(job)) return 'cancelled';
+  const state = (META.accountQuotas[job.id] ||= { snapshot: null, lastAttemptAt: 0, lastSuccessAt: 0, errorCategory: null });
+  state.lastAttemptAt = attemptedAt;
+  if (snapshot) { state.snapshot = snapshot; state.lastSuccessAt = snapshot.fetchedAt; state.errorCategory = null; quotaFailureCounts.delete(job.id); quotaSuccessVersions.set(job.id, (quotaSuccessVersions.get(job.id) || 0) + 1); }
+  else { state.errorCategory = errorCategory || 'schema'; quotaFailureCounts.set(job.id, Math.min(4, (quotaFailureCounts.get(job.id) || 0) + 1)); }
+  try { saveMeta(); } catch (error) { console.error(`[额度] 持久化失败：${safeReason(error.message)}`); }
+  return snapshot ? 'refreshed' : 'failed';
+}
+function pumpQuotaQueue() {
+  while (quotaRunning < QUOTA_GLOBAL_LIMIT && quotaQueue.length) {
+    const job = quotaQueue.shift();
+    if (quotaJobs.get(job.id) !== job || job.state !== 'queued') continue;
+    const account = quotaJobAccount(job);
+    if (!account || !quotaJobHasOwner(job)) { cancelQuotaJob(job); continue; }
+    const lastSuccessAt = successfulQuotaTime(META.accountQuotas?.[job.id]), pageOwners = [...job.pageOwners].filter((token) => token.active);
+    const force = pageOwners.some((token) => quotaPageOwnerRequiresForce(token, job.id, lastSuccessAt));
+    const pageSuccess = !META.accountQuotas?.[job.id]?.errorCategory && job.routingEpoch === null && pageOwners.length > 0 && pageOwners.every((token) => token.force && quotaPageOwnerHasNewSuccess(token, job.id, lastSuccessAt));
+    const immediate = pageSuccess ? 'cached' : quotaDemandOutcome(account, { force });
+    if (immediate) { finishQueuedQuotaJob(job, immediate); continue; }
+    job.state = 'running'; quotaRunning++;
+    void runQuotaJob(job, account).then((outcome) => {
+      job.state = 'done'; quotaRunning--;
+      if (quotaJobs.get(job.id) === job) quotaJobs.delete(job.id);
+      detachQuotaJob(job); job.resolve(outcome); pumpQuotaQueue();
+    }, () => {
+      job.state = 'done'; quotaRunning--;
+      if (quotaJobs.get(job.id) === job) quotaJobs.delete(job.id);
+      detachQuotaJob(job); job.resolve('failed'); pumpQuotaQueue();
+    });
   }
 }
+function cancelQuotaPageToken(token) {
+  if (!token.active) return;
+  token.active = false; token.resolveCancel(); clearTimeout(token.deadline);
+  for (const job of [...token.jobs]) {
+    job.pageOwners.delete(token); token.jobs.delete(job);
+    if (!quotaJobHasOwner(job)) cancelQuotaJob(job);
+  }
+}
+function createQuotaPageToken() {
+  let resolveCancel;
+  const token = { active: true, force: false, startedAt: Date.now(), successVersions: new Map(quotaSuccessVersions), jobs: new Set(), deadline: null, cancelPromise: new Promise((resolve) => { resolveCancel = resolve; }), resolveCancel };
+  quotaPageBatches++; return token;
+}
+function releaseQuotaPageToken(token) { cancelQuotaPageToken(token); quotaPageBatches = Math.max(0, quotaPageBatches - 1); }
 function scheduleQuotaRefresh() {
+  const version = ++quotaScheduleVersion, epoch = quotaRoutingEpoch;
   clearTimeout(quotaTimer); quotaTimer = null;
   if (!config.accountPipeline.quotaPool) return;
-  const run = async () => {
-    const accounts = hrwRank(config.accounts.filter((account) => account.enabled !== false && account.key), 'quota-refresh');
-    const dueAccounts = accounts.filter((account) => { const q = META.accountQuotas[account.id]; const interval = q?.errorCategory ? Math.min(15 * QUOTA_FAILURE_MS, QUOTA_FAILURE_MS * (2 ** (quotaFailureCounts.get(account.id) || 0))) : QUOTA_SUCCESS_MS; return !q?.lastAttemptAt || Date.now() - q.lastAttemptAt >= interval; });
-    const start = quotaCursor % Math.max(1, dueAccounts.length), due = [...dueAccounts.slice(start), ...dueAccounts.slice(0, start)].slice(0, 2);
-    quotaCursor++; await Promise.all(due.map(refreshQuota)); scheduleQuotaRefresh();
+  const arm = () => {
+    if (version !== quotaScheduleVersion || epoch !== quotaRoutingEpoch || !config.accountPipeline.quotaPool) return;
+    const run = async () => {
+      if (version !== quotaScheduleVersion || epoch !== quotaRoutingEpoch || !config.accountPipeline.quotaPool) return;
+      quotaTimer = null;
+      const accounts = hrwRank(config.accounts.filter((account) => account.enabled !== false && account.key), 'quota-refresh');
+      const dueAccounts = accounts.filter((account) => quotaDemandOutcome(account) === null);
+      const start = quotaCursor % Math.max(1, dueAccounts.length), due = [...dueAccounts.slice(start), ...dueAccounts.slice(0, start)].slice(0, 2);
+      quotaCursor++; await Promise.all(due.map((account) => requestQuota(account.id, { routingEpoch: epoch })));
+      arm();
+    };
+    quotaTimer = setTimeout(run, process.env.NODE_ENV === 'test' ? 10 : 1000 + (quotaCursor % 30) * 1000); quotaTimer.unref();
   };
-  quotaTimer = setTimeout(run, process.env.NODE_ENV === 'test' ? 10 : 1000 + (quotaCursor % 30) * 1000); quotaTimer.unref();
+  arm();
 }
 function createSseObserver(maxBytes = 64 * 1024) {
   let pending = Buffer.alloc(0), discardTail = Buffer.alloc(0), discarding = false, usage = null, provider = null, canonical = null, error = null, normalizedStatus = null, done = false;
@@ -1352,6 +1524,7 @@ const CHAT_PATHS = new Set(['/chat/completions', '/v1/chat/completions', '/api/v
 
 const MAX_REQUEST_BODY_BYTES = 50 * 1024 * 1024;
 function readBody(req) {
+  const detail = detailContext.getStore();
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
@@ -1360,6 +1533,8 @@ function readBody(req) {
       req.off('data', onData);
       req.off('end', onEnd);
       req.off('error', onError);
+      req.off('aborted', onAborted);
+      req.off('close', onClose);
     };
     const rejectTooLarge = () => {
       if (settled) return;
@@ -1380,6 +1555,7 @@ function readBody(req) {
       reject(error);
     };
     const onData = (chunk) => {
+      detail?.input.add(chunk);
       size += chunk.length;
       if (size > MAX_REQUEST_BODY_BYTES) return rejectTooLarge();
       chunks.push(chunk);
@@ -1388,6 +1564,7 @@ function readBody(req) {
       if (settled) return;
       settled = true;
       cleanup();
+      detail?.input.end();
       resolve(Buffer.concat(chunks));
     };
     const onError = (error) => {
@@ -1396,15 +1573,19 @@ function readBody(req) {
       cleanup();
       reject(error);
     };
+    const onAborted = () => onError(new Error('request body aborted'));
+    const onClose = () => { if (!settled) onError(new Error('request body closed early')); };
     req.on('data', onData);
     req.on('end', onEnd);
     req.on('error', onError);
+    req.on('aborted', onAborted);
+    req.on('close', onClose);
     const declaredLength = Number(req.headers['content-length']);
     if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BODY_BYTES) rejectTooLarge();
   });
 }
 async function readJsonBody(req) {
-  try { return JSON.parse((await readBody(req)).toString('utf8')); }
+  try { const body = JSON.parse((await readBody(req)).toString('utf8')); detailContext.getStore()?.redactor.learn(body); return body; }
   catch (e) {
     if (e?.statusCode) throw e;
     const invalid = new Error('invalid JSON body'); invalid.statusCode = 400; throw invalid;
@@ -1704,11 +1885,13 @@ function emptyMessageContentPath(body) {
   return null;
 }
 async function handleChat(req, res) {
-  const requestId = crypto.randomUUID();
+  const detail = detailContext.getStore();
+  const requestId = detail?.requestId || crypto.randomUUID();
   res.setHeader('X-Cline-Request-Id', requestId);
   const raw = await readBody(req);
   let body;
   try { body = JSON.parse(raw.toString('utf8')); } catch { return sendJSON(res, 400, { error: { message: 'invalid JSON body' } }); }
+  detailContext.getStore()?.redactor.learn(body);
   if (!body || typeof body !== 'object' || Array.isArray(body)) return sendJSON(res, 400, { error: { message: 'JSON body must be an object' } });
   const requestedModel = typeof body.model === 'string' ? body.model.trim() : '';
   if (!requestedModel || requestedModel.length > 300) return sendJSON(res, 400, { error: { message: 'valid model is required' } });
@@ -1718,6 +1901,7 @@ async function handleChat(req, res) {
   let statisticsFinalized = false;
   const finalizeStatistics = (facts) => { if (statisticsFinalized) return; statisticsFinalized = true; try { commitStatistics(facts); } catch (error) { console.error(`[统计] 持久化失败：${safeReason(error.message)}`); } };
   const modelId = resolveModelAlias(requestedModel);
+  const recordChat = (info) => record(modelId, info, detail);
   body = { ...body, model: modelId };
   const identity = extractSessionIdentity(req, body);
   const forwardedHeaders = forwardHeadersFor(req, body);
@@ -1728,7 +1912,7 @@ async function handleChat(req, res) {
   if (!selected.lease) {
     const status = enabledAccounts().length ? 429 : 503;
     finalizeStatistics({ globalError: true, segments: [] });
-    record(modelId, { requestId, requestedModel, resolvedModel: modelId, stream: isStream, strategy: selected.strategy, sessionSource: identity.source, selectionReason: 'capacity-unavailable', normalizedStatus: status, upstreamStatus: null, error: selected.error, ms: 0 });
+    recordChat({ requestId, requestedModel, resolvedModel: modelId, stream: isStream, strategy: selected.strategy, sessionSource: identity.source, selectionReason: 'capacity-unavailable', normalizedStatus: status, upstreamStatus: null, error: selected.error, ms: 0 });
     return sendBusy(res, selected.error, selected.retryAfter, status);
   }
   const initialSelection = { ...selected };
@@ -1806,7 +1990,7 @@ async function handleChat(req, res) {
       }
       const usage = result === 'success' ? observed.usage : null;
       finalizeStatistics({ globalError: result === 'failed', usage, clientDisconnect: clientCancelled, segments: statisticsSegments(chain.trace, acc.id, usage, clientCancelled) });
-      record(modelId, { requestId, requestedModel, resolvedModel: modelId, provider: observed.provider, canonical: observed.canonical, ms: Date.now() - chain.t0, stream: true, result, normalizedStatus, error: streamError, account: acc.name, accountId: acc.id, attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, accountPath, accountActions, sessionSource: identity.source, strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, appliedHeaderNames: Object.keys(acc.headers || {}), proxyError: !!acc.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues });
+      recordChat({ requestId, requestedModel, resolvedModel: modelId, provider: observed.provider, canonical: observed.canonical, ms: Date.now() - chain.t0, stream: true, result, normalizedStatus, error: streamError, account: acc.name, accountId: acc.id, attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, accountPath, accountActions, sessionSource: identity.source, strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, appliedHeaderNames: Object.keys(acc.headers || {}), proxyError: !!acc.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues });
     };
     const tap = new Transform({ transform(c, enc, cb) { observer.push(c); cb(null, c); }, flush(cb) { finalize(); cb(); } });
     onUpstreamError = (e) => { finalize(e.message, 'upstream'); if (!res.destroyed) res.destroy(e); };
@@ -1823,7 +2007,7 @@ async function handleChat(req, res) {
   if (!out) {
     const result = disconnected ? 'client_cancelled' : 'failed';
     finalizeStatistics({ globalError: !disconnected, clientDisconnect: disconnected, segments: statisticsSegments(chain.trace, null, null, disconnected) });
-    record(modelId, { requestId, requestedModel, resolvedModel: modelId, stream: false, result, normalizedStatus: disconnected ? 499 : 502, error: disconnected ? null : 'no upstream response', trace: chain.trace, accountPath, accountActions, sessionSource: identity.source, strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, sensitiveValues });
+    recordChat({ requestId, requestedModel, resolvedModel: modelId, stream: false, result, normalizedStatus: disconnected ? 499 : 502, error: disconnected ? null : 'no upstream response', trace: chain.trace, accountPath, accountActions, sessionSource: identity.source, strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, sensitiveValues });
     if (res.destroyed) return;
     return sendJSON(res, disconnected ? 499 : 502, { error: { message: disconnected ? 'client cancelled request' : 'no upstream response', type: disconnected ? 'client_cancelled' : 'upstream_error' } });
   }
@@ -1831,7 +2015,7 @@ async function handleChat(req, res) {
   const safeOut = status === 200 ? out : { ...out, error: { ...(out.error || {}), message: safeReason(out?.error?.message || 'upstream error', sensitiveValues) } };
   const usage = status === 200 && !disconnected ? normalizeUsage(routing.usage) : null;
   finalizeStatistics({ globalError: status !== 200 && !disconnected, usage, clientDisconnect: disconnected, segments: statisticsSegments(chain.trace, acc?.id, usage, disconnected) });
-  record(modelId, {
+  recordChat({
     requestId, requestedModel, resolvedModel: modelId, provider: routing.finalProvider || null, canonical: routing.canonicalSlug || null, ms: Date.now() - chain.t0, stream: false, result: disconnected ? 'client_cancelled' : status === 200 ? 'success' : 'failed',
     attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, error: disconnected ? null : status !== 200 ? safeOut.error.message : null,
     account: acc?.name || null, accountId: acc?.id || null, accountPath, accountActions, accountAction: chain.accountAction?.action || accountActions.at(-1)?.action || null, upstreamStatus: chain.upstreamStatus, normalizedStatus: chain.normalizedStatus, sessionSource: identity.source,
@@ -1858,15 +2042,27 @@ function sendBusy(res, message, retryAfter = 1, status = 429) {
 
 async function catalog() {
   if (META.catalog && Date.now() - (META.catalogFetchedAt || 0) < 3600e3) return META.catalog;
-  const { json } = await fetchJSON(`${config.upstreamBase}/models`, { headers: chatHeaders(pickAccount().key) });
+  const account = pickAccount();
+  const { json } = await fetchJSON(`${config.upstreamBase}/models`, { headers: chatHeaders(account.key) }, 60000, account);
   const ids = (json?.data || []).map((m) => m.id);
   if (ids.length) { META.catalog = ids; META.catalogFetchedAt = Date.now(); saveMeta(); }
   return META.catalog || [];
 }
 
-const server = http.createServer(async (req, res) => {
+const server = http.createServer((req, res) => {
+  const pathname = new URL(req.url, 'http://local').pathname;
+  if (config.detailedLogging === true && detailRoute(req.method, pathname)) {
+    if (DetailRoot.active >= 128) { detailedLogs.health.dropped++; return dispatch(req, res); }
+    const secrets = [config.proxyKey, PROXY_KEY, ...config.accounts.flatMap((account) => [account.key, account.proxyUrl])];
+    const root = new DetailRoot(req, res, detailedLogs, secrets);
+    return detailContext.run(root, () => dispatch(req, res));
+  }
+  return dispatch(req, res);
+});
+async function dispatch(req, res) {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
+  if (p === '/api/logs/settings' || p === '/api/logs/details' || p.startsWith('/api/logs/details/')) res.setHeader('Cache-Control', 'no-store');
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
@@ -1945,6 +2141,33 @@ const server = http.createServer(async (req, res) => {
       config.modelAliases = normalizeModelAliases(aliases); saveConfig();
       return sendJSON(res, 200, { ok: true, count: Object.keys(config.modelAliases).length });
     }
+    if (p === '/api/logs/settings' || p === '/api/logs/details' || p.startsWith('/api/logs/details/')) {
+      if (p === '/api/logs/settings') {
+        if (req.method === 'GET') return sendJSON(res, 200, { detailedLogging: config.detailedLogging === true, authRequired: !!PROXY_KEY, maxBodyBytes: MAX_BODY_BYTES, maxAgeMs: MAX_AGE_MS, maxTotalBytes: MAX_TOTAL_BYTES, health: { ...detailedLogs.health, captureDropped: captureBudget.dropped, retainedPayloadBytes: captureBudget.used } });
+        if (req.method === 'POST') {
+          const body = await readJsonBody(req);
+          if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 1 || typeof body.detailedLogging !== 'boolean') return sendJSON(res, 400, { error: { message: 'expected only boolean detailedLogging' } });
+          try { atomicWriteJson(CONFIG_PATH, { ...config, detailedLogging: body.detailedLogging }); }
+          catch { return sendJSON(res, 500, { error: { message: 'logging setting could not be saved' } }); }
+          config.detailedLogging = body.detailedLogging;
+          return sendJSON(res, 200, { ok: true, detailedLogging: config.detailedLogging });
+        }
+      }
+      if (p === '/api/logs/details') {
+        if (req.method === 'GET') return sendJSON(res, 200, await detailedLogs.query(parseDetailQuery(url.searchParams)));
+        if (req.method === 'DELETE') return sendJSON(res, 200, await detailedLogs.clear());
+      }
+      if (req.method === 'GET' && p.startsWith('/api/logs/details/')) {
+        const parts = p.slice('/api/logs/details/'.length).split('/');
+        if (url.search) return sendJSON(res, 400, { error: { message: 'invalid detailed log query' } });
+        if (parts.length === 1) return sendJSON(res, 200, await detailedLogs.detail(parts[0]));
+        if (parts.length === 3 && parts[1] === 'bodies') {
+          const text = await detailedLogs.body(parts[0], parts[2]);
+          res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'X-Content-Type-Options': 'nosniff' }); return res.end(text);
+        }
+        return sendJSON(res, 400, { error: { message: 'invalid detailed log identity' } });
+      }
+    }
     if ((req.method === 'GET' || req.method === 'DELETE') && (p === '/api/logs/requests' || p === '/api/logs/errors')) {
       const store = p.endsWith('/errors') ? errorLogs : requestLogs;
       if (req.method === 'DELETE') { await store.clear(); return sendJSON(res, 200, { ok: true }); }
@@ -1978,7 +2201,7 @@ const server = http.createServer(async (req, res) => {
       const t0 = Date.now();
       try {
         const model = config.knownModels[0];
-        const result = await clineRequestJSON(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, {}), body: JSON.stringify({ model, messages: [], max_tokens: 1 }), proxyUrl, timeoutMs: 15000 });
+        const result = await clineRequestJSON(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, {}), body: JSON.stringify({ model, messages: [], max_tokens: 1 }), proxyUrl, account, timeoutMs: 15000 });
         return sendJSON(res, 200, { ok: result.status > 0, proxyType: new URL(proxyUrl).protocol.replace(':', ''), ms: Date.now() - t0, status: result.status });
       } catch (e) {
         let reason = String(e.message || 'proxy error');
@@ -1986,11 +2209,36 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, { ok: false, proxyType: new URL(proxyUrl).protocol.replace(':', ''), ms: Date.now() - t0, errorCategory: 'proxy', reason: safeReason(reason) });
       }
     }
+    if (req.method === 'POST' && p === '/api/statistics/quota-refresh') {
+      if (url.search) return sendJSON(res, 400, { error: { message: 'quota refresh does not accept query parameters' } });
+      if (quotaPageBatches >= QUOTA_PAGE_BATCH_LIMIT) { res.setHeader('Retry-After', '1'); return sendJSON(res, 429, { error: { message: 'too many active quota refreshes' } }); }
+      const token = createQuotaPageToken();
+      const onClose = () => { if (!res.writableFinished) cancelQuotaPageToken(token); };
+      res.once('close', onClose);
+      try {
+        let body;
+        try { body = await readJsonBody(req); }
+        catch (error) { if (!token.active || res.destroyed) return; throw error; }
+        if (!isPlainObject(body) || Object.keys(body).length !== 1 || typeof body.force !== 'boolean') return sendJSON(res, 400, { error: { message: 'expected only boolean force' } });
+        token.force = body.force;
+        if (!token.active || res.destroyed) return;
+        const ids = config.accounts.map((account) => account.id);
+        const slots = Math.ceil(ids.length / QUOTA_GLOBAL_LIMIT) + 1;
+        token.deadline = setTimeout(() => cancelQuotaPageToken(token), Math.min(2147483647, Math.max(QUOTA_TIMEOUT_MS, slots * QUOTA_TIMEOUT_MS))); token.deadline.unref?.();
+        const outcomes = await Promise.all(ids.map((id) => requestQuota(id, { pageToken: token, force: body.force })));
+        if (!token.active && (res.destroyed || !res.writable)) return;
+        const counts = { refreshed: 0, cached: 0, deferred: 0, skipped: 0, failed: 0, cancelled: 0 };
+        for (const outcome of outcomes) counts[Object.hasOwn(counts, outcome) ? outcome : 'failed']++;
+        return sendJSON(res, 200, { ok: true, ...counts });
+      } finally {
+        res.off('close', onClose); releaseQuotaPageToken(token);
+      }
+    }
     if (req.method === 'GET' && p === '/api/statistics') {
       pruneStatistics();
-      const recentGlobal = aggregateRange().aggregate;
-      const accounts = config.accounts.map((account) => { const recent = aggregateRange(account.id).aggregate; return { id: account.id, name: account.name, enabled: account.enabled !== false, lifetime: projectAggregate(META.statistics.lifetime.accounts[account.id] || emptyAggregate()), recent24h: projectAggregate(recent), health: healthProjection(account), quota: quotaProjection(account.id) }; });
-      return sendJSON(res, 200, { generatedAt: Date.now(), window: { kind: 'last-1440-minutes', from: (Math.floor(Date.now()/60000)-1439)*60000, to: Date.now() }, lifetime: { global: projectAggregate(META.statistics.lifetime.global) }, recent24h: { global: projectAggregate(recentGlobal) }, accounts, migration: META.statistics.migration });
+      const generatedAt = Date.now(), recentGlobal = aggregateRange().aggregate;
+      const accounts = config.accounts.map((account) => { const recent = aggregateRange(account.id).aggregate; return { id: account.id, name: account.name, enabled: account.enabled !== false, lifetime: projectAggregate(META.statistics.lifetime.accounts[account.id] || emptyAggregate()), recent24h: projectAggregate(recent), health: healthProjection(account), quota: statisticsQuotaProjection(account, generatedAt) }; });
+      return sendJSON(res, 200, { generatedAt, window: { kind: 'last-1440-minutes', from: (Math.floor(generatedAt/60000)-1439)*60000, to: generatedAt }, lifetime: { global: projectAggregate(META.statistics.lifetime.global) }, recent24h: { global: projectAggregate(recentGlobal) }, accounts, migration: META.statistics.migration });
     }
     if (req.method === 'GET' && p === '/api/accounts') {
       clearExpiredCooldowns();
@@ -2040,8 +2288,13 @@ const server = http.createServer(async (req, res) => {
       config.accounts = accs; config.accountMode = body.mode; config.activeAccount = requestedActive >= 0 ? requestedActive : Math.min(Math.max(0, Number(body.active) || 0), accs.length - 1);
       const pipelineWasEnabled = config.accountPipeline.quotaPool;
       config.concurrencyWaitMs = wait; config.accountErrorRules = normalizeAccountErrorRules(body.accountErrorRules || {}); config.accountPipeline = requestedPipeline;
-      for (const [id, previous] of previousById) { const current = accs.find((a) => a.id === id); if (!current || current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) { quotaGenerations.set(id, (quotaGenerations.get(id) || 0) + 1); delete META.accountQuotas[id]; } }
-      if (pipelineWasEnabled && !config.accountPipeline.quotaPool) for (const id of seen) quotaGenerations.set(id, (quotaGenerations.get(id) || 0) + 1);
+      for (const [id, previous] of previousById) {
+        const current = accs.find((a) => a.id === id);
+        if (!current) invalidateQuotaAccount(id, { clearSnapshot: true, deleted: true });
+        else if (current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) invalidateQuotaAccount(id, { clearSnapshot: true });
+        else if (previous.enabled !== false && current.enabled === false) invalidateQuotaAccount(id);
+      }
+      if (pipelineWasEnabled !== config.accountPipeline.quotaPool) advanceQuotaRoutingEpoch();
       for (const id of Object.keys(META.accountStates || {})) if (!seen.has(id)) delete META.accountStates[id];
       for (const id of Object.keys(META.statistics.lifetime.accounts)) if (!seen.has(id)) delete META.statistics.lifetime.accounts[id];
       for (const bucket of META.statistics.minuteBuckets) for (const id of new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health)])) if (!seen.has(id)) { delete bucket.accounts[id]; delete bucket.health[id]; }
@@ -2144,7 +2397,7 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     return sendJSON(res, Number.isInteger(e?.statusCode) ? e.statusCode : 500, { error: { message: safeReason(e.message || 'internal error') } });
   }
-});
+}
 
 // HTTP 响应头只允许 Latin-1，账号名里的中文等字符需要清洗（历史/统计仍用原名）
 const headerSafe = (s) => String(s ?? '').replace(/[^\x20-\x7E]/g, '').trim().slice(0, 80) || '-';
