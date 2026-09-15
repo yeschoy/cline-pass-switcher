@@ -33,7 +33,11 @@ previewPreset()
 applyPreset()
 previewErrorPreset()
 applyErrorPreset()
-loadStatistics()
+loadStatistics(visitId, announce)
+refreshStatisticsQuota(force, visitId)
+startStatisticsVisit()
+stopStatisticsVisit()
+restoreStatisticsVisit()
 generateAliases()
 saveAliases()
 switchSection(section)
@@ -58,9 +62,20 @@ GET /api/statistics
     generatedAt, window,
     lifetime: { global: AggregateProjection },
     recent24h: { global: AggregateProjection },
-    accounts: [{ id, name, enabled, lifetime, recent24h, health, quota }],
+    accounts: [{
+      id, name, enabled, lifetime, recent24h, health,
+      quota: {
+        status, pool, limits, fetchedAt, lastAttemptAt, lastSuccessAt,
+        errorCategory,
+        refresh: { eligible, reason, state, nextAttemptAt }
+      }
+    }],
     migration
   }
+
+POST /api/statistics/quota-refresh
+  <- { force: boolean }
+  -> { ok: true, refreshed, cached, deferred, skipped, failed, cancelled }
 
 GET /api/models[?accountId=<id>]
   -> { subscription: [{ id, config, configSource, meta }], accountId, ... }
@@ -141,13 +156,61 @@ The active radio is an array index in the submitted list. The server resolves th
 
 `ACCS.accountPipeline` is a complete snapshot with exactly `quotaPool`, `excludeUnhealthy`, `healthSort`, and `sticky`. `collectAccounts()` always sends all four booleans. The server preserves its current value only when an older client omits the whole field; it rejects partial, unknown, or non-boolean pipeline objects.
 
+#### Local account drafts and bulk concurrency
+
+`loadAll()` hydrates mode, wait, error-rule text, and pipeline controls from the server snapshot. `renderAccounts()` only projects the existing draft: search, add/delete, drawer apply, mode changes, and bulk redraw must preserve live controls, including temporarily invalid rule JSON. The active radio reads live mode without resetting `ACCS.active`.
+
+`BULK_SELECTION` is a transient `Set` of account object references, not names or filtered indexes. `visibleAccountRows()` retains original indexes; `updateBulkSelection()` intersects selection with current visible objects and uses that same set for names/count and application. Search changes and reload clear selection; redraw prunes hidden/deleted objects; new rows begin unselected. Duplicate names and unsaved rows must never transfer selection to another object.
+
+`applyBulkConcurrency()` accepts only non-empty finite integers 0–100000 (0 means unlimited). Empty selection or invalid input announces an error without mutation or persistence. A valid operation changes only selected `maxConcurrent`, retains selection, and announces the draft-only result. Full hidden fields, active selection, unselected accounts, and scheduling controls remain unchanged. Only the ordinary explicit `saveAccounts()` persists the combined draft; presets retain their existing confirm-and-save behavior.
+
+- **Good:** a pending drawer note and invalid rule text survive bulk apply and search; fix JSON before explicit save.
+- **Base:** select-all targets only current name/note matches, and no matches disables selection/application.
+- **Bad:** hydrate scheduling controls during every redraw, or use an account name as batch identity.
+
+```js
+// Wrong: filtered indexes can retarget after deletion/search.
+selectedIndexes.forEach(i => { ACCS.accounts[i].maxConcurrent = value; });
+// Correct: validate first, then mutate only current selected visible objects.
+for (const account of updateBulkSelection()) account.maxConcurrent = value;
+```
+
+`test/account-draft.test.js` executes the production embedded script in Node VM to verify exact target-only changes, 0/100000 boundaries, invalid/empty no-ops, no apply-time requests, search/rename/delete/new-row/reload lifetime, live controls and drawer-note preservation, and explicit-save payloads. `test/integration.test.js` verifies ordinary combined account/scheduling API round trips with local mocks and temporary data. These checks do not prove browser focus, keyboard or responsive behavior.
+
+#### Raw scheduling draft editor
+
+`openRawScheduling(button)`, `validateRawScheduling(value, names)`, `applyRawScheduling()`, and `closeRawScheduling(force=false)` reuse the live scheduling controls; `RAW_SCHEDULING` is only an editor snapshot, never a second account store. The complete JSON has exactly `accountMode`, `concurrencyWaitMs`, `accountErrorRules`, `accountPipeline`, and `accountNames`. `accountMode` maps to the existing mode control; ordered names include all accounts, duplicates and unsaved rows regardless of search. Names are reference-only, not identities. Never project IDs, Keys, notes, proxies, Headers, account parameters, runtime state or `perModel` into this editor.
+
+Validation precedes every control write: six existing modes; integer wait 0–30000; exactly four boolean pipeline keys; object rules keyed by three-digit HTTP statuses 100–599; rule action `ignore`, `ban`, or `cooldown` with only its allowed fields; cooldown requires a safe integer 1–2592000000. JSON numeric strings/null/booleans, unknown fields (including prototype-like keys), missing fields, and changed reference names are rejected without coercion. The server remains authoritative for ordinary saves.
+
+| Condition | Local result |
+|---|---|
+| Invalid live rule JSON or wait on open | Announce field error; preserve original input; do not open |
+| Invalid editor JSON/schema | Keep text/dialog open; no account/control mutation or request; do not echo arbitrary values |
+| Replaced `ACCS`, changed scheduling controls, renamed/reordered/replaced/deleted account objects | Reject as stale and require reopening; preserve newer draft |
+| Valid apply | Update scheduling controls only, redraw without hydration, close and announce draft-only result |
+| Dirty cancel/Escape | Confirm discard; cancellation never applies |
+| Successful ordinary save/reload | Hydrate saved controls and clear obsolete raw draft feedback; retain any open editor text and reject its stale apply |
+
+- **Good:** pending bulk concurrency plus raw policy changes survive the ordinary full-account save with active identity and hidden fields intact.
+- **Base:** opening and clean cancellation perform no requests and leave controls unchanged.
+- **Bad:** reconstruct accounts by reference names or post the five-field editor object to the destructive account API.
+
+```js
+// Wrong: saveAccounts(JSON.parse(rawSchedulingJson.value));
+// Correct: validate the complete editor value, assign existing scheduling controls,
+// then let the operator explicitly invoke the unchanged saveAccounts().
+```
+
+`test/account-draft.test.js` executes production projection/apply/cancel/stale and validation logic, combined bulk/raw payload preservation, and existing preset compatibility. `test/integration.test.js` covers the ordinary combined API round trip. VM/static checks are not browser keyboard/focus/responsive verification.
+
 #### Rendering and sensitive values
 
 All server-provided text used in HTML strings passes through `escapeHtml()` (or `jsArg()` where a JavaScript string argument is needed). Status regions use `aria-live="polite"`. Account keys are password inputs unless the operator explicitly enables “show keys.” This is display protection only; account data comes from the management API and must be protected by the configured proxy key.
 
 Key visibility is transient drawer UI state: every `openAccountDrawer()` clears the show control and restores `drawerKey.type = "password"`. Visibility state is excluded from `drawerValue()`, so showing or hiding an unchanged Key never marks the account draft dirty.
 
-Raw sessions and message content are not frontend state and must never be added to account, model, history, or diagnostic views. Account notes, proxy URLs/authentication, account Keys, and custom Header values are editable only in the authenticated drawer and must not be copied into log rows/details.
+Raw sessions and message content must never be added to account, model, history or ordinary diagnostic state/views. Account notes, proxy URLs/authentication, account Keys and custom Header values remain owned by the authenticated drawer and must not be copied into ordinary log rows/details. Only the separately enabled detailed panel may hold sanitized captured model HTTP headers/content, under the bounded authenticated API contract in `../backend/logging-guidelines.md`; it never receives raw credentials or whole account objects.
 
 #### Preset, alias, and log state
 
@@ -157,11 +220,55 @@ Preset selection owns a temporary draft only. Confirm submits the complete ordin
 
 Error-rule presets are separate from the six scheduling presets. The five rule presets (`standard`, `fast`, `conservative`, `observe`, and `clear`) read the current JSON textarea at preview time. Merge preserves custom status entries; replace computes deletions; clear is replace-only. The preview classifies preserve/add/modify/delete, cancel is a no-op, and confirm passes the draft through the ordinary authenticated full-account save. Among 4xx statuses, built-in rule presets may define only `429`.
 
-The top-level section is projected by `consolePanel.hidden`, `statisticsPanel.hidden`, `logPanel.hidden`, and four navigation buttons' `aria-pressed` values. Console, statistics, request logs, and error logs are mutually exclusive. Request and error navigation share one `logPanel`; `logType` remains the single selected-type owner, while the title and live status are projections of it.
+The top-level section is projected by `consolePanel.hidden`, `statisticsPanel.hidden`, `logPanel.hidden`, `detailsPanel.hidden`, and five navigation buttons' `aria-pressed` values. Console, statistics, request logs, error logs and detailed logs are mutually exclusive. Request and error navigation share one `logPanel`; `logType` remains the single selected-type owner, while the title and live status are projections of it.
 
-`STATISTICS_QUERY_ID` is independent of log state. `loadStatistics()` may render only when its captured generation still matches and `statisticsPanel` is visible. A coverage count of zero, `null` overflow, missing ratio, missing quota window, or insufficient health must render as unknown/no data rather than numeric zero. All account/provider text is escaped, and raw quota/provider payloads never become frontend state.
+`STATISTICS_QUERY_ID` is independent of log state. `loadStatistics()` may render only when its captured query/visit generation still matches and `statisticsPanel` is visible. A coverage count of zero, `null` overflow, missing ratio, missing quota window, or insufficient health must render as unknown/no data rather than numeric zero. All account/provider text is escaped, and raw quota/provider payloads never become frontend state.
+
+#### Statistics quota visit ownership
+
+`STATISTICS_VISIT_ID`, `STATISTICS_TIMER`, `STATISTICS_REFRESH_CONTROLLER`, `STATISTICS_REFRESH_PROMISE`, and `STATISTICS_REFRESH_VISIT` own one browser visit independently of account, raw, bulk, ordinary-log and detail state.
+
+- Entry renders the current authenticated `GET /api/statistics`, starts one cache-aware `POST /api/statistics/quota-refresh` with `force:false`, then rereads the projection. A single five-minute timer repeats only while that visit remains visible.
+- Manual refresh uses `force:true` but coalesces with an active sweep from the same visit. The button is natively disabled and labelled while busy; `statisticsStatus` announces loading, bounded outcome counts or retained-data failure.
+- Section changes and `pagehide` increment visit/query generations, clear the timer and abort only the page-owned POST. `pageshow` restarts a visible statistics visit only when no timer is active. Success, catch and finally handlers all check visit/controller identity so an old request cannot render, announce, re-enable or clear a newer visit.
+- Statistics reads persisted server accounts only. Disabled accounts retain last-known values but are not queried; unconfigured, unknown, partial, failed and stale values remain distinct from numeric 0%/100%. Remaining percentage is computed only from a validated finite used value, and missing/invalid reset times render unavailable.
+- Statistics navigation/refresh never calls `loadAll()` or mutates `ACCS`, `BULK_SELECTION`, raw JSON, live scheduling controls or detailed-log state. It does not enable quota routing or persist account/configuration changes.
 
 `LOG_CURSOR` belongs to the current log type plus filter set. Starting a new query or changing filters resets it; “next” sends the opaque server cursor unchanged. The request type alone owns the `result` filter and renders `status / result`; missing historical results derive only the display label `success` or `legacy_failed` without mutating storage. The shared description distinguishes one-row-per-final-request from potentially-many-upstream-attempts. `LOG_QUERY_ID` is a generation counter: every section switch and query invalidates earlier reads, and a response may render only when both its generation and captured type still match. Clearing logs captures the selected type before the asynchronous delete and reloads only when that same log section remains visible.
+
+#### Detailed settings and selected-content ownership
+
+```js
+api(path, body, method, asText = false)
+loadDetailSettings()
+toggleDetailedLogging()
+loadDetails(next = false)
+selectDetail(requestId)
+loadDetailBody(requestId, bodyId, state)
+copyDetailBody()
+clearDetails()
+```
+
+The fourth `api()` argument preserves authenticated text-body reads (including 401/login and non-OK handling); do not repurpose it when adding options to this shared helper. `detailJSON()` rejects safe API errors. The details API schemas/strict filters are owned by `../backend/logging-guidelines.md`.
+
+`DETAIL_NAV_ID`, `DETAIL_LIST_ID` and `DETAIL_SELECTION_ID` are independent generations. Every section switch invalidates list/selection/navigation; metadata/body responses require the captured generation and visible details panel, and bodies also require the selected request ID. `DETAIL_CURSOR` belongs to the current filter set: editing any filter invalidates list/selection, clears the cursor and loaded copy content, disables Next and requests a refresh. Starting a query disables Next; only its accepted response can enable it.
+
+`DETAIL_CONFIRMED`, `DETAIL_TOGGLE_PENDING` and `DETAIL_SETTINGS_ID` own settings. A stale settings GET cannot undo a later POST; a failed POST restores the confirmed mode. Navigation away suppresses stale status messages, but a completed setting write still updates the confirmed value. Do not call `loadAll()`, `saveAccounts()` or mutate ACCS, bulk selection, raw editor or live scheduling controls for any diagnostic action.
+
+`DETAIL_BODY_TEXT` is null during reads/invalidations; copy uses only its loaded sanitized string, not metadata, raw network errors or stale text. Clear captures navigation before awaiting DELETE, invalidates pending detail reads, removes loaded content and reloads only if that same details navigation is still visible. Missing/expired bodies remain a safe empty/error state.
+
+- **Good:** a dirty bulk/raw draft survives settings save, filtering, copy and clear.
+- **Base:** selecting a root loads only metadata; selecting one body reads only that body.
+- **Bad:** reuse the ordinary `LOG_QUERY_ID` or `LOG_CURSOR`, or fetch all 50 roots' bodies at once.
+
+```js
+// Wrong: a changed filter skips newer matches using the previous query cursor.
+params.set('cursor', oldCursor);
+// Correct: invalidate at the input boundary, before pending reads can render.
+DETAIL_LIST_ID++; DETAIL_CURSOR = null; resetDetailSelection();
+```
+
+`test/detailed-log-ui.test.js` executes production functions for five-section navigation, account/raw/bulk preservation, settings failure/staleness, list/body selection staleness, safe text/copy fallback, clear/navigation and filter/cursor invalidation. `test/ui-contract.test.js` checks DOM labels and privacy/accessibility markers. Neither proves browser interactions.
 
 ### 4. Validation & Error Matrix
 
@@ -172,7 +279,11 @@ The top-level section is projected by `consolePanel.hidden`, `statisticsPanel.hi
 | Rule preset merge/replace/clear is confirmed | send the computed live draft through `saveAccounts()`; server validation remains authoritative |
 | `accountPipeline` is incomplete, contains unknown keys, or non-booleans | server `400`; retain/reload prior state |
 | Statistics response becomes stale after navigation | ignore it; do not update hidden/newly selected content |
-| Usage coverage is zero or a metric/ratio is `null` | render “no data”; do not render `0` |
+| A quota refresh settles after navigation, pagehide or a newer visit | Ignore stale success/catch/finally; do not update status/button/table or cancel another source |
+| Manual/timer/entry refresh overlaps in one visit | Coalesce into one POST; do not queue replay work |
+| Statistics page is restored after pagehide | Start one visible visit only when its timer is absent; repeated pageshow is a no-op |
+| Usage coverage is zero or a field/ratio is `null` | render “no data”; do not render `0` |
+| Quota window is missing/invalid or snapshot is failed/partial/stale/disabled | Show explicit unknown/last-known state and time; never infer zero or routing freshness |
 | No submitted account has a non-empty key | stop and display an error |
 | Account mode is not one of the six supported scheduling modes | server `400`; retain/reload prior state |
 | `concurrencyWaitMs` is not an integer in 0-30000 | server `400` |
@@ -181,6 +292,9 @@ The top-level section is projected by `consolePanel.hidden`, `statisticsPanel.hi
 | Existing account ID is unknown/changed or duplicated | server `400` |
 | Alias text is malformed/duplicated or server target invalid | block locally when possible; server `400` remains authoritative |
 | Log filter/cursor query is rejected | show safe error; do not render stale results as current |
+| Detail filter edited while reads are pending | Invalidate response generations, selected/copy text and old cursor; disable Next |
+| Detailed toggle fails or stale settings read completes | Preserve latest confirmed mode and every account/raw/bulk draft |
+| Detail clear completes after navigation away | Do not reload another section |
 | Dirty drawer closes by Escape/backdrop/button | confirm before discard and restore opener focus |
 | Account route or global route is invalid | server `400`; `saveModelCfg()` reloads on failure |
 | Route account ID is unknown | server `400` |
@@ -197,6 +311,8 @@ Browser-side validation improves feedback but never replaces the server matrix.
 - **Good:** select account A, copy a global model route, edit it, observe `configSource: "account"`, then restore inheritance and observe `"inherited"` after reload.
 - **Good:** merge a built-in error preset into a live custom `418` rule; preview marks `418` preserved and confirmation round-trips both through the normal save.
 - **Good:** leave the statistics panel before its request completes; the stale generation never renders, and a covered token value of zero remains distinguishable from no covered requests.
+- **Good:** a pending account note, bulk selection and invalid scheduling-rule draft survive entry/manual quota refresh and return to the console unchanged.
+- **Base:** a disabled account displays its retained quota and last-success time but creates no page refresh request; a never-fetched disabled account remains unknown.
 - **Base:** global scope has no `accountId`; model saves update global `perModel` only.
 - **Base:** a new account row starts with `maxConcurrent: 0`, `weight: 1`, `priority: 100`, direct transport, empty note/Header fields, and `perModel: {}`.
 - **Bad:** construct account payloads from visible table columns only and omit `perModel`; this silently deletes account-specific routes.
@@ -215,9 +331,11 @@ Cross-layer changes must assert:
 - every error-rule preset previews the live textarea for merge/replace/clear, preserves custom rules when merging, reports exact diff groups, and cancel changes nothing;
 - all four pipeline booleans survive a full account save; omission preserves the server snapshot while partial/unknown/non-boolean payloads fail without persistence;
 - statistics generation invalidation prevents stale rendering, coverage-zero/null values remain unknown, and all rendered server text is escaped;
+- statistics entry/manual/five-minute refresh coalesces per visit, aborts page ownership on leave, restores one visit on pageshow, and guards success/catch/finally from older visits;
+- used/remaining/reset rendering preserves known 0%/100% and labels unconfigured, disabled, unknown, partial, failed and stale snapshots truthfully without changing drafts or quota routing;
 - alias generation/save/reload and log type/filter/cursor/clear keep separate state owners;
 - request logs alone filter/render `result`, historical rows without it use a display-only fallback, and the shared description distinguishes one final request from potentially many failed attempts;
-- top-level console/statistics/request/error sections remain mutually exclusive, request/error reuse one log owner, and stale reads or clears cannot update a different section;
+- top-level console/statistics/request/error/details sections remain mutually exclusive, request/error reuse one log owner, details keep their own generations, and stale reads or clears cannot update a different section;
 - invalid scope, malformed JSON, immutable ID changes, empty account lists, and invalid rule shapes return `400` without persistence;
 - account recovery clears displayed dynamic state after reload;
 - every server-controlled name, reason, model, provider, and trace note is HTML-escaped before `innerHTML` use;
@@ -255,3 +373,17 @@ const accountPipeline = {
 ```
 
 The full-list save preserves hidden server-owned associations instead of rebuilding accounts from visible cells alone. Statistics and logs keep separate query generations; neither may reuse a single stale-response owner.
+
+```js
+// Wrong: an old request can update a newer or hidden statistics visit.
+const data = await api('/api/statistics/quota-refresh', { force });
+statisticsStatus.textContent = quotaRefreshSummary(data);
+
+// Correct: bind POST, reread, catch and finally to one visible visit/controller.
+if (visitId === STATISTICS_VISIT_ID &&
+    controller === STATISTICS_REFRESH_CONTROLLER &&
+    !statisticsPanel.hidden) {
+  await loadStatistics(visitId, false);
+  statisticsStatus.textContent = quotaRefreshSummary(data);
+}
+```

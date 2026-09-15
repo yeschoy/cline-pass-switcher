@@ -32,10 +32,14 @@ createSseObserver(maxBytes = 64 * 1024)
 commitStatistics({ ts, globalError, usage, segments, clientDisconnect })
 healthProjection(account, now)
 quotaProjection(accountId, now)
+statisticsQuotaProjection(account, now)
+quotaDemandOutcome(account, source, now)
+requestQuota(accountId, { routingEpoch } | { pageToken, force })
+createQuotaPageToken()
+cancelQuotaPageToken(token)
+scheduleQuotaRefresh()
 buildPipelineGroups(accounts)
 acquirePipelineAccountLease(identity, options)
-refreshQuota(account)
-scheduleQuotaRefresh()
 ```
 
 Chat endpoints:
@@ -53,6 +57,7 @@ Management endpoints relevant to routing:
 GET  /api/accounts
 POST /api/accounts
 GET  /api/statistics
+POST /api/statistics/quota-refresh  // exact body: { force: boolean }
 POST /api/accounts/recover
 POST /api/accounts/proxy-test
 GET  /api/models?accountId=<account id>
@@ -117,7 +122,7 @@ Protocol allowlists are exclusive:
 
 Always reject downstream `Authorization`, `Proxy-Authorization`, `Cookie`, `Host`, client `Content-Length`, hop-by-hop headers, `X-Codex-Installation-Id`, and `X-OAI-Attestation`. Account custom Headers are merged after the protocol allowlist and before the system-owned `Content-Type` and `Authorization`. Their names/values are strictly bounded, and credential/session/device/hop-by-hop names are rejected case-insensitively. Custom Headers never participate in session identity extraction. `responseHeadersFor()` always overwrites Authorization with `Bearer ${account.key}`. The native `http`/`https` transport is required for chat forwarding so a missing client `User-Agent` stays missing.
 
-Account keys, proxy URLs/authentication, Header values, and notes are intentionally static account configuration in `config.json` and are returned only through authenticated account administration. They must not appear in `metadata.json`, JSONL logs, traces, error bodies, or diagnostic headers. Raw session values, HMAC fingerprints, and message text must not be persisted; only `sessionSource` and applied safe Header names may be recorded.
+Account keys, proxy URLs/authentication, Header values, and notes are intentionally static account configuration in `config.json` and are returned only through authenticated account administration. They must not appear in `metadata.json`, ordinary JSONL logs, traces, error bodies, or diagnostic headers. Raw sessions, HMAC fingerprints and message text remain forbidden in these ordinary projections; only `sessionSource` and applied safe Header names may be recorded. The separately opt-in detailed store may retain sanitized model HTTP content and ordinary headers/session values under `logging-guidelines.md`; it never permits raw credentials, whole account objects or HMAC fingerprints, and does not relax the ordinary exclusions.
 
 #### Account proxy and model alias boundary
 
@@ -142,6 +147,7 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - The SSE observer records a complete `data: [DONE]` event. A downstream close after `[DONE]` finalizes once as `200 / success`; a close before `[DONE]` finalizes once as `499 / client_cancelled`.
 - An observed SSE error or upstream transport error takes precedence over `[DONE]` and remains a real failure. A client cancellation creates no error attempt, usage, error statistic, health result, or account action.
 - The account lease stays held until normal stream flush, upstream error, or downstream close. Stream finalization, listener cleanup, statistics submission, and lease release are idempotent.
+- Detailed capture, when enabled, observes native responses before SSE-head consumers with a single pass-through Transform and two-way destruction propagation. Use native `stream.finished(source, { readable: true, writable: false }, callback)` to observe terminal source errors: `aborted` may precede Node's actual `error`, and synthesizing an earlier error changes downstream error bodies with logging enabled. Preserve the native error object/code (`ECONNRESET`); a silent premature close still terminates the tap with `ERR_STREAM_PREMATURE_CLOSE`. The 5 MiB capture cap never becomes a traffic limit; asynchronous store publication is not awaited here. Preserve downstream write/end/writeHead overloads/return values and explicitly carry the detail root into chat result recording because close callbacks may run outside the originating AsyncLocalStorage context. See the detailed logging contract for route exclusions and failure states.
 
 #### Usage, statistics, and health
 
@@ -155,12 +161,14 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 
 #### Quota refresh and account pipeline
 
-- Quota refresh calls only `/users/me/plan/usage-limits` in the background, uses the account's proxy without direct fallback, allows at most two concurrent refreshes, caps the body at 256 KiB, and never waits in chat selection.
-- Accepted quota rows are only `five_hour`, `weekly`, and `monthly`, each with finite `percentUsed` in 0-100 and an optional canonical ISO reset time. A routing snapshot is fresh only when all three windows belong to the latest successful, non-error attempt and are no older than 15 minutes.
-- Account/key/proxy changes and disabling quota routing advance a generation so a stale in-flight completion cannot write or route. Failures retain safe category/timestamps, make routing quota unknown, and retry on a bounded backoff.
-- `accountPipeline` has exactly four booleans: `quotaPool`, `excludeUnhealthy`, `healthSort`, and `sticky`. When all are false, `acquireAccountLease()` calls the unchanged legacy selector.
-- Enabled pipelines first apply mandatory account eligibility. Optional unhealthy filtering uses deterministic best-score fallback instead of starving all candidates; then quota groups are `hot`, `warm`, `unknown`, `reserve`, followed by health groups `available-or-insufficient`, `degraded`, `unhealthy`.
-- Pipeline affinity is applied once before the configured six-mode selector. Capacity fallback may advance to a lower group but cannot bypass mandatory eligibility, and provider retries remain bound to the selected account.
+- Routing-owned refreshes and statistics-page refreshes share one FIFO admission pump. Every actual `/users/me/plan/usage-limits` transport uses the account proxy without direct fallback, has a 15-second absolute deadline, caps the body at 256 KiB, and occupies one of exactly two global slots until the native response settles. Overlapping scheduler callbacks, account saves, tabs and manual requests cannot create a third live upstream call; chat selection never waits for this work.
+- `quotaJobs` owns one queued/running promise per account ID. Matching demands join that promise. Cancelled or identity-stale work remains ID-locked and slot-counted until settlement; finalizers may remove only the same job object. Queue admission rereads current account identity, source ownership, cache and backoff rather than retaining arbitrary account payloads.
+- A successful partial or complete snapshot is reusable for five minutes from `lastSuccessAt`; a routing snapshot remains fresh only when all three windows belong to the latest successful, non-error attempt and are no older than 15 minutes. Manual `force:true` bypasses only the success cache: backoff, deduplication and the global cap still apply. Each page token snapshots a monotonic per-account success version before body parsing, so a success published after batch acceptance is reused instead of replayed, including across key/proxy rotation. Only true account deletion removes that runtime version.
+- `POST /api/statistics/quota-refresh` is an authenticated finite sweep derived from persisted accounts. It accepts exactly `{ force: boolean }`, keeps the response open for the sweep, returns only `{ ok, refreshed, cached, deferred, skipped, failed, cancelled }`, and never writes scheduling configuration. At most 16 page batches may be active; excess requests receive `429` with `Retry-After: 1` before jobs are created.
+- Page tokens and the routing scheduler are separate sources. Response/socket close withdraws only that page token; disabling quota routing advances a routing epoch and withdraws only routing ownership. A queued job is dropped and a running job aborted only after its final valid owner leaves. Source withdrawal/invalidation publishes neither success nor failure/backoff state.
+- Account generation is independent of routing epoch. Key/proxy replacement and deletion clear the old snapshot; disablement retains last-good display data. All three cancel old-generation work. Publication rechecks ID, enabled/key/proxy identity, generation and at least one live source, preventing disable/re-enable and key A→B→A resurrection.
+- Accepted quota rows are only `five_hour`, `weekly`, and `monthly`, each with finite `percentUsed` in 0-100 and an optional canonical ISO reset time. `statisticsQuotaProjection()` adds safe attempt/success times plus `refresh.{eligible,reason,state,nextAttemptAt}` without exposing credentials, owner tokens, controllers or raw responses. Reading retained/partial/error data never makes it fresh for routing.
+- `accountPipeline` has exactly four booleans: `quotaPool`, `excludeUnhealthy`, `healthSort`, and `sticky`. When all are false, `acquireAccountLease()` calls the unchanged legacy selector. Enabled pipelines first apply mandatory account eligibility, deterministic unhealthy fallback and quota/health groups; capacity fallback cannot bypass eligibility, and provider retries remain bound to the selected account.
 
 ### 4. Validation & Error Matrix
 
@@ -191,8 +199,11 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 | A streaming SSE event exceeds 64 KiB | discard that event only; resume at its CRLF/LF terminator and observe later usage |
 | A fixed statistics counter exceeds `Number.MAX_SAFE_INTEGER` | persist `null` plus the exact `overflowFields` marker; never wrap or clamp |
 | Health input is an ordinary 4xx or client disconnect | no result/penalty unit is recorded |
-| Quota body exceeds 256 KiB or its schema/time/percentage is invalid | safe failure category; quota routing becomes unknown; no raw payload persists |
-| Quota completion belongs to an old key/proxy/config generation | discard without mutating quota state |
+| Quota body exceeds 256 KiB, times out, or its schema/time/percentage is invalid | Safe failure category/backoff; retain last-good diagnostics, make routing quota unknown, and persist no raw payload |
+| Quota completion belongs to an old key/proxy/account generation or has no live page/routing owner | Cancel/discard without mutating snapshot, attempt time, failure count or backoff |
+| Quota refresh body is missing/extra/nonboolean, is not an object, or has any query parameter | `400`; no quota owner/job/upstream call |
+| More than 16 statistics quota batches are active | `429` plus `Retry-After: 1`; no new job |
+| Manual, automatic, routing and save-triggered quota demands overlap | Join by account and keep actual unfinished upstream concurrency at or below two |
 | All four pipeline flags are false | use the legacy six-mode selection path without extra sorting/filtering |
 | `/api/config` scope/action/account/model/route is invalid | `400`; do not save |
 
@@ -205,6 +216,9 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - **Good:** a streaming request receives fragmented events and one oversized event, then commits the final later cumulative usage exactly once.
 - **Good:** every account is unhealthy, so `excludeUnhealthy` deterministically retains only the best-score tie set instead of returning no account.
 - **Good:** an old quota request finishes after credential rotation; its generation mismatch prevents any state write.
+- **Good:** a delayed manual batch is accepted, another owner publishes a new-identity success, and the delayed batch returns `cached` without another upstream call.
+- **Good:** routing turns off while a page still owns a shared job; the page may publish the valid result, but routing remains disabled and strict freshness rules are unchanged.
+- **Base:** opening statistics within five minutes of a successful partial snapshot returns cached diagnostics without enabling quota routing.
 - **Base:** no account-specific `perModel[model]` exists, so the global route is used unchanged.
 - **Base:** no identity is extractable, so sticky deliberately behaves as round-robin.
 - **Bad:** calling account selection inside the provider-attempt loop; this breaks request-level account affinity.
@@ -236,7 +250,10 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - non-stream and fragmented/oversized streaming responses count only explicit usage, preserve known zero versus missing, and finalize once across success, failure, and disconnect;
 - health penalty classes, minimum coverage, score thresholds, incomplete coverage, and one-result-per-account-segment behavior are deterministic;
 - all-false pipeline output is equivalent to each legacy mode, while enabled filters/groups/sticky/capacity fallback preserve eligibility and lease release;
-- quota projection rejects oversized/malformed/non-canonical responses, never uses a stale generation, stays outside the chat path, and applies bounded retry/concurrency;
+- quota projection rejects oversized/malformed/non-canonical responses, never uses a stale generation, stays outside the chat path, and preserves strict 15-minute routing freshness;
+- simultaneous routing/save/manual/multi-page demand never exceeds two truly unfinished upstream responses, same-account work joins, force does not bypass backoff, and a success since page-batch acceptance prevents a sequential duplicate even across key/proxy rotation;
+- page close, routing off/on, disable/re-enable, key A→B→A, proxy rotation and deletion fence queued/header/body completions; owner-only cancellation records no failure/backoff; slow-drip responses hit the absolute deadline;
+- the statistics refresh API rejects invalid/query/overload requests before work, returns bounded outcome counts, changes no configuration, refreshes only enabled keyed persisted accounts and never enters ordinary/detailed chat logs or chat statistics;
 - `/api/statistics` is authenticated, coverage-labelled, bounded, stable-ID keyed, and contains no sensitive/raw provider data.
 
 The current integration suite directly covers stable identities, provider/account failover, capacity overflow, valid SSE, fragmented pre-response SSE errors, wrapped post-start SSE errors without replay, `[DONE]`-then-close success, streaming/non-streaming client cancellation projections, empty-content rejection and exceptions, deliberate Responses API rejection, prompt oversized-body rejection, HRW input-order independence, minimal remapping after account removal, missing usage, oversized CRLF SSE recovery, statistics corruption rejection, and quota generation invalidation.
@@ -286,3 +303,23 @@ finalizeStatistics({ usage }); // request-scoped and idempotent
 ```
 
 Likewise, do not run pipeline grouping unconditionally: `pipelineEnabled() === false` must delegate to `acquireLegacyAccountLease()`.
+
+Quota work must also use the shared admission owner.
+
+#### Wrong
+
+```js
+// Two scheduler callbacks can each start two transports.
+await Promise.all(due.slice(0, 2).map(refreshQuota));
+```
+
+#### Correct
+
+```js
+// Every source joins the same per-account job and global two-slot pump.
+await requestQuota(account.id, pageToken
+  ? { pageToken, force }
+  : { routingEpoch });
+```
+
+The slot and ID lock are released only when the underlying transport settles, not when one requesting source leaves.
