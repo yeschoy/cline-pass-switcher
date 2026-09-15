@@ -21,9 +21,9 @@ the rest conversationally.
 
 ## Status (update the checkboxes as you complete each item)
 
-- [ ] Fill backend guidelines
-- [ ] Fill frontend guidelines
-- [ ] Add code examples
+- [x] Fill backend guidelines
+- [x] Fill frontend guidelines
+- [x] Add code examples
 
 ---
 
@@ -34,23 +34,23 @@ the rest conversationally.
 
 | File | What to document |
 |------|------------------|
-| `.trellis/spec/backend/directory-structure.md` | Where different file types go (routes, services, utils) |
-| `.trellis/spec/backend/database-guidelines.md` | ORM, migrations, query patterns, naming conventions |
-| `.trellis/spec/backend/error-handling.md` | How errors are caught, logged, and returned |
-| `.trellis/spec/backend/logging-guidelines.md` | Log levels, format, what to log |
-| `.trellis/spec/backend/quality-guidelines.md` | Code review standards, testing requirements |
+| `.trellis/spec/backend/directory-structure.md` | Native Node runtime, cohesive `lib/` modules, tests, data and deploy layout |
+| `.trellis/spec/backend/database-guidelines.md` | JSON persistence, migrations, identity and atomic-write contracts |
+| `.trellis/spec/backend/error-handling.md` | API/upstream/storage errors, cancellation, redaction and fail-open diagnostics |
+| `.trellis/spec/backend/logging-guidelines.md` | Ordinary and detailed diagnostic storage/capture contracts |
+| `.trellis/spec/backend/quality-guidelines.md` | Routing, transport, statistics, quota, trust boundaries and tests |
+| `.trellis/spec/backend/deployment-guidelines.md` | Canonical production target, safe release switching and rollback |
 
 
 ### Frontend guidelines
 
 | File | What to document |
 |------|------------------|
-| `.trellis/spec/frontend/directory-structure.md` | Component/page/hook organization |
-| `.trellis/spec/frontend/component-guidelines.md` | Component patterns, props conventions |
-| `.trellis/spec/frontend/hook-guidelines.md` | Custom hook naming, patterns |
-| `.trellis/spec/frontend/state-management.md` | State library, patterns, what goes where |
-| `.trellis/spec/frontend/type-safety.md` | TypeScript conventions, type organization |
-| `.trellis/spec/frontend/quality-guidelines.md` | Linting, testing, accessibility |
+| `.trellis/spec/frontend/directory-structure.md` | Single static document structure, naming and feature placement |
+| `.trellis/spec/frontend/state-management.md` | Server snapshots, drafts, generations, controllers and API ownership |
+| `.trellis/spec/frontend/quality-guidelines.md` | Native accessibility, safe rendering, responsive behavior and verification |
+
+The generic component, hook, and TypeScript templates were deleted because this repository has no frontend framework, custom-hook layer, TypeScript source, or bundler. Adding rules for those patterns would document an architecture that does not exist.
 
 
 ### Thinking guides (already populated)
