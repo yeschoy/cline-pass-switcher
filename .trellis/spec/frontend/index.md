@@ -1,39 +1,39 @@
 # Frontend Development Guidelines
 
-> Best practices for frontend development in this project.
+> Entry point for the static administration console in `public/index.html`.
 
 ---
 
-## Overview
+## Architecture
 
-This directory contains guidelines for frontend development. Fill in each file with your project's specific conventions.
+The frontend is plain HTML, CSS, and JavaScript served directly by `server.js`. It has no framework, component module tree, hooks, TypeScript, bundler, or frontend dependency. Browser state is owned by explicit snapshots, generation counters, controllers, and native DOM elements inside the one production document.
 
----
+The unused framework-oriented component, hook, and type-safety templates were removed rather than documenting patterns this repository does not use.
 
 ## Guidelines Index
 
-| Guide | Description | Status |
-|-------|-------------|--------|
-| [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
-| [Component Guidelines](./component-guidelines.md) | Component patterns, props, composition | To fill |
-| [Hook Guidelines](./hook-guidelines.md) | Custom hooks, data fetching patterns | To fill |
-| [State Management](./state-management.md) | Console server-state and account/model routing round-trip contracts | Filled |
-| [Quality Guidelines](./quality-guidelines.md) | Responsive account drawer, presets, aliases, logs, rendering and accessibility contracts | Filled |
-| [Type Safety](./type-safety.md) | Type patterns, validation | To fill |
+| Guide | Use it when changing |
+|-------|----------------------|
+| [Directory Structure](./directory-structure.md) | Static document organization, naming, feature placement, test layout |
+| [State Management](./state-management.md) | Server snapshots, complete account drafts, raw/bulk/statistics/log/detail ownership |
+| [Quality Guidelines](./quality-guidelines.md) | Native accessibility, rendering safety, responsive layout, UI/API verification |
 
----
+## Pre-Development Checklist
 
-## How to Fill These Guidelines
+- Trace the complete production inline-script flow and every caller before editing shared state or `api()`.
+- Identify the owning snapshot/generation/controller; do not invent a second store or cursor.
+- Preserve hidden account fields and temporarily invalid local drafts across redraw/navigation.
+- Escape server text before `innerHTML`; use `textContent`/textarea values for arbitrary diagnostics.
+- Use native controls and existing responsive wrappers; do not introduce a build system or dependency for one feature.
+- Define the server validation/persistence boundary before adding browser-side feedback.
 
-For each guideline file:
+## Quality Check
 
-1. Document your project's **actual conventions** (not ideals)
-2. Include **code examples** from your codebase
-3. List **forbidden patterns** and why
-4. Add **common mistakes** your team has made
+- Compile the extracted production `<script>` with `vm.Script`.
+- Run the focused production-VM tests plus `test/ui-contract.test.js`.
+- Run `npm test` and `git diff --check`.
+- Check stale success/catch/finally paths across section changes and aborted requests.
+- For interactive/layout changes, collect real-browser keyboard, focus, dialog, live-status, and narrow-width evidence; do not describe static/VM tests as browser automation.
+- Confirm no account/configuration write occurs before the existing explicit save action.
 
-The goal is to help AI assistants and new team members understand how YOUR project works.
-
----
-
-**Language**: All documentation should be written in **English**.
+**Documentation language:** English.

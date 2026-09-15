@@ -52,6 +52,13 @@ metadata.json   DATA_DIR/metadata.json
 
 ```js
 {
+  port,                 // default 3123
+  apiKey,               // legacy single-key compatibility input
+  proxyKey,
+  publicBaseUrl,
+  exposeCatalog,
+  upstreamBase,
+  knownModels,
   accounts: [{
     id, name, note, key, enabled,
     maxConcurrent, weight, priority,
@@ -114,7 +121,10 @@ Startup normalization preserves legacy behavior while making the schema explicit
   },
   routingSecret,
   models,
-  history,
+  history,                 // compatibility-only persisted array
+  catalog, catalogFetchedAt,
+  orModelsFetchedAt, orModelList,
+  officialModelsFetch,
   statistics: {
     version: 1,
     lifetime: { global: Aggregate, accounts: { [accountId]: Aggregate } },
@@ -157,7 +167,7 @@ Startup normalization preserves legacy behavior while making the schema explicit
 
 `routingSecret` is generated once and persisted so HRW mapping survives restart. `accountStates` entries for removed accounts are deleted; the deterministic environment-account ID remains valid while `CLINE_PASS_KEY` is present. Expired, non-banned cooldown entries are deleted when candidates are read. Ban/cooldown state persists until expiry or `POST /api/accounts/recover` removes it.
 
-Metadata may contain the identity source label (for example `message_hmac`) but must not contain account keys, proxy credentials, custom Header values, account notes, raw session values, HMAC fingerprints, or message text. Error reasons are redacted and flattened before persistence; structured upstream reasons remain complete so their final provider diagnostics are retained.
+`metadata.json` must not contain account keys, proxy credentials, custom Header values, account notes, raw session values, HMAC fingerprints, message text, or identity-source labels. Bounded identity-source labels such as `message_hmac` belong only to ordinary request-log projections. Reasons written to metadata are redacted and flattened; bounded model status notes may be truncated, while complete redacted structured provider reasons belong to the separate error JSONL stream.
 
 `Aggregate` has fixed non-negative safe-integer counters for requests, errors, usage coverage, input/output/total tokens, and cache coverage/tokens. A counter that would overflow becomes `null` and its exact field name is added once to `overflowFields`; a `null` field without that marker, or a marker whose field is not `null`, is corrupt. Statistics retain at most 1,440 minute buckets and 50,000 union `(minute, accountId)` cells. Dropped account cells mark recent coverage incomplete rather than inventing zeroes.
 

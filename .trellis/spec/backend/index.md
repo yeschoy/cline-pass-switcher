@@ -1,39 +1,40 @@
 # Backend Development Guidelines
 
-> Best practices for backend development in this project.
+> Entry point for the native-Node proxy, persistence, diagnostics, testing, and production deployment contracts.
 
 ---
 
-## Overview
+## Architecture
 
-This directory contains guidelines for backend development. Fill in each file with your project's specific conventions.
-
----
+The backend is an ESM Node service centered on `server.js`, with cohesive storage/capture modules under `lib/`, native `node:test` coverage, JSON state under `DATA_DIR`, and Docker-based production deployment. Read the scenario-specific guide before changing a shared boundary.
 
 ## Guidelines Index
 
-| Guide | Description | Status |
-|-------|-------------|--------|
-| [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
-| [Persistence Guidelines](./database-guidelines.md) | JSON configuration, metadata, and startup migration contracts | Filled |
-| [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
-| [Quality Guidelines](./quality-guidelines.md) | Account routing, transport, security, and test contracts | Filled |
-| [Logging Guidelines](./logging-guidelines.md) | Ordinary JSONL projections and separate opt-in detailed capture/storage/API contracts | Filled |
-| [Deployment Guidelines](./deployment-guidelines.md) | Canonical production host, key-path safety, versioned releases, verification, and rollback | Filled |
+| Guide | Use it when changing |
+|-------|----------------------|
+| [Directory Structure](./directory-structure.md) | File placement, module ownership, runtime/test/deploy layout |
+| [Persistence Guidelines](./database-guidelines.md) | JSON configuration, metadata, migration, identity, atomic writes |
+| [Error Handling](./error-handling.md) | API errors, upstream classification, cancellation, fail-open diagnostics |
+| [Quality Guidelines](./quality-guidelines.md) | Account routing, transport, statistics, quota jobs, security, integration tests |
+| [Logging Guidelines](./logging-guidelines.md) | Ordinary JSONL logs and opt-in detailed capture/storage/APIs |
+| [Deployment Guidelines](./deployment-guidelines.md) | Canonical production host, key-path safety, versioned releases, verification, rollback |
 
----
+## Pre-Development Checklist
 
-## How to Fill These Guidelines
+- Identify every caller of a shared `server.js` helper before changing it.
+- Read the exact persistence/logging/routing/deployment contract for the affected boundary.
+- Preserve operator `DATA_DIR` files and use temporary data/local upstreams in tests.
+- Validate trust-boundary input completely before mutation or network work.
+- Keep credentials, message bodies, raw sessions, proxy details, and internal owner state out of ordinary projections.
+- Prefer Node/platform APIs and existing modules over new dependencies or abstraction layers.
 
-For each guideline file:
+## Quality Check
 
-1. Document your project's **actual conventions** (not ideals)
-2. Include **code examples** from your codebase
-3. List **forbidden patterns** and why
-4. Add **common mistakes** your team has made
+- Run focused `node --test` coverage that can fail for the changed behavior.
+- Run `node --check` for touched runtime modules.
+- Run `npm test` with real credential/base environment overrides unset for integration work.
+- Run `git diff --check` and inspect the complete affected flow.
+- Use temporary/local fixtures; never validate against production data or credentials.
+- For deployment, archive committed `HEAD`, verify hashes, preserve `config.json`, and require rollback-ready health/API checks.
 
-The goal is to help AI assistants and new team members understand how YOUR project works.
-
----
-
-**Language**: All documentation should be written in **English**.
+**Documentation language:** English.

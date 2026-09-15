@@ -112,7 +112,8 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 | `limit` outside 1-200 or non-integer | `400` |
 | `from`, `to`, `status`, or `upstreamStatus` is not a finite integer | `400` |
 | Boolean filter is not exactly `true` or `false` | `400` |
-| Cursor is malformed or stale after retention | safely restart from the newest matching records; never crash |
+| Cursor is malformed at the HTTP boundary | `400` |
+| Cursor is structurally valid but stale after retention | safely restart from the newest matching records; never crash |
 | One complete JSONL line is malformed | skip the line and continue |
 | Last line is truncated | ignore it until compaction |
 | Append/compact filesystem error | redacted service error; proxy response path remains usable |

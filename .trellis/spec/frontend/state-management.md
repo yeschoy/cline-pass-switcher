@@ -239,7 +239,7 @@ The top-level section is projected by `consolePanel.hidden`, `statisticsPanel.hi
 #### Detailed settings and selected-content ownership
 
 ```js
-api(path, body, method, asText = false)
+api(path, body, method, asText = false, options = {})
 loadDetailSettings()
 toggleDetailedLogging()
 loadDetails(next = false)

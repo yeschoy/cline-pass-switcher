@@ -1,6 +1,6 @@
 # Backend Quality Guidelines
 
-> Executable contracts for account routing, upstream transport, and administrative APIs in the zero-dependency Node server.
+> Executable contracts for account routing, upstream transport, and administrative APIs in the small ESM Node server.
 
 ---
 
@@ -127,7 +127,7 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 #### Account proxy and model alias boundary
 
 - Empty `proxyUrl` means native direct transport. `http:`/`https:` use `HttpsProxyAgent`; `socks5:`/`socks5h:` use `SocksProxyAgent`. The pinned agent versions preserve Node >=18.
-- The account proxy applies to account-bound Cline chat/probe/validation/test traffic only. Public catalog/document fetching and management APIs remain direct.
+- The account proxy applies to account-bound Cline chat/probe/validation/test and quota-upstream traffic. Public catalog/document fetching and ordinary management APIs remain direct.
 - A configured proxy failure is a proxy/network attempt failure and never retries the same request without an agent.
 - `requestedModel` is preserved for diagnostics. `resolvedModel = modelAliases[requestedModel] || requestedModel` replaces outbound `body.model` and owns global/account `perModel` lookup. Aliases are not chained.
 - `/v1/models` exposes the de-duplicated union of original visible models and aliases so old clients remain compatible.

@@ -16,7 +16,8 @@ The canonical target is fixed for this project. Do not ask which server to use u
 
 ```text
 SSH target:       ubuntu@167.114.158.4:49555
-SSH identity:     ./167.114.158.4_ubuntu_49555_ed25519
+Repository root:  git rev-parse --show-toplevel
+SSH identity:     <repository-root>/167.114.158.4_ubuntu_49555_ed25519
 Remote root:      /opt/cline-pass-switcher
 Compose file:     /opt/cline-pass-switcher/compose.yml
 Service/container: cline-pass-console
@@ -25,8 +26,10 @@ Public check:     https://clinepass.yeschoy.com/api/meta
 ```
 
 ```bash
-ssh -o BatchMode=yes \
-  -i ./167.114.158.4_ubuntu_49555_ed25519 \
+REPO_ROOT="$(git rev-parse --show-toplevel)" || exit 1
+IDENTITY="$REPO_ROOT/167.114.158.4_ubuntu_49555_ed25519"
+ssh -o BatchMode=yes -o ConnectTimeout=10 \
+  -i "$IDENTITY" \
   -p 49555 ubuntu@167.114.158.4
 ```
 
@@ -35,7 +38,7 @@ ssh -o BatchMode=yes \
 #### Target and key safety
 
 - “Deploy remote” means the SSH target above unless the user names another host.
-- The identity file is repository-local, mode `0600`, and gitignored. Use its path only. Never read, print, copy, upload, edit, or commit its contents.
+- The identity file is repository-local, mode `0600`, and gitignored. Resolve it from `git rev-parse --show-toplevel`; abort if the repository root, exact file, ignore rule, or mode check fails. Never search for a fallback key or directly read, print, copy, upload, edit, or commit its contents; pass only the resolved path to `ssh`/`scp`.
 - Use `BatchMode=yes` and a bounded connection timeout so authentication failures stop without an interactive prompt.
 
 #### Release layout and source
@@ -110,10 +113,12 @@ ssh ubuntu@167.114.158.4 'docker compose up -d --build'
 #### Correct
 
 ```bash
-git archive --format=tar --output="$release.tar" HEAD -- \
+REPO_ROOT="$(git rev-parse --show-toplevel)" || exit 1
+IDENTITY="$REPO_ROOT/167.114.158.4_ubuntu_49555_ed25519"
+git -C "$REPO_ROOT" archive --format=tar --output="$release.tar" HEAD -- \
   Dockerfile package.json package-lock.json server.js lib public \
   README.md LICENSE .dockerignore config.example.json
-scp -i ./167.114.158.4_ubuntu_49555_ed25519 -P 49555 \
+scp -o BatchMode=yes -o ConnectTimeout=10 -i "$IDENTITY" -P 49555 \
   "$release.tar" ubuntu@167.114.158.4:/tmp/
 # Remote: verify hashes, back up state, switch the two compose fields,
 # require health/API/data checks, and restore the previous compose on failure.
