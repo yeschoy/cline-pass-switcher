@@ -19,6 +19,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
 | [Quality Guidelines](./quality-guidelines.md) | Account routing, transport, security, and test contracts | Filled |
 | [Logging Guidelines](./logging-guidelines.md) | Ordinary JSONL projections and separate opt-in detailed capture/storage/API contracts | Filled |
+| [Deployment Guidelines](./deployment-guidelines.md) | Canonical production host, key-path safety, versioned releases, verification, and rollback | Filled |
 
 ---
 
