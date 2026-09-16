@@ -236,3 +236,25 @@ Added current, +2h, +8h and +24h account-equivalent quota forecast cards using f
 ### Status
 
 [OK] **Completed**
+
+
+## Session 9: Deploy quota forecast panel
+<!-- trellis-session: v=2 fp=a8aef9090479cfdc -->
+
+**Date**: 2026-09-17
+**Task**: Deploy quota forecast panel
+**Branch**: `feat/quota-forecast-panel`
+
+### Summary
+
+Directly deployed committed quota forecast UI to production as release 20260916-174357-529d642f4b8e-quota-forecast with versioned backups, unchanged config hash, healthy zero-restart container, API/internal-network/HTML gates, delayed stability, and independent read-only verification. Public DNS remains a pre-existing degraded dependency.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d3c8bd5` | docs: harden production deployment preflight |
+
+### Status
+
+[OK] **Completed**
