@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/deployment-guidelines.md", "reason": "生产目标、SSH 身份和只读安全边界"}
+{"file": ".trellis/tasks/archive/2026-09/09-14-error-logging-api-compat/research/production-error-analysis.md", "reason": "历史生产错误基线与已知统计口径"}
