@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/state-management.md","reason":"Statistics snapshot ownership, stale-response guards, quota truthfulness, and existing VM test requirements."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Responsive native UI, accessibility, safe rendering, and statistics validation contracts."}
+{"file":".trellis/spec/frontend/directory-structure.md","reason":"Required placement in the single production HTML and focused test layout."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Reuse existing statistics/quota owners without adding another store, request, or scheduler."}

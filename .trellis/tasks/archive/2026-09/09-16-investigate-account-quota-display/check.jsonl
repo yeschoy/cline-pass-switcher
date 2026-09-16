@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/state-management.md","reason":"Review accepted-snapshot rendering, unknown/fresh semantics, and draft/state isolation."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Review accessibility, responsive cards, truthful units, escaping, and required test evidence."}
+{"file":".trellis/tasks/archive/2026-09/09-14-account-quota-statistics/prd.md","reason":"Preserve the original per-account quota visibility, refresh, and truthful-state acceptance contracts."}
+{"file":".trellis/tasks/archive/2026-09/09-14-account-quota-statistics/research/quota-refresh-ownership.md","reason":"Confirm the forecast remains a read-only projection and does not duplicate quota refresh ownership."}
