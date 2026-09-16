@@ -214,3 +214,25 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 8: Add statistics quota forecast
+<!-- trellis-session: v=2 fp=bb9985deeeb08deb -->
+
+**Date**: 2026-09-17
+**Task**: Add statistics quota forecast
+**Branch**: `feat/quota-forecast-panel`
+
+### Summary
+
+Added current, +2h, +8h and +24h account-equivalent quota forecast cards using fresh complete quota snapshots, conservative reset-time projections, focused tests, and frontend spec contracts. Full test suite passed 139/139.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `8b727b1` | feat: add quota forecast panel |
+
+### Status
+
+[OK] **Completed**
