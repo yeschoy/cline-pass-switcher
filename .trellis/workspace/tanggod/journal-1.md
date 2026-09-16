@@ -189,3 +189,28 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 7: 修复额度解析并部署可排序调度流水线
+<!-- trellis-session: v=2 fp=2d7974ef387b58ad -->
+
+**Date**: 2026-09-16
+**Task**: 修复额度解析并部署可排序调度流水线
+**Branch**: `main`
+
+### Summary
+
+兼容 Cline 1-9 位额度重置时间；实现四步骤任意排序、严格迁移、六模式容量与可访问拖拽；全套测试与 Chrome 验收通过；版本化部署到远程服务器并验证 9/9 账号额度恢复，公网 DNS 保持部署前外部故障。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e1e1a1a` | fix: 兼容纳秒级额度重置时间 |
+| `cabb882` | feat: 支持可排序账号调度流水线 |
+| `b1f2170` | docs: define safe config migration deployment gate |
+| `f2e7890` | chore(task): record production deployment |
+
+### Status
+
+[OK] **Completed**
