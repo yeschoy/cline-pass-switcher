@@ -40,6 +40,8 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 - “Deploy remote” means the SSH target above unless the user names another host.
 - The identity file is repository-local, mode `0600`, and gitignored. Resolve it from `git rev-parse --show-toplevel`; abort if the repository root, exact file, ignore rule, or mode check fails. Never search for a fallback key or directly read, print, copy, upload, edit, or commit its contents; pass only the resolved path to `ssh`/`scp`.
 - Use `BatchMode=yes` and a bounded connection timeout so authentication failures stop without an interactive prompt.
+- Do not assume the host has Node.js or another helper runtime merely because the application container does. Before any mutation, verify each host-side helper used by preflight; prefer existing `python3` for bounded JSON projections or run Node only inside the known application image/container. A missing helper must stop or fall back during read-only preflight, never after the compose switch.
+- Pass release names, hashes and paths to remote helpers as validated positional arguments or fixed environment values. Do not interpolate them through nested local/SSH shell quoting. A quoting failure is retryable only while no release directory, backup or compose mutation exists; record the retry in deployment evidence.
 
 #### Release layout and source
 
@@ -67,6 +69,8 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 | Condition | Required result |
 |---|---|
 | SSH identity is missing, readable by others, or authentication fails | Stop before upload or mutation |
+| A host-side preflight helper is unavailable | Use an already verified host runtime or the known container runtime while still read-only; otherwise stop before upload/mutation |
+| A nested-shell/argument quoting check fails | Prove no release/backup/compose mutation occurred, then retry with positional arguments; otherwise stop and inspect state |
 | Local deployment files are dirty but not committed | Archive committed `HEAD`; do not include working-tree content |
 | Release directory already exists or uploaded hashes differ | Stop before compose change |
 | Build/start/health/image check fails | Restore previous compose and wait for previous image to become healthy |
@@ -79,10 +83,12 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 ### 5. Good / Base / Bad Cases
 
 - **Good:** archive committed `HEAD`, verify release hashes, back up state, switch two compose fields, wait for health, verify local/authenticated/internal routes, and record a safe report.
+- **Good:** verify `python3` (or another chosen host helper) during read-only preflight and pass the expected archive hash as a positional argument to the remote verifier.
 - **Base:** the public hostname has a known pre-switch DNS outage; the new container passes every local/internal gate, deployment stays active, and the DNS limitation is reported separately.
 - **Bad:** ask which server to use even though the user said “remote” and this contract defines the canonical host.
 - **Bad:** use `scp -r .`, which can upload gitignored credentials, local data, `.pi`, `.trellis`, or unrelated dirty files.
 - **Bad:** print the admin key in logs or pass it through a parent-visible command line.
+- **Bad:** assume host-level `node` exists or embed a local hash inside a multiply nested quoted SSH command; both can fail at an ambiguous operational boundary.
 
 ### 6. Tests Required
 
@@ -90,6 +96,7 @@ Before switching:
 
 - run the repository full test suite against committed code;
 - verify the identity path is gitignored and mode `0600` without reading it;
+- verify host-side helper runtime availability and argument passing during read-only preflight;
 - inspect the current container/image/health, account count/mode, safe `/api/meta`, disk space, and config hash;
 - for a declared config migration, run the committed image only against copied data, verify the exact documented structural diff, and record the predicted post-migration hash;
 - verify uploaded `server.js`, `public/index.html`, and security-sensitive module hashes match local `HEAD`.
