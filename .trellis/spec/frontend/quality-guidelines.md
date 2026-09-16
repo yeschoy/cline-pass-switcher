@@ -26,6 +26,8 @@ applyPreset()
 previewErrorPreset()
 applyErrorPreset()
 loadStatistics(visitId, announce)
+statisticsQuotaForecast(data)
+renderStatisticsQuotaForecast(data)
 refreshStatisticsQuota(force, visitId)
 startStatisticsVisit()
 stopStatisticsVisit()
@@ -122,6 +124,8 @@ The statistics panel owns an `aria-live` status, horizontally wrapped table, ind
 
 Each quota window labels used and remaining percentages plus an available reset time. Known 0%/100% remain numeric; unconfigured, disabled, unknown, partial, failed and stale/last-known states remain explicit without color alone. The status shows last success/attempt and queued/fetching/due state separately from routing `fresh/unknown`. Viewing or refreshing never enables quota routing, mutates account/raw/bulk drafts, or imports unsaved accounts. Missing/overflowed statistics and zero coverage still render as no data. Account/provider text is escaped, and Keys, proxy/Header/note values, raw traces/messages/sessions, owner state and raw quota responses never render.
 
+The quota forecast appears between the statistics summary and account table as four responsive cards: current, +2h, +8h and +24h. It projects only enabled, `fresh`, complete three-window rows from the accepted statistics snapshot. Each account contributes the minimum remaining percentage across 5-hour/weekly/monthly limits; the page then sums account minima and displays account quota points against `included * 100`. Future cards assume no new consumption and restore a window to 100% only when its canonical reset is after `generatedAt` and no later than that target. Missing/invalid/past resets and invalid snapshot time retain current remaining values and visibly mark the forecast as a conservative lower bound. Excluded and reset-incomplete account counts, unit meaning, and the no-consumption assumption are textual, not color-only. Values are written with `textContent`; no server-controlled account text enters the forecast markup.
+
 Request and error sections share one bounded filter, table, cursor, and clear implementation. The request view is labelled “最终请求结果（每个请求一条）”; the error view is labelled “上游失败尝试（同一请求可能多条）” and explicitly warns that attempt count is not failed-request count. `switchSection()` selects the type, updates the visible title/status/description, invalidates pending log reads, and starts a first-page load. `loadLogs()` ignores a response whose query generation or selected type is stale. “Next” sends only the server-provided cursor. Changing a filter or type resets the cursor. Clear captures the selected type before awaiting deletion, requires explicit confirmation naming that type, and reloads only if the same log section is still visible.
 
 Request status renders `status / result` and offers the request-only `result` filter. Historical rows without `result` display `success` for 2xx/3xx or `legacy_failed` otherwise; this fallback does not rewrite or claim to correct historical JSONL. Error status continues to render attempt status/upstream status.
@@ -158,6 +162,8 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 | Quota refresh resolves after navigation/pagehide or a newer visit starts | Ignore stale success/catch/finally; do not mutate the hidden/new visit or its button |
 | Statistics is restored after pagehide | Start one visible visit only when no timer is active; repeated pageshow does nothing |
 | Quota data is disabled, partial, failed, stale or missing a reset | Keep explicit last-known/unknown labels and times; never infer zero/freshness |
+| Forecast row is disabled/non-fresh/incomplete | Exclude and count it; do not reduce or increase the account quota-point denominator silently |
+| Forecast reset or `generatedAt` is unusable | Carry current remaining forward and announce a conservative lower bound; never assume an unseen reset |
 | Statistics coverage is zero or a field/ratio is `null` | render no data rather than numeric zero |
 | Alias row lacks `=` or duplicates an alias | block save and identify the row/alias |
 | Top section changes while a log query is pending | invalidate the old query; it must not update hidden or newly selected log state |
@@ -177,12 +183,14 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 - **Good:** merge a rule preset into a live custom status, observe the custom status in “preserved,” then cancel without changing the textarea.
 - **Good:** switch rapidly from statistics to request logs, errors, and console; only the current section remains visible and stale responses cannot replace its state.
 - **Good:** keyboard entry/manual refresh announces progress and preserves a pending account note, bulk selection and invalid scheduling-rule draft; a 500px viewport scrolls the wide table without document overflow.
+- **Good:** forecast cards wrap with `auto-fit/minmax`, expose a labelled region/live update, and show `available / maximum account quota points` plus the percentage and assumptions in text.
 - **Base:** a disabled account shows retained quota/time or unknown and is never queried by page refresh.
 - **Base:** an old account shows weight 1, priority 100, direct proxy status, and empty note/Header fields.
 - **Base:** no log records renders an empty-state row and disables next page.
 - **Bad:** rebuild account objects from visible table cells; hidden routes/proxy/Header fields will be erased.
 - **Bad:** put raw server JSON into a log `<pre>`; future fields could expose secrets.
 - **Bad:** encode preset logic in the backend and UI independently; values will drift.
+- **Bad:** describe summed percentages as Token/request/money capacity, or make a future card look exact when reset timestamps are incomplete.
 
 ### 6. Tests Required
 
@@ -195,6 +203,7 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 - five mutually exclusive top sections with one statistics panel, one shared ordinary-log DOM, one independent details panel, explicit active state, and no anchor/scroll shortcut;
 - statistics stale-response guards, escaped server text, unknown/known-zero rendering, table wrapping, and forbidden sensitive fields;
 - statistics entry/manual/timer coalescing, abort and pageshow restoration ownership; used/remaining/reset plus disabled/partial/error/stale states; draft preservation and routing-independent refresh;
+- the labelled responsive four-card quota forecast, truthful account-point units/assumptions, `textContent` rendering, exact fixed-time calculations, eligibility/exclusion counts, reset boundaries, lower-bound fallback, invalid snapshot time, and no-data state;
 - log query invalidation, filters/pagination, captured-type clear controls, request-only result filtering, safe historical fallback, explicit final-request versus failed-attempt wording, and model-alias batch controls;
 - independent detailed settings/privacy/retention/auth warnings, safe metadata/text and on-demand copy/clear controls; production VM tests must verify stale reads, cursor reset and no account-draft mutation.
 

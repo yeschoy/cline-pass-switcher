@@ -173,14 +173,43 @@ test('quota rendering preserves known zero/full values and labels partial, stale
   h.context.row={...base,quota:{status:'unknown',pool:'unknown',fetchedAt:null,lastAttemptAt:null,lastSuccessAt:null,limits:{},errorCategory:null,refresh:{eligible:false,reason:'unconfigured',state:'idle',nextAttemptAt:null}}};assert.match(h.run('quotaState(row,1000)'),/未配置/);
 });
 
+test('quota forecast sums each account minimum and applies resets at fixed target boundaries', () => {
+  const h=harness(),generatedAt=Date.parse('2026-09-15T00:00:00.000Z'),at=hours=>new Date(generatedAt+hours*60*60*1000).toISOString();
+  h.context.forecastData={generatedAt,accounts:[
+    {enabled:true,quota:{status:'fresh',limits:{five_hour:{percentUsed:20,resetsAt:at(2)},weekly:{percentUsed:40,resetsAt:at(8)},monthly:{percentUsed:10,resetsAt:at(24)}}}},
+    {enabled:true,quota:{status:'fresh',limits:{five_hour:{percentUsed:100,resetsAt:at(2)},weekly:{percentUsed:0,resetsAt:at(25)},monthly:{percentUsed:0,resetsAt:at(25)}}}}
+  ]};
+  const forecast=JSON.parse(h.run('JSON.stringify(statisticsQuotaForecast(forecastData))'));
+  assert.deepEqual(forecast,{totals:{current:60,twoHours:160,eightHours:190,twentyFourHours:200},maximum:200,included:2,excluded:0,incompleteResets:0});
+});
+
+test('quota forecast excludes untrusted snapshots and conservatively carries incomplete resets', () => {
+  const h=harness(),generatedAt=Date.parse('2026-09-15T00:00:00.000Z'),at=hours=>new Date(generatedAt+hours*60*60*1000).toISOString(),complete={five_hour:{percentUsed:10,resetsAt:at(1)},weekly:{percentUsed:20,resetsAt:at(2)},monthly:{percentUsed:30,resetsAt:at(3)}};
+  h.context.forecastData={generatedAt,accounts:[
+    {enabled:true,quota:{status:'fresh',limits:{five_hour:{percentUsed:80,resetsAt:at(0)},weekly:{percentUsed:60,resetsAt:at(1)},monthly:{percentUsed:40,resetsAt:at(1)}}}},
+    {enabled:true,quota:{status:'fresh',limits:{five_hour:{percentUsed:70},weekly:{percentUsed:60,resetsAt:'invalid'},monthly:{percentUsed:50,resetsAt:at(1)}}}},
+    {enabled:false,quota:{status:'fresh',limits:complete}},
+    {enabled:true,quota:{status:'stale',limits:complete}},
+    {enabled:true,quota:{status:'fresh',limits:{five_hour:complete.five_hour,weekly:complete.weekly}}},
+    {enabled:true,quota:{status:'fresh',limits:{...complete,monthly:{percentUsed:'30',resetsAt:at(3)}}}}
+  ]};
+  const forecast=JSON.parse(h.run('JSON.stringify(statisticsQuotaForecast(forecastData))'));
+  assert.deepEqual(forecast,{totals:{current:50,twoHours:50,eightHours:50,twentyFourHours:50},maximum:200,included:2,excluded:4,incompleteResets:2});
+  h.context.invalidGeneratedAt={generatedAt:-1,accounts:[{enabled:true,quota:{status:'fresh',limits:complete}}]};
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(statisticsQuotaForecast(invalidGeneratedAt))')),{totals:{current:70,twoHours:70,eightHours:70,twentyFourHours:70},maximum:100,included:1,excluded:0,incompleteResets:1});
+  h.context.noEligible={generatedAt,accounts:[{enabled:false,quota:{status:'fresh',limits:complete}}]};h.run('renderStatisticsQuotaForecast(noEligible)');
+  for(const id of ['#statisticsQuotaCurrent','#statisticsQuota2h','#statisticsQuota8h','#statisticsQuota24h'])assert.equal(h.el(id).textContent,'无可用数据');
+  assert.equal(h.el('#statisticsQuotaForecastMeta').textContent,'纳入 0 个账号 · 排除 1 个账号 · 重置时间不完整 0 个账号');
+});
+
 test('statistics visit refreshes on entry/timer/manual, coalesces, aborts stale work and preserves every draft owner', async () => {
   const h=harness(),aggregate={requests:0,errors:0,inputTokens:0,inputKnownRequests:0,outputTokens:0,outputKnownRequests:0,totalTokens:0,totalKnownRequests:0,cachedTokens:0,cacheKnownRequests:0,cacheInputCachedTokens:0,cacheInputTokens:0,cacheTokenRatio:null,cacheHitRequestRate:null,cacheHitRequests:0};
-  h.context.statData={generatedAt:Date.now(),lifetime:{global:aggregate},recent24h:{global:aggregate},accounts:[{id:'id0',name:'<safe>',health:{status:'insufficient',results:0,score:null},lifetime:aggregate,recent24h:aggregate,quota:{status:'fresh',pool:'hot',fetchedAt:Date.now(),lastAttemptAt:Date.now(),lastSuccessAt:Date.now(),limits:{five_hour:{percentUsed:0},weekly:{percentUsed:50},monthly:{percentUsed:100}},errorCategory:null,refresh:{eligible:true,reason:null,state:'idle',nextAttemptAt:Date.now()+300000}}}],migration:{legacyRequests:0}};
+  h.context.statData={generatedAt:Date.now(),lifetime:{global:aggregate},recent24h:{global:aggregate},accounts:[{id:'id0',name:'<safe>',enabled:true,health:{status:'insufficient',results:0,score:null},lifetime:aggregate,recent24h:aggregate,quota:{status:'fresh',pool:'hot',fetchedAt:Date.now(),lastAttemptAt:Date.now(),lastSuccessAt:Date.now(),limits:{five_hour:{percentUsed:0},weekly:{percentUsed:50},monthly:{percentUsed:100}},errorCategory:null,refresh:{eligible:true,reason:null,state:'idle',nextAttemptAt:Date.now()+300000}}}],migration:{legacyRequests:0}};
   h.el('#statisticsPanel').hidden=true;h.el('#logPanel').hidden=true;h.el('#detailsPanel').hidden=true;
   h.run("selectAccount(1,true); openRawScheduling(); openAccountDrawer(0); $('#drawerNote').value='unsaved drawer'; $('#accountErrorRules').value='{ pending';");
   const before={accounts:h.snapshot(),bulk:h.run('BULK_SELECTION.size'),raw:h.el('#rawSchedulingJson').value,drawer:h.el('#drawerNote').value,rules:h.el('#accountErrorRules').value};
   h.context.statCalls=[];h.run("api=async(path,body,method,asText,options={})=>{statCalls.push({path,body,options});return path==='/api/statistics'?statData:{ok:true,refreshed:1,cached:0,deferred:0,skipped:0,failed:0,cancelled:0};}");
-  await h.run("switchSection('statistics')");assert.deepEqual(h.context.statCalls.map(call=>[call.path,call.body?.force]),[['/api/statistics',undefined],['/api/statistics/quota-refresh',false],['/api/statistics',undefined]]);assert.match(h.el('#statisticsBody').innerHTML,/&lt;safe&gt;/);assert.match(h.el('#statisticsStatus').textContent,/额度刷新完成/);
+  await h.run("switchSection('statistics')");assert.deepEqual(h.context.statCalls.map(call=>[call.path,call.body?.force]),[['/api/statistics',undefined],['/api/statistics/quota-refresh',false],['/api/statistics',undefined]]);assert.match(h.el('#statisticsBody').innerHTML,/&lt;safe&gt;/);assert.equal(h.el('#statisticsQuotaCurrent').textContent,'可用 0.0 / 100.0 账号额度点（0.0%）');assert.match(h.el('#statisticsQuotaForecastMeta').textContent,/纳入 1 个账号.*重置时间不完整 1 个账号.*预测下限/);assert.match(h.el('#statisticsStatus').textContent,/额度刷新完成/);
   let timer=[...h.timers.values()].find(value=>value.ms===5*60*1000);assert.ok(timer);await timer.fn();assert.equal(h.context.statCalls.filter(call=>call.path==='/api/statistics/quota-refresh'&&call.body.force===false).length,2);
   await h.run('refreshStatisticsQuota(true)');assert.equal(h.context.statCalls.filter(call=>call.path==='/api/statistics/quota-refresh'&&call.body.force===true).length,1);
   assert.equal(typeof h.windowListeners.pagehide,'function');assert.equal(typeof h.windowListeners.pageshow,'function');

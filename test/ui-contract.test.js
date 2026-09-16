@@ -124,6 +124,21 @@ test('statistics quota controls expose labelled lifecycle, truthful units and ca
   assert.match(statistics,/controller!==STATISTICS_REFRESH_CONTROLLER/);assert.match(statistics,/STATISTICS_REFRESH_PROMISE&&STATISTICS_REFRESH_VISIT===visitId/);
 });
 
+test('statistics quota forecast is a labelled responsive four-card projection with truthful units', () => {
+  assert.match(html,/class="quota-forecast" role="region" aria-labelledby="statisticsQuotaForecastTitle"/);
+  assert.match(html,/id="statisticsQuotaForecastTitle">总可用额度预测<\/h3>/);
+  assert.match(html,/id="statisticsQuotaForecast" class="quota-forecast-grid" aria-live="polite"/);
+  for(const [id,label] of [['statisticsQuotaCurrent','当前'],['statisticsQuota2h','未来 2h'],['statisticsQuota8h','未来 8h'],['statisticsQuota24h','未来 24h']])assert.match(html,new RegExp(`<h4>${label}<\\/h4><p id="${id}">无可用数据<\\/p>`));
+  assert.match(html,/\.quota-forecast-grid \{[^}]*grid-template-columns: repeat\(auto-fit,minmax\(/);
+  assert.ok(html.indexOf('id="statisticsSummary"')<html.indexOf('id="statisticsQuotaForecast"'));
+  assert.ok(html.indexOf('id="statisticsQuotaForecast"')<html.indexOf('<div class="table-wrap"><table style="min-width:1500px"'));
+  for(const wording of ['账号等效百分比容量','最多 100 账号额度点','不代表 Token、请求数、金额','无新增消耗','预测下限','重置时间不完整'])assert.ok(html.includes(wording),wording);
+  const renderer=html.slice(html.indexOf('function renderStatisticsQuotaForecast'),html.indexOf('function quotaState'));
+  assert.match(renderer,/\.textContent=/);assert.doesNotMatch(renderer,/innerHTML/);
+  const loadStatistics=html.slice(html.indexOf('async function loadStatistics'),html.indexOf('function quotaRefreshSummary'));
+  assert.match(loadStatistics,/renderStatisticsQuotaForecast\(data\)/);
+});
+
 test('bulk concurrency uses labelled native controls, bounded input and persistent draft guidance', () => {
   assert.match(html, /id="bulkSelectAll" type="checkbox" onchange="selectAllAccounts\(this.checked\)"> 选择当前搜索结果全部账号/);
   assert.match(html, /<label for="bulkConcurrency">/);

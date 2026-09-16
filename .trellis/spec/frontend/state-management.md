@@ -34,6 +34,8 @@ applyPreset()
 previewErrorPreset()
 applyErrorPreset()
 loadStatistics(visitId, announce)
+statisticsQuotaForecast(data)
+renderStatisticsQuotaForecast(data)
 refreshStatisticsQuota(force, visitId)
 startStatisticsVisit()
 stopStatisticsVisit()
@@ -232,6 +234,9 @@ The top-level section is projected by `consolePanel.hidden`, `statisticsPanel.hi
 - Manual refresh uses `force:true` but coalesces with an active sweep from the same visit. The button is natively disabled and labelled while busy; `statisticsStatus` announces loading, bounded outcome counts or retained-data failure.
 - Section changes and `pagehide` increment visit/query generations, clear the timer and abort only the page-owned POST. `pageshow` restarts a visible statistics visit only when no timer is active. Success, catch and finally handlers all check visit/controller identity so an old request cannot render, announce, re-enable or clear a newer visit.
 - Statistics reads persisted server accounts only. Disabled accounts retain last-known values but are not queried; unconfigured, unknown, partial, failed and stale values remain distinct from numeric 0%/100%. Remaining percentage is computed only from a validated finite used value, and missing/invalid reset times render unavailable.
+- The total quota forecast is a pure projection of the same accepted `GET /api/statistics` snapshot. It includes only rows with `enabled === true`, `quota.status === "fresh"`, and all three finite 0–100 windows. For each included account, current availability is the minimum of the 5-hour/weekly/monthly remaining percentages; totals sum those account minima, with a maximum of `included * 100` account quota points.
+- Future +2h/+8h/+24h projections assume no new consumption. A window becomes 100% only when its canonical reset is strictly after `generatedAt` and at or before the target; otherwise its current remaining value is carried forward. Missing, invalid, already-past resets or invalid `generatedAt` make that account's future projection a conservative lower bound and are counted explicitly. Disabled/non-fresh/incomplete rows are excluded and counted, never coerced to zero or full capacity. The projection is not a Token, request, monetary, or provider absolute limit.
+- `loadStatistics()` renders the forecast only after its existing query/visit/visibility checks accept the snapshot. The forecast adds no request, timer, cursor, persistence, or generic store, and uses `textContent` for bounded numeric output.
 - Statistics navigation/refresh never calls `loadAll()` or mutates `ACCS`, `BULK_SELECTION`, raw JSON, live scheduling controls or detailed-log state. It does not enable quota routing or persist account/configuration changes.
 
 `LOG_CURSOR` belongs to the current log type plus filter set. Starting a new query or changing filters resets it; “next” sends the opaque server cursor unchanged. The request type alone owns the `result` filter and renders `status / result`; missing historical results derive only the display label `success` or `legacy_failed` without mutating storage. The shared description distinguishes one-row-per-final-request from potentially-many-upstream-attempts. `LOG_QUERY_ID` is a generation counter: every section switch and query invalidates earlier reads, and a response may render only when both its generation and captured type still match. Clearing logs captures the selected type before the asynchronous delete and reloads only when that same log section remains visible.
@@ -283,7 +288,8 @@ DETAIL_LIST_ID++; DETAIL_CURSOR = null; resetDetailSelection();
 | Manual/timer/entry refresh overlaps in one visit | Coalesce into one POST; do not queue replay work |
 | Statistics page is restored after pagehide | Start one visible visit only when its timer is absent; repeated pageshow is a no-op |
 | Usage coverage is zero or a field/ratio is `null` | render “no data”; do not render `0` |
-| Quota window is missing/invalid or snapshot is failed/partial/stale/disabled | Show explicit unknown/last-known state and time; never infer zero or routing freshness |
+| Quota window is missing/invalid or snapshot is failed/partial/stale/disabled | Show explicit unknown/last-known state and time; never infer zero or routing freshness; exclude the account from total quota points |
+| Forecast reset is missing/invalid/past, or `generatedAt` is invalid | Carry the current remaining value forward, count the account once as reset-incomplete, and label future values as a conservative lower bound |
 | No submitted account has a non-empty key | stop and display an error |
 | Account mode is not one of the six supported scheduling modes | server `400`; retain/reload prior state |
 | `concurrencyWaitMs` is not an integer in 0-30000 | server `400` |
@@ -311,6 +317,7 @@ Browser-side validation improves feedback but never replaces the server matrix.
 - **Good:** select account A, copy a global model route, edit it, observe `configSource: "account"`, then restore inheritance and observe `"inherited"` after reload.
 - **Good:** merge a built-in error preset into a live custom `418` rule; preview marks `418` preserved and confirmation round-trips both through the normal save.
 - **Good:** leave the statistics panel before its request completes; the stale generation never renders, and a covered token value of zero remains distinguishable from no covered requests.
+- **Good:** compute each eligible account's three-window minimum before summing; a reset exactly at a target restores only that window for that target and later targets.
 - **Good:** a pending account note, bulk selection and invalid scheduling-rule draft survive entry/manual quota refresh and return to the console unchanged.
 - **Base:** a disabled account displays its retained quota and last-success time but creates no page refresh request; a never-fetched disabled account remains unknown.
 - **Base:** global scope has no `accountId`; model saves update global `perModel` only.
@@ -318,6 +325,7 @@ Browser-side validation improves feedback but never replaces the server matrix.
 - **Bad:** construct account payloads from visible table columns only and omit `perModel`; this silently deletes account-specific routes.
 - **Bad:** infer account scope from the rendered badge while sending no `scope`/`accountId`; the backend defaults to global.
 - **Bad:** merge an account route field-by-field with the global route; account ownership is whole-entry replacement.
+- **Bad:** sum all window percentages directly, include stale/disabled rows, or treat missing reset times as an automatic 100%; each choice overstates usable capacity.
 
 ### 6. Tests Required
 
@@ -333,6 +341,7 @@ Cross-layer changes must assert:
 - statistics generation invalidation prevents stale rendering, coverage-zero/null values remain unknown, and all rendered server text is escaped;
 - statistics entry/manual/five-minute refresh coalesces per visit, aborts page ownership on leave, restores one visit on pageshow, and guards success/catch/finally from older visits;
 - used/remaining/reset rendering preserves known 0%/100% and labels unconfigured, disabled, unknown, partial, failed and stale snapshots truthfully without changing drafts or quota routing;
+- fixed-time quota forecast fixtures assert account-minimum-before-sum, current/+2h/+8h/+24h target boundaries, 0%/100%, eligible/excluded counts, conservative missing-reset behavior, invalid `generatedAt`, no-data rendering, and update from the accepted statistics snapshot;
 - alias generation/save/reload and log type/filter/cursor/clear keep separate state owners;
 - request logs alone filter/render `result`, historical rows without it use a display-only fallback, and the shared description distinguishes one final request from potentially many failed attempts;
 - top-level console/statistics/request/error/details sections remain mutually exclusive, request/error reuse one log owner, details keep their own generations, and stale reads or clears cannot update a different section;
