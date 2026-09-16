@@ -90,9 +90,16 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   assert.match(html, /function closeErrorPreset\(\).*PENDING_ERROR_PRESET=null/);
   assert.match(html, /applyErrorPreset\(\).*JSON\.stringify\(next,null,2\);await saveAccounts\(\)/);
   for (const id of ['pipelineExcludeUnhealthy','pipelineQuotaPool','pipelineHealthSort','pipelineSticky']) assert.match(html, new RegExp(`id="${id}"`));
+  assert.match(html,/可排序账号调度流水线/); assert.equal((html.match(/class="pipeline-step" draggable="true"/g)||[]).length,4);
+  assert.equal((html.match(/class="ghost pipeline-move-up"/g)||[]).length,4); assert.equal((html.match(/class="ghost pipeline-move-down"/g)||[]).length,4);
+  assert.match(html,/id="pipelineOrderStatus" aria-live="polite"/); assert.match(html,/越靠前优先级越高/);
+  for(const handler of ['startPipelineDrag','dropPipelineDrag','movePipelineStep','syncPipelineOrder'])assert.match(html,new RegExp(`function ${handler}\\(`));
+  assert.match(html,/onclick="movePipelineStep\('quotaPool',-1,this\)"/,'native move buttons pass their focus target to production reorder logic');
+  assert.match(html,/const opposite=row\?\.querySelector\(direction<0\?'\.pipeline-move-down':'\.pipeline-move-up'\)/);
+  assert.match(html,/const target=button\.disabled\?opposite:button/,'boundary moves transfer focus to the enabled opposite-direction button');
   const collect = html.slice(html.indexOf('function collectAccounts'), html.indexOf('async function saveAccounts'));
   for (const field of ['id:a.id','name:a.name',"note:a.note||''","key:a.key||''",'enabled:a.enabled!==false','maxConcurrent:','weight:','priority:',"proxyUrl:a.proxyUrl||''","headers:a.headers||{}","perModel:a.perModel||{}"] ) assert.ok(collect.includes(field), `full account snapshot must preserve ${field}`);
-  assert.match(collect, /accountPipeline:\{quotaPool:[^}]+excludeUnhealthy:[^}]+healthSort:[^}]+sticky:/);
+  assert.match(collect, /accountPipeline:\{quotaPool:[^}]+excludeUnhealthy:[^}]+healthSort:[^}]+sticky:[^}]+order:pipelineOrder\(\)/);
   assert.match(html, /api\('\/api\/statistics'\)/);
   assert.match(html, /id="statisticsStatus"[^>]+aria-live="polite"/);
   assert.match(html, /cacheTokenRatio/); assert.match(html, /cacheHitRequestRate/);
@@ -138,6 +145,8 @@ test('raw scheduling editor uses a labelled native modal, draft guidance and ann
   for (const id of ['rawSchedulingError','rawSchedulingFeedback']) assert.match(html,new RegExp(`id="${id}" aria-live="polite"`));
   assert.match(html,/accountNames 为全部账号的只读参考名称（可重复），不可修改/);
   assert.match(html,/策略全局适用于账号池/);
+  const raw=html.slice(html.indexOf('const RAW_PIPELINE_CONTROLS'),html.indexOf('function collectAccounts'));
+  assert.match(raw,/accountPipeline\.order=pipelineOrder\(\)/); assert.match(raw,/validPipelineOrder\(value\.accountPipeline\.order\)/); assert.match(raw,/setPipelineOrder\(value\.accountPipeline\.order\)/);
 });
 
 test('detailed logs have independent labelled controls, privacy/retention guidance and safe on-demand text', () => {

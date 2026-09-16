@@ -1,0 +1,10 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "加载后端选号变更前置检查"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "约束 accountPipeline 配置、迁移和原子保存"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "约束六模式、租约、容量、sticky 和额度分层"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "约束流水线诊断投影和敏感数据边界"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "加载控制台改动前置检查"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "约束 ACCS、原始调度与完整账号草稿所有权"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "约束拖拽键盘可访问性和浏览器验证"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "检查 UI 到 API 到持久化再到选号的完整数据流"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "复用现有配置、租约和浏览器状态所有者"}
+{"file": ".trellis/tasks/09-16-sortable-account-pipeline/research/current-pipeline-flow.md", "reason": "提供当前固定流水线和确认后的顺序语义"}

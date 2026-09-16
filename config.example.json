@@ -29,7 +29,13 @@
     "quotaPool": false,
     "excludeUnhealthy": false,
     "healthSort": false,
-    "sticky": false
+    "sticky": false,
+    "order": [
+      "excludeUnhealthy",
+      "quotaPool",
+      "healthSort",
+      "sticky"
+    ]
   },
   "modelAliases": {
     "glm-5.3-flash": "cline-pass/glm-5.3-flash"

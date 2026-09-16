@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const script = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8').match(/<script>([\s\S]*?)<\/script>/)[1];
-const fixture = () => ({mode:'single', active:1, concurrencyWaitMs:2000, accountErrorRules:{}, accountPipeline:{}, accounts:[0,1,2].map(i => ({id:`id${i}`, name:i < 2 ? 'duplicate <name>' : 'other', note:`note${i}`, key:`fake${i}`, enabled:i !== 1, maxConcurrent:i+1, weight:i+1, priority:10+i, proxyUrl:'http://localhost:1234', headers:{'X-Test':'fixture'}, perModel:{model:{upstreams:['mock']}}, activeCount:0}))});
+const DEFAULT_PIPELINE_ORDER = ['excludeUnhealthy','quotaPool','healthSort','sticky'];
+const fixture = () => ({mode:'single', active:1, concurrencyWaitMs:2000, accountErrorRules:{}, accountPipeline:{order:[...DEFAULT_PIPELINE_ORDER]}, accounts:[0,1,2].map(i => ({id:`id${i}`, name:i < 2 ? 'duplicate <name>' : 'other', note:`note${i}`, key:`fake${i}`, enabled:i !== 1, maxConcurrent:i+1, weight:i+1, priority:10+i, proxyUrl:'http://localhost:1234', headers:{'X-Test':'fixture'}, perModel:{model:{upstreams:['mock']}}, activeCount:0}))});
 function harness() {
   const elements = new Map(), calls = [], timers = new Map(), windowListeners = {};
   let timerId = 0;
@@ -12,11 +13,15 @@ function harness() {
   const context = vm.createContext({document:{querySelector:el,addEventListener(){},activeElement:null},window:{addEventListener(name,fn){windowListeners[name]=fn;}},localStorage:{getItem(){return '';}},fetch:(...args)=>{calls.push(args);return new Promise(()=>{});},setTimeout(fn,ms){const id=++timerId;timers.set(id,{fn,ms});return id;},clearTimeout(id){timers.delete(id);},confirm:()=>true,AbortController,URL,URLSearchParams,console});
   const run = code => vm.runInContext(code, context);
   run(script); calls.length = 0;
+  const pipelineList=el('#pipelineSteps');
+  const classList=()=>{const values=new Set();return{add(...names){for(const name of names)values.add(name);},remove(...names){for(const name of names)values.delete(name);},contains(name){return values.has(name);}};};
+  pipelineList.children=DEFAULT_PIPELINE_ORDER.map((step,index)=>{const position={textContent:String(index+1),attrs:{},setAttribute(name,value){this.attrs[name]=value;}},button=()=>({disabled:false,focusCalls:0,focus(){if(!this.disabled){this.focused=true;this.focusCalls++;}}}),up=button(),down=button();return{dataset:{pipelineStep:step},attrs:{},classList:classList(),position,up,down,setAttribute(name,value){this.attrs[name]=value;},querySelector(selector){return selector==='.pipeline-position'?position:selector==='.pipeline-move-up'?up:selector==='.pipeline-move-down'?down:null;},getBoundingClientRect(){return{top:0,height:20};}};});
+  pipelineList.appendChild=node=>{const index=pipelineList.children.indexOf(node);if(index>=0)pipelineList.children.splice(index,1);pipelineList.children.push(node);return node;};
   el('#accMode').options = ['single','roundrobin','sticky','least-connections','weighted-roundrobin','priority-failover'].map(value=>({value}));
   context.snapshot = fixture();
   run("ACCS = snapshot; $('#accMode').value='single'; $('#concurrencyWaitMs').value='2000'; $('#accountErrorRules').value='{}'; renderAccounts();");
   const snapshot = () => JSON.parse(run('JSON.stringify(ACCS)'));
-  return {run,el,calls,snapshot,context,timers,windowListeners};
+  return {run,el,calls,snapshot,context,timers,windowListeners,pipelineList};
 }
 
 test('bulk assignment is atomic, target-only, draft-only and independent of active radio', () => {
@@ -80,19 +85,65 @@ test('redraw callers preserve live scheduling drafts including invalid JSON; exp
   assert.deepEqual(payload.accounts,h.snapshot().accounts.map(({activeCount,...a})=>a));
   assert.equal(payload.active,1); assert.equal(payload.concurrencyWaitMs,987);
   assert.deepEqual(payload.accountErrorRules,{'429':{action:'ignore'}});
-  assert.deepEqual(payload.accountPipeline,{quotaPool:true,excludeUnhealthy:false,healthSort:false,sticky:true});
+  assert.deepEqual(payload.accountPipeline,{quotaPool:true,excludeUnhealthy:false,healthSort:false,sticky:true,order:DEFAULT_PIPELINE_ORDER});
   assert.equal(h.snapshot().accounts[1].maxConcurrent,42);
 });
 
-test('real loadAll hydration resets controls and clears old selection on reload', async () => {
-  const h = harness(); h.run('selectAllAccounts(true)');
-  h.context.responses = {'/api/models':{},'/api/accounts':fixture(),'/api/security':{},'/api/meta':{configured:true},'/api/model-aliases':{aliases:{}}};
+test('real loadAll hydration resets controls, order and old selection on reload', async () => {
+  const h = harness(); h.run("selectAllAccounts(true); movePipelineStep('sticky',-1)");
+  const hydrated=fixture(); hydrated.accountPipeline.order=['sticky','healthSort','quotaPool','excludeUnhealthy'];
+  h.context.responses = {'/api/models':{},'/api/accounts':hydrated,'/api/security':{},'/api/meta':{configured:true},'/api/model-aliases':{aliases:{}}};
   // Model rendering is unrelated to the account hydration boundary.
   h.run('render = () => {}; api = async path => responses[path]');
   h.el('#accountErrorRules').value='invalid draft'; h.el('#accMode').value='sticky';
   await h.run('loadAll()');
   assert.equal(h.run('BULK_SELECTION.size'),0); assert.equal(h.el('#accMode').value,'single');
   assert.equal(h.el('#accountErrorRules').value,'{}'); assert.equal(h.el('#bulkApply').disabled,true);
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(pipelineOrder())')),hydrated.accountPipeline.order);
+  assert.equal(h.el('#pipelineOrderStatus').textContent,'','reload clears obsolete draft-only order feedback');
+});
+
+test('keyboard pipeline reorder keeps logical focus when the activated button stays enabled or reaches a boundary', () => {
+  const upBoundary=harness(),quota=upBoundary.pipelineList.children.find(item=>item.dataset.pipelineStep==='quotaPool');
+  upBoundary.context.button=quota.up;upBoundary.run("movePipelineStep('quotaPool',-1,button)");
+  assert.deepEqual(JSON.parse(upBoundary.run('JSON.stringify(pipelineOrder())')),['quotaPool','excludeUnhealthy','healthSort','sticky']);
+  assert.equal(quota.up.disabled,true);assert.equal(quota.up.focusCalls,0,'a disabled boundary button is never focused');
+  assert.equal(quota.down.disabled,false);assert.equal(quota.down.focusCalls,1,'up at first transfers focus to down in the moved row');
+  upBoundary.run('setPipelineOrder(PIPELINE_DEFAULT_ORDER)');
+  assert.equal(quota.down.focusCalls,1,'drag/raw/load reorder owner does not move focus without an activated button');
+
+  const middle=harness(),middleHealth=middle.pipelineList.children.find(item=>item.dataset.pipelineStep==='healthSort');
+  middle.context.button=middleHealth.up;middle.run("movePipelineStep('healthSort',-1,button)");
+  assert.equal(middleHealth.up.disabled,false);assert.equal(middleHealth.up.focusCalls,1,'an enabled activated button regains focus');
+  assert.equal(middleHealth.down.focusCalls,0);
+
+  const downBoundary=harness(),lastHealth=downBoundary.pipelineList.children.find(item=>item.dataset.pipelineStep==='healthSort');
+  downBoundary.context.button=lastHealth.down;downBoundary.run("movePipelineStep('healthSort',1,button)");
+  assert.deepEqual(JSON.parse(downBoundary.run('JSON.stringify(pipelineOrder())')),['excludeUnhealthy','quotaPool','sticky','healthSort']);
+  assert.equal(lastHealth.down.disabled,true);assert.equal(lastHealth.down.focusCalls,0,'a disabled last-position button is never focused');
+  assert.equal(lastHealth.up.disabled,false);assert.equal(lastHealth.up.focusCalls,1,'down at last transfers focus to up in the moved row');
+  assert.equal(upBoundary.calls.length+middle.calls.length+downBoundary.calls.length,0);
+});
+
+test('native drag and keyboard-equivalent buttons share one ordered draft with announced positions', () => {
+  const h=harness(); h.run('syncPipelineOrder()');
+  assert.equal(h.pipelineList.children[0].up.disabled,true); assert.equal(h.pipelineList.children.at(-1).down.disabled,true);
+  h.el('#pipelineSticky').checked=false;
+  h.run("movePipelineStep('sticky',-1)");
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(pipelineOrder())')),['excludeUnhealthy','quotaPool','sticky','healthSort']);
+  assert.equal(h.pipelineList.children[2].position.textContent,'3'); assert.match(h.el('#pipelineOrderStatus').textContent,/第 3 位/);
+  h.context.dragEvent={currentTarget:h.pipelineList.children[0],dataTransfer:{effectAllowed:'',setData(){}}};
+  h.run("startPipelineDrag(dragEvent,'excludeUnhealthy'); endPipelineDrag()");
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(pipelineOrder())')),['excludeUnhealthy','quotaPool','sticky','healthSort']);
+  assert.match(h.el('#pipelineOrderStatus').textContent,/已取消拖动.*顺序未更改/);
+  h.run("startPipelineDrag(dragEvent,'excludeUnhealthy')");
+  const target=h.pipelineList.children.find(item=>item.dataset.pipelineStep==='healthSort');
+  h.context.dropEvent={currentTarget:target,clientY:20,dataTransfer:{dropEffect:''},preventDefault(){}};
+  h.run("dropPipelineDrag(dropEvent,'healthSort')");
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(pipelineOrder())')),['quotaPool','sticky','healthSort','excludeUnhealthy']);
+  assert.equal(h.pipelineList.children.at(-1).position.textContent,'4'); assert.equal(h.pipelineList.children.at(-1).down.disabled,true);
+  assert.equal(h.el('#pipelineSticky').checked,false,'disabled steps keep their position and state');
+  assert.match(h.el('#pipelineOrderStatus').textContent,/尚未保存/); assert.equal(h.calls.length,0);
 });
 
 test('apply rechecks visible membership even without redraw and deselection updates mixed state', () => {
@@ -162,7 +213,7 @@ test('raw editor projects only live scheduling and all reference names; combined
   assert.equal(draft.accountPipeline.quotaPool,true);
   draft.accountMode='priority-failover'; draft.concurrencyWaitMs=30000;
   draft.accountErrorRules={'100':{action:'ignore'},'599':{action:'cooldown',cooldownMs:2592000000}};
-  draft.accountPipeline={quotaPool:false,excludeUnhealthy:true,healthSort:true,sticky:true};
+  draft.accountPipeline={quotaPool:false,excludeUnhealthy:true,healthSort:true,sticky:true,order:['sticky','healthSort','quotaPool','excludeUnhealthy']};
   h.el('#rawSchedulingJson').value=JSON.stringify(draft); h.run('applyRawScheduling()');
   assert.deepEqual(h.snapshot(),before); assert.equal(h.calls.length,0);
   assert.equal(h.el('#rawSchedulingDialog').open,false);
@@ -182,7 +233,7 @@ test('successful raw save hydrates persisted values and clears obsolete draft fe
   const draft=rawDraft(h);
   draft.accountMode='sticky'; draft.concurrencyWaitMs=987;
   draft.accountErrorRules={'418':{action:'ban'}};
-  draft.accountPipeline={quotaPool:true,excludeUnhealthy:false,healthSort:true,sticky:true};
+  draft.accountPipeline={quotaPool:true,excludeUnhealthy:false,healthSort:true,sticky:true,order:['quotaPool','sticky','healthSort','excludeUnhealthy']};
   h.el('#rawSchedulingJson').value=JSON.stringify(draft); h.run('applyRawScheduling()');
   const before=h.snapshot();
   assert.match(h.el('#rawSchedulingFeedback').textContent,/尚未生效/);
@@ -204,6 +255,7 @@ test('successful raw save hydrates persisted values and clears obsolete draft fe
   assert.equal(Number(h.el('#concurrencyWaitMs').value),draft.concurrencyWaitMs);
   assert.deepEqual(JSON.parse(h.el('#accountErrorRules').value),draft.accountErrorRules);
   for(const [key,id] of Object.entries({quotaPool:'QuotaPool',excludeUnhealthy:'ExcludeUnhealthy',healthSort:'HealthSort',sticky:'Sticky'})) assert.equal(h.el('#pipeline'+id).checked,draft.accountPipeline[key]);
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(pipelineOrder())')),draft.accountPipeline.order);
   assert.equal(h.el('#rawSchedulingFeedback').textContent,'');
   // Native input.value coerces hydrated numbers to strings; the minimal DOM stub does not.
   h.el('#concurrencyWaitMs').value=String(h.el('#concurrencyWaitMs').value);
@@ -220,7 +272,7 @@ test('raw validation rejects every unsupported domain atomically without echoing
   const h=harness(); h.run('openRawScheduling()'); const base=rawDraft(h), before=h.snapshot(), controls=liveScheduling(h);
   const invalid=['{ secret-value',null,[],{}, {...base,secret:'secret-value'}, ...['unknown',null,1].map(accountMode=>({...base,accountMode})),
     ...['1',true,null,-1,30001,1.5].map(concurrencyWaitMs=>({...base,concurrencyWaitMs})),
-    ...[null,[],{}, {...base.accountPipeline,extra:true}, {...base.accountPipeline,sticky:1}].map(accountPipeline=>({...base,accountPipeline})),
+    ...[null,[],{}, {...base.accountPipeline,extra:true}, {...base.accountPipeline,sticky:1}, {...base.accountPipeline,order:null}, {...base.accountPipeline,order:['sticky']}, {...base.accountPipeline,order:['sticky','sticky','quotaPool','healthSort']}, {...base.accountPipeline,order:['sticky','quotaPool','healthSort','__proto__']}].map(accountPipeline=>({...base,accountPipeline})),
     ...[null,[],{'99':{action:'ban'}},{'600':{action:'ban'}},{'secret-value':{action:'ban'}},{'429':null},{'429':[]},{'429':{}},{'429':{action:'secret-value'}},{'429':{action:'ban',cooldownMs:1}},
       ...[undefined,null,true,'1',0,-1,1.5,2592000001].map(cooldownMs=>({'429':{action:'cooldown',cooldownMs}})),
       JSON.parse('{"__proto__":{"action":"ignore"}}'),{'429':JSON.parse('{"action":"ban","__proto__":{}}')}].map(accountErrorRules=>({...base,accountErrorRules})),
@@ -252,7 +304,7 @@ test('failed raw opening preserves invalid live input; cancel confirms dirty tex
 });
 
 test('raw stale reload, scheduling edits, rename, deletion and duplicate reorder never overwrite newer drafts', () => {
-  for(const change of ["ACCS=JSON.parse(JSON.stringify(ACCS))", "$('#accMode').value='sticky'", "$('#accountErrorRules').value='invalid'", "$('#pipelineSticky').checked=true", "ACCS.accounts[0].name='new'", 'ACCS.accounts.pop()', '[ACCS.accounts[0],ACCS.accounts[1]]=[ACCS.accounts[1],ACCS.accounts[0]]']){
+  for(const change of ["ACCS=JSON.parse(JSON.stringify(ACCS))", "$('#accMode').value='sticky'", "$('#accountErrorRules').value='invalid'", "$('#pipelineSticky').checked=true", "movePipelineStep('sticky',-1)", "ACCS.accounts[0].name='new'", 'ACCS.accounts.pop()', '[ACCS.accounts[0],ACCS.accounts[1]]=[ACCS.accounts[1],ACCS.accounts[0]]']){
     const h=harness();h.run('openRawScheduling()');const text=h.el('#rawSchedulingJson').value;
     h.run(change);const before=h.snapshot(),controls=liveScheduling(h);h.run('applyRawScheduling()');
     assert.deepEqual(h.snapshot(),before); assert.equal(liveScheduling(h),controls);

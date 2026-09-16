@@ -154,7 +154,7 @@ Editing any inherited field creates an account-owned route. `copyGlobalCfg()` ex
 
 The active radio is an array index in the submitted list. The server resolves the selected account ID before filtering empty-key rows, so a blank row before the selected row must not shift the active account.
 
-`ACCS.accountPipeline` is a complete snapshot with exactly `quotaPool`, `excludeUnhealthy`, `healthSort`, and `sticky`. `collectAccounts()` always sends all four booleans. The server preserves its current value only when an older client omits the whole field; it rejects partial, unknown, or non-boolean pipeline objects.
+`ACCS.accountPipeline` is a complete snapshot with `quotaPool`, `excludeUnhealthy`, `healthSort`, `sticky`, and an exact four-step `order`. The ordered pipeline DOM is the live draft owner: `loadAll()` reorders the existing nodes, and `collectAccounts()` reads their order while sending all four booleans. The server preserves its current value when an older client omits the whole field and preserves only the current order when an old client sends all booleans without `order`; it rejects partial, unknown, non-boolean, or non-permutation payloads.
 
 #### Local account drafts and bulk concurrency
 
@@ -179,9 +179,9 @@ for (const account of updateBulkSelection()) account.maxConcurrent = value;
 
 #### Raw scheduling draft editor
 
-`openRawScheduling(button)`, `validateRawScheduling(value, names)`, `applyRawScheduling()`, and `closeRawScheduling(force=false)` reuse the live scheduling controls; `RAW_SCHEDULING` is only an editor snapshot, never a second account store. The complete JSON has exactly `accountMode`, `concurrencyWaitMs`, `accountErrorRules`, `accountPipeline`, and `accountNames`. `accountMode` maps to the existing mode control; ordered names include all accounts, duplicates and unsaved rows regardless of search. Names are reference-only, not identities. Never project IDs, Keys, notes, proxies, Headers, account parameters, runtime state or `perModel` into this editor.
+`openRawScheduling(button)`, `validateRawScheduling(value, names)`, `applyRawScheduling()`, and `closeRawScheduling(force=false)` reuse the live scheduling controls; `RAW_SCHEDULING` is only an editor snapshot, never a second account store. The complete JSON has exactly `accountMode`, `concurrencyWaitMs`, `accountErrorRules`, `accountPipeline`, and `accountNames`; `accountPipeline` contains the four booleans plus the same exact `order` shown by the visual controls. `accountMode` maps to the existing mode control; ordered names include all accounts, duplicates and unsaved rows regardless of search. Names are reference-only, not identities. Never project IDs, Keys, notes, proxies, Headers, account parameters, runtime state or `perModel` into this editor.
 
-Validation precedes every control write: six existing modes; integer wait 0–30000; exactly four boolean pipeline keys; object rules keyed by three-digit HTTP statuses 100–599; rule action `ignore`, `ban`, or `cooldown` with only its allowed fields; cooldown requires a safe integer 1–2592000000. JSON numeric strings/null/booleans, unknown fields (including prototype-like keys), missing fields, and changed reference names are rejected without coercion. The server remains authoritative for ordinary saves.
+Validation precedes every control write: six existing modes; integer wait 0–30000; exactly four boolean pipeline keys plus an exact four-ID order permutation; object rules keyed by three-digit HTTP statuses 100–599; rule action `ignore`, `ban`, or `cooldown` with only its allowed fields; cooldown requires a safe integer 1–2592000000. JSON numeric strings/null/booleans, unknown fields (including prototype-like keys), missing fields, and changed reference names are rejected without coercion. The server remains authoritative for ordinary saves.
 
 | Condition | Local result |
 |---|---|
@@ -368,7 +368,8 @@ const accountPipeline = {
   quotaPool: pipelineQuotaPool.checked,
   excludeUnhealthy: pipelineExcludeUnhealthy.checked,
   healthSort: pipelineHealthSort.checked,
-  sticky: pipelineSticky.checked
+  sticky: pipelineSticky.checked,
+  order: pipelineOrder()
 };
 ```
 

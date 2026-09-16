@@ -83,6 +83,14 @@
   .pill.excl-on { background: var(--red); border-color: var(--red); color: #fff; }
   .pill.excl-on:hover { filter: brightness(1.15); }
   button.mini { padding: 4px 9px; font-size: 12px; border-radius: 6px; min-width: 30px; }
+  .pipeline-list { list-style:none; display:grid; gap:8px; margin-top:4px; }
+  .pipeline-step { display:grid; grid-template-columns:auto auto minmax(220px,1fr) auto; gap:8px; align-items:center; padding:8px; border:1px solid var(--border); border-radius:7px; background:var(--card2); }
+  .pipeline-step.dragging { opacity:.55; }
+  .pipeline-step.drag-over { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset; }
+  .pipeline-drag-handle { cursor:grab; color:var(--dim); font-size:18px; line-height:1; user-select:none; }
+  .pipeline-position { width:24px; height:24px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; background:var(--card); color:var(--accent); font-weight:700; }
+  .pipeline-step-actions { display:flex; gap:5px; }
+  .pipeline-step-actions button { padding:4px 8px; }
   .ups-tools { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
   .ups-sum { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 2px 0; }
   .ups-sum .sum-auto { color: var(--dim); font-size: 12px; }
@@ -210,7 +218,16 @@
       <label class="dim" style="font-size:12px">账号错误规则（高级 JSON；例：<code>{&quot;429&quot;:{&quot;action&quot;:&quot;cooldown&quot;,&quot;cooldownMs&quot;:1800000}}</code>）</label>
       <textarea id="accountErrorRules" rows="3" style="width:100%;margin-top:5px;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:Consolas,monospace"></textarea>
     </div>
-    <fieldset style="border:1px solid var(--border);padding:10px;margin-top:12px"><legend class="dim">固定顺序账号调度流水线（可选）</legend><label><input id="pipelineExcludeUnhealthy" type="checkbox"> 1. 排除已评分不健康账号</label>　<label><input id="pipelineQuotaPool" type="checkbox"> 2. Cline 额度热池</label>　<label><input id="pipelineHealthSort" type="checkbox"> 3. 健康度分层</label>　<label><input id="pipelineSticky" type="checkbox"> 4. 会话粘性</label><p class="dim" style="font-size:12px;margin-top:8px">硬过滤始终最先执行；数据不足仍可采样；额度未知不阻塞；高层满载可跨层回退。sticky 模式已隐式启用粘性。</p></fieldset>
+    <fieldset style="border:1px solid var(--border);padding:10px;margin-top:12px"><legend class="dim">可排序账号调度流水线（可选）</legend>
+      <ol id="pipelineSteps" class="pipeline-list" aria-describedby="pipelineOrderHelp">
+        <li class="pipeline-step" draggable="true" data-pipeline-step="excludeUnhealthy" ondragstart="startPipelineDrag(event,'excludeUnhealthy')" ondragover="overPipelineDrag(event)" ondrop="dropPipelineDrag(event,'excludeUnhealthy')" ondragend="endPipelineDrag()"><span class="pipeline-drag-handle" aria-hidden="true" title="拖动排序">⠿</span><span class="pipeline-position" aria-label="当前位置 1">1</span><label><input id="pipelineExcludeUnhealthy" type="checkbox"> 排除已评分不健康账号</label><span class="pipeline-step-actions"><button type="button" class="ghost pipeline-move-up" aria-label="上移排除已评分不健康账号" disabled onclick="movePipelineStep('excludeUnhealthy',-1,this)">↑</button><button type="button" class="ghost pipeline-move-down" aria-label="下移排除已评分不健康账号" onclick="movePipelineStep('excludeUnhealthy',1,this)">↓</button></span></li>
+        <li class="pipeline-step" draggable="true" data-pipeline-step="quotaPool" ondragstart="startPipelineDrag(event,'quotaPool')" ondragover="overPipelineDrag(event)" ondrop="dropPipelineDrag(event,'quotaPool')" ondragend="endPipelineDrag()"><span class="pipeline-drag-handle" aria-hidden="true" title="拖动排序">⠿</span><span class="pipeline-position" aria-label="当前位置 2">2</span><label><input id="pipelineQuotaPool" type="checkbox"> Cline 额度热池</label><span class="pipeline-step-actions"><button type="button" class="ghost pipeline-move-up" aria-label="上移 Cline 额度热池" onclick="movePipelineStep('quotaPool',-1,this)">↑</button><button type="button" class="ghost pipeline-move-down" aria-label="下移 Cline 额度热池" onclick="movePipelineStep('quotaPool',1,this)">↓</button></span></li>
+        <li class="pipeline-step" draggable="true" data-pipeline-step="healthSort" ondragstart="startPipelineDrag(event,'healthSort')" ondragover="overPipelineDrag(event)" ondrop="dropPipelineDrag(event,'healthSort')" ondragend="endPipelineDrag()"><span class="pipeline-drag-handle" aria-hidden="true" title="拖动排序">⠿</span><span class="pipeline-position" aria-label="当前位置 3">3</span><label><input id="pipelineHealthSort" type="checkbox"> 健康度分层</label><span class="pipeline-step-actions"><button type="button" class="ghost pipeline-move-up" aria-label="上移健康度分层" onclick="movePipelineStep('healthSort',-1,this)">↑</button><button type="button" class="ghost pipeline-move-down" aria-label="下移健康度分层" onclick="movePipelineStep('healthSort',1,this)">↓</button></span></li>
+        <li class="pipeline-step" draggable="true" data-pipeline-step="sticky" ondragstart="startPipelineDrag(event,'sticky')" ondragover="overPipelineDrag(event)" ondrop="dropPipelineDrag(event,'sticky')" ondragend="endPipelineDrag()"><span class="pipeline-drag-handle" aria-hidden="true" title="拖动排序">⠿</span><span class="pipeline-position" aria-label="当前位置 4">4</span><label><input id="pipelineSticky" type="checkbox"> 会话粘性</label><span class="pipeline-step-actions"><button type="button" class="ghost pipeline-move-up" aria-label="上移会话粘性" onclick="movePipelineStep('sticky',-1,this)">↑</button><button type="button" class="ghost pipeline-move-down" aria-label="下移会话粘性" disabled onclick="movePipelineStep('sticky',1,this)">↓</button></span></li>
+      </ol>
+      <p id="pipelineOrderHelp" class="dim" style="font-size:12px;margin-top:8px">可用鼠标拖动或上移/下移按钮排序；越靠前优先级越高，关闭的步骤仍保留位置。硬过滤始终最先执行；数据不足仍可采样；额度未知不阻塞；高层满载可跨层回退。sticky 模式在未显式启用粘性步骤时仍会在末尾隐式应用。</p>
+      <div id="pipelineOrderStatus" aria-live="polite" class="dim" style="font-size:12px"></div>
+    </fieldset>
     <button id="rawSchedulingOpen" type="button" class="ghost" onclick="openRawScheduling(this)">查看/编辑原始配置</button>
     <p class="dim">原始配置仅编辑当前调度草稿；应用后仍需点击“保存账号配置”。</p>
     <div id="rawSchedulingFeedback" aria-live="polite"></div>
@@ -483,6 +500,7 @@ async function loadAll() {
   DATA = models;
   ACCS = accs; ALIASES = aliases;
   $('#accMode').value = ACCS.mode; $('#concurrencyWaitMs').value = ACCS.concurrencyWaitMs ?? 2000; $('#accountErrorRules').value = JSON.stringify(ACCS.accountErrorRules || {}, null, 2);
+  setPipelineOrder(ACCS.accountPipeline?.order || PIPELINE_DEFAULT_ORDER);
   $('#pipelineQuotaPool').checked=!!ACCS.accountPipeline?.quotaPool;$('#pipelineExcludeUnhealthy').checked=!!ACCS.accountPipeline?.excludeUnhealthy;$('#pipelineHealthSort').checked=!!ACCS.accountPipeline?.healthSort;$('#pipelineSticky').checked=!!ACCS.accountPipeline?.sticky;
   BULK_SELECTION.clear(); $('#bulkFeedback').textContent = '';
   $('#rawSchedulingFeedback').textContent = '';
@@ -787,6 +805,56 @@ let ACCS = null, ALIASES = null, DRAWER_INDEX = -1, DRAWER_SNAPSHOT = '', DRAWER
 let STATISTICS_VISIT_ID = 0, STATISTICS_TIMER = null, STATISTICS_REFRESH_CONTROLLER = null, STATISTICS_REFRESH_PROMISE = null, STATISTICS_REFRESH_VISIT = 0;
 const STATISTICS_REFRESH_MS = 5 * 60 * 1000, STATISTICS_STALE_MS = 15 * 60 * 1000;
 const BULK_SELECTION = new Set();
+const PIPELINE_DEFAULT_ORDER = ['excludeUnhealthy','quotaPool','healthSort','sticky'];
+const PIPELINE_LABELS = {excludeUnhealthy:'排除已评分不健康账号',quotaPool:'Cline 额度热池',healthSort:'健康度分层',sticky:'会话粘性'};
+let PIPELINE_DRAG_STEP = null;
+function pipelineItems() { return Array.from($('#pipelineSteps').children); }
+function pipelineOrder() { return pipelineItems().map(item => item.dataset.pipelineStep); }
+function validPipelineOrder(order) { return Array.isArray(order) && order.length === PIPELINE_DEFAULT_ORDER.length && new Set(order).size === PIPELINE_DEFAULT_ORDER.length && order.every(step => PIPELINE_DEFAULT_ORDER.includes(step)); }
+function syncPipelineOrder(message='') {
+  const items = pipelineItems();
+  items.forEach((item,index) => {
+    const position=item.querySelector('.pipeline-position'),up=item.querySelector('.pipeline-move-up'),down=item.querySelector('.pipeline-move-down');
+    position.textContent=String(index+1); position.setAttribute('aria-label',`当前位置 ${index+1}`); up.disabled=index===0; down.disabled=index===items.length-1;
+  });
+  $('#pipelineOrderStatus').textContent=message;
+}
+function setPipelineOrder(order, message='') {
+  const next=validPipelineOrder(order)?order:PIPELINE_DEFAULT_ORDER, list=$('#pipelineSteps'), byStep=new Map(pipelineItems().map(item=>[item.dataset.pipelineStep,item]));
+  for(const step of next) list.appendChild(byStep.get(step));
+  syncPipelineOrder(message);
+}
+function movePipelineStep(step,direction,button=null) {
+  const order=pipelineOrder(),from=order.indexOf(step),to=from+direction;
+  if(from<0||to<0||to>=order.length)return;
+  [order[from],order[to]]=[order[to],order[from]];
+  setPipelineOrder(order,`${PIPELINE_LABELS[step]}已移动到第 ${to+1} 位；尚未保存`);
+  if(button?.focus){
+    const row=pipelineItems().find(item=>item.dataset.pipelineStep===step);
+    const opposite=row?.querySelector(direction<0?'.pipeline-move-down':'.pipeline-move-up');
+    const target=button.disabled?opposite:button;
+    if(target&&!target.disabled)target.focus();
+  }
+}
+function startPipelineDrag(event,step) {
+  PIPELINE_DRAG_STEP=step; event.dataTransfer.effectAllowed='move'; event.dataTransfer.setData('text/plain',step);
+  event.currentTarget.classList.add('dragging'); event.currentTarget.setAttribute('aria-grabbed','true');
+  $('#pipelineOrderStatus').textContent=`正在拖动${PIPELINE_LABELS[step]}`;
+}
+function overPipelineDrag(event) { event.preventDefault(); event.dataTransfer.dropEffect='move'; event.currentTarget.classList.add('drag-over'); }
+function dropPipelineDrag(event,targetStep) {
+  event.preventDefault();
+  const source=PIPELINE_DRAG_STEP,order=pipelineOrder().filter(step=>step!==source),target=event.currentTarget,rect=target.getBoundingClientRect();
+  let index=order.indexOf(targetStep); if(index<0||!source)return endPipelineDrag();
+  if(Number.isFinite(event.clientY)&&event.clientY>rect.top+rect.height/2)index++;
+  order.splice(index,0,source); setPipelineOrder(order,`${PIPELINE_LABELS[source]}已移动到第 ${index+1} 位；尚未保存`); endPipelineDrag(false);
+}
+function endPipelineDrag(cancelled=true) {
+  const step=PIPELINE_DRAG_STEP;
+  for(const item of pipelineItems()){item.classList.remove('dragging','drag-over');item.setAttribute('aria-grabbed','false');}
+  PIPELINE_DRAG_STEP=null;
+  if(cancelled&&step)$('#pipelineOrderStatus').textContent=`已取消拖动${PIPELINE_LABELS[step]}；顺序未更改`;
+}
 function visibleAccountRows() {
   const q = ($('#accSearch').value || '').toLowerCase();
   return (ACCS?.accounts || []).map((a,i) => ({a,i})).filter(({a}) => !q || `${a.name} ${a.note || ''}`.toLowerCase().includes(q));
@@ -839,9 +907,10 @@ function renderAccounts() {
 let RAW_SCHEDULING = null;
 const RAW_PIPELINE_CONTROLS = {quotaPool:'pipelineQuotaPool',excludeUnhealthy:'pipelineExcludeUnhealthy',healthSort:'pipelineHealthSort',sticky:'pipelineSticky'};
 function rawSchedulingControls() {
+  const accountPipeline=Object.fromEntries(Object.entries(RAW_PIPELINE_CONTROLS).map(([key,id]) => [key,$('#'+id).checked]));
+  accountPipeline.order=pipelineOrder();
   return {accountMode:$('#accMode').value, concurrencyWaitMs:$('#concurrencyWaitMs').value,
-    accountErrorRules:$('#accountErrorRules').value,
-    accountPipeline:Object.fromEntries(Object.entries(RAW_PIPELINE_CONTROLS).map(([key,id]) => [key,$('#'+id).checked]))};
+    accountErrorRules:$('#accountErrorRules').value,accountPipeline};
 }
 function validateRawScheduling(value, names) {
   const object = x => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -849,8 +918,9 @@ function validateRawScheduling(value, names) {
   if (!exact(value,['accountMode','concurrencyWaitMs','accountErrorRules','accountPipeline','accountNames'])) throw Error('根对象必须且只能包含五个指定字段');
   if (!Array.from($('#accMode').options).some(option => option.value === value.accountMode)) throw Error('accountMode 无效');
   if (!Number.isInteger(value.concurrencyWaitMs) || value.concurrencyWaitMs < 0 || value.concurrencyWaitMs > 30000) throw Error('concurrencyWaitMs 必须为 0–30000 的整数');
-  if (!exact(value.accountPipeline,Object.keys(RAW_PIPELINE_CONTROLS))) throw Error('accountPipeline 必须包含且仅包含四个开关');
+  if (!exact(value.accountPipeline,[...Object.keys(RAW_PIPELINE_CONTROLS),'order'])) throw Error('accountPipeline 必须包含四个开关和 order');
   for (const key of Object.keys(RAW_PIPELINE_CONTROLS)) if (typeof value.accountPipeline[key] !== 'boolean') throw Error(`accountPipeline.${key} 必须为 boolean`);
+  if (!validPipelineOrder(value.accountPipeline.order)) throw Error('accountPipeline.order 必须是四个步骤的精确排列');
   if (!object(value.accountErrorRules)) throw Error('accountErrorRules 必须为对象');
   for (const [code,rule] of Object.entries(value.accountErrorRules)) {
     if (!/^[1-5][0-9]{2}$/.test(code)) throw Error('accountErrorRules 状态码必须为 100–599');
@@ -898,11 +968,12 @@ function applyRawScheduling() {
   catch (e) { $('#rawSchedulingError').textContent = e.message; return; }
   $('#accMode').value = value.accountMode; $('#concurrencyWaitMs').value = String(value.concurrencyWaitMs);
   $('#accountErrorRules').value = JSON.stringify(value.accountErrorRules,null,2);
+  setPipelineOrder(value.accountPipeline.order);
   for (const [key,id] of Object.entries(RAW_PIPELINE_CONTROLS)) $('#'+id).checked = value.accountPipeline[key];
   renderAccounts(); closeRawScheduling(true);
   $('#rawSchedulingFeedback').textContent = '草稿已更新，尚未生效；请保存账号配置';
 }
-function collectAccounts(){return {accounts:ACCS.accounts.map(a=>({id:a.id,name:a.name,note:a.note||'',key:a.key||'',enabled:a.enabled!==false,maxConcurrent:Number(a.maxConcurrent)||0,weight:Number(a.weight)||1,priority:Number(a.priority)||100,proxyUrl:a.proxyUrl||'',headers:a.headers||{},perModel:a.perModel||{}})),mode:$('#accMode').value,active:ACCS.active||0,accountPipeline:{quotaPool:$('#pipelineQuotaPool').checked,excludeUnhealthy:$('#pipelineExcludeUnhealthy').checked,healthSort:$('#pipelineHealthSort').checked,sticky:$('#pipelineSticky').checked}};}
+function collectAccounts(){return {accounts:ACCS.accounts.map(a=>({id:a.id,name:a.name,note:a.note||'',key:a.key||'',enabled:a.enabled!==false,maxConcurrent:Number(a.maxConcurrent)||0,weight:Number(a.weight)||1,priority:Number(a.priority)||100,proxyUrl:a.proxyUrl||'',headers:a.headers||{},perModel:a.perModel||{}})),mode:$('#accMode').value,active:ACCS.active||0,accountPipeline:{quotaPool:$('#pipelineQuotaPool').checked,excludeUnhealthy:$('#pipelineExcludeUnhealthy').checked,healthSort:$('#pipelineHealthSort').checked,sticky:$('#pipelineSticky').checked,order:pipelineOrder()}};}
 async function saveAccounts(payload=null){payload||=collectAccounts();payload.concurrencyWaitMs=Number($('#concurrencyWaitMs').value);try{payload.accountErrorRules||=JSON.parse($('#accountErrorRules').value||'{}');}catch{return accMsg('错误规则不是有效 JSON',true);}if(!payload.accounts.some(a=>a.key))return accMsg('至少需要一个 key 非空的账号',true);const r=await api('/api/accounts',payload);if(!r.ok)return accMsg(r.error?.message||'保存失败',true);accMsg(`已保存：${r.accounts} 个账号 · ${r.mode}`);await loadAll();}
 async function recoverAccount(id){const r=await api('/api/accounts/recover',{id});if(r.ok){accMsg('账号已恢复');await loadAll();}}
 function addAccountRow(){ACCS.accounts.push({name:`账号${ACCS.accounts.length+1}`,note:'',key:'',enabled:true,maxConcurrent:0,weight:1,priority:100,proxyUrl:'',headers:{},perModel:{}});renderAccounts();openAccountDrawer(ACCS.accounts.length-1);}

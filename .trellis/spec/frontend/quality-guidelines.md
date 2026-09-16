@@ -100,11 +100,13 @@ The modal focuses the textarea on open and returns focus to its opener after app
 
 #### Presets and pipeline controls
 
+The four pipeline rows are native draggable elements with visible handles, current position numbers, independent enablement checkboxes, and native up/down button equivalents. Mouse drop and keyboard-operable buttons call the same DOM reorder owner, update first/last disabled states, and announce the draft-only result through `aria-live`. Disabled steps remain orderable and retain their positions; reordering never sends a request.
+
 The six scheduling presets produce an editable draft and a current-to-next preview. They may change only `accountMode`, `concurrencyWaitMs`, `maxConcurrent`, `weight`, `priority`, and status-specific `accountErrorRules`. They never mutate names, Keys, enablement, proxy, Header maps, model routes, or the four pipeline toggles.
 
 The separate five error-rule presets are `standard`, `fast`, `conservative`, `observe`, and `clear`. They parse the live JSON textarea at preview time and show preserve/add/modify/delete groups. Merge preserves custom statuses; replace may delete them; clear forces replace. Built-in 4xx entries are limited to `429`.
 
-Cancel discards the relevant draft. Confirm submits through the ordinary complete account save, so the server applies the same validation as manual edits. No persistent “selected preset” state exists. Pipeline controls submit exactly `quotaPool`, `excludeUnhealthy`, `healthSort`, and `sticky` in that fixed order.
+Cancel discards the relevant draft. Confirm submits through the ordinary complete account save, so the server applies the same validation as manual edits. No persistent “selected preset” state exists. Pipeline controls submit `quotaPool`, `excludeUnhealthy`, `healthSort`, and `sticky` plus `order`, which is read from the four existing DOM nodes as an exact permutation.
 
 #### Model aliases
 

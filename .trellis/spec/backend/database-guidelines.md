@@ -77,7 +77,8 @@ metadata.json   DATA_DIR/metadata.json
     quotaPool: boolean,
     excludeUnhealthy: boolean,
     healthSort: boolean,
-    sticky: boolean
+    sticky: boolean,
+    order: ("excludeUnhealthy" | "quotaPool" | "healthSort" | "sticky")[]
   },
   modelAliases: { [clientAlias]: "cline-pass/<known model>" },
   detailedLogging: boolean, // default false; only literal true enables capture
@@ -104,7 +105,8 @@ Startup normalization preserves legacy behavior while making the schema explicit
 - normalize legacy `upstream` into `upstreams` while retaining `upstream` as the first-item compatibility mirror;
 - normalize global and account routes with the same functions;
 - default an invalid/missing wait to 2000 ms and normalize error rules;
-- clamp `activeAccount` to the persisted account list.
+- clamp `activeAccount` to the persisted account list;
+- normalize a missing/invalid pipeline order to `excludeUnhealthy`, `quotaPool`, `healthSort`, `sticky`, while always persisting all four unique step IDs.
 
 #### Dynamic `metadata.json`
 
@@ -206,7 +208,7 @@ Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/
 | Model alias is invalid, duplicated, collides with an original ID, or targets an unknown/non-Cline model | `400`; no write |
 | Route has over 20 upstreams, over 50 exclusions, invalid slug/mode/sort, or `maxRetries` outside 0-20 | `400`; no write |
 | Error rule status outside 100-599, unknown action, or non-positive cooldown | `400`; no write |
-| `accountPipeline` is not an exact four-boolean object on management save | `400`; no write |
+| `accountPipeline` lacks any of the four booleans, has unknown fields, or has an explicit `order` that is not an exact four-step permutation | `400`; no write; an older client may omit only `order`, which preserves the current server order |
 | Existing statistics version is missing/unknown or its structure exceeds bounds | startup fails; original metadata bytes remain |
 | Aggregate overflow marker and `null` field disagree | startup fails; original metadata bytes remain |
 | Quota percentage is outside 0-100, persisted reset time is not canonical millisecond UTC, or a state field is unknown | startup fails; original metadata bytes remain |
@@ -237,7 +239,8 @@ Persistence changes must use a temporary `DATA_DIR` and assert:
 
 - malformed `config.json` causes non-zero startup, reports `cannot read config.json`, and retains the exact original bytes;
 - legacy accounts gain non-empty stable IDs, `maxConcurrent: 0`, `weight: 1`, `priority: 100`, empty note/proxy/Header fields, and `perModel`, then retain IDs across restart;
-- all new account fields and model aliases survive an authenticated save/restart round trip without erasing account routes;
+- all new account fields, model aliases, and all 24 pipeline order permutations survive an authenticated save/restart round trip without erasing account routes;
+- missing legacy pipeline order migrates to the compatibility default, an old-client save preserves the current order, and malformed explicit orders fail without changing file bytes;
 - invalid proxy/Header/note/weight/priority/alias payloads return `400` and preserve the previous file bytes;
 - `routingSecret` and cooldown state survive restart, and the cooled account is excluded afterward;
 - newly created `metadata.json` has mode `0600` on POSIX;

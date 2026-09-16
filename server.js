@@ -38,7 +38,13 @@ const DEFAULT_CONFIG = {
   activeAccount: 0,        // single 模式下使用的账号下标
   concurrencyWaitMs: 2000,
   accountErrorRules: {},   // "429": { action: 'cooldown', cooldownMs: 1800000 } | { action: 'ban' } | { action: 'ignore' }
-  accountPipeline: { quotaPool: false, excludeUnhealthy: false, healthSort: false, sticky: false },
+  accountPipeline: {
+    quotaPool: false,
+    excludeUnhealthy: false,
+    healthSort: false,
+    sticky: false,
+    order: ['excludeUnhealthy', 'quotaPool', 'healthSort', 'sticky'],
+  },
   modelAliases: {},        // client alias -> cline-pass/* model
   knownModels: [
     'cline-pass/glm-5.3-flash',
@@ -238,17 +244,27 @@ function validateAccountErrorRulesInput(rules = {}) {
   return null;
 }
 const PIPELINE_KEYS = ['quotaPool', 'excludeUnhealthy', 'healthSort', 'sticky'];
-function normalizeAccountPipeline(value, { strict = false } = {}) {
+const PIPELINE_DEFAULT_ORDER = ['excludeUnhealthy', 'quotaPool', 'healthSort', 'sticky'];
+function validPipelineOrder(value) {
+  return Array.isArray(value) && value.length === PIPELINE_DEFAULT_ORDER.length &&
+    new Set(value).size === PIPELINE_DEFAULT_ORDER.length &&
+    value.every((step) => PIPELINE_DEFAULT_ORDER.includes(step));
+}
+function normalizeAccountPipeline(value, { strict = false, fallbackOrder = PIPELINE_DEFAULT_ORDER } = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     if (strict) throw new Error('accountPipeline must be an object');
     value = {};
   }
-  if (strict && Object.keys(value).some((key) => !PIPELINE_KEYS.includes(key))) throw new Error('accountPipeline contains an unknown field');
+  if (strict && Object.keys(value).some((key) => ![...PIPELINE_KEYS, 'order'].includes(key))) throw new Error('accountPipeline contains an unknown field');
   const out = {};
   for (const key of PIPELINE_KEYS) {
     if (strict && typeof value[key] !== 'boolean') throw new Error(`accountPipeline.${key} must be boolean`);
     out[key] = value[key] === true;
   }
+  if (value.order === undefined) out.order = [...(validPipelineOrder(fallbackOrder) ? fallbackOrder : PIPELINE_DEFAULT_ORDER)];
+  else if (validPipelineOrder(value.order)) out.order = [...value.order];
+  else if (strict) throw new Error('accountPipeline.order must be an exact permutation of the four pipeline steps');
+  else out.order = [...PIPELINE_DEFAULT_ORDER];
   return out;
 }
 const AGG_FIELDS = ['requests','errors','usageRequests','inputKnownRequests','inputTokens','outputKnownRequests','outputTokens','totalKnownRequests','totalTokens','cacheKnownRequests','cacheHitRequests','cachedTokens','cacheInputKnownRequests','cacheInputTokens','cacheInputCachedTokens'];
@@ -590,51 +606,72 @@ function statisticsQuotaProjection(account, now = Date.now()) {
   else if (!reason) { const successAt = successfulQuotaTime(state, now); if (successAt) nextAttemptAt = successAt + QUOTA_SUCCESS_MS; }
   return { ...quota, lastAttemptAt: state?.lastAttemptAt || null, lastSuccessAt: state?.lastSuccessAt || null, refresh: { eligible: reason === null, reason, state: activeJob ? (activeJob.state === 'running' ? 'fetching' : 'queued') : 'idle', nextAttemptAt } };
 }
-function buildPipelineGroups(list) {
+function buildPipelineGroups(list, identity) {
   const diagnostics = [];
-  let candidates = list.map((account) => ({ account, health: healthProjection(account), quota: quotaProjection(account.id) }));
-  if (config.accountPipeline.excludeUnhealthy) {
-    const kept = candidates.filter((item) => item.health.status !== 'unhealthy');
-    if (kept.length) { if (kept.length < candidates.length) diagnostics.push('health-filtered'); candidates = kept; }
-    else if (candidates.length) {
-      const best = Math.max(...candidates.map((item) => item.health.score ?? -1));
-      candidates = candidates.filter((item) => (item.health.score ?? -1) === best).sort((a,b) => a.account.id.localeCompare(b.account.id)); diagnostics.push('health-filter-fallback');
-    }
+  let groups = [{
+    candidates: list.map((account) => ({ account, health: healthProjection(account), quota: quotaProjection(account.id) })),
+    quota: 'ordinary',
+    health: 'ordinary',
+  }];
+  let stickyApplied = false;
+  const applySticky = () => {
+    if (!identity?.fingerprint) return;
+    groups = groups.flatMap((group) => {
+      const byId = new Map(group.candidates.map((candidate) => [candidate.account.id, candidate]));
+      return hrwRank(group.candidates.map((candidate) => candidate.account), identity.fingerprint)
+        .map((account) => ({ ...group, candidates: [byId.get(account.id)] }));
+    });
+    stickyApplied = true;
+  };
+  for (const step of config.accountPipeline.order) {
+    if (!config.accountPipeline[step]) continue;
+    if (step === 'excludeUnhealthy') {
+      const total = groups.reduce((count, group) => count + group.candidates.length, 0);
+      const kept = groups.map((group) => ({ ...group, candidates: group.candidates.filter((candidate) => candidate.health.status !== 'unhealthy') })).filter((group) => group.candidates.length);
+      const keptCount = kept.reduce((count, group) => count + group.candidates.length, 0);
+      if (keptCount) {
+        if (keptCount < total) diagnostics.push('health-filtered');
+        groups = kept;
+      } else if (total) {
+        const first = groups.find((group) => group.candidates.length);
+        const best = Math.max(...first.candidates.map((candidate) => candidate.health.score ?? -1));
+        groups = [{ ...first, candidates: first.candidates.filter((candidate) => (candidate.health.score ?? -1) === best).sort((a, b) => a.account.id.localeCompare(b.account.id)) }];
+        diagnostics.push('health-filter-fallback');
+      }
+    } else if (step === 'quotaPool') {
+      if (!groups.some((group) => group.candidates.some((candidate) => candidate.quota.pool !== 'unknown'))) diagnostics.push('quota-all-unknown');
+      else groups = groups.flatMap((group) => ['hot','warm','unknown','reserve'].map((pool) => ({ ...group, candidates: group.candidates.filter((candidate) => candidate.quota.pool === pool), quota: pool })).filter((next) => next.candidates.length));
+    } else if (step === 'healthSort') {
+      const layers = [[['available','insufficient'],'available-or-insufficient'],[['degraded'],'degraded'],[['unhealthy'],'unhealthy']];
+      groups = groups.flatMap((group) => layers.map(([statuses, health]) => ({ ...group, candidates: group.candidates.filter((candidate) => statuses.includes(candidate.health.status)), health })).filter((next) => next.candidates.length));
+    } else if (step === 'sticky') applySticky();
   }
-  const quotaOrder = config.accountPipeline.quotaPool && candidates.some((item) => item.quota.pool !== 'unknown') ? ['hot','warm','unknown','reserve'] : [null];
-  if (quotaOrder[0] === null && config.accountPipeline.quotaPool) diagnostics.push('quota-all-unknown');
-  const healthOrder = config.accountPipeline.healthSort ? [['available','insufficient'],['degraded'],['unhealthy']] : [null];
-  const groups = [];
-  for (const quota of quotaOrder) for (const health of healthOrder) {
-    const accounts = candidates.filter((item) => (!quota || item.quota.pool === quota) && (!health || health.includes(item.health.status))).map((item) => item.account);
-    if (accounts.length) groups.push({ accounts, quota: quota || 'ordinary', health: health ? (health.includes('available') ? 'available-or-insufficient' : health[0]) : 'ordinary' });
-  }
-  return { groups, diagnostics };
+  if (config.accountMode === 'sticky' && !config.accountPipeline.sticky) applySticky();
+  return { groups: groups.map((group) => ({ accounts: group.candidates.map((candidate) => candidate.account), quota: group.quota, health: group.health })), diagnostics, stickyApplied };
 }
 async function acquirePipelineAccountLease(identity, { excludeIds = new Set(), allowOverflow = true } = {}) {
   const mode = config.accountMode, waitMs = Math.min(30000, Math.max(0, Number(config.concurrencyWaitMs) || 0)), deadline = Date.now() + waitMs;
   while (true) {
     const list = enabledAccounts({ excludeIds });
     if (!list.length) return { error: 'no available upstream account', strategy: mode };
-    const plan = buildPipelineGroups(list); const sticky = !!identity?.fingerprint && (config.accountPipeline.sticky || mode === 'sticky');
-    const primary = sticky ? hrwRank(plan.groups[0].accounts, identity.fingerprint)[0] : null;
+    const plan = buildPipelineGroups(list, identity);
+    const primary = plan.stickyApplied ? plan.groups[0].accounts[0] : null;
     if (primary) {
       const lease = tryLease(primary);
       if (lease) { const result = selectionResult(lease, mode, primary, 'pipeline-sticky-primary', identity); result.pipeline = { ...plan, groups: undefined, selectedQuota: plan.groups[0].quota, selectedHealth: plan.groups[0].health }; return result; }
-      if (mode === 'single') {
-        const leaseAfterWait = await waitForLease([primary], Math.max(0, deadline - Date.now()));
-        if (leaseAfterWait) return { ...selectionResult(leaseAfterWait, mode, primary, 'pipeline-sticky-primary', identity), pipeline: { diagnostics: plan.diagnostics, selectedQuota: plan.groups[0].quota, selectedHealth: plan.groups[0].health } };
-        return { error: 'upstream account is busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
-      }
-      if (mode === 'sticky') {
-        const leaseAfterWait = await waitForLease([primary], Math.max(0, deadline - Date.now()));
-        if (leaseAfterWait) return { ...selectionResult(leaseAfterWait, mode, primary, 'pipeline-sticky-primary', identity), pipeline: { diagnostics: plan.diagnostics, selectedQuota: plan.groups[0].quota, selectedHealth: plan.groups[0].health } };
+      if (mode === 'single' || mode === 'sticky') {
+        const remaining = deadline - Date.now();
+        if (remaining > 0) { await waitForCapacity(remaining); continue; }
+        if (mode === 'single') return { error: 'upstream account is busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
+        if (!allowOverflow) return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
       }
     }
     if (mode === 'single' && !primary) {
       const chosen = singlePreferred(plan.groups[0].accounts) || plan.groups[0].accounts[0];
-      const lease = await waitForLease([chosen], Math.max(0, deadline - Date.now()));
+      const lease = tryLease(chosen);
       if (lease) return { ...selectionResult(lease, mode, chosen, 'single-selected', identity), pipeline: { diagnostics: plan.diagnostics, selectedQuota: plan.groups[0].quota, selectedHealth: plan.groups[0].health } };
+      const remaining = deadline - Date.now();
+      if (remaining > 0) { await waitForCapacity(remaining); continue; }
       return { error: 'upstream account is busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
     }
     for (let groupIndex = 0; groupIndex < plan.groups.length; groupIndex++) {
@@ -642,7 +679,7 @@ async function acquirePipelineAccountLease(identity, { excludeIds = new Set(), a
       if (!available.length) continue;
       let ranked;
       if (mode === 'single') { const preferred = singlePreferred(group.accounts); ranked = available.includes(preferred) ? [preferred] : [available[0]]; }
-      else if (mode === 'sticky' && identity?.fingerprint) ranked = hrwRank(available, identity.fingerprint);
+      else if (mode === 'sticky' && identity?.fingerprint && !plan.stickyApplied) ranked = hrwRank(available, identity.fingerprint);
       else ranked = strategyRank(mode, available);
       const lease = tryLease(ranked[0]); if (!lease) continue;
       const fallback = groupIndex > 0 || !!primary;
@@ -2264,8 +2301,9 @@ async function dispatch(req, res) {
       const ruleError = validateAccountErrorRulesInput(body.accountErrorRules || {});
       if (ruleError) return sendJSON(res, 400, { error: { message: ruleError } });
       let requestedPipeline = config.accountPipeline;
-      try { if (body.accountPipeline !== undefined) requestedPipeline = normalizeAccountPipeline(body.accountPipeline, { strict: true }); }
-      catch (e) { return sendJSON(res, 400, { error: { message: e.message } }); }
+      try {
+        if (body.accountPipeline !== undefined) requestedPipeline = normalizeAccountPipeline(body.accountPipeline, { strict: true, fallbackOrder: config.accountPipeline.order });
+      } catch (e) { return sendJSON(res, 400, { error: { message: e.message } }); }
       if (!Number.isInteger(Number(body.active ?? 0)) || Number(body.active ?? 0) < 0 || Number(body.active ?? 0) >= body.accounts.length) return sendJSON(res, 400, { error: { message: 'active account index is out of range' } });
       const existingIds = new Set(config.accounts.map((a) => a.id));
       for (const [i, a] of body.accounts.entries()) {
