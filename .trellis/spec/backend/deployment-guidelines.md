@@ -49,10 +49,11 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 
 #### Data, switching, and rollback
 
-- Never replace, upload, print, or edit production `data/config.json` as part of deployment. Record its SHA-256 before and after; they must match.
+- Never replace, upload, print, or manually edit production `data/config.json` as part of deployment. Record its SHA-256 before and after; without a declared schema migration they must match.
+- A release that intentionally normalizes a new persisted configuration field may use a predicted post-migration hash only after running the committed image against byte-for-byte config/metadata copies. The copied result must differ solely by the documented non-secret schema projection, and its SHA-256 becomes the exact post-switch gate. Preserve the original bytes for rollback; any additional live diff or hash mismatch requires config restoration and rollback. This exception never permits uploading a local config or printing secrets.
 - Before switching, copy `compose.yml`, `deployment.json`, `data/config.json`, and `data/metadata.json` into versioned backup/verification paths. Metadata may legitimately change while the service runs; retain its backup and report both hashes.
 - Run `docker compose -f compose.yml up -d --build`, then require `cline-pass-console` to be `running`, `healthy`, on the requested image, with zero restarts.
-- Roll back the compose file and restore the previous healthy container when build, startup, health, local endpoint, authenticated management API, internal network alias, or config-hash validation fails. Retain the failed release, image, logs, and backups for diagnosis.
+- Roll back the compose file and restore the previous healthy container when build, startup, health, local endpoint, authenticated management API, internal network alias, or config-hash validation fails. When a declared config migration was applied, rollback also restores the original backed-up config bytes before starting the previous image.
 - Do not prune releases, images, build cache, logs, or operator data during deployment.
 
 #### Endpoint policy
@@ -69,7 +70,7 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 | Local deployment files are dirty but not committed | Archive committed `HEAD`; do not include working-tree content |
 | Release directory already exists or uploaded hashes differ | Stop before compose change |
 | Build/start/health/image check fails | Restore previous compose and wait for previous image to become healthy |
-| `data/config.json` hash changes | Restore the backed-up config, roll back, and report |
+| `data/config.json` hash changes without a declared migration, or differs from the copy-predicted migration hash | Restore the backed-up config, roll back, and report |
 | Authenticated loopback API or internal network alias fails | Roll back and retain evidence |
 | Public DNS was already unavailable before switching | Continue only with all required local/internal gates; report public ingress as degraded |
 | Public endpoint fails despite working DNS | Treat as deployment validation failure and roll back |
@@ -90,6 +91,7 @@ Before switching:
 - run the repository full test suite against committed code;
 - verify the identity path is gitignored and mode `0600` without reading it;
 - inspect the current container/image/health, account count/mode, safe `/api/meta`, disk space, and config hash;
+- for a declared config migration, run the committed image only against copied data, verify the exact documented structural diff, and record the predicted post-migration hash;
 - verify uploaded `server.js`, `public/index.html`, and security-sensitive module hashes match local `HEAD`.
 
 After switching:
@@ -97,7 +99,7 @@ After switching:
 - require healthy/current image and zero restarts;
 - inspect bounded startup logs for fatal config/metadata errors;
 - validate local and authenticated management projections without exposing credentials;
-- assert account count/mode and `config.json` hash are unchanged;
+- assert account count/mode are unchanged and `config.json` equals either its original hash or the declared copy-predicted migration hash;
 - verify the internal `cline-pass-switcher` alias;
 - save a safe verification report and preserve rollback artifacts.
 
