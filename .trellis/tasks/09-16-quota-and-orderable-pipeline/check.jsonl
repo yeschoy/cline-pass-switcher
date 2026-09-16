@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "覆盖额度和调度后端质量门禁"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "覆盖额度刷新、候选分层、租约和聊天隔离"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "覆盖控制台改动质量门禁"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "覆盖完整调度草稿和账号保存往返"}
+{"file": ".trellis/tasks/archive/2026-09/09-16-quota-reset-time-precision/research/live-reset-time-shape.md", "reason": "提供额度故障的线上脱敏证据"}
+{"file": ".trellis/tasks/archive/2026-09/09-16-sortable-account-pipeline/research/current-pipeline-flow.md", "reason": "提供流水线现状和新顺序契约"}

@@ -1,0 +1,29 @@
+{
+  "id": "quota-and-orderable-pipeline",
+  "name": "quota-and-orderable-pipeline",
+  "title": "修复额度解析并支持可排序调度流水线",
+  "description": "修复 Cline 额度重置时间解析，并让四个可选账号调度步骤支持任意拖动排序。",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "tanggod",
+  "assignee": "tanggod",
+  "createdAt": "2026-09-16",
+  "completedAt": null,
+  "branch": "main",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "09-16-quota-reset-time-precision",
+    "09-16-sortable-account-pipeline"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}
