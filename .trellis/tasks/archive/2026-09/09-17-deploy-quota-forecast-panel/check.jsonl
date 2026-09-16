@@ -1,0 +1,2 @@
+{"file":".trellis/spec/backend/deployment-guidelines.md","reason":"Audit every deployment gate, secret boundary, rollback action, and success record."}
+{"file":".trellis/tasks/archive/2026-09/09-16-quota-and-orderable-pipeline/research/deployment-20260916.md","reason":"Compare current production outcome with the latest successful release evidence and retained baseline."}

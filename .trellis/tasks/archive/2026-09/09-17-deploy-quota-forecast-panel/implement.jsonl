@@ -1,0 +1,3 @@
+{"file":".trellis/spec/backend/deployment-guidelines.md","reason":"Canonical production target, immutable release, backup, validation, security, and rollback contract."}
+{"file":".trellis/tasks/archive/2026-09/09-16-quota-and-orderable-pipeline/research/deployment-20260916.md","reason":"Most recent successful production deployment baseline, release layout, migration gate, and post-switch checks."}
+{"file":".trellis/tasks/archive/2026-09/09-14-diagnostics-routing-config/implement.md","reason":"Prior production deployment record and verified handling of the pre-existing public DNS limitation."}
