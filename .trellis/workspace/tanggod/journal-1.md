@@ -305,3 +305,26 @@ Directly deployed committed quota forecast UI to production as release 20260916-
 ### Status
 
 [OK] **Completed**
+
+
+## Session 12: 优化详细日志扫描并部署
+<!-- trellis-session: v=2 fp=a8c8cbcee9450b5b -->
+
+**Date**: 2026-09-18
+**Task**: 优化详细日志扫描并部署
+**Branch**: `feat/quota-forecast-panel`
+
+### Summary
+
+将详细日志发布、查询和分钟维护改为有界内存索引，增加低频校准与索引资源上限；151 项测试通过，生产版本化部署完成并恢复详细日志，5 分钟 Node CPU 平均 0.04%、无 OOM/重启。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d6c0087` | fix: avoid repeated detailed log corpus scans |
+| `983dacb` | docs(task): record detailed log optimization deployment |
+
+### Status
+
+[OK] **Completed**
