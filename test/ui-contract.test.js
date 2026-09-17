@@ -4,8 +4,8 @@ import fs from 'node:fs';
 
 const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 
-test('console exposes six bounded presets and accessible account drawer/log/alias views', () => {
-  for (const id of ['stable','throughput','even','quota','failover','safe']) assert.match(html, new RegExp(`${id}:\\{`));
+test('console exposes seven bounded presets and accessible account drawer/log/alias views', () => {
+  for (const id of ['stable','throughput','even','quota','failover','safe','cache']) assert.match(html, new RegExp(`${id}:\\{`));
   const presets = html.slice(html.indexOf('const PRESETS='), html.indexOf('function previewPreset'));
   for (const forbidden of ['proxyUrl','perModel','modelAliases','key:']) assert.equal(presets.includes(forbidden), false, `presets must not modify ${forbidden}`);
   assert.match(html, /role="dialog"/); assert.match(html, /aria-labelledby="drawerTitle"/); assert.match(html, /accountDrawerBackdrop/);
@@ -99,7 +99,9 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   assert.match(html,/const target=button\.disabled\?opposite:button/,'boundary moves transfer focus to the enabled opposite-direction button');
   const collect = html.slice(html.indexOf('function collectAccounts'), html.indexOf('async function saveAccounts'));
   for (const field of ['id:a.id','name:a.name',"note:a.note||''","key:a.key||''",'enabled:a.enabled!==false','maxConcurrent:','weight:','priority:',"proxyUrl:a.proxyUrl||''","headers:a.headers||{}","perModel:a.perModel||{}"] ) assert.ok(collect.includes(field), `full account snapshot must preserve ${field}`);
-  assert.match(collect, /accountPipeline:\{quotaPool:[^}]+excludeUnhealthy:[^}]+healthSort:[^}]+sticky:[^}]+order:pipelineOrder\(\)/);
+  assert.match(collect, /accountPipeline:\{quotaPool:[^}]+excludeUnhealthy:[^}]+healthSort:[^}]+sticky:[^}]+order:pipelineOrder\(\),cachePoolSize:/);
+  assert.match(html,/id="cachePoolSize" type="number" min="0" max="100000" step="1"/);assert.match(html,/0 = 关闭/);assert.match(html,/仅在 sticky 模式或启用会话粘性步骤时生效/);
+  assert.match(html,/cachePoolRole==='active'/);assert.match(html,/缓存活跃/);assert.match(html,/缓存备用/);
   assert.match(html, /api\('\/api\/statistics'\)/);
   assert.match(html, /id="statisticsStatus"[^>]+aria-live="polite"/);
   assert.match(html, /cacheTokenRatio/); assert.match(html, /cacheHitRequestRate/);
@@ -159,9 +161,9 @@ test('raw scheduling editor uses a labelled native modal, draft guidance and ann
   assert.match(html, /id="rawSchedulingJson"[^>]+overflow-wrap:anywhere/);
   for (const id of ['rawSchedulingError','rawSchedulingFeedback']) assert.match(html,new RegExp(`id="${id}" aria-live="polite"`));
   assert.match(html,/accountNames 为全部账号的只读参考名称（可重复），不可修改/);
-  assert.match(html,/策略全局适用于账号池/);
+  assert.match(html,/策略全局适用于账号池/);assert.match(html,/priority 越小越优先/);assert.match(html,/reserve/);assert.match(html,/备用溢出/);
   const raw=html.slice(html.indexOf('const RAW_PIPELINE_CONTROLS'),html.indexOf('function collectAccounts'));
-  assert.match(raw,/accountPipeline\.order=pipelineOrder\(\)/); assert.match(raw,/validPipelineOrder\(value\.accountPipeline\.order\)/); assert.match(raw,/setPipelineOrder\(value\.accountPipeline\.order\)/);
+  assert.match(raw,/accountPipeline\.order=pipelineOrder\(\)/);assert.match(raw,/accountPipeline\.cachePoolSize=/);assert.match(raw,/value\.accountPipeline\.cachePoolSize/); assert.match(raw,/validPipelineOrder\(value\.accountPipeline\.order\)/); assert.match(raw,/setPipelineOrder\(value\.accountPipeline\.order\)/);
 });
 
 test('detailed logs have independent labelled controls, privacy/retention guidance and safe on-demand text', () => {

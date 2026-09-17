@@ -212,13 +212,15 @@
         <option value="least-connections">最少连接</option><option value="weighted-roundrobin">加权轮询</option><option value="priority-failover">主备优先级</option>
       </select>
       <label class="dim" style="font-size:12px">容量等待(ms) <input id="concurrencyWaitMs" type="number" min="0" max="30000" value="2000" style="width:90px"></label>
-      <select id="preset"><option value="">策略预设…</option><option value="stable">会话稳定</option><option value="throughput">最大吞吐</option><option value="even">均匀分摊</option><option value="quota">按额度分摊</option><option value="failover">主备容灾</option><option value="safe">保守防封</option></select>
+      <label class="dim" style="font-size:12px" for="cachePoolSize">缓存活跃池账号数 <input id="cachePoolSize" type="number" min="0" max="100000" step="1" value="0" aria-describedby="cachePoolHelp" style="width:90px"></label>
+      <select id="preset"><option value="">策略预设…</option><option value="cache">缓存命中优先</option><option value="stable">会话稳定</option><option value="throughput">最大吞吐</option><option value="even">均匀分摊</option><option value="quota">按额度分摊</option><option value="failover">主备容灾</option><option value="safe">保守防封</option></select>
       <button class="ghost" onclick="previewPreset()">预览应用</button>
       <input id="accSearch" placeholder="搜索名称或备注" oninput="clearBulkSelection()" style="background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px">
       <button class="ghost" onclick="addAccountRow()">＋ 添加账号</button>
       <button onclick="saveAccounts()">保存账号配置</button>
       <span class="dim" style="font-size:12px" id="accMsg" aria-live="polite"></span>
     </div>
+    <p id="cachePoolHelp" class="dim" style="font-size:12px;margin-bottom:10px">缓存活跃池 0 = 关闭；仅在 sticky 模式或启用会话粘性步骤时生效。priority 越小越优先；reserve 或明确不健康账号会由下一优先级账号替换；活跃账号全部满载并等待超时后才允许备用溢出。该策略不保证生产缓存命中率。</p>
     <div class="toolbar">
       <label><input id="bulkSelectAll" type="checkbox" onchange="selectAllAccounts(this.checked)"> 选择当前搜索结果全部账号</label>
       <label for="bulkConcurrency">统一并发（0 = 不限）</label><input id="bulkConcurrency" type="number" min="0" max="100000" step="1" style="width:110px">
@@ -251,7 +253,7 @@
     <div id="rawSchedulingFeedback" aria-live="polite"></div>
     <dialog id="rawSchedulingDialog" aria-labelledby="rawSchedulingTitle" aria-describedby="rawSchedulingHelp" style="width:min(760px,calc(100% - 24px));max-height:90vh;overflow:auto;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:16px">
       <h2 id="rawSchedulingTitle">原始调度配置 · 当前页面草稿</h2>
-      <p id="rawSchedulingHelp" class="dim">策略全局适用于账号池；accountNames 为全部账号的只读参考名称（可重复），不可修改。实际选择仍受启用状态、健康和容量影响。应用不会立即生效；请另行保存账号配置。</p>
+      <p id="rawSchedulingHelp" class="dim">策略全局适用于账号池；accountNames 为全部账号的只读参考名称（可重复），不可修改。缓存活跃池按 priority 越小越优先，reserve/明确不健康会替换，满载等待超时后才备用溢出。实际选择仍受启用状态、健康和容量影响。应用不会立即生效；请另行保存账号配置。</p>
       <label for="rawSchedulingJson">调度草稿 JSON</label>
       <textarea id="rawSchedulingJson" rows="20" spellcheck="false" style="width:100%;max-width:100%;background:var(--card2);color:var(--text);font-family:Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere"></textarea>
       <div id="rawSchedulingError" aria-live="polite"></div>
@@ -517,7 +519,7 @@ async function loadAll() {
   const [models, accs, sec, meta, aliases] = await Promise.all([api('/api/models' + (accountId ? '?accountId=' + encodeURIComponent(accountId) : '')), api('/api/accounts'), api('/api/security'), api('/api/meta'), api('/api/model-aliases')]);
   DATA = models;
   ACCS = accs; ALIASES = aliases;
-  $('#accMode').value = ACCS.mode; $('#concurrencyWaitMs').value = ACCS.concurrencyWaitMs ?? 2000; $('#accountErrorRules').value = JSON.stringify(ACCS.accountErrorRules || {}, null, 2);
+  $('#accMode').value = ACCS.mode; $('#concurrencyWaitMs').value = ACCS.concurrencyWaitMs ?? 2000; $('#cachePoolSize').value = ACCS.accountPipeline?.cachePoolSize ?? 0; $('#accountErrorRules').value = JSON.stringify(ACCS.accountErrorRules || {}, null, 2);
   setPipelineOrder(ACCS.accountPipeline?.order || PIPELINE_DEFAULT_ORDER);
   $('#pipelineQuotaPool').checked=!!ACCS.accountPipeline?.quotaPool;$('#pipelineExcludeUnhealthy').checked=!!ACCS.accountPipeline?.excludeUnhealthy;$('#pipelineHealthSort').checked=!!ACCS.accountPipeline?.healthSort;$('#pipelineSticky').checked=!!ACCS.accountPipeline?.sticky;
   BULK_SELECTION.clear(); $('#bulkFeedback').textContent = '';
@@ -915,9 +917,10 @@ function renderAccounts() {
   const rows = visibleAccountRows().map(({a,i}) => {
     const usage=(ACCS.stats||{})[a.name]||{}, checked=$('#accMode').value==='single'&&i===ACCS.active;
     const state=a.state?.banned?'封禁':a.state?.cooldownUntil>Date.now()?`冷却至 ${new Date(a.state.cooldownUntil).toLocaleTimeString()}`:'健康';
+    const cacheRole=a.cachePoolRole==='active'?'缓存活跃':a.cachePoolRole==='standby'?'缓存备用':null;
     let proxy='直连'; try { if(a.proxyUrl) proxy=new URL(a.proxyUrl).protocol.replace(':','').toUpperCase(); } catch {}
     const note=String(a.note||'').replace(/\s+/g,' ').slice(0,50);
-    return `<tr><td><input type="checkbox" aria-label="批量选择 ${escapeHtml(a.name)}" ${BULK_SELECTION.has(a)?'checked':''} onchange="selectAccount(${i},this.checked)"></td><td><input type="radio" name="accActive" data-i="${i}" ${checked?'checked':''} ${$('#accMode').value!=='single'?'disabled':''} onchange="ACCS.active=${i}"></td><td class="account-name" title="${escapeHtml(a.name)}">${escapeHtml(a.name)}</td><td class="dim">${escapeHtml(note||'—')}</td><td><input type="checkbox" ${a.enabled!==false?'checked':''} onchange="ACCS.accounts[${i}].enabled=this.checked"></td><td>${a.maxConcurrent||0} / ${a.activeCount||0}</td><td>${a.weight||1} / ${a.priority||100}</td><td><span class="badge">${escapeHtml(proxy)}</span></td><td><span class="badge ${state==='健康'?'green':'orange'}">${escapeHtml(state)}</span></td><td>${usage.requests===null?'无数据':Number(usage.requests)||0}</td><td><div class="row-actions"><button class="ghost" onclick="openAccountDrawer(${i},this)">设置</button><button class="ghost" onclick="testAccount(${i},this)">测试</button>${a.state?`<button class="ghost" onclick="recoverAccount(${jsArg(a.id)})">恢复</button>`:''}<button class="ghost" onclick="delAccount(${i})">删除</button></div></td></tr>`;
+    return `<tr><td><input type="checkbox" aria-label="批量选择 ${escapeHtml(a.name)}" ${BULK_SELECTION.has(a)?'checked':''} onchange="selectAccount(${i},this.checked)"></td><td><input type="radio" name="accActive" data-i="${i}" ${checked?'checked':''} ${$('#accMode').value!=='single'?'disabled':''} onchange="ACCS.active=${i}"></td><td class="account-name" title="${escapeHtml(a.name)}">${escapeHtml(a.name)}</td><td class="dim">${escapeHtml(note||'—')}</td><td><input type="checkbox" ${a.enabled!==false?'checked':''} onchange="ACCS.accounts[${i}].enabled=this.checked"></td><td>${a.maxConcurrent||0} / ${a.activeCount||0}</td><td>${a.weight||1} / ${a.priority||100}</td><td><span class="badge">${escapeHtml(proxy)}</span></td><td><span class="badge ${state==='健康'?'green':'orange'}">${escapeHtml(state)}</span>${cacheRole?` <span class="badge">${cacheRole}</span>`:''}</td><td>${usage.requests===null?'无数据':Number(usage.requests)||0}</td><td><div class="row-actions"><button class="ghost" onclick="openAccountDrawer(${i},this)">设置</button><button class="ghost" onclick="testAccount(${i},this)">测试</button>${a.state?`<button class="ghost" onclick="recoverAccount(${jsArg(a.id)})">恢复</button>`:''}<button class="ghost" onclick="delAccount(${i})">删除</button></div></td></tr>`;
   }).join('');
   $('#accBody').innerHTML=rows||'<tr><td colspan="11" class="empty">无匹配账号</td></tr>';
 }
@@ -926,9 +929,14 @@ let RAW_SCHEDULING = null;
 const RAW_PIPELINE_CONTROLS = {quotaPool:'pipelineQuotaPool',excludeUnhealthy:'pipelineExcludeUnhealthy',healthSort:'pipelineHealthSort',sticky:'pipelineSticky'};
 function rawSchedulingControls() {
   const accountPipeline=Object.fromEntries(Object.entries(RAW_PIPELINE_CONTROLS).map(([key,id]) => [key,$('#'+id).checked]));
-  accountPipeline.order=pipelineOrder();
+  accountPipeline.order=pipelineOrder(); accountPipeline.cachePoolSize=$('#cachePoolSize').value;
   return {accountMode:$('#accMode').value, concurrencyWaitMs:$('#concurrencyWaitMs').value,
     accountErrorRules:$('#accountErrorRules').value,accountPipeline};
+}
+function cachePoolSizeDraft() {
+  const raw=String($('#cachePoolSize').value),value=Number(raw);
+  if (!raw.trim() || !Number.isInteger(value) || value < 0 || value > 100000) throw Error('缓存活跃池账号数必须为 0–100000 的整数');
+  return value;
 }
 function validateRawScheduling(value, names) {
   const object = x => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -936,9 +944,10 @@ function validateRawScheduling(value, names) {
   if (!exact(value,['accountMode','concurrencyWaitMs','accountErrorRules','accountPipeline','accountNames'])) throw Error('根对象必须且只能包含五个指定字段');
   if (!Array.from($('#accMode').options).some(option => option.value === value.accountMode)) throw Error('accountMode 无效');
   if (!Number.isInteger(value.concurrencyWaitMs) || value.concurrencyWaitMs < 0 || value.concurrencyWaitMs > 30000) throw Error('concurrencyWaitMs 必须为 0–30000 的整数');
-  if (!exact(value.accountPipeline,[...Object.keys(RAW_PIPELINE_CONTROLS),'order'])) throw Error('accountPipeline 必须包含四个开关和 order');
+  if (!exact(value.accountPipeline,[...Object.keys(RAW_PIPELINE_CONTROLS),'order','cachePoolSize'])) throw Error('accountPipeline 必须包含四个开关、order 和 cachePoolSize');
   for (const key of Object.keys(RAW_PIPELINE_CONTROLS)) if (typeof value.accountPipeline[key] !== 'boolean') throw Error(`accountPipeline.${key} 必须为 boolean`);
   if (!validPipelineOrder(value.accountPipeline.order)) throw Error('accountPipeline.order 必须是四个步骤的精确排列');
+  if (!Number.isInteger(value.accountPipeline.cachePoolSize) || value.accountPipeline.cachePoolSize < 0 || value.accountPipeline.cachePoolSize > 100000) throw Error('accountPipeline.cachePoolSize 必须为 0–100000 的整数');
   if (!object(value.accountErrorRules)) throw Error('accountErrorRules 必须为对象');
   for (const [code,rule] of Object.entries(value.accountErrorRules)) {
     if (!/^[1-5][0-9]{2}$/.test(code)) throw Error('accountErrorRules 状态码必须为 100–599');
@@ -955,9 +964,10 @@ function openRawScheduling(button) {
   let rules;
   try { rules = JSON.parse(controls.accountErrorRules); }
   catch { $('#rawSchedulingFeedback').textContent = 'accountErrorRules 不是有效 JSON；原草稿未改变'; return; }
-  const value = {...controls,concurrencyWaitMs:Number(controls.concurrencyWaitMs),accountErrorRules:rules,accountNames:names};
+  let value;
   try {
     if (!controls.concurrencyWaitMs.trim()) throw Error('concurrencyWaitMs 不可为空');
+    value = {...controls,concurrencyWaitMs:Number(controls.concurrencyWaitMs),accountErrorRules:rules,accountPipeline:{...controls.accountPipeline,cachePoolSize:cachePoolSizeDraft()},accountNames:names};
     validateRawScheduling(value,names);
   } catch (e) { $('#rawSchedulingFeedback').textContent = e.message; return; }
   const text = JSON.stringify(value,null,2);
@@ -985,14 +995,14 @@ function applyRawScheduling() {
   try { validateRawScheduling(value,snapshot.names); }
   catch (e) { $('#rawSchedulingError').textContent = e.message; return; }
   $('#accMode').value = value.accountMode; $('#concurrencyWaitMs').value = String(value.concurrencyWaitMs);
-  $('#accountErrorRules').value = JSON.stringify(value.accountErrorRules,null,2);
+  $('#accountErrorRules').value = JSON.stringify(value.accountErrorRules,null,2); $('#cachePoolSize').value = String(value.accountPipeline.cachePoolSize);
   setPipelineOrder(value.accountPipeline.order);
   for (const [key,id] of Object.entries(RAW_PIPELINE_CONTROLS)) $('#'+id).checked = value.accountPipeline[key];
   renderAccounts(); closeRawScheduling(true);
   $('#rawSchedulingFeedback').textContent = '草稿已更新，尚未生效；请保存账号配置';
 }
-function collectAccounts(){return {accounts:ACCS.accounts.map(a=>({id:a.id,name:a.name,note:a.note||'',key:a.key||'',enabled:a.enabled!==false,maxConcurrent:Number(a.maxConcurrent)||0,weight:Number(a.weight)||1,priority:Number(a.priority)||100,proxyUrl:a.proxyUrl||'',headers:a.headers||{},perModel:a.perModel||{}})),mode:$('#accMode').value,active:ACCS.active||0,accountPipeline:{quotaPool:$('#pipelineQuotaPool').checked,excludeUnhealthy:$('#pipelineExcludeUnhealthy').checked,healthSort:$('#pipelineHealthSort').checked,sticky:$('#pipelineSticky').checked,order:pipelineOrder()}};}
-async function saveAccounts(payload=null){payload||=collectAccounts();payload.concurrencyWaitMs=Number($('#concurrencyWaitMs').value);try{payload.accountErrorRules||=JSON.parse($('#accountErrorRules').value||'{}');}catch{return accMsg('错误规则不是有效 JSON',true);}if(!payload.accounts.some(a=>a.key))return accMsg('至少需要一个 key 非空的账号',true);const r=await api('/api/accounts',payload);if(!r.ok)return accMsg(r.error?.message||'保存失败',true);accMsg(`已保存：${r.accounts} 个账号 · ${r.mode}`);await loadAll();}
+function collectAccounts(){return {accounts:ACCS.accounts.map(a=>({id:a.id,name:a.name,note:a.note||'',key:a.key||'',enabled:a.enabled!==false,maxConcurrent:Number(a.maxConcurrent)||0,weight:Number(a.weight)||1,priority:Number(a.priority)||100,proxyUrl:a.proxyUrl||'',headers:a.headers||{},perModel:a.perModel||{}})),mode:$('#accMode').value,active:ACCS.active||0,accountPipeline:{quotaPool:$('#pipelineQuotaPool').checked,excludeUnhealthy:$('#pipelineExcludeUnhealthy').checked,healthSort:$('#pipelineHealthSort').checked,sticky:$('#pipelineSticky').checked,order:pipelineOrder(),cachePoolSize:cachePoolSizeDraft()}};}
+async function saveAccounts(payload=null){if(!payload){try{payload=collectAccounts();}catch(e){return accMsg(e.message,true);}}payload.concurrencyWaitMs=Number($('#concurrencyWaitMs').value);try{payload.accountErrorRules||=JSON.parse($('#accountErrorRules').value||'{}');}catch{return accMsg('错误规则不是有效 JSON',true);}if(!payload.accounts.some(a=>a.key))return accMsg('至少需要一个 key 非空的账号',true);const r=await api('/api/accounts',payload);if(!r.ok)return accMsg(r.error?.message||'保存失败',true);accMsg(`已保存：${r.accounts} 个账号 · ${r.mode}`);await loadAll();}
 async function recoverAccount(id){const r=await api('/api/accounts/recover',{id});if(r.ok){accMsg('账号已恢复');await loadAll();}}
 function addAccountRow(){ACCS.accounts.push({name:`账号${ACCS.accounts.length+1}`,note:'',key:'',enabled:true,maxConcurrent:0,weight:1,priority:100,proxyUrl:'',headers:{},perModel:{}});renderAccounts();openAccountDrawer(ACCS.accounts.length-1);}
 function delAccount(i){if(!confirm('确认删除该账号？'))return;ACCS.accounts.splice(i,1);ACCS.active=Math.min(ACCS.active,Math.max(0,ACCS.accounts.length-1));renderAccounts();}
@@ -1003,10 +1013,10 @@ function closeAccountDrawer(force=false){if(!force&&DRAWER_INDEX>=0&&drawerValue
 function saveDrawer(){try{const a=ACCS.accounts[DRAWER_INDEX],headers=JSON.parse($('#drawerHeaders').value||'{}');Object.assign(a,{name:$('#drawerName').value.trim(),note:$('#drawerNote').value,key:$('#drawerKey').value.trim(),maxConcurrent:Number($('#drawerMax').value),weight:Number($('#drawerWeight').value),priority:Number($('#drawerPriority').value),proxyUrl:$('#drawerProxy').value.trim(),headers});DRAWER_SNAPSHOT=drawerValue();closeAccountDrawer(true);renderAccounts();accMsg('草案已更新，请点击“保存账号配置”持久化');}catch{$('#drawerError').textContent='请求头必须是有效 JSON';}}
 async function testDraftProxy(){const a=ACCS.accounts[DRAWER_INDEX];if(!a.id)return $('#drawerError').textContent='请先保存新账号再测试代理';const r=await api('/api/accounts/proxy-test',{accountId:a.id,proxyUrl:$('#drawerProxy').value.trim()});$('#drawerError').style.color=r.ok?'var(--green)':'var(--red)';$('#drawerError').textContent=r.ok?`代理可达：${r.proxyType} · ${r.ms}ms`:`代理失败：${r.reason||r.error?.message}`;}
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('#accountDrawerBackdrop').style.display==='block')closeAccountDrawer();});
-const PRESETS={stable:{mode:'sticky',wait:2000,rules:{429:{action:'cooldown',cooldownMs:1800000}}},throughput:{mode:'least-connections',wait:0,rules:{429:{action:'cooldown',cooldownMs:300000}}},even:{mode:'roundrobin',wait:0,weight:1,priority:100,rules:{429:{action:'cooldown',cooldownMs:1800000}}},quota:{mode:'weighted-roundrobin',wait:0,weight:1,rules:{429:{action:'cooldown',cooldownMs:1800000}}},failover:{mode:'priority-failover',wait:0,priorities:true,rules:{429:{action:'cooldown',cooldownMs:1800000}}},safe:{mode:'sticky',wait:5000,maxConcurrent:1,rules:{429:{action:'cooldown',cooldownMs:3600000}}}};
-function previewPreset(){const p=PRESETS[$('#preset').value];if(!p)return accMsg('请先选择预设',true);let liveRules;try{liveRules=JSON.parse($('#accountErrorRules').value||'{}');}catch{return accMsg('错误规则不是有效 JSON',true);}const draft=collectAccounts(),changes=[];if(draft.mode!==p.mode)changes.push(`accountMode: ${draft.mode} → ${p.mode}`);draft.mode=p.mode;draft.concurrencyWaitMs=p.wait;changes.push(`concurrencyWaitMs: ${$('#concurrencyWaitMs').value} → ${p.wait}`);draft.accountErrorRules={...liveRules,...p.rules};draft.accounts=draft.accounts.map((a,i)=>{const n={...a};if(p.weight)n.weight=p.weight;if(p.priority)n.priority=p.priority;if(p.priorities)n.priority=Math.min(100,i===0?1:i*10);if(p.maxConcurrent)n.maxConcurrent=p.maxConcurrent;for(const k of ['maxConcurrent','weight','priority'])if(n[k]!==a[k])changes.push(`${a.name}.${k}: ${a[k]} → ${n[k]}`);return n});for(const c of Object.keys(p.rules))changes.push(`accountErrorRules.${c}: ${JSON.stringify(liveRules[c]||null)} → ${JSON.stringify(p.rules[c])}`);PENDING_PRESET=draft;$('#presetDiff').textContent=changes.join('\n')||'没有变化';$('#presetAdjust').innerHTML=p.weight?draft.accounts.map((a,i)=>`<label>${escapeHtml(a.name)} 权重 <input type="number" min="1" max="100" value="${a.weight}" onchange="updatePresetAccount(${i},'weight',this.value)"></label>`).join(''):p.priorities?draft.accounts.map((a,i)=>`<label>${escapeHtml(a.name)} 优先级 <input type="number" min="1" max="100" value="${a.priority}" onchange="updatePresetAccount(${i},'priority',this.value)"></label>`).join(''):'';$('#presetModal').style.display='flex';}
+const PRESETS={cache:{mode:'sticky',wait:5000,cachePoolSize:2,editPriorities:true,rules:{429:{action:'cooldown',cooldownMs:1800000}}},stable:{mode:'sticky',wait:2000,rules:{429:{action:'cooldown',cooldownMs:1800000}}},throughput:{mode:'least-connections',wait:0,rules:{429:{action:'cooldown',cooldownMs:300000}}},even:{mode:'roundrobin',wait:0,weight:1,priority:100,rules:{429:{action:'cooldown',cooldownMs:1800000}}},quota:{mode:'weighted-roundrobin',wait:0,weight:1,rules:{429:{action:'cooldown',cooldownMs:1800000}}},failover:{mode:'priority-failover',wait:0,priorities:true,rules:{429:{action:'cooldown',cooldownMs:1800000}}},safe:{mode:'sticky',wait:5000,maxConcurrent:1,rules:{429:{action:'cooldown',cooldownMs:3600000}}}};
+function previewPreset(){const p=PRESETS[$('#preset').value];if(!p)return accMsg('请先选择预设',true);let liveRules;try{liveRules=JSON.parse($('#accountErrorRules').value||'{}');}catch{return accMsg('错误规则不是有效 JSON',true);}let draft;try{draft=collectAccounts();}catch(e){return accMsg(e.message,true);}const changes=[];if(draft.mode!==p.mode)changes.push(`accountMode: ${draft.mode} → ${p.mode}`);draft.mode=p.mode;draft.concurrencyWaitMs=p.wait;changes.push(`concurrencyWaitMs: ${$('#concurrencyWaitMs').value} → ${p.wait}`);if(p.cachePoolSize!==undefined){changes.push(`accountPipeline.cachePoolSize: ${draft.accountPipeline.cachePoolSize} → ${p.cachePoolSize}`);draft.accountPipeline.cachePoolSize=p.cachePoolSize;}draft.accountErrorRules={...liveRules,...p.rules};draft.accounts=draft.accounts.map((a,i)=>{const n={...a};if(p.weight)n.weight=p.weight;if(p.priority)n.priority=p.priority;if(p.priorities)n.priority=Math.min(100,i===0?1:i*10);if(p.maxConcurrent)n.maxConcurrent=p.maxConcurrent;for(const k of ['maxConcurrent','weight','priority'])if(n[k]!==a[k])changes.push(`${a.name}.${k}: ${a[k]} → ${n[k]}`);return n});for(const c of Object.keys(p.rules))changes.push(`accountErrorRules.${c}: ${JSON.stringify(liveRules[c]||null)} → ${JSON.stringify(p.rules[c])}`);PENDING_PRESET=draft;$('#presetDiff').textContent=changes.join('\n')||'没有变化';$('#presetAdjust').innerHTML=p.weight?draft.accounts.map((a,i)=>`<label>${escapeHtml(a.name)} 权重 <input type="number" min="1" max="100" value="${a.weight}" onchange="updatePresetAccount(${i},'weight',this.value)"></label>`).join(''):(p.priorities||p.editPriorities)?draft.accounts.map((a,i)=>`<label>${escapeHtml(a.name)} 优先级 <input type="number" min="1" max="100" value="${a.priority}" onchange="updatePresetAccount(${i},'priority',this.value)"></label>`).join(''):'';$('#presetModal').style.display='flex';}
 function updatePresetAccount(i,field,value){if(PENDING_PRESET)PENDING_PRESET.accounts[i][field]=Math.min(100,Math.max(1,Number(value)||1));}
-function closePreset(){$('#presetModal').style.display='none';PENDING_PRESET=null;}async function applyPreset(){const p=PENDING_PRESET;$('#presetModal').style.display='none';PENDING_PRESET=null;if(p){$('#accMode').value=p.mode;$('#concurrencyWaitMs').value=p.concurrencyWaitMs;$('#accountErrorRules').value=JSON.stringify(p.accountErrorRules,null,2);await saveAccounts(p);}}
+function closePreset(){$('#presetModal').style.display='none';PENDING_PRESET=null;}async function applyPreset(){const p=PENDING_PRESET;$('#presetModal').style.display='none';PENDING_PRESET=null;if(p){$('#accMode').value=p.mode;$('#concurrencyWaitMs').value=p.concurrencyWaitMs;$('#cachePoolSize').value=p.accountPipeline.cachePoolSize;$('#accountErrorRules').value=JSON.stringify(p.accountErrorRules,null,2);await saveAccounts(p);}}
 const ERROR_RULE_PRESETS={standard:{429:{action:'cooldown',cooldownMs:1800000}},fast:{429:{action:'cooldown',cooldownMs:300000},500:{action:'cooldown',cooldownMs:60000},502:{action:'cooldown',cooldownMs:60000},503:{action:'cooldown',cooldownMs:60000},504:{action:'cooldown',cooldownMs:60000}},conservative:{429:{action:'cooldown',cooldownMs:3600000},500:{action:'cooldown',cooldownMs:300000},502:{action:'cooldown',cooldownMs:300000},503:{action:'cooldown',cooldownMs:300000},504:{action:'cooldown',cooldownMs:300000}},observe:{429:{action:'ignore'},500:{action:'ignore'},502:{action:'ignore'},503:{action:'ignore'},504:{action:'ignore'}},clear:{}};
 function previewErrorPreset(){let current;try{current=JSON.parse($('#accountErrorRules').value||'{}');}catch{return accMsg('错误规则不是有效 JSON',true);}const name=$('#errorRulePreset').value,preset=ERROR_RULE_PRESETS[name],replace=name==='clear'||$('#errorPresetReplace').checked;if(name==='clear')$('#errorPresetReplace').checked=true;const next=replace?{...preset}:{...current,...preset};const groups={保留:[],新增:[],修改:[],删除:[]};for(const code of [...new Set([...Object.keys(current),...Object.keys(next)])].sort((a,b)=>Number(a)-Number(b))){if(!(code in current))groups.新增.push(`${code}: ${JSON.stringify(next[code])}`);else if(!(code in next))groups.删除.push(`${code}: ${JSON.stringify(current[code])}`);else if(JSON.stringify(current[code])===JSON.stringify(next[code]))groups.保留.push(`${code}: ${JSON.stringify(next[code])}`);else groups.修改.push(`${code}: ${JSON.stringify(current[code])} → ${JSON.stringify(next[code])}`);}PENDING_ERROR_PRESET=next;$('#errorPresetDiff').textContent=Object.entries(groups).map(([label,items])=>`${label}（${items.length}）\n${items.length?items.join('\n'):'—'}`).join('\n\n');$('#errorPresetModal').style.display='flex';}
 function closeErrorPreset(){$('#errorPresetModal').style.display='none';PENDING_ERROR_PRESET=null;}

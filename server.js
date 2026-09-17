@@ -44,6 +44,7 @@ const DEFAULT_CONFIG = {
     healthSort: false,
     sticky: false,
     order: ['excludeUnhealthy', 'quotaPool', 'healthSort', 'sticky'],
+    cachePoolSize: 0,
   },
   modelAliases: {},        // client alias -> cline-pass/* model
   knownModels: [
@@ -250,12 +251,12 @@ function validPipelineOrder(value) {
     new Set(value).size === PIPELINE_DEFAULT_ORDER.length &&
     value.every((step) => PIPELINE_DEFAULT_ORDER.includes(step));
 }
-function normalizeAccountPipeline(value, { strict = false, fallbackOrder = PIPELINE_DEFAULT_ORDER } = {}) {
+function normalizeAccountPipeline(value, { strict = false, fallbackOrder = PIPELINE_DEFAULT_ORDER, fallbackCachePoolSize = 0 } = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     if (strict) throw new Error('accountPipeline must be an object');
     value = {};
   }
-  if (strict && Object.keys(value).some((key) => ![...PIPELINE_KEYS, 'order'].includes(key))) throw new Error('accountPipeline contains an unknown field');
+  if (strict && Object.keys(value).some((key) => ![...PIPELINE_KEYS, 'order', 'cachePoolSize'].includes(key))) throw new Error('accountPipeline contains an unknown field');
   const out = {};
   for (const key of PIPELINE_KEYS) {
     if (strict && typeof value[key] !== 'boolean') throw new Error(`accountPipeline.${key} must be boolean`);
@@ -265,6 +266,10 @@ function normalizeAccountPipeline(value, { strict = false, fallbackOrder = PIPEL
   else if (validPipelineOrder(value.order)) out.order = [...value.order];
   else if (strict) throw new Error('accountPipeline.order must be an exact permutation of the four pipeline steps');
   else out.order = [...PIPELINE_DEFAULT_ORDER];
+  if (value.cachePoolSize === undefined) out.cachePoolSize = Number.isInteger(fallbackCachePoolSize) && fallbackCachePoolSize >= 0 && fallbackCachePoolSize <= 100000 ? fallbackCachePoolSize : 0;
+  else if (Number.isInteger(value.cachePoolSize) && value.cachePoolSize >= 0 && value.cachePoolSize <= 100000) out.cachePoolSize = value.cachePoolSize;
+  else if (strict) throw new Error('accountPipeline.cachePoolSize must be an integer from 0 to 100000');
+  else out.cachePoolSize = 0;
   return out;
 }
 const AGG_FIELDS = ['requests','errors','usageRequests','inputKnownRequests','inputTokens','outputKnownRequests','outputTokens','totalKnownRequests','totalTokens','cacheKnownRequests','cacheHitRequests','cachedTokens','cacheInputKnownRequests','cacheInputTokens','cacheInputCachedTokens'];
@@ -588,7 +593,10 @@ async function acquireLegacyAccountLease(identity, { excludeIds = new Set(), all
     await waitForCapacity(remaining);
   }
 }
-function pipelineEnabled() { return PIPELINE_KEYS.some((key) => config.accountPipeline?.[key]); }
+function configuredCachePoolSize() { return Number.isInteger(config.accountPipeline?.cachePoolSize) ? config.accountPipeline.cachePoolSize : 0; }
+function cachePoolEnabled() { return configuredCachePoolSize() > 0 && (config.accountMode === 'sticky' || config.accountPipeline?.sticky === true); }
+function pipelineEnabled() { return cachePoolEnabled() || PIPELINE_KEYS.some((key) => config.accountPipeline?.[key]); }
+function quotaRoutingEnabled() { return config.accountPipeline?.quotaPool === true || cachePoolEnabled(); }
 function quotaProjection(accountId, now = Date.now()) {
   const q = META.accountQuotas?.[accountId];
   const snapshot = q?.snapshot;
@@ -606,13 +614,12 @@ function statisticsQuotaProjection(account, now = Date.now()) {
   else if (!reason) { const successAt = successfulQuotaTime(state, now); if (successAt) nextAttemptAt = successAt + QUOTA_SUCCESS_MS; }
   return { ...quota, lastAttemptAt: state?.lastAttemptAt || null, lastSuccessAt: state?.lastSuccessAt || null, refresh: { eligible: reason === null, reason, state: activeJob ? (activeJob.state === 'running' ? 'fetching' : 'queued') : 'idle', nextAttemptAt } };
 }
-function buildPipelineGroups(list, identity) {
+function pipelineCandidates(list) {
+  return list.map((account) => ({ account, health: healthProjection(account), quota: quotaProjection(account.id) }));
+}
+function buildPipelineGroups(list, identity, candidates = pipelineCandidates(list)) {
   const diagnostics = [];
-  let groups = [{
-    candidates: list.map((account) => ({ account, health: healthProjection(account), quota: quotaProjection(account.id) })),
-    quota: 'ordinary',
-    health: 'ordinary',
-  }];
+  let groups = [{ candidates, quota: 'ordinary', health: 'ordinary' }];
   let stickyApplied = false;
   const applySticky = () => {
     if (!identity?.fingerprint) return;
@@ -649,7 +656,85 @@ function buildPipelineGroups(list, identity) {
   if (config.accountMode === 'sticky' && !config.accountPipeline.sticky) applySticky();
   return { groups: groups.map((group) => ({ accounts: group.candidates.map((candidate) => candidate.account), quota: group.quota, health: group.health })), diagnostics, stickyApplied };
 }
-async function acquirePipelineAccountLease(identity, { excludeIds = new Set(), allowOverflow = true } = {}) {
+function cachePoolMembership(list, candidates = null) {
+  if (!cachePoolEnabled()) return null;
+  candidates ||= pipelineCandidates(list);
+  const size = configuredCachePoolSize();
+  const activeCandidates = candidates.filter((candidate) => candidate.health.status !== 'unhealthy' && candidate.quota.pool !== 'reserve')
+    .sort((left, right) => (left.account.priority || 100) - (right.account.priority || 100) || (left.account.id < right.account.id ? -1 : left.account.id > right.account.id ? 1 : 0))
+    .slice(0, size);
+  const activeIds = new Set(activeCandidates.map((candidate) => candidate.account.id));
+  return { size, activeIds, activeCandidates, candidates, byId: new Map(candidates.map((candidate) => [candidate.account.id, candidate])) };
+}
+function cachePoolRoles() {
+  const list = enabledAccounts(), membership = cachePoolMembership(list), eligibleIds = new Set(list.map((account) => account.id));
+  if (!membership) return new Map();
+  return new Map(config.accounts.map((account) => [account.id, eligibleIds.has(account.id) ? (membership.activeIds.has(account.id) ? 'active' : 'standby') : null]));
+}
+function cachePoolRank(accounts, identity, mode) {
+  if (identity?.fingerprint) return hrwRank(accounts, identity.fingerprint);
+  if (mode === 'single') {
+    const preferred = singlePreferred(accounts);
+    return preferred ? [preferred, ...accounts.filter((account) => account.id !== preferred.id)] : [...accounts];
+  }
+  return strategyRank(mode, accounts);
+}
+function cacheHealthLayer(status) {
+  if (status === 'available' || status === 'insufficient') return 'available-or-insufficient';
+  return status === 'degraded' || status === 'unhealthy' ? status : 'ordinary';
+}
+function cachePipelineFacts(plan, membership, candidate, tier, capacityFallback) {
+  return {
+    diagnostics: plan.diagnostics,
+    selectedQuota: candidate?.quota.pool || 'unknown',
+    selectedHealth: cacheHealthLayer(candidate?.health.status),
+    capacityFallback,
+    cachePoolSize: membership.size,
+    cachePoolTier: tier,
+    cachePoolFallback: tier === 'standby',
+  };
+}
+function tryCachePoolStandbyLease(plan, membership, identity, mode, preferred) {
+  for (const group of plan.groups) {
+    const available = group.accounts.filter((account) => !membership.activeIds.has(account.id) && accountHasCapacity(account));
+    if (!available.length) continue;
+    const ranked = plan.stickyApplied ? available : cachePoolRank(available, identity, mode);
+    const account = ranked[0], lease = tryLease(account); if (!lease) continue;
+    const result = selectionResult(lease, mode, preferred, 'cache-pool-standby-overflow', identity, true);
+    result.pipeline = cachePipelineFacts(plan, membership, membership.byId.get(account.id), 'standby', true);
+    return result;
+  }
+  return null;
+}
+async function acquireCachePoolAccountLease(identity, { excludeIds = new Set(), allowOverflow = true } = {}) {
+  const mode = config.accountMode, waitMs = Math.min(30000, Math.max(0, Number(config.concurrencyWaitMs) || 0)), deadline = Date.now() + waitMs;
+  while (true) {
+    const list = enabledAccounts({ excludeIds });
+    if (!list.length) return { error: 'no available upstream account', strategy: mode };
+    const candidates = pipelineCandidates(list), membership = cachePoolMembership(list, candidates), plan = buildPipelineGroups(list, identity, candidates);
+    const active = membership.activeCandidates.map((candidate) => candidate.account);
+    const rankedActive = identity?.fingerprint ? cachePoolRank(active, identity, mode) : cachePoolRank(active.filter(accountHasCapacity), identity, mode);
+    const preferred = rankedActive[0] || (identity?.fingerprint ? null : cachePoolRank(active, identity, mode)[0]) || null;
+    for (const account of rankedActive) {
+      const lease = tryLease(account); if (!lease) continue;
+      const overflow = !!preferred && account.id !== preferred.id;
+      const result = selectionResult(lease, mode, preferred || account, overflow ? 'cache-pool-active-overflow' : 'cache-pool-active', identity, overflow);
+      result.pipeline = cachePipelineFacts(plan, membership, membership.byId.get(account.id), 'active', overflow);
+      return result;
+    }
+    if (!active.length) {
+      const fallback = allowOverflow ? tryCachePoolStandbyLease(plan, membership, identity, mode, preferred) : null;
+      return fallback || { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
+    }
+    const remaining = deadline - Date.now();
+    if (remaining > 0) { await waitForCapacity(remaining); continue; }
+    if (!allowOverflow) return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
+    return tryCachePoolStandbyLease(plan, membership, identity, mode, preferred) || { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
+  }
+}
+async function acquirePipelineAccountLease(identity, options = {}) {
+  if (cachePoolEnabled()) return acquireCachePoolAccountLease(identity, options);
+  const { excludeIds = new Set(), allowOverflow = true } = options;
   const mode = config.accountMode, waitMs = Math.min(30000, Math.max(0, Number(config.concurrencyWaitMs) || 0)), deadline = Date.now() + waitMs;
   while (true) {
     const list = enabledAccounts({ excludeIds });
@@ -1111,6 +1196,7 @@ function record(modelId, info, detail = detailContext.getStore()) {
     preferredAccountName: info.preferredAccountName || null, accountId: info.accountId || null, accountName: info.account || null,
     selectionReason: info.selectionReason || null, overflow: !!info.overflow,
     pipelineSteps: Array.isArray(info.pipeline?.diagnostics) ? info.pipeline.diagnostics.slice(0, 8) : [], selectedQuotaPool: info.pipeline?.selectedQuota || null, selectedHealthLayer: info.pipeline?.selectedHealth || null, capacityFallback: !!info.pipeline?.capacityFallback,
+    cachePoolSize: Number.isInteger(info.pipeline?.cachePoolSize) ? info.pipeline.cachePoolSize : configuredCachePoolSize(), cachePoolTier: ['active','standby'].includes(info.pipeline?.cachePoolTier) ? info.pipeline.cachePoolTier : null, cachePoolFallback: info.pipeline?.cachePoolFallback === true,
     targetProviders: Array.isArray(info.targets) ? info.targets : [], actualProvider: info.provider || null,
     attempts: Array.isArray(info.trace) ? info.trace.map((t) => ({ provider: t.upstream || 'auto', status: t.status, upstreamStatus: t.upstreamStatus, ms: t.ms, account: t.account, action: t.action || null })) : [],
     status: result === 'client_cancelled' ? 499 : result === 'success' ? 200 : (info.normalizedStatus || 502), result, upstreamStatus: info.upstreamStatus ?? null,
@@ -1359,7 +1445,7 @@ function quotaJobAccount(job) {
 }
 function quotaJobHasOwner(job) {
   if (job.cancelled) return false;
-  if (job.routingEpoch === quotaRoutingEpoch && config.accountPipeline.quotaPool) return true;
+  if (job.routingEpoch === quotaRoutingEpoch && quotaRoutingEnabled()) return true;
   for (const token of job.pageOwners) if (token.active) return true;
   return false;
 }
@@ -1400,7 +1486,7 @@ function attachQuotaOwner(job, source) {
     if (!source.pageToken.active) return false;
     source.pageToken.force = !!source.force;
     job.pageOwners.add(source.pageToken); source.pageToken.jobs.add(job);
-  } else if (source.routingEpoch === quotaRoutingEpoch && config.accountPipeline.quotaPool) job.routingEpoch = source.routingEpoch;
+  } else if (source.routingEpoch === quotaRoutingEpoch && quotaRoutingEnabled()) job.routingEpoch = source.routingEpoch;
   else return false;
   return true;
 }
@@ -1496,11 +1582,11 @@ function releaseQuotaPageToken(token) { cancelQuotaPageToken(token); quotaPageBa
 function scheduleQuotaRefresh() {
   const version = ++quotaScheduleVersion, epoch = quotaRoutingEpoch;
   clearTimeout(quotaTimer); quotaTimer = null;
-  if (!config.accountPipeline.quotaPool) return;
+  if (!quotaRoutingEnabled()) return;
   const arm = () => {
-    if (version !== quotaScheduleVersion || epoch !== quotaRoutingEpoch || !config.accountPipeline.quotaPool) return;
+    if (version !== quotaScheduleVersion || epoch !== quotaRoutingEpoch || !quotaRoutingEnabled()) return;
     const run = async () => {
-      if (version !== quotaScheduleVersion || epoch !== quotaRoutingEpoch || !config.accountPipeline.quotaPool) return;
+      if (version !== quotaScheduleVersion || epoch !== quotaRoutingEpoch || !quotaRoutingEnabled()) return;
       quotaTimer = null;
       const accounts = hrwRank(config.accounts.filter((account) => account.enabled !== false && account.key), 'quota-refresh');
       const dueAccounts = accounts.filter((account) => quotaDemandOutcome(account) === null);
@@ -2285,8 +2371,9 @@ async function dispatch(req, res) {
     }
     if (req.method === 'GET' && p === '/api/accounts') {
       clearExpiredCooldowns();
+      const cacheRoles = cachePoolRoles();
       return sendJSON(res, 200, {
-        accounts: config.accounts.map((a) => ({ ...a, state: getAccountState(a.id), activeCount: activeCounts.get(a.id) || 0, health: healthProjection(a), quota: quotaProjection(a.id) })),
+        accounts: config.accounts.map((a) => ({ ...a, state: getAccountState(a.id), activeCount: activeCounts.get(a.id) || 0, health: healthProjection(a), quota: quotaProjection(a.id), cachePoolRole: cacheRoles.get(a.id) ?? null })),
         mode: config.accountMode, active: config.activeAccount, concurrencyWaitMs: config.concurrencyWaitMs,
         accountErrorRules: config.accountErrorRules, accountPipeline: config.accountPipeline,
         stats: Object.fromEntries(config.accounts.map((a) => [a.name, { requests: META.statistics.lifetime.accounts[a.id]?.requests ?? 0 }])),
@@ -2302,7 +2389,7 @@ async function dispatch(req, res) {
       if (ruleError) return sendJSON(res, 400, { error: { message: ruleError } });
       let requestedPipeline = config.accountPipeline;
       try {
-        if (body.accountPipeline !== undefined) requestedPipeline = normalizeAccountPipeline(body.accountPipeline, { strict: true, fallbackOrder: config.accountPipeline.order });
+        if (body.accountPipeline !== undefined) requestedPipeline = normalizeAccountPipeline(body.accountPipeline, { strict: true, fallbackOrder: config.accountPipeline.order, fallbackCachePoolSize: configuredCachePoolSize() });
       } catch (e) { return sendJSON(res, 400, { error: { message: e.message } }); }
       if (!Number.isInteger(Number(body.active ?? 0)) || Number(body.active ?? 0) < 0 || Number(body.active ?? 0) >= body.accounts.length) return sendJSON(res, 400, { error: { message: 'active account index is out of range' } });
       const existingIds = new Set(config.accounts.map((a) => a.id));
@@ -2329,8 +2416,8 @@ async function dispatch(req, res) {
       if (!accs.length) return sendJSON(res, 400, { error: { message: '至少需要一个有效账号（key 非空）' } });
       for (const a of accs) { if (seen.has(a.id)) return sendJSON(res, 400, { error: { message: 'duplicate account id' } }); seen.add(a.id); }
       const requestedActive = requestedActiveId ? accs.findIndex((a) => a.id === requestedActiveId) : -1;
+      const quotaRoutingWasEnabled = quotaRoutingEnabled();
       config.accounts = accs; config.accountMode = body.mode; config.activeAccount = requestedActive >= 0 ? requestedActive : Math.min(Math.max(0, Number(body.active) || 0), accs.length - 1);
-      const pipelineWasEnabled = config.accountPipeline.quotaPool;
       config.concurrencyWaitMs = wait; config.accountErrorRules = normalizeAccountErrorRules(body.accountErrorRules || {}); config.accountPipeline = requestedPipeline;
       for (const [id, previous] of previousById) {
         const current = accs.find((a) => a.id === id);
@@ -2338,7 +2425,7 @@ async function dispatch(req, res) {
         else if (current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) invalidateQuotaAccount(id, { clearSnapshot: true });
         else if (previous.enabled !== false && current.enabled === false) invalidateQuotaAccount(id);
       }
-      if (pipelineWasEnabled !== config.accountPipeline.quotaPool) advanceQuotaRoutingEpoch();
+      if (quotaRoutingWasEnabled !== quotaRoutingEnabled()) advanceQuotaRoutingEpoch();
       for (const id of Object.keys(META.accountStates || {})) if (!seen.has(id)) delete META.accountStates[id];
       for (const id of Object.keys(META.statistics.lifetime.accounts)) if (!seen.has(id)) delete META.statistics.lifetime.accounts[id];
       for (const bucket of META.statistics.minuteBuckets) for (const id of new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health)])) if (!seen.has(id)) { delete bucket.accounts[id]; delete bucket.health[id]; }
