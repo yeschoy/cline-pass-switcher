@@ -1,0 +1,429 @@
+{
+    "rows": [
+        {
+            "count": 16,
+            "model": "deepseek-v4.1-flash",
+            "stream": false,
+            "window": "last1h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/messages"
+        },
+        {
+            "count": 28,
+            "model": "deepseek-v4.1-flash",
+            "stream": false,
+            "window": "last24h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 535,
+            "model": "deepseek-v4.1-flash",
+            "stream": true,
+            "window": "last24h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 3,
+            "model": "deepseek-v4.1-flash",
+            "stream": false,
+            "window": "last24h",
+            "logType": 5,
+            "statusCode": "400",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 38,
+            "model": "deepseek-v4.1-flash",
+            "stream": false,
+            "window": "last24h",
+            "logType": 5,
+            "statusCode": "500",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "deepseek-v4.1-flash",
+            "stream": true,
+            "window": "last24h",
+            "logType": 5,
+            "statusCode": "400",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "deepseek-v4.1-flash",
+            "stream": true,
+            "window": "last24h",
+            "logType": 5,
+            "statusCode": "500",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "deepseek-v4.1-flash",
+            "stream": true,
+            "window": "last24h",
+            "logType": 5,
+            "statusCode": "502",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 84,
+            "model": "deepseek-v4-flash",
+            "stream": false,
+            "window": "last24h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 663,
+            "model": "deepseek-v4-flash",
+            "stream": true,
+            "window": "last24h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 2,
+            "model": "deepseek-v4-flash",
+            "stream": false,
+            "window": "last24h",
+            "logType": 5,
+            "statusCode": "500",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 60,
+            "model": "deepseek-v4-flash",
+            "stream": true,
+            "window": "last24h",
+            "logType": 5,
+            "statusCode": "400",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "deepseek-v4-flash",
+            "stream": true,
+            "window": "last24h",
+            "logType": 5,
+            "statusCode": "500",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "deepseek-v4-flash",
+            "stream": true,
+            "window": "last24h",
+            "logType": 5,
+            "statusCode": "502",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "deepseek-v4-pro",
+            "stream": false,
+            "window": "last24h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 195,
+            "model": "deepseek-v4-pro",
+            "stream": true,
+            "window": "last24h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "glm-5.3",
+            "stream": false,
+            "window": "last24h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "glm-5.3",
+            "stream": true,
+            "window": "last24h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 56,
+            "model": "glm-5.3-flash",
+            "stream": false,
+            "window": "last24h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 8,
+            "model": "glm-5.3-flash",
+            "stream": true,
+            "window": "last24h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 66,
+            "model": "glm-5.3-flash",
+            "stream": false,
+            "window": "last24h",
+            "logType": 5,
+            "statusCode": "500",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "kimi-k3",
+            "stream": false,
+            "window": "last24h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "kimi-k3",
+            "stream": true,
+            "window": "last24h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "minimax-m3",
+            "stream": false,
+            "window": "last24h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "minimax-m3",
+            "stream": true,
+            "window": "last24h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "qwen3.8-max",
+            "stream": false,
+            "window": "last24h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "qwen3.8-max",
+            "stream": true,
+            "window": "last24h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 603,
+            "model": "deepseek-v4.1-flash",
+            "stream": false,
+            "window": "last24h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/messages"
+        },
+        {
+            "count": 12,
+            "model": "deepseek-v4.1-flash",
+            "stream": true,
+            "window": "last24h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/messages"
+        },
+        {
+            "count": 1,
+            "model": "deepseek-v4.1-flash",
+            "stream": false,
+            "window": "last6h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 8,
+            "model": "deepseek-v4.1-flash",
+            "stream": true,
+            "window": "last6h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "deepseek-v4-flash",
+            "stream": false,
+            "window": "last6h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "deepseek-v4-flash",
+            "stream": true,
+            "window": "last6h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "deepseek-v4-pro",
+            "stream": false,
+            "window": "last6h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 124,
+            "model": "deepseek-v4-pro",
+            "stream": true,
+            "window": "last6h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "glm-5.3",
+            "stream": false,
+            "window": "last6h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "glm-5.3",
+            "stream": true,
+            "window": "last6h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "glm-5.3-flash",
+            "stream": false,
+            "window": "last6h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 8,
+            "model": "glm-5.3-flash",
+            "stream": true,
+            "window": "last6h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "kimi-k3",
+            "stream": false,
+            "window": "last6h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "kimi-k3",
+            "stream": true,
+            "window": "last6h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "minimax-m3",
+            "stream": false,
+            "window": "last6h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "minimax-m3",
+            "stream": true,
+            "window": "last6h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "qwen3.8-max",
+            "stream": false,
+            "window": "last6h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 1,
+            "model": "qwen3.8-max",
+            "stream": true,
+            "window": "last6h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/chat/completions"
+        },
+        {
+            "count": 156,
+            "model": "deepseek-v4.1-flash",
+            "stream": false,
+            "window": "last6h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/messages"
+        },
+        {
+            "count": 12,
+            "model": "deepseek-v4.1-flash",
+            "stream": true,
+            "window": "last6h",
+            "logType": 2,
+            "statusCode": "unknown",
+            "requestPath": "/v1/messages"
+        }
+    ],
+    "scope": "PostgreSQL BEGIN READ ONLY; aggregate path/model/type/stream/status only; no IDs, users, IPs, content, bodies, or credentials",
+    "capturedAt": 1789594706234
+}

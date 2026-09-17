@@ -1,0 +1,266 @@
+{
+  "capturedAt": 1789592190649,
+  "globalRoutes": [
+    {
+      "exclude": [],
+      "maxRetries": null,
+      "model": "cline-pass/deepseek-v4-flash",
+      "pinMode": "preferred",
+      "sort": "ttft",
+      "upstreams": []
+    },
+    {
+      "exclude": [],
+      "maxRetries": null,
+      "model": "cline-pass/deepseek-v4-pro",
+      "pinMode": "preferred",
+      "sort": null,
+      "upstreams": []
+    },
+    {
+      "exclude": [],
+      "maxRetries": null,
+      "model": "cline-pass/deepseek-v4.1-flash",
+      "pinMode": "preferred",
+      "sort": null,
+      "upstreams": []
+    },
+    {
+      "exclude": [],
+      "maxRetries": null,
+      "model": "cline-pass/glm-5.2",
+      "pinMode": "preferred",
+      "sort": null,
+      "upstreams": []
+    },
+    {
+      "exclude": [],
+      "maxRetries": 0,
+      "model": "cline-pass/glm-5.3",
+      "pinMode": "preferred",
+      "sort": null,
+      "upstreams": []
+    },
+    {
+      "exclude": [],
+      "maxRetries": null,
+      "model": "cline-pass/glm-5.3-flash",
+      "pinMode": "preferred",
+      "sort": null,
+      "upstreams": []
+    },
+    {
+      "exclude": [],
+      "maxRetries": null,
+      "model": "cline-pass/kimi-k2.6",
+      "pinMode": "preferred",
+      "sort": null,
+      "upstreams": []
+    },
+    {
+      "exclude": [],
+      "maxRetries": null,
+      "model": "cline-pass/kimi-k2.7-code",
+      "pinMode": "preferred",
+      "sort": null,
+      "upstreams": []
+    },
+    {
+      "exclude": [],
+      "maxRetries": null,
+      "model": "cline-pass/kimi-k3",
+      "pinMode": "preferred",
+      "sort": null,
+      "upstreams": []
+    },
+    {
+      "exclude": [],
+      "maxRetries": null,
+      "model": "cline-pass/mimo-v2.5",
+      "pinMode": "preferred",
+      "sort": null,
+      "upstreams": []
+    },
+    {
+      "exclude": [],
+      "maxRetries": null,
+      "model": "cline-pass/mimo-v2.5-pro",
+      "pinMode": "preferred",
+      "sort": null,
+      "upstreams": []
+    },
+    {
+      "exclude": [],
+      "maxRetries": null,
+      "model": "cline-pass/minimax-m3",
+      "pinMode": "preferred",
+      "sort": null,
+      "upstreams": []
+    },
+    {
+      "exclude": [],
+      "maxRetries": null,
+      "model": "cline-pass/qwen3.7-max",
+      "pinMode": "preferred",
+      "sort": null,
+      "upstreams": []
+    },
+    {
+      "exclude": [],
+      "maxRetries": null,
+      "model": "cline-pass/qwen3.7-plus",
+      "pinMode": "preferred",
+      "sort": null,
+      "upstreams": []
+    },
+    {
+      "exclude": [],
+      "maxRetries": null,
+      "model": "cline-pass/qwen3.8-max",
+      "pinMode": "preferred",
+      "sort": null,
+      "upstreams": []
+    }
+  ],
+  "observedModels": [
+    {
+      "knownUpstreamCount": 0,
+      "model": "cline-pass/deepseek-v4-flash",
+      "observedProvider": null,
+      "pipeline": "planner"
+    },
+    {
+      "knownUpstreamCount": 0,
+      "model": "cline-pass/deepseek-v4-pro",
+      "observedProvider": null,
+      "pipeline": "planner"
+    },
+    {
+      "knownUpstreamCount": 16,
+      "model": "cline-pass/deepseek-v4.1-flash",
+      "observedProvider": "fireworks",
+      "pipeline": "planner"
+    },
+    {
+      "knownUpstreamCount": 0,
+      "model": "cline-pass/glm-5.2",
+      "observedProvider": "openai-compatible-private",
+      "pipeline": "planner"
+    },
+    {
+      "knownUpstreamCount": 0,
+      "model": "cline-pass/glm-5.3",
+      "observedProvider": null,
+      "pipeline": "planner"
+    },
+    {
+      "knownUpstreamCount": 28,
+      "model": "cline-pass/glm-5.3-flash",
+      "observedProvider": "atlascloud",
+      "pipeline": "direct"
+    },
+    {
+      "knownUpstreamCount": 4,
+      "model": "cline-pass/kimi-k2.6",
+      "observedProvider": null,
+      "pipeline": "planner"
+    },
+    {
+      "knownUpstreamCount": 4,
+      "model": "cline-pass/kimi-k2.7-code",
+      "observedProvider": null,
+      "pipeline": "planner"
+    },
+    {
+      "knownUpstreamCount": 0,
+      "model": "cline-pass/kimi-k3",
+      "observedProvider": null,
+      "pipeline": "planner"
+    },
+    {
+      "knownUpstreamCount": 6,
+      "model": "cline-pass/mimo-v2.5",
+      "observedProvider": "gmicloud",
+      "pipeline": "direct"
+    },
+    {
+      "knownUpstreamCount": 7,
+      "model": "cline-pass/mimo-v2.5-pro",
+      "observedProvider": null,
+      "pipeline": "direct"
+    },
+    {
+      "knownUpstreamCount": 5,
+      "model": "cline-pass/minimax-m3",
+      "observedProvider": null,
+      "pipeline": "planner"
+    },
+    {
+      "knownUpstreamCount": 0,
+      "model": "cline-pass/qwen3.7-max",
+      "observedProvider": null,
+      "pipeline": "planner"
+    },
+    {
+      "knownUpstreamCount": 0,
+      "model": "cline-pass/qwen3.7-plus",
+      "observedProvider": null,
+      "pipeline": "planner"
+    },
+    {
+      "knownUpstreamCount": 0,
+      "model": "cline-pass/qwen3.8-max",
+      "observedProvider": null,
+      "pipeline": "planner"
+    },
+    {
+      "knownUpstreamCount": 1,
+      "model": "inference-net/schematron-v2-small",
+      "observedProvider": null,
+      "pipeline": "direct"
+    },
+    {
+      "knownUpstreamCount": 1,
+      "model": "inference-net/schematron-v2-turbo",
+      "observedProvider": null,
+      "pipeline": "direct"
+    },
+    {
+      "knownUpstreamCount": 0,
+      "model": "sakana/fugu-max",
+      "observedProvider": null,
+      "pipeline": "planner"
+    },
+    {
+      "knownUpstreamCount": 0,
+      "model": "sakana/fugu-ultra-v2",
+      "observedProvider": null,
+      "pipeline": "planner"
+    },
+    {
+      "knownUpstreamCount": 2,
+      "model": "~openai/gpt-astra-latest",
+      "observedProvider": null,
+      "pipeline": "direct"
+    },
+    {
+      "knownUpstreamCount": 3,
+      "model": "~openai/gpt-luna-latest",
+      "observedProvider": null,
+      "pipeline": "direct"
+    },
+    {
+      "knownUpstreamCount": 3,
+      "model": "~openai/gpt-sol-latest",
+      "observedProvider": null,
+      "pipeline": "direct"
+    },
+    {
+      "knownUpstreamCount": 3,
+      "model": "~openai/gpt-terra-latest",
+      "observedProvider": null,
+      "pipeline": "direct"
+    }
+  ],
+  "scope": "read-only non-credential model/provider routing projection"
+}

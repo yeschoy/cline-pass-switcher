@@ -1,0 +1,38 @@
+{
+    "scope": "PostgreSQL BEGIN READ ONLY; route shape only; auth values omitted",
+    "routes": [
+        {
+            "order": 1,
+            "converter": "none",
+            "modelCount": 0,
+            "incomingPath": "/v1/chat/completions",
+            "upstreamPath": "/v1/chat/completions",
+            "authConfigured": false
+        },
+        {
+            "order": 2,
+            "converter": "none",
+            "modelCount": 0,
+            "incomingPath": "/v1/dashboard/billing/credit_grants",
+            "upstreamPath": "/v1/dashboard/billing/credit_grants",
+            "authConfigured": false
+        },
+        {
+            "order": 3,
+            "converter": "none",
+            "modelCount": 0,
+            "incomingPath": "/v1/models",
+            "upstreamPath": "/v1/models",
+            "authConfigured": false
+        },
+        {
+            "order": 4,
+            "converter": "anthropic_messages_to_openai_chat_completions",
+            "modelCount": 0,
+            "incomingPath": "/v1/messages",
+            "upstreamPath": "/v1/chat/completions",
+            "authConfigured": true
+        }
+    ],
+    "capturedAt": 1789594612713
+}

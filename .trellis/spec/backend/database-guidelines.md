@@ -78,7 +78,8 @@ metadata.json   DATA_DIR/metadata.json
     excludeUnhealthy: boolean,
     healthSort: boolean,
     sticky: boolean,
-    order: ("excludeUnhealthy" | "quotaPool" | "healthSort" | "sticky")[]
+    order: ("excludeUnhealthy" | "quotaPool" | "healthSort" | "sticky")[],
+    cachePoolSize: integer // 0-100000; 0 disables the cache-focused active pool
   },
   modelAliases: { [clientAlias]: "cline-pass/<known model>" },
   detailedLogging: boolean, // default false; only literal true enables capture
@@ -106,7 +107,8 @@ Startup normalization preserves legacy behavior while making the schema explicit
 - normalize global and account routes with the same functions;
 - default an invalid/missing wait to 2000 ms and normalize error rules;
 - clamp `activeAccount` to the persisted account list;
-- normalize a missing/invalid pipeline order to `excludeUnhealthy`, `quotaPool`, `healthSort`, `sticky`, while always persisting all four unique step IDs.
+- normalize a missing/invalid pipeline order to `excludeUnhealthy`, `quotaPool`, `healthSort`, `sticky`, while always persisting all four unique step IDs;
+- normalize a missing/invalid `accountPipeline.cachePoolSize` to `0`; strict management saves accept only integer values from 0 through 100000, while an older client that omits only this field preserves the current server value.
 
 #### Dynamic `metadata.json`
 
@@ -208,7 +210,7 @@ Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/
 | Model alias is invalid, duplicated, collides with an original ID, or targets an unknown/non-Cline model | `400`; no write |
 | Route has over 20 upstreams, over 50 exclusions, invalid slug/mode/sort, or `maxRetries` outside 0-20 | `400`; no write |
 | Error rule status outside 100-599, unknown action, or non-positive cooldown | `400`; no write |
-| `accountPipeline` lacks any of the four booleans, has unknown fields, or has an explicit `order` that is not an exact four-step permutation | `400`; no write; an older client may omit only `order`, which preserves the current server order |
+| `accountPipeline` lacks any of the four booleans, has unknown fields, has `cachePoolSize` outside integer 0-100000, or has an explicit `order` that is not an exact four-step permutation | `400`; no write; an older client may omit `order` and/or `cachePoolSize`, preserving the current server values |
 | Existing statistics version is missing/unknown or its structure exceeds bounds | startup fails; original metadata bytes remain |
 | Aggregate overflow marker and `null` field disagree | startup fails; original metadata bytes remain |
 | Quota percentage is outside 0-100, persisted reset time is not canonical millisecond UTC, or a state field is unknown | startup fails; original metadata bytes remain |
@@ -227,7 +229,7 @@ Startup normalization is permissive for legacy files; management APIs validate s
 - **Good:** an account route and global route both pass through `normalizeRouteConfig()`, so their persisted shapes stay identical.
 - **Good:** a known counter overflow persists as `null` plus one matching `overflowFields` entry, and the statistics API renders it as unknown.
 - **Good:** changing an account key invalidates its quota generation/state while retaining that stable ID's local usage history.
-- **Base:** `accountErrorRules: {}`, all-false `accountPipeline`, and `maxConcurrent: 0` preserve legacy no-action/routing/unlimited behavior.
+- **Base:** `accountErrorRules: {}`, all-false `accountPipeline` with `cachePoolSize: 0`, and `maxConcurrent: 0` preserve legacy no-action/routing/unlimited behavior.
 - **Base:** a missing metadata file creates a routing secret and owner-only metadata on first migration save.
 - **Bad:** catching JSON parse failure and saving defaults; this destroys operator configuration.
 - **Bad:** using account name or key as the state-map key; renaming or credential rotation would orphan state.
@@ -240,7 +242,7 @@ Persistence changes must use a temporary `DATA_DIR` and assert:
 - malformed `config.json` causes non-zero startup, reports `cannot read config.json`, and retains the exact original bytes;
 - legacy accounts gain non-empty stable IDs, `maxConcurrent: 0`, `weight: 1`, `priority: 100`, empty note/proxy/Header fields, and `perModel`, then retain IDs across restart;
 - all new account fields, model aliases, and all 24 pipeline order permutations survive an authenticated save/restart round trip without erasing account routes;
-- missing legacy pipeline order migrates to the compatibility default, an old-client save preserves the current order, and malformed explicit orders fail without changing file bytes;
+- missing legacy pipeline order and cache-pool size migrate to the compatibility defaults, old-client saves preserve the current order/size, valid cache-pool sizes survive restart, and malformed explicit values fail without changing file bytes;
 - invalid proxy/Header/note/weight/priority/alias payloads return `400` and preserve the previous file bytes;
 - `routingSecret` and cooldown state survive restart, and the cooled account is excluded afterward;
 - newly created `metadata.json` has mode `0600` on POSIX;

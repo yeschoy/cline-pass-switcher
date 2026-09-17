@@ -61,6 +61,7 @@ A request record may contain only:
   preferredAccountId, preferredAccountName,
   accountId, accountName, selectionReason, overflow, switched,
   pipelineSteps, selectedQuotaPool, selectedHealthLayer, capacityFallback,
+  cachePoolSize, cachePoolTier, cachePoolFallback,
   targetProviders, actualProvider, attempts,
   status, result, upstreamStatus, durationMs,
   accountActions, appliedHeaderNames, errorCategory
@@ -69,7 +70,7 @@ A request record may contain only:
 
 `result` is exactly `success`, `client_cancelled`, or `failed`. `status` remains the final request status; client cancellation is `499`, has `errorCategory: null`, and suppresses all error-log attempt projection even when abort plumbing produced an internal transport trace. Older JSONL rows without `result` remain readable and are never migrated.
 
-`attempts` is a projection of provider/status/timing/account/action facts. It is not the raw upstream object. Pipeline fields are server-owned bounded values: `pipelineSteps` contains at most eight of `health-filtered`, `health-filter-fallback`, and `quota-all-unknown`; `selectedQuotaPool` is `ordinary`, `hot`, `warm`, `unknown`, or `reserve`; `selectedHealthLayer` is `ordinary`, `available-or-insufficient`, `degraded`, or `unhealthy`; and `capacityFallback` is boolean. Raw health buckets, quota payloads, percentages, identities, credentials, proxy data, and messages remain forbidden.
+`attempts` is a projection of provider/status/timing/account/action facts. It is not the raw upstream object. Pipeline fields are server-owned bounded values: `pipelineSteps` contains at most eight of `health-filtered`, `health-filter-fallback`, and `quota-all-unknown`; `selectedQuotaPool` is `ordinary`, `hot`, `warm`, `unknown`, or `reserve`; `selectedHealthLayer` is `ordinary`, `available-or-insufficient`, `degraded`, or `unhealthy`; `capacityFallback` is boolean; `cachePoolSize` is the configured bounded integer; `cachePoolTier` is `active`, `standby`, or null; and `cachePoolFallback` is boolean. Selection reasons may additionally be `cache-pool-active`, `cache-pool-active-overflow`, or `cache-pool-standby-overflow`. Raw candidate lists, health buckets, quota payloads, percentages, identities, credentials, proxy data, and messages remain forbidden.
 
 An error record may contain only:
 
@@ -179,6 +180,9 @@ await requestLogs.append({
   selectedQuotaPool: safeQuotaPool,
   selectedHealthLayer: safeHealthLayer,
   capacityFallback: Boolean(capacityFallback),
+  cachePoolSize: boundedCachePoolSize,
+  cachePoolTier: safeCachePoolTier,
+  cachePoolFallback: Boolean(cachePoolFallback),
   appliedHeaderNames: Object.keys(account?.headers || {})
 });
 ```

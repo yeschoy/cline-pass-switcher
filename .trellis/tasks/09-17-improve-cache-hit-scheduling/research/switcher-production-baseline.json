@@ -1,0 +1,929 @@
+{
+  "accounts": [
+    {
+      "account": "account#5984fc42cf",
+      "enabled": true,
+      "keyConfigured": true,
+      "lifetime": {
+        "cacheFieldCoverageOfUsage": 1.0,
+        "cacheHitRequestRate": 0.4785714285714286,
+        "cacheHitRequests": 134,
+        "cacheInputCachedTokens": 12111632,
+        "cacheInputKnownRequests": 280,
+        "cacheInputTokens": 16503342,
+        "cacheKnownRequests": 280,
+        "cacheTokenRatio": 0.7338896570161365,
+        "cachedTokens": 12111632,
+        "errors": 18,
+        "inputKnownRequests": 280,
+        "inputTokens": 16503342,
+        "outputKnownRequests": 280,
+        "outputTokens": 241941,
+        "requests": 299,
+        "totalKnownRequests": 280,
+        "totalTokens": 16745283,
+        "usageCoverageOfRequests": 0.9364548494983278,
+        "usageRequests": 280
+      },
+      "maxConcurrent": 0,
+      "perModelRoutes": 0,
+      "priority": 100,
+      "proxyConfigured": false,
+      "quota": {
+        "ageSeconds": 59.0,
+        "errorCategory": null,
+        "fresh": true,
+        "maxPercentUsed": 26,
+        "pool": "hot"
+      },
+      "recent24h": {
+        "cacheFieldCoverageOfUsage": 1.0,
+        "cacheHitRequestRate": 0.48014440433212996,
+        "cacheHitRequests": 133,
+        "cacheInputCachedTokens": 12111504,
+        "cacheInputKnownRequests": 277,
+        "cacheInputTokens": 16503009,
+        "cacheKnownRequests": 277,
+        "cacheTokenRatio": 0.7338967093819072,
+        "cachedTokens": 12111504,
+        "errors": 2,
+        "inputKnownRequests": 277,
+        "inputTokens": 16503009,
+        "outputKnownRequests": 277,
+        "outputTokens": 241895,
+        "requests": 280,
+        "totalKnownRequests": 277,
+        "totalTokens": 16744904,
+        "usageCoverageOfRequests": 0.9892857142857143,
+        "usageRequests": 277
+      },
+      "runtimeState": "available",
+      "weight": 1
+    },
+    {
+      "account": "account#8321fe5602",
+      "enabled": true,
+      "keyConfigured": true,
+      "lifetime": {
+        "cacheFieldCoverageOfUsage": 1.0,
+        "cacheHitRequestRate": 0.5592592592592592,
+        "cacheHitRequests": 151,
+        "cacheInputCachedTokens": 15141969,
+        "cacheInputKnownRequests": 270,
+        "cacheInputTokens": 17302853,
+        "cacheKnownRequests": 270,
+        "cacheTokenRatio": 0.8751140057654075,
+        "cachedTokens": 15141969,
+        "errors": 37,
+        "inputKnownRequests": 270,
+        "inputTokens": 17302853,
+        "outputKnownRequests": 270,
+        "outputTokens": 116419,
+        "requests": 308,
+        "totalKnownRequests": 270,
+        "totalTokens": 17419272,
+        "usageCoverageOfRequests": 0.8766233766233766,
+        "usageRequests": 270
+      },
+      "maxConcurrent": 0,
+      "perModelRoutes": 0,
+      "priority": 100,
+      "proxyConfigured": false,
+      "quota": {
+        "ageSeconds": 59.0,
+        "errorCategory": null,
+        "fresh": true,
+        "maxPercentUsed": 8,
+        "pool": "hot"
+      },
+      "recent24h": {
+        "cacheFieldCoverageOfUsage": 1.0,
+        "cacheHitRequestRate": 0.5655430711610487,
+        "cacheHitRequests": 151,
+        "cacheInputCachedTokens": 15141969,
+        "cacheInputKnownRequests": 267,
+        "cacheInputTokens": 17302603,
+        "cacheKnownRequests": 267,
+        "cacheTokenRatio": 0.8751266500190752,
+        "cachedTokens": 15141969,
+        "errors": 17,
+        "inputKnownRequests": 267,
+        "inputTokens": 17302603,
+        "outputKnownRequests": 267,
+        "outputTokens": 116289,
+        "requests": 284,
+        "totalKnownRequests": 267,
+        "totalTokens": 17418892,
+        "usageCoverageOfRequests": 0.9401408450704225,
+        "usageRequests": 267
+      },
+      "runtimeState": "available",
+      "weight": 1
+    },
+    {
+      "account": "account#201cd88fa8",
+      "enabled": true,
+      "keyConfigured": true,
+      "lifetime": {
+        "cacheFieldCoverageOfUsage": 1.0,
+        "cacheHitRequestRate": 0.6115606936416185,
+        "cacheHitRequests": 529,
+        "cacheInputCachedTokens": 66928950,
+        "cacheInputKnownRequests": 865,
+        "cacheInputTokens": 82593301,
+        "cacheKnownRequests": 865,
+        "cacheTokenRatio": 0.810343565272927,
+        "cachedTokens": 66928950,
+        "errors": 146,
+        "inputKnownRequests": 865,
+        "inputTokens": 82593301,
+        "outputKnownRequests": 865,
+        "outputTokens": 412485,
+        "requests": 1013,
+        "totalKnownRequests": 865,
+        "totalTokens": 83005786,
+        "usageCoverageOfRequests": 0.8538993089832182,
+        "usageRequests": 865
+      },
+      "maxConcurrent": 0,
+      "perModelRoutes": 0,
+      "priority": 100,
+      "proxyConfigured": false,
+      "quota": {
+        "ageSeconds": 143.4,
+        "errorCategory": null,
+        "fresh": true,
+        "maxPercentUsed": 92,
+        "pool": "warm"
+      },
+      "recent24h": {
+        "cacheFieldCoverageOfUsage": 1.0,
+        "cacheHitRequestRate": 0.28125,
+        "cacheHitRequests": 9,
+        "cacheInputCachedTokens": 585216,
+        "cacheInputKnownRequests": 32,
+        "cacheInputTokens": 916351,
+        "cacheKnownRequests": 32,
+        "cacheTokenRatio": 0.6386373780352725,
+        "cachedTokens": 585216,
+        "errors": 46,
+        "inputKnownRequests": 32,
+        "inputTokens": 916351,
+        "outputKnownRequests": 32,
+        "outputTokens": 15126,
+        "requests": 78,
+        "totalKnownRequests": 32,
+        "totalTokens": 931477,
+        "usageCoverageOfRequests": 0.41025641025641024,
+        "usageRequests": 32
+      },
+      "runtimeState": "available",
+      "weight": 1
+    },
+    {
+      "account": "account#8d27641ca9",
+      "enabled": true,
+      "keyConfigured": true,
+      "lifetime": {
+        "cacheFieldCoverageOfUsage": 1.0,
+        "cacheHitRequestRate": 0.7603448275862069,
+        "cacheHitRequests": 441,
+        "cacheInputCachedTokens": 73007876,
+        "cacheInputKnownRequests": 580,
+        "cacheInputTokens": 78076484,
+        "cacheKnownRequests": 580,
+        "cacheTokenRatio": 0.9350815029016931,
+        "cachedTokens": 73007876,
+        "errors": 25,
+        "inputKnownRequests": 580,
+        "inputTokens": 78076484,
+        "outputKnownRequests": 580,
+        "outputTokens": 320515,
+        "requests": 685,
+        "totalKnownRequests": 580,
+        "totalTokens": 78396999,
+        "usageCoverageOfRequests": 0.8467153284671532,
+        "usageRequests": 580
+      },
+      "maxConcurrent": 0,
+      "perModelRoutes": 0,
+      "priority": 100,
+      "proxyConfigured": false,
+      "quota": {
+        "ageSeconds": 169.8,
+        "errorCategory": null,
+        "fresh": true,
+        "maxPercentUsed": 32,
+        "pool": "hot"
+      },
+      "recent24h": {
+        "cacheFieldCoverageOfUsage": 1.0,
+        "cacheHitRequestRate": 0.7095343680709535,
+        "cacheHitRequests": 320,
+        "cacheInputCachedTokens": 54996447,
+        "cacheInputKnownRequests": 451,
+        "cacheInputTokens": 59415534,
+        "cacheKnownRequests": 451,
+        "cacheTokenRatio": 0.9256240463983711,
+        "cachedTokens": 54996447,
+        "errors": 6,
+        "inputKnownRequests": 451,
+        "inputTokens": 59415534,
+        "outputKnownRequests": 451,
+        "outputTokens": 268641,
+        "requests": 508,
+        "totalKnownRequests": 451,
+        "totalTokens": 59684175,
+        "usageCoverageOfRequests": 0.8877952755905512,
+        "usageRequests": 451
+      },
+      "runtimeState": "available",
+      "weight": 1
+    },
+    {
+      "account": "account#a450100a5d",
+      "enabled": true,
+      "keyConfigured": true,
+      "lifetime": {
+        "cacheFieldCoverageOfUsage": 1.0,
+        "cacheHitRequestRate": 0.6178217821782178,
+        "cacheHitRequests": 312,
+        "cacheInputCachedTokens": 24850178,
+        "cacheInputKnownRequests": 505,
+        "cacheInputTokens": 31664726,
+        "cacheKnownRequests": 505,
+        "cacheTokenRatio": 0.7847905584276965,
+        "cachedTokens": 24850178,
+        "errors": 103,
+        "inputKnownRequests": 505,
+        "inputTokens": 31664726,
+        "outputKnownRequests": 505,
+        "outputTokens": 368735,
+        "requests": 610,
+        "totalKnownRequests": 505,
+        "totalTokens": 32033461,
+        "usageCoverageOfRequests": 0.8278688524590164,
+        "usageRequests": 505
+      },
+      "maxConcurrent": 0,
+      "perModelRoutes": 0,
+      "priority": 100,
+      "proxyConfigured": false,
+      "quota": {
+        "ageSeconds": 195.0,
+        "errorCategory": null,
+        "fresh": true,
+        "maxPercentUsed": 20,
+        "pool": "hot"
+      },
+      "recent24h": {
+        "cacheFieldCoverageOfUsage": 1.0,
+        "cacheHitRequestRate": 0.5595667870036101,
+        "cacheHitRequests": 155,
+        "cacheInputCachedTokens": 8117958,
+        "cacheInputKnownRequests": 277,
+        "cacheInputTokens": 12134020,
+        "cacheKnownRequests": 277,
+        "cacheTokenRatio": 0.6690246101456896,
+        "cachedTokens": 8117958,
+        "errors": 30,
+        "inputKnownRequests": 277,
+        "inputTokens": 12134020,
+        "outputKnownRequests": 277,
+        "outputTokens": 158498,
+        "requests": 308,
+        "totalKnownRequests": 277,
+        "totalTokens": 12292518,
+        "usageCoverageOfRequests": 0.8993506493506493,
+        "usageRequests": 277
+      },
+      "runtimeState": "available",
+      "weight": 1
+    },
+    {
+      "account": "account#653683b9f7",
+      "enabled": true,
+      "keyConfigured": true,
+      "lifetime": {
+        "cacheFieldCoverageOfUsage": 1.0,
+        "cacheHitRequestRate": 0.5365296803652968,
+        "cacheHitRequests": 235,
+        "cacheInputCachedTokens": 27038515,
+        "cacheInputKnownRequests": 438,
+        "cacheInputTokens": 30590131,
+        "cacheKnownRequests": 438,
+        "cacheTokenRatio": 0.8838966724268033,
+        "cachedTokens": 27038515,
+        "errors": 46,
+        "inputKnownRequests": 438,
+        "inputTokens": 30590131,
+        "outputKnownRequests": 438,
+        "outputTokens": 250032,
+        "requests": 522,
+        "totalKnownRequests": 438,
+        "totalTokens": 30840163,
+        "usageCoverageOfRequests": 0.8390804597701149,
+        "usageRequests": 438
+      },
+      "maxConcurrent": 0,
+      "perModelRoutes": 0,
+      "priority": 100,
+      "proxyConfigured": false,
+      "quota": {
+        "ageSeconds": 195.1,
+        "errorCategory": null,
+        "fresh": true,
+        "maxPercentUsed": 12,
+        "pool": "hot"
+      },
+      "recent24h": {
+        "cacheFieldCoverageOfUsage": 1.0,
+        "cacheHitRequestRate": 0.6260623229461756,
+        "cacheHitRequests": 221,
+        "cacheInputCachedTokens": 26948707,
+        "cacheInputKnownRequests": 353,
+        "cacheInputTokens": 30255675,
+        "cacheKnownRequests": 353,
+        "cacheTokenRatio": 0.8906992489838683,
+        "cachedTokens": 26948707,
+        "errors": 0,
+        "inputKnownRequests": 353,
+        "inputTokens": 30255675,
+        "outputKnownRequests": 353,
+        "outputTokens": 241425,
+        "requests": 390,
+        "totalKnownRequests": 353,
+        "totalTokens": 30497100,
+        "usageCoverageOfRequests": 0.9051282051282051,
+        "usageRequests": 353
+      },
+      "runtimeState": "available",
+      "weight": 1
+    },
+    {
+      "account": "account#817abcc6d2",
+      "enabled": false,
+      "keyConfigured": true,
+      "lifetime": {
+        "cacheFieldCoverageOfUsage": 1.0,
+        "cacheHitRequestRate": 0.0,
+        "cacheHitRequests": 0,
+        "cacheInputCachedTokens": 0,
+        "cacheInputKnownRequests": 1,
+        "cacheInputTokens": 89,
+        "cacheKnownRequests": 1,
+        "cacheTokenRatio": 0.0,
+        "cachedTokens": 0,
+        "errors": 18,
+        "inputKnownRequests": 1,
+        "inputTokens": 89,
+        "outputKnownRequests": 1,
+        "outputTokens": 16,
+        "requests": 19,
+        "totalKnownRequests": 1,
+        "totalTokens": 105,
+        "usageCoverageOfRequests": 0.05263157894736842,
+        "usageRequests": 1
+      },
+      "maxConcurrent": 0,
+      "perModelRoutes": 0,
+      "priority": 100,
+      "proxyConfigured": false,
+      "quota": {
+        "ageSeconds": 15297.9,
+        "errorCategory": null,
+        "fresh": false,
+        "maxPercentUsed": 1,
+        "pool": "unknown"
+      },
+      "recent24h": {
+        "cacheFieldCoverageOfUsage": null,
+        "cacheHitRequestRate": null,
+        "cacheHitRequests": 0,
+        "cacheInputCachedTokens": 0,
+        "cacheInputKnownRequests": 0,
+        "cacheInputTokens": 0,
+        "cacheKnownRequests": 0,
+        "cacheTokenRatio": null,
+        "cachedTokens": 0,
+        "errors": 0,
+        "inputKnownRequests": 0,
+        "inputTokens": 0,
+        "outputKnownRequests": 0,
+        "outputTokens": 0,
+        "requests": 0,
+        "totalKnownRequests": 0,
+        "totalTokens": 0,
+        "usageCoverageOfRequests": null,
+        "usageRequests": 0
+      },
+      "runtimeState": "available",
+      "weight": 1
+    },
+    {
+      "account": "account#e7f116a449",
+      "enabled": true,
+      "keyConfigured": true,
+      "lifetime": {
+        "cacheFieldCoverageOfUsage": 1.0,
+        "cacheHitRequestRate": 0.569593147751606,
+        "cacheHitRequests": 266,
+        "cacheInputCachedTokens": 31893908,
+        "cacheInputKnownRequests": 467,
+        "cacheInputTokens": 41688811,
+        "cacheKnownRequests": 467,
+        "cacheTokenRatio": 0.7650471969565167,
+        "cachedTokens": 31893908,
+        "errors": 81,
+        "inputKnownRequests": 467,
+        "inputTokens": 41688811,
+        "outputKnownRequests": 467,
+        "outputTokens": 538991,
+        "requests": 553,
+        "totalKnownRequests": 467,
+        "totalTokens": 42227802,
+        "usageCoverageOfRequests": 0.8444846292947559,
+        "usageRequests": 467
+      },
+      "maxConcurrent": 0,
+      "perModelRoutes": 0,
+      "priority": 100,
+      "proxyConfigured": false,
+      "quota": {
+        "ageSeconds": 169.8,
+        "errorCategory": null,
+        "fresh": true,
+        "maxPercentUsed": 12,
+        "pool": "hot"
+      },
+      "recent24h": {
+        "cacheFieldCoverageOfUsage": 1.0,
+        "cacheHitRequestRate": 0.648854961832061,
+        "cacheHitRequests": 255,
+        "cacheInputCachedTokens": 31579700,
+        "cacheInputKnownRequests": 393,
+        "cacheInputTokens": 41086425,
+        "cacheKnownRequests": 393,
+        "cacheTokenRatio": 0.768616398238591,
+        "cachedTokens": 31579700,
+        "errors": 9,
+        "inputKnownRequests": 393,
+        "inputTokens": 41086425,
+        "outputKnownRequests": 393,
+        "outputTokens": 518179,
+        "requests": 406,
+        "totalKnownRequests": 393,
+        "totalTokens": 41604604,
+        "usageCoverageOfRequests": 0.9679802955665024,
+        "usageRequests": 393
+      },
+      "runtimeState": "available",
+      "weight": 1
+    },
+    {
+      "account": "account#c66164b088",
+      "enabled": false,
+      "keyConfigured": true,
+      "lifetime": {
+        "cacheFieldCoverageOfUsage": 1.0,
+        "cacheHitRequestRate": 0.19230769230769232,
+        "cacheHitRequests": 25,
+        "cacheInputCachedTokens": 3661733,
+        "cacheInputKnownRequests": 130,
+        "cacheInputTokens": 5022586,
+        "cacheKnownRequests": 130,
+        "cacheTokenRatio": 0.7290533203413541,
+        "cachedTokens": 3661733,
+        "errors": 36,
+        "inputKnownRequests": 130,
+        "inputTokens": 5022586,
+        "outputKnownRequests": 130,
+        "outputTokens": 72434,
+        "requests": 166,
+        "totalKnownRequests": 130,
+        "totalTokens": 5095020,
+        "usageCoverageOfRequests": 0.7831325301204819,
+        "usageRequests": 130
+      },
+      "maxConcurrent": 0,
+      "perModelRoutes": 0,
+      "priority": 100,
+      "proxyConfigured": false,
+      "quota": {
+        "ageSeconds": 15317.0,
+        "errorCategory": null,
+        "fresh": false,
+        "maxPercentUsed": 6,
+        "pool": "unknown"
+      },
+      "recent24h": {
+        "cacheFieldCoverageOfUsage": 1.0,
+        "cacheHitRequestRate": 0.1984126984126984,
+        "cacheHitRequests": 25,
+        "cacheInputCachedTokens": 3661733,
+        "cacheInputKnownRequests": 126,
+        "cacheInputTokens": 5022266,
+        "cacheKnownRequests": 126,
+        "cacheTokenRatio": 0.7290997728913602,
+        "cachedTokens": 3661733,
+        "errors": 13,
+        "inputKnownRequests": 126,
+        "inputTokens": 5022266,
+        "outputKnownRequests": 126,
+        "outputTokens": 72357,
+        "requests": 139,
+        "totalKnownRequests": 126,
+        "totalTokens": 5094623,
+        "usageCoverageOfRequests": 0.9064748201438849,
+        "usageRequests": 126
+      },
+      "runtimeState": "available",
+      "weight": 1
+    }
+  ],
+  "capturedAt": 1789591838747,
+  "config": {
+    "accountCount": 9,
+    "accountMode": "sticky",
+    "accountPipeline": {
+      "excludeUnhealthy": true,
+      "healthSort": true,
+      "order": [
+        "excludeUnhealthy",
+        "quotaPool",
+        "healthSort",
+        "sticky"
+      ],
+      "quotaPool": true,
+      "sticky": true
+    },
+    "availableCount": 7,
+    "boundedConcurrencyTotal": 0,
+    "concurrencyWaitMs": 2000,
+    "enabledCount": 7,
+    "errorRuleStatuses": [
+      "429",
+      "500",
+      "502",
+      "503",
+      "504"
+    ],
+    "unlimitedConcurrencyAccounts": 7
+  },
+  "requestLogs": {
+    "all": {
+      "accounts": {
+        "account#201cd88fa8": 1013,
+        "account#5984fc42cf": 288,
+        "account#653683b9f7": 495,
+        "account#817abcc6d2": 11,
+        "account#8321fe5602": 294,
+        "account#8d27641ca9": 645,
+        "account#a450100a5d": 599,
+        "account#c66164b088": 151,
+        "account#e7f116a449": 504
+      },
+      "approxPeakConcurrency": 50,
+      "approxPeakConcurrencyByAccount": {
+        "account#201cd88fa8": 24,
+        "account#5984fc42cf": 2,
+        "account#653683b9f7": 4,
+        "account#817abcc6d2": 3,
+        "account#8321fe5602": 2,
+        "account#8d27641ca9": 4,
+        "account#a450100a5d": 30,
+        "account#c66164b088": 2,
+        "account#e7f116a449": 4
+      },
+      "capacityFallback": 0,
+      "durationMs": {
+        "max": 235498,
+        "p50": 4523.0,
+        "p95": 31119.79999999997
+      },
+      "models": {
+        "cline-pass/deepseek-v4-flash": 1447,
+        "cline-pass/deepseek-v4-pro": 326,
+        "cline-pass/deepseek-v4.1-flash": 2052,
+        "cline-pass/glm-5.3": 3,
+        "cline-pass/glm-5.3-flash": 159,
+        "cline-pass/kimi-k3": 3,
+        "cline-pass/minimax-m3": 5,
+        "cline-pass/qwen3.8-max": 5
+      },
+      "overflow": 0,
+      "preferredAccountMismatch": 0,
+      "requests": 4000,
+      "result": {
+        "client_cancelled": 100,
+        "failed": 405,
+        "success": 3495
+      },
+      "selectedHealthLayer": {
+        "available-or-insufficient": 3594,
+        "degraded": 406
+      },
+      "selectedQuotaPool": {
+        "hot": 1610,
+        "ordinary": 2390
+      },
+      "selectionReason": {
+        "pipeline-sticky-primary": 4000
+      },
+      "sessionSource": {
+        "message_hmac": 4000
+      },
+      "status": {
+        "200": 3495,
+        "400": 3,
+        "429": 141,
+        "499": 100,
+        "500": 227,
+        "502": 34
+      },
+      "strategy": {
+        "sticky": 4000
+      },
+      "stream": {
+        "False": 1579,
+        "True": 2421
+      },
+      "switched": 0,
+      "timeRange": {
+        "from": 1789393450040,
+        "to": 1789591530751
+      }
+    },
+    "files": 1,
+    "invalidLines": 0,
+    "last1h": {
+      "accounts": {
+        "account#5984fc42cf": 1,
+        "account#653683b9f7": 25,
+        "account#8321fe5602": 1,
+        "account#8d27641ca9": 2,
+        "account#a450100a5d": 18,
+        "account#e7f116a449": 8
+      },
+      "approxPeakConcurrency": 5,
+      "approxPeakConcurrencyByAccount": {
+        "account#5984fc42cf": 1,
+        "account#653683b9f7": 1,
+        "account#8321fe5602": 1,
+        "account#8d27641ca9": 1,
+        "account#a450100a5d": 5,
+        "account#e7f116a449": 1
+      },
+      "capacityFallback": 0,
+      "durationMs": {
+        "max": 22472,
+        "p50": 2518,
+        "p95": 8570.799999999997
+      },
+      "models": {
+        "cline-pass/deepseek-v4-flash": 2,
+        "cline-pass/deepseek-v4-pro": 2,
+        "cline-pass/deepseek-v4.1-flash": 41,
+        "cline-pass/glm-5.3": 2,
+        "cline-pass/glm-5.3-flash": 2,
+        "cline-pass/kimi-k3": 2,
+        "cline-pass/minimax-m3": 2,
+        "cline-pass/qwen3.8-max": 2
+      },
+      "overflow": 0,
+      "preferredAccountMismatch": 0,
+      "requests": 55,
+      "result": {
+        "success": 55
+      },
+      "selectedHealthLayer": {
+        "available-or-insufficient": 55
+      },
+      "selectedQuotaPool": {
+        "hot": 55
+      },
+      "selectionReason": {
+        "pipeline-sticky-primary": 55
+      },
+      "sessionSource": {
+        "message_hmac": 55
+      },
+      "status": {
+        "200": 55
+      },
+      "strategy": {
+        "sticky": 55
+      },
+      "stream": {
+        "False": 28,
+        "True": 27
+      },
+      "switched": 0,
+      "timeRange": {
+        "from": 1789588290121,
+        "to": 1789591530751
+      }
+    },
+    "last24h": {
+      "accounts": {
+        "account#201cd88fa8": 78,
+        "account#5984fc42cf": 280,
+        "account#653683b9f7": 390,
+        "account#8321fe5602": 284,
+        "account#8d27641ca9": 508,
+        "account#a450100a5d": 308,
+        "account#c66164b088": 139,
+        "account#e7f116a449": 407
+      },
+      "approxPeakConcurrency": 7,
+      "approxPeakConcurrencyByAccount": {
+        "account#201cd88fa8": 1,
+        "account#5984fc42cf": 2,
+        "account#653683b9f7": 3,
+        "account#8321fe5602": 2,
+        "account#8d27641ca9": 4,
+        "account#a450100a5d": 5,
+        "account#c66164b088": 2,
+        "account#e7f116a449": 4
+      },
+      "capacityFallback": 0,
+      "durationMs": {
+        "max": 235498,
+        "p50": 5512.5,
+        "p95": 32649.04999999999
+      },
+      "models": {
+        "cline-pass/deepseek-v4-flash": 749,
+        "cline-pass/deepseek-v4-pro": 196,
+        "cline-pass/deepseek-v4.1-flash": 1311,
+        "cline-pass/glm-5.3": 2,
+        "cline-pass/glm-5.3-flash": 130,
+        "cline-pass/kimi-k3": 2,
+        "cline-pass/minimax-m3": 2,
+        "cline-pass/qwen3.8-max": 2
+      },
+      "overflow": 0,
+      "preferredAccountMismatch": 0,
+      "requests": 2394,
+      "result": {
+        "client_cancelled": 94,
+        "failed": 123,
+        "success": 2177
+      },
+      "selectedHealthLayer": {
+        "available-or-insufficient": 2394
+      },
+      "selectedQuotaPool": {
+        "hot": 1610,
+        "ordinary": 784
+      },
+      "selectionReason": {
+        "pipeline-sticky-primary": 2394
+      },
+      "sessionSource": {
+        "message_hmac": 2394
+      },
+      "status": {
+        "200": 2177,
+        "499": 94,
+        "500": 107,
+        "502": 16
+      },
+      "strategy": {
+        "sticky": 2394
+      },
+      "stream": {
+        "False": 905,
+        "True": 1489
+      },
+      "switched": 0,
+      "timeRange": {
+        "from": 1789505456353,
+        "to": 1789591530751
+      }
+    },
+    "last6h": {
+      "accounts": {
+        "account#5984fc42cf": 38,
+        "account#653683b9f7": 50,
+        "account#8321fe5602": 17,
+        "account#8d27641ca9": 118,
+        "account#a450100a5d": 74,
+        "account#c66164b088": 12,
+        "account#e7f116a449": 31
+      },
+      "approxPeakConcurrency": 5,
+      "approxPeakConcurrencyByAccount": {
+        "account#5984fc42cf": 2,
+        "account#653683b9f7": 1,
+        "account#8321fe5602": 1,
+        "account#8d27641ca9": 2,
+        "account#a450100a5d": 5,
+        "account#c66164b088": 1,
+        "account#e7f116a449": 1
+      },
+      "capacityFallback": 0,
+      "durationMs": {
+        "max": 99531,
+        "p50": 2739.0,
+        "p95": 22714.300000000014
+      },
+      "models": {
+        "cline-pass/deepseek-v4-flash": 3,
+        "cline-pass/deepseek-v4-pro": 128,
+        "cline-pass/deepseek-v4.1-flash": 192,
+        "cline-pass/glm-5.3": 2,
+        "cline-pass/glm-5.3-flash": 9,
+        "cline-pass/kimi-k3": 2,
+        "cline-pass/minimax-m3": 2,
+        "cline-pass/qwen3.8-max": 2
+      },
+      "overflow": 0,
+      "preferredAccountMismatch": 0,
+      "requests": 340,
+      "result": {
+        "client_cancelled": 1,
+        "failed": 1,
+        "success": 338
+      },
+      "selectedHealthLayer": {
+        "available-or-insufficient": 340
+      },
+      "selectedQuotaPool": {
+        "hot": 340
+      },
+      "selectionReason": {
+        "pipeline-sticky-primary": 340
+      },
+      "sessionSource": {
+        "message_hmac": 340
+      },
+      "status": {
+        "200": 338,
+        "499": 1,
+        "502": 1
+      },
+      "strategy": {
+        "sticky": 340
+      },
+      "stream": {
+        "False": 174,
+        "True": 166
+      },
+      "switched": 0,
+      "timeRange": {
+        "from": 1789570289445,
+        "to": 1789591530751
+      }
+    }
+  },
+  "scope": "read-only sanitized projection; no names, IDs, keys, proxy URLs, headers, or bodies",
+  "statistics": {
+    "coverage": {
+      "accountIncompleteAt": {},
+      "droppedAccountMinuteCells": 0
+    },
+    "lifetimeGlobal": {
+      "cacheFieldCoverageOfUsage": 1.0,
+      "cacheHitRequestRate": 0.5919117647058824,
+      "cacheHitRequests": 2093,
+      "cacheInputCachedTokens": 254634761,
+      "cacheInputKnownRequests": 3536,
+      "cacheInputTokens": 303442323,
+      "cacheKnownRequests": 3536,
+      "cacheTokenRatio": 0.8391537425713683,
+      "cachedTokens": 254634761,
+      "errors": 939,
+      "inputKnownRequests": 3536,
+      "inputTokens": 303442323,
+      "outputKnownRequests": 3536,
+      "outputTokens": 2321568,
+      "requests": 4604,
+      "totalKnownRequests": 3536,
+      "totalTokens": 305763891,
+      "usageCoverageOfRequests": 0.7680278019113814,
+      "usageRequests": 3536
+    },
+    "recent24hGlobal": {
+      "cacheFieldCoverageOfUsage": 1.0,
+      "cacheHitRequestRate": 0.5831801470588235,
+      "cacheHitRequests": 1269,
+      "cacheInputCachedTokens": 153143234,
+      "cacheInputKnownRequests": 2176,
+      "cacheInputTokens": 182635883,
+      "cacheKnownRequests": 2176,
+      "cacheTokenRatio": 0.838516678565296,
+      "cachedTokens": 153143234,
+      "errors": 123,
+      "inputKnownRequests": 2176,
+      "inputTokens": 182635883,
+      "outputKnownRequests": 2176,
+      "outputTokens": 1632410,
+      "requests": 2393,
+      "totalKnownRequests": 2176,
+      "totalTokens": 184268293,
+      "usageCoverageOfRequests": 0.9093188466360217,
+      "usageRequests": 2176
+    }
+  }
+}

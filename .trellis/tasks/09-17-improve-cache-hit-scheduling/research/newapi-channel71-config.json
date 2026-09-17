@@ -1,0 +1,46 @@
+{
+    "scope": "PostgreSQL BEGIN READ ONLY; safe channel projection without key, proxy, prompt, body, or header values",
+    "channel": {
+        "id": 71,
+        "type": 58,
+        "status": 1,
+        "baseUrl": "http://cline-pass-console:3123",
+        "settings": {
+            "forceFormat": false,
+            "httpProtocol": null,
+            "proxyConfigured": false,
+            "systemPromptOverride": false,
+            "http2ConnectionShards": 3,
+            "passThroughBodyEnabled": false,
+            "systemPromptConfigured": false
+        },
+        "modelCount": 8,
+        "paramOverride": {
+            "operations": [
+                {
+                    "mode": "set",
+                    "path": "max_tokens",
+                    "valueType": "number"
+                }
+            ],
+            "operationCount": 1,
+            "referencesThread": false,
+            "referencesContent": false,
+            "referencesSession": false,
+            "referencesMessages": false,
+            "referencesPromptCacheKey": false
+        },
+        "headerOverride": {
+            "topLevelNames": [
+            ],
+            "operationCount": 0,
+            "referencesCodex": false,
+            "referencesThread": false,
+            "referencesSession": false,
+            "referencesPromptCacheKey": false
+        },
+        "advancedRouteCount": 4
+    },
+    "capturedAt": 1789594581203,
+    "globalChannelAffinityOptionsPersisted": 0
+}

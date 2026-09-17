@@ -104,11 +104,11 @@ The modal focuses the textarea on open and returns focus to its opener after app
 
 The four pipeline rows are native draggable elements with visible handles, current position numbers, independent enablement checkboxes, and native up/down button equivalents. Mouse drop and keyboard-operable buttons call the same DOM reorder owner, update first/last disabled states, and announce the draft-only result through `aria-live`. Disabled steps remain orderable and retain their positions; reordering never sends a request.
 
-The six scheduling presets produce an editable draft and a current-to-next preview. They may change only `accountMode`, `concurrencyWaitMs`, `maxConcurrent`, `weight`, `priority`, and status-specific `accountErrorRules`. They never mutate names, Keys, enablement, proxy, Header maps, model routes, or the four pipeline toggles.
+The seven scheduling presets produce an editable draft and a current-to-next preview. They may change only `accountMode`, `concurrencyWaitMs`, `maxConcurrent`, `weight`, `priority`, `cachePoolSize`, and status-specific `accountErrorRules`. The cache-hit preset sets sticky mode, size 2 and a 5000 ms wait while exposing existing priorities for review. Presets never mutate names, Keys, enablement, proxy, Header maps, model routes, or the four pipeline toggles.
 
 The separate five error-rule presets are `standard`, `fast`, `conservative`, `observe`, and `clear`. They parse the live JSON textarea at preview time and show preserve/add/modify/delete groups. Merge preserves custom statuses; replace may delete them; clear forces replace. Built-in 4xx entries are limited to `429`.
 
-Cancel discards the relevant draft. Confirm submits through the ordinary complete account save, so the server applies the same validation as manual edits. No persistent “selected preset” state exists. Pipeline controls submit `quotaPool`, `excludeUnhealthy`, `healthSort`, and `sticky` plus `order`, which is read from the four existing DOM nodes as an exact permutation.
+Cancel discards the relevant draft. Confirm submits through the ordinary complete account save, so the server applies the same validation as manual edits. No persistent “selected preset” state exists. Pipeline controls submit `quotaPool`, `excludeUnhealthy`, `healthSort`, and `sticky` plus `order`, which is read from the four existing DOM nodes as an exact permutation, and `cachePoolSize` from its labelled bounded number input. Empty, fractional, nonnumeric, or out-of-range pool-size drafts block visual save and preset preview without coercion or a request. Authenticated account rows may display only the safe runtime `cachePoolRole` labels active/standby; that field is never submitted as static account configuration.
 
 #### Model aliases
 
@@ -155,6 +155,7 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 | Drawer is dirty and user presses Escape/backdrop/Close | ask before discarding |
 | Proxy test on unsaved account | explain that the account must be saved first |
 | Scheduling or error-rule preset is cancelled | no account, rule, pipeline, or global field changes |
+| Cache-pool size is empty, fractional, nonnumeric, or out of range | Block visual save/preset preview without coercing to zero or sending a request |
 | Error-rule textarea is invalid during preview | show an error; do not open/apply a stale preset draft |
 | Rule preset merge/replace/clear is confirmed | submit the live computed draft through the normal complete API |
 | Scheduling preset is confirmed | submit a complete account snapshot without changing pipeline flags |
@@ -197,9 +198,9 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 `test/ui-contract.test.js` provides static executable checks for:
 
 - 1800px responsive container, table wrappers, and account-name width;
-- six bounded scheduling presets plus five live-draft error-rule presets, merge/replace/clear diffs, cancel behavior, and forbidden-field absence;
+- seven bounded scheduling presets plus five live-draft error-rule presets, cache-pool input/role/help contracts, merge/replace/clear diffs, cancel behavior, and forbidden-field absence;
 - labelled modal/drawer semantics, Escape handling, focus return, dirty confirmation, and `aria-live` feedback;
-- account snapshot preservation for new hidden fields and all four pipeline booleans;
+- account snapshot preservation for new hidden fields, all four pipeline booleans, the four-step order, and `cachePoolSize`;
 - five mutually exclusive top sections with one statistics panel, one shared ordinary-log DOM, one independent details panel, explicit active state, and no anchor/scroll shortcut;
 - statistics stale-response guards, escaped server text, unknown/known-zero rendering, table wrapping, and forbidden sensitive fields;
 - statistics entry/manual/timer coalescing, abort and pageshow restoration ownership; used/remaining/reset plus disabled/partial/error/stale states; draft preservation and routing-independent refresh;
@@ -230,7 +231,9 @@ const accountPipeline = {
   quotaPool: pipelineQuotaPool.checked,
   excludeUnhealthy: pipelineExcludeUnhealthy.checked,
   healthSort: pipelineHealthSort.checked,
-  sticky: pipelineSticky.checked
+  sticky: pipelineSticky.checked,
+  order: pipelineOrder(),
+  cachePoolSize: Number(cachePoolSize.value)
 };
 ```
 

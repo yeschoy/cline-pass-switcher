@@ -1,0 +1,142 @@
+{
+  "capturedAt": "2026-09-16T22:46:47.100Z",
+  "browser": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+  "desktop": {
+    "viewport": {
+      "width": 1280,
+      "height": 900,
+      "scrollWidth": 1265
+    },
+    "pool": {
+      "value": "2",
+      "label": "缓存活跃池账号数",
+      "help": "缓存活跃池 0 = 关闭；仅在 sticky 模式或启用会话粘性步骤时生效。priority 越小越优先；reserve 或明确不健康账号会由下一优先级账号替换；活跃账号全部满载并等待超时后才允许备用溢出。该策略不保证生产缓存命中率。"
+    },
+    "roles": [
+      "\t\talpha-long-account-name@example.invalid\t—\t\t0 / 0\t1 / 1\t直连\t健康 缓存活跃\t0\t\n设置\n测试\n删除",
+      "\t\tbeta-long-account-name@example.invalid\t—\t\t0 / 0\t1 / 2\t直连\t健康 缓存活跃\t0\t\n设置\n测试\n删除",
+      "\t\tgamma-standby-long-name@example.invalid\t—\t\t0 / 0\t1 / 100\t直连\t健康 缓存备用\t0\t\n设置\n测试\n删除"
+    ],
+    "names": [
+      {
+        "text": "alpha-long-account-name@example.invalid",
+        "title": "alpha-long-account-name@example.invalid",
+        "clientWidth": 321,
+        "scrollWidth": 321
+      },
+      {
+        "text": "beta-long-account-name@example.invalid",
+        "title": "beta-long-account-name@example.invalid",
+        "clientWidth": 321,
+        "scrollWidth": 321
+      },
+      {
+        "text": "gamma-standby-long-name@example.invalid",
+        "title": "gamma-standby-long-name@example.invalid",
+        "clientWidth": 321,
+        "scrollWidth": 321
+      }
+    ],
+    "tableWraps": [
+      "auto",
+      "auto",
+      "auto",
+      "auto"
+    ],
+    "presetOptions": [
+      "策略预设…",
+      "缓存命中优先",
+      "会话稳定",
+      "最大吞吐",
+      "均匀分摊",
+      "按额度分摊",
+      "主备容灾",
+      "保守防封"
+    ],
+    "activeElement": "BODY"
+  },
+  "selectedPreset": "cache",
+  "preview": {
+    "selected": "cache",
+    "visible": "flex",
+    "diff": "concurrencyWaitMs: 2000 → 5000\naccountPipeline.cachePoolSize: 0 → 2\naccountErrorRules.429: null → {\"action\":\"cooldown\",\"cooldownMs\":1800000}",
+    "priorityInputs": 3,
+    "draftPool": "0",
+    "draftWait": "2000",
+    "pendingPool": 2,
+    "pendingWait": 5000
+  },
+  "afterCancel": {
+    "modal": "none",
+    "pool": "0",
+    "wait": "2000",
+    "pending": null,
+    "persistedPool": 2
+  },
+  "rawOpen": {
+    "open": true,
+    "focused": "rawSchedulingJson",
+    "containsPool": true
+  },
+  "rawClosed": {
+    "open": false,
+    "focused": "rawSchedulingOpen"
+  },
+  "liveStatus": {
+    "text": "排除已评分不健康账号已移动到第 2 位；尚未保存",
+    "ariaLive": "polite",
+    "order": [
+      "quotaPool",
+      "excludeUnhealthy",
+      "healthSort",
+      "sticky"
+    ]
+  },
+  "accessibility": {
+    "hasPoolLabel": true,
+    "hasCachePreset": true,
+    "hasRawButton": true,
+    "liveRegionPresent": true
+  },
+  "narrow": {
+    "viewport": {
+      "width": 390,
+      "height": 844,
+      "scrollWidth": 390
+    },
+    "pool": {
+      "left": 124.375,
+      "right": 214.375,
+      "width": 90,
+      "visible": true
+    },
+    "preview": {
+      "left": 25,
+      "right": 107,
+      "visible": true
+    },
+    "tableWraps": [
+      {
+        "overflowX": "auto",
+        "clientWidth": 0,
+        "scrollWidth": 0
+      },
+      {
+        "overflowX": "auto",
+        "clientWidth": 0,
+        "scrollWidth": 0
+      },
+      {
+        "overflowX": "auto",
+        "clientWidth": 0,
+        "scrollWidth": 0
+      },
+      {
+        "overflowX": "auto",
+        "clientWidth": 340,
+        "scrollWidth": 980
+      }
+    ],
+    "bodyOverflowX": "visible"
+  }
+}

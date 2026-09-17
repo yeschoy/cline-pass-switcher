@@ -1,0 +1,12 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend entrypoint and required routing, persistence, logging, testing conventions."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Account selection, sticky HRW, capacity leases, quota/health pipeline, diagnostics and test contracts."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Config migration, strict accountPipeline validation, atomic persistence and old-client compatibility."}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Trust-boundary validation, safe 429/503 behavior and fail-open diagnostic rules."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Ordinary request-log allowlist, sensitive-data exclusions and bounded diagnostic behavior."}
+{"file":".trellis/spec/frontend/index.md","reason":"Frontend architecture and pre-development requirements for the static console."}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Complete account drafts, accountPipeline round trips, presets and raw scheduling ownership."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Accessible scheduling controls, preset preview/cancel behavior and responsive verification."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Reuse existing account selection, config, logging and browser state owners."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Trace the account configuration and chat request flow across server, UI, tests and persistence."}
+{"file":".trellis/tasks/09-17-improve-cache-hit-scheduling/research/current-cache-baseline.md","reason":"Production baseline, root-cause ranking, metrics and safety constraints for the implementation."}
+{"file":".trellis/tasks/09-17-improve-cache-hit-scheduling/research/newapi-session-path.md","reason":"Confirmed upstream session-signal limitation that the Switcher-only design must treat as fixed."}

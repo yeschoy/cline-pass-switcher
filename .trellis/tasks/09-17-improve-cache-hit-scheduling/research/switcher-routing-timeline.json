@@ -1,0 +1,555 @@
+{
+  "capturedAt": 1789592072493,
+  "hours": [
+    {
+      "accounts": {
+        "account#201cd88fa8": 2,
+        "account#653683b9f7": 1,
+        "account#8d27641ca9": 1,
+        "account#a450100a5d": 1,
+        "account#e7f116a449": 16
+      },
+      "capacityFallback": 0,
+      "failed": 0,
+      "health": {
+        "available-or-insufficient": 21
+      },
+      "hour": "2026-09-15T20:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "ordinary": 21
+      },
+      "requests": 21
+    },
+    {
+      "accounts": {
+        "account#201cd88fa8": 5,
+        "account#5984fc42cf": 26,
+        "account#653683b9f7": 4,
+        "account#8321fe5602": 5,
+        "account#8d27641ca9": 7,
+        "account#a450100a5d": 5,
+        "account#c66164b088": 2,
+        "account#e7f116a449": 25
+      },
+      "capacityFallback": 0,
+      "failed": 0,
+      "health": {
+        "available-or-insufficient": 79
+      },
+      "hour": "2026-09-15T21:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "ordinary": 79
+      },
+      "requests": 79
+    },
+    {
+      "accounts": {
+        "account#201cd88fa8": 38,
+        "account#5984fc42cf": 4,
+        "account#653683b9f7": 1,
+        "account#8321fe5602": 2,
+        "account#8d27641ca9": 1,
+        "account#a450100a5d": 2,
+        "account#c66164b088": 7,
+        "account#e7f116a449": 2
+      },
+      "capacityFallback": 0,
+      "failed": 36,
+      "health": {
+        "available-or-insufficient": 57
+      },
+      "hour": "2026-09-15T22:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "ordinary": 57
+      },
+      "requests": 57
+    },
+    {
+      "accounts": {
+        "account#201cd88fa8": 18,
+        "account#5984fc42cf": 24,
+        "account#653683b9f7": 6,
+        "account#8321fe5602": 7,
+        "account#8d27641ca9": 1,
+        "account#a450100a5d": 2,
+        "account#c66164b088": 4,
+        "account#e7f116a449": 3
+      },
+      "capacityFallback": 0,
+      "failed": 16,
+      "health": {
+        "available-or-insufficient": 65
+      },
+      "hour": "2026-09-15T23:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "ordinary": 65
+      },
+      "requests": 65
+    },
+    {
+      "accounts": {
+        "account#201cd88fa8": 7,
+        "account#5984fc42cf": 14,
+        "account#653683b9f7": 4,
+        "account#8321fe5602": 20,
+        "account#8d27641ca9": 4,
+        "account#a450100a5d": 29,
+        "account#c66164b088": 7,
+        "account#e7f116a449": 28
+      },
+      "capacityFallback": 0,
+      "failed": 5,
+      "health": {
+        "available-or-insufficient": 113
+      },
+      "hour": "2026-09-16T00:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "ordinary": 113
+      },
+      "requests": 113
+    },
+    {
+      "accounts": {
+        "account#201cd88fa8": 7,
+        "account#5984fc42cf": 42,
+        "account#653683b9f7": 18,
+        "account#8321fe5602": 47,
+        "account#8d27641ca9": 42,
+        "account#a450100a5d": 20,
+        "account#c66164b088": 3,
+        "account#e7f116a449": 2
+      },
+      "capacityFallback": 0,
+      "failed": 0,
+      "health": {
+        "available-or-insufficient": 181
+      },
+      "hour": "2026-09-16T01:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "ordinary": 181
+      },
+      "requests": 181
+    },
+    {
+      "accounts": {
+        "account#5984fc42cf": 2,
+        "account#653683b9f7": 6,
+        "account#8321fe5602": 2,
+        "account#8d27641ca9": 15,
+        "account#a450100a5d": 7,
+        "account#c66164b088": 2,
+        "account#e7f116a449": 2
+      },
+      "capacityFallback": 0,
+      "failed": 1,
+      "health": {
+        "available-or-insufficient": 36
+      },
+      "hour": "2026-09-16T02:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "ordinary": 36
+      },
+      "requests": 36
+    },
+    {
+      "accounts": {
+        "account#5984fc42cf": 7,
+        "account#653683b9f7": 2,
+        "account#8321fe5602": 10,
+        "account#8d27641ca9": 13,
+        "account#a450100a5d": 4,
+        "account#c66164b088": 1,
+        "account#e7f116a449": 4
+      },
+      "capacityFallback": 0,
+      "failed": 1,
+      "health": {
+        "available-or-insufficient": 41
+      },
+      "hour": "2026-09-16T03:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "ordinary": 41
+      },
+      "requests": 41
+    },
+    {
+      "accounts": {
+        "account#5984fc42cf": 3,
+        "account#653683b9f7": 28,
+        "account#8321fe5602": 59,
+        "account#8d27641ca9": 26,
+        "account#a450100a5d": 15,
+        "account#c66164b088": 10,
+        "account#e7f116a449": 8
+      },
+      "capacityFallback": 0,
+      "failed": 14,
+      "health": {
+        "available-or-insufficient": 149
+      },
+      "hour": "2026-09-16T04:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "ordinary": 149
+      },
+      "requests": 149
+    },
+    {
+      "accounts": {
+        "account#5984fc42cf": 21,
+        "account#653683b9f7": 90,
+        "account#8321fe5602": 18,
+        "account#8d27641ca9": 61,
+        "account#a450100a5d": 6,
+        "account#c66164b088": 3,
+        "account#e7f116a449": 21
+      },
+      "capacityFallback": 0,
+      "failed": 2,
+      "health": {
+        "available-or-insufficient": 220
+      },
+      "hour": "2026-09-16T05:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "hot": 193,
+        "ordinary": 27
+      },
+      "requests": 220
+    },
+    {
+      "accounts": {
+        "account#5984fc42cf": 19,
+        "account#653683b9f7": 81,
+        "account#8321fe5602": 13,
+        "account#8d27641ca9": 92,
+        "account#a450100a5d": 51,
+        "account#c66164b088": 5,
+        "account#e7f116a449": 20
+      },
+      "capacityFallback": 0,
+      "failed": 7,
+      "health": {
+        "available-or-insufficient": 281
+      },
+      "hour": "2026-09-16T06:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "hot": 281
+      },
+      "requests": 281
+    },
+    {
+      "accounts": {
+        "account#5984fc42cf": 4,
+        "account#653683b9f7": 10,
+        "account#8321fe5602": 20,
+        "account#8d27641ca9": 49,
+        "account#a450100a5d": 8,
+        "account#c66164b088": 13,
+        "account#e7f116a449": 54
+      },
+      "capacityFallback": 0,
+      "failed": 29,
+      "health": {
+        "available-or-insufficient": 158
+      },
+      "hour": "2026-09-16T07:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "hot": 158
+      },
+      "requests": 158
+    },
+    {
+      "accounts": {
+        "account#5984fc42cf": 4,
+        "account#653683b9f7": 28,
+        "account#8321fe5602": 6,
+        "account#8d27641ca9": 13,
+        "account#a450100a5d": 4,
+        "account#c66164b088": 19,
+        "account#e7f116a449": 8
+      },
+      "capacityFallback": 0,
+      "failed": 4,
+      "health": {
+        "available-or-insufficient": 82
+      },
+      "hour": "2026-09-16T08:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "hot": 82
+      },
+      "requests": 82
+    },
+    {
+      "accounts": {
+        "account#5984fc42cf": 25,
+        "account#653683b9f7": 20,
+        "account#8321fe5602": 18,
+        "account#8d27641ca9": 29,
+        "account#a450100a5d": 24,
+        "account#c66164b088": 21,
+        "account#e7f116a449": 18
+      },
+      "capacityFallback": 0,
+      "failed": 4,
+      "health": {
+        "available-or-insufficient": 155
+      },
+      "hour": "2026-09-16T09:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "hot": 155
+      },
+      "requests": 155
+    },
+    {
+      "accounts": {
+        "account#5984fc42cf": 28,
+        "account#653683b9f7": 7,
+        "account#8321fe5602": 23,
+        "account#8d27641ca9": 10,
+        "account#a450100a5d": 17,
+        "account#c66164b088": 15,
+        "account#e7f116a449": 29
+      },
+      "capacityFallback": 0,
+      "failed": 2,
+      "health": {
+        "available-or-insufficient": 129
+      },
+      "hour": "2026-09-16T10:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "hot": 129
+      },
+      "requests": 129
+    },
+    {
+      "accounts": {
+        "account#5984fc42cf": 8,
+        "account#653683b9f7": 7,
+        "account#8321fe5602": 6,
+        "account#8d27641ca9": 3,
+        "account#a450100a5d": 14,
+        "account#c66164b088": 6,
+        "account#e7f116a449": 40
+      },
+      "capacityFallback": 0,
+      "failed": 1,
+      "health": {
+        "available-or-insufficient": 84
+      },
+      "hour": "2026-09-16T11:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "hot": 84
+      },
+      "requests": 84
+    },
+    {
+      "accounts": {
+        "account#5984fc42cf": 3,
+        "account#653683b9f7": 20,
+        "account#8321fe5602": 2,
+        "account#8d27641ca9": 16,
+        "account#a450100a5d": 22,
+        "account#c66164b088": 3,
+        "account#e7f116a449": 80
+      },
+      "capacityFallback": 0,
+      "failed": 0,
+      "health": {
+        "available-or-insufficient": 146
+      },
+      "hour": "2026-09-16T12:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "hot": 146
+      },
+      "requests": 146
+    },
+    {
+      "accounts": {
+        "account#5984fc42cf": 6,
+        "account#653683b9f7": 4,
+        "account#8321fe5602": 4,
+        "account#8d27641ca9": 5,
+        "account#a450100a5d": 2,
+        "account#c66164b088": 4,
+        "account#e7f116a449": 3
+      },
+      "capacityFallback": 0,
+      "failed": 0,
+      "health": {
+        "available-or-insufficient": 28
+      },
+      "hour": "2026-09-16T13:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "hot": 28
+      },
+      "requests": 28
+    },
+    {
+      "accounts": {
+        "account#5984fc42cf": 3,
+        "account#653683b9f7": 3,
+        "account#8321fe5602": 4,
+        "account#8d27641ca9": 1,
+        "account#a450100a5d": 2,
+        "account#c66164b088": 3,
+        "account#e7f116a449": 3
+      },
+      "capacityFallback": 0,
+      "failed": 0,
+      "health": {
+        "available-or-insufficient": 19
+      },
+      "hour": "2026-09-16T14:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "hot": 19
+      },
+      "requests": 19
+    },
+    {
+      "accounts": {
+        "account#5984fc42cf": 10,
+        "account#653683b9f7": 1,
+        "account#8321fe5602": 3,
+        "account#8d27641ca9": 31,
+        "account#a450100a5d": 4,
+        "account#c66164b088": 6,
+        "account#e7f116a449": 3
+      },
+      "capacityFallback": 0,
+      "failed": 0,
+      "health": {
+        "available-or-insufficient": 58
+      },
+      "hour": "2026-09-16T15:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "hot": 58
+      },
+      "requests": 58
+    },
+    {
+      "accounts": {
+        "account#5984fc42cf": 10,
+        "account#653683b9f7": 10,
+        "account#8d27641ca9": 60,
+        "account#a450100a5d": 5,
+        "account#c66164b088": 5,
+        "account#e7f116a449": 5
+      },
+      "capacityFallback": 0,
+      "failed": 1,
+      "health": {
+        "available-or-insufficient": 95
+      },
+      "hour": "2026-09-16T16:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "hot": 95
+      },
+      "requests": 95
+    },
+    {
+      "accounts": {
+        "account#5984fc42cf": 9,
+        "account#653683b9f7": 1,
+        "account#8321fe5602": 4,
+        "account#8d27641ca9": 13,
+        "account#a450100a5d": 42,
+        "account#e7f116a449": 4
+      },
+      "capacityFallback": 0,
+      "failed": 0,
+      "health": {
+        "available-or-insufficient": 73
+      },
+      "hour": "2026-09-16T17:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "hot": 73
+      },
+      "requests": 73
+    },
+    {
+      "accounts": {
+        "account#5984fc42cf": 4,
+        "account#653683b9f7": 5,
+        "account#8321fe5602": 4,
+        "account#8d27641ca9": 7,
+        "account#a450100a5d": 2,
+        "account#e7f116a449": 6
+      },
+      "capacityFallback": 0,
+      "failed": 0,
+      "health": {
+        "available-or-insufficient": 28
+      },
+      "hour": "2026-09-16T18:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "hot": 28
+      },
+      "requests": 28
+    },
+    {
+      "accounts": {
+        "account#5984fc42cf": 2,
+        "account#653683b9f7": 10,
+        "account#8321fe5602": 5,
+        "account#8d27641ca9": 5,
+        "account#a450100a5d": 3,
+        "account#e7f116a449": 5
+      },
+      "capacityFallback": 0,
+      "failed": 0,
+      "health": {
+        "available-or-insufficient": 30
+      },
+      "hour": "2026-09-16T19:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "hot": 30
+      },
+      "requests": 30
+    },
+    {
+      "accounts": {
+        "account#5984fc42cf": 1,
+        "account#653683b9f7": 23,
+        "account#8321fe5602": 1,
+        "account#8d27641ca9": 2,
+        "account#a450100a5d": 17,
+        "account#e7f116a449": 7
+      },
+      "capacityFallback": 0,
+      "failed": 0,
+      "health": {
+        "available-or-insufficient": 51
+      },
+      "hour": "2026-09-16T20:00:00Z",
+      "overflow": 0,
+      "pool": {
+        "hot": 51
+      },
+      "requests": 51
+    }
+  ],
+  "scope": "read-only hourly routing aggregates; account IDs replaced with report-local aliases"
+}

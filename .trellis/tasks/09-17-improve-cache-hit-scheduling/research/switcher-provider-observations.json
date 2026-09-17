@@ -1,0 +1,53 @@
+{
+  "byModel": {
+    "cline-pass/deepseek-v4-flash": {
+      "openai-compatible-private": 84,
+      "unknown": 665
+    },
+    "cline-pass/deepseek-v4-pro": {
+      "openai-compatible-private": 1,
+      "unknown": 195
+    },
+    "cline-pass/deepseek-v4.1-flash": {
+      "alibaba": 270,
+      "baseten": 45,
+      "fireworks": 241,
+      "novita": 89,
+      "togetherai": 2,
+      "unknown": 642
+    },
+    "cline-pass/glm-5.3": {
+      "baseten": 1,
+      "unknown": 1
+    },
+    "cline-pass/glm-5.3-flash": {
+      "atlascloud": 2,
+      "cloudflare": 1,
+      "gmicloud": 26,
+      "novita": 2,
+      "phala": 1,
+      "relace": 14,
+      "sail-research": 1,
+      "streamlake": 10,
+      "unknown": 66,
+      "wafer": 1,
+      "z.ai": 6
+    },
+    "cline-pass/kimi-k3": {
+      "openai-compatible-private": 1,
+      "unknown": 1
+    },
+    "cline-pass/minimax-m3": {
+      "minimax": 1,
+      "unknown": 1
+    },
+    "cline-pass/qwen3.8-max": {
+      "openai-compatible-private": 1,
+      "unknown": 1
+    }
+  },
+  "capturedAt": 1789592212038,
+  "knownProviderRequests": 800,
+  "requests": 2372,
+  "scope": "read-only model/provider outcome counts; no account/session/body fields"
+}

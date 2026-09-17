@@ -1,0 +1,9 @@
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verify routing compatibility, active/standby selection, lease lifecycle and required integration coverage."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Verify migration, validation, atomic persistence and old-client omission behavior."}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Verify invalid input fails before mutation and capacity/fallback responses remain safe."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Verify new diagnostics remain bounded and contain no session or credential material."}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Verify full account drafts, raw scheduling and presets preserve all hidden fields."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Verify accessibility, preset cancel/apply semantics and responsive controls."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Check the complete UI/API/persistence/routing/logging data flow."}
+{"file":".trellis/tasks/09-17-improve-cache-hit-scheduling/research/current-cache-baseline.md","reason":"Check implementation claims and rollout gates against the measured production baseline."}
+{"file":".trellis/tasks/09-17-improve-cache-hit-scheduling/research/newapi-session-path.md","reason":"Ensure no implementation or claim crosses the approved NewAPI read-only boundary."}
