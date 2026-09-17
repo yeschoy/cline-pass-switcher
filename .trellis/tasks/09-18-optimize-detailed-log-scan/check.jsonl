@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"复核 retention、corruption、temporary、clear、security 与 focused test 契约"}
+{"file":".trellis/spec/backend/deployment-guidelines.md","reason":"复核生产 committed-source、哈希、配置、健康、内部网络和回滚证据"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"复核存储失败继续 fail-open 且只暴露安全 404/503/health"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查未改变捕获、普通日志、API schema、模型流量和部署边界"}

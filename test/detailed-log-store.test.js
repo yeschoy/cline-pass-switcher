@@ -37,6 +37,56 @@ test('independent owner-only groups, metadata-only paging, on-demand body and re
   await assert.rejects(store.body(a.requestId, a.bodyId), { statusCode: 404 });
 });
 
+test('runtime publication, query and expiry reuse the startup inventory until explicit reconciliation', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cps-details-index-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const seed = new DetailedLogStore({ dir }); await seed.queue; seed.close();
+  const first = publish(seed); await first.done;
+
+  let corpusOpens = 0, manifestReads = 0, bodyReads = 0;
+  const io = {
+    ...fs,
+    opendir: async (name, ...args) => { if (String(name).startsWith(dir)) corpusOpens++; return fs.opendir(name, ...args); },
+    open: async (name, ...args) => {
+      if (String(name).startsWith(dir) && name.endsWith('manifest.json')) manifestReads++;
+      if (String(name).startsWith(dir) && name.endsWith('.txt')) bodyReads++;
+      return fs.open(name, ...args);
+    }
+  };
+  const store = new DetailedLogStore({ dir, io }); t.after(() => store.close()); await store.queue; store.close();
+  corpusOpens = 0; manifestReads = 0; bodyReads = 0;
+
+  const second = publish(store); assert.equal(await second.done, true);
+  assert.equal((await store.query()).items.length, 2);
+  await store.serial(() => store.expire());
+  assert.equal(corpusOpens, 0, 'normal runtime work must not walk the corpus');
+  assert.equal(manifestReads, 0, 'normal runtime work must not reread stored manifests');
+  assert.equal(bodyReads, 0, 'metadata work must never read detailed bodies');
+
+  const externalId = randomUUID();
+  await fs.mkdir(path.join(dir, externalId));
+  await fs.writeFile(path.join(dir, externalId, 'manifest.json'), JSON.stringify({ request: { requestId: externalId, ts: store.now(), status: 200 }, attempts: [], bodies: [] }));
+  assert.equal((await store.query()).items.length, 2, 'external files wait for reconciliation');
+  await store.serial(() => store.reconcile());
+  assert.equal((await store.query()).items.length, 3);
+  assert.ok(corpusOpens > 0); assert.ok(manifestReads > 0); assert.equal(bodyReads, 0);
+});
+
+test('bounded inventory fails closed without deleting roots and explicit clear recovers', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cps-details-inventory-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const seed = new DetailedLogStore({ dir }); await seed.queue; seed.close();
+  await publish(seed).done; await publish(seed).done;
+  const roots = (await fs.readdir(dir)).sort(); assert.equal(roots.length, 2);
+
+  const limited = new DetailedLogStore({ dir, maxInventoryEntries: 1 }); t.after(() => limited.close()); await limited.queue; limited.close();
+  assert.equal(limited.inventoryOverflow, true); assert.ok(limited.health.failures >= 1);
+  await assert.rejects(limited.query(), { statusCode: 503, message: 'detailed storage unavailable' });
+  assert.deepEqual((await fs.readdir(dir)).sort(), roots, 'inventory pressure must not evict durable roots');
+  assert.deepEqual(await limited.clear(), { ok: true });
+  assert.equal(limited.inventoryOverflow, false); assert.equal((await limited.query()).items.length, 0);
+});
+
 test('small byte/age budgets evict oldest roots, reject older late completions, expire while idle', async (t) => {
   let now = 100;
   const store = await setup(t, { now: () => now, maxAgeMs: 100, maxTotalBytes: 850 });

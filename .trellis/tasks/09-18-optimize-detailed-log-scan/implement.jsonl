@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"详细日志存储、安全、保留、清理、查询和测试的主契约"}
+{"file":".trellis/spec/backend/deployment-guidelines.md","reason":"生产目标、committed archive、配置保护、门禁与回滚契约"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"共享 Node 服务变更的完整质量与集成验证要求"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"保持 DetailedLogStore 为唯一存储所有者，避免新增重复队列或模块"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"核对详细日志从捕获、存储、API 到部署的完整数据流"}
