@@ -39,6 +39,8 @@
 - 转义解码必须使用固定正则和有限轮次，禁止 `eval`、动态代码执行或无界递归。
 - 任何凭据泄漏回归、业务字节变化、工作上限失效或完整测试失败都阻止交付。
 
-## 回滚
+## 部署与回滚
 
-生产调查阶段没有远程变更。代码修复只涉及 redactor、聚焦测试与 logging code-spec；回滚时恢复这些本地文件即可。生产部署不在本任务授权范围内。
+用户在修复与测试通过后明确授权提交并部署。发布必须从 committed HEAD 的 allowlist archive 构建唯一 release，预先备份 compose/deployment/config/metadata，仅切换 image 与 build context，保持当前 cache-pool 配置和详细日志设置。候选镜像在切换前验证关键源码哈希；切换、API 或延迟稳定性门禁失败时恢复备份 config/compose/deployment 并以 `--no-build` 拉回旧 exact image ID。
+
+成功后原子更新无敏感信息的 `deployment.json`，保留旧 release/image、候选镜像、构建日志、备份和回滚证据。公开域名若与切换前一样 DNS 不可解析，则按既有部署契约记录为 pre-existing degraded，不替代本地、认证和内部网络硬门禁。

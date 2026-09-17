@@ -37,6 +37,13 @@
    - 运行聚焦 detailed capture 测试、相关 integration、语法检查、`npm test` 和 `git diff --check`。
    - 更新 `.trellis/spec/backend/logging-guidelines.md` 的转义凭据契约。
 
+9. **授权后的生产部署**
+   - 提交已验证代码与任务记录；从 committed HEAD 生成 allowlist archive、远端不可变 release 和候选镜像。
+   - 只读预检当前 cache-pool release、配置/账号/详细日志、API、内部别名和公开 DNS；创建版本化备份及自动回滚材料。
+   - 证明候选 Compose 只改变 image/context，预构建并核对镜像源码哈希，再原子切换。
+   - 验证即时和 90 秒延迟健康、restart/OOM、配置哈希、认证 API、非法 quota 输入拒绝、内部别名和启动日志。
+   - 在生产镜像内运行不发送业务请求的合成 redactor witness；成功后原子更新 `deployment.json` 和安全报告，不清理任何历史数据或发布物。
+
 ## 验证门槛
 
 - 截图时间簇及其前后同类错误总量均有可复核计数。

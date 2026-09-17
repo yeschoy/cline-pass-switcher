@@ -5,3 +5,4 @@
 {"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "详细日志脱敏、整组省略与资源边界契约"}
 {"file": ".trellis/spec/backend/error-handling.md", "reason": "诊断失败不得泄漏凭据或改变流量语义"}
 {"file": ".trellis/tasks/09-17-investigate-empty-content-errors/research/escaped-redaction-fix.md", "reason": "本地红绿复现、修复边界和验证证据"}
+{"file": ".trellis/tasks/09-17-investigate-empty-content-errors/research/deployment-20260917-113817.md", "reason": "生产发布身份、门禁和回滚证据"}

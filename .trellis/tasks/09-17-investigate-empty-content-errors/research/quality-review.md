@@ -26,6 +26,14 @@
 - 338 KiB 合成正文 witness：`state=complete`、`truncated=false`，普通字面转义保持可读。
 - `task.py validate`：通过；implement/check manifests 均含真实上下文。
 
+## 部署复核
+
+- committed HEAD `1ea9f29d…` 的 allowlist archive 与远端 12 个 release 文件及候选/运行镜像关键源码哈希一致。
+- 候选 Compose 只改变 image/context；config SHA-256 前后均为 `a8045340…87b4`，账号数 9、模式 sticky、cache-pool 配置和 `detailedLogging=true` 保持不变。
+- 即时和 90 秒延迟 exact image/health/restart/OOM、认证 API、非法 quota 输入、内部别名、启动日志门禁均通过。
+- 生产镜像内合成 witness 证明普通转义 complete/可读、转义凭据不泄漏；未发送业务请求。
+- 公开 DNS 故障切换前后均存在，按部署契约记录为 pre-existing degraded；旧 release/image 与完整回滚材料均保留。
+
 ## Spec 同步
 
 `.trellis/spec/backend/logging-guidelines.md` 已更新：完整单层普通转义采用一次有界解码视图；转义凭据仅局部省略并清理跨组回显；partial/嵌套/无效/超限继续整组省略。该文档仍保留完整七段 code-spec 结构。
