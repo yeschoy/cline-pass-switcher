@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/deployment-guidelines.md", "reason": "复核生产检查未越过只读与凭据安全边界"}
+{"file": ".trellis/tasks/09-17-investigate-empty-content-errors/research/initial-evidence.md", "reason": "复核当前结论覆盖截图与全部同类错误"}
+{"file": ".trellis/tasks/09-17-investigate-empty-content-errors/research/current-empty-content-analysis.md", "reason": "复核生产计数、根因分级、日志不可见机制和只读边界"}
+{"file": ".trellis/spec/backend/index.md", "reason": "复核后端质量门"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "复核完整文本可观测性与凭据安全边界"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "复核 fail-closed 与业务 fail-open 契约"}
+{"file": ".trellis/tasks/09-17-investigate-empty-content-errors/research/escaped-redaction-fix.md", "reason": "复核普通转义可读与转义凭据不泄漏"}

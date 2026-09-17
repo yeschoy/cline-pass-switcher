@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/deployment-guidelines.md", "reason": "生产主机、SSH 身份与只读安全边界"}
+{"file": ".trellis/tasks/09-17-investigate-empty-content-errors/research/initial-evidence.md", "reason": "截图事实、既有根因和当前待验证问题"}
+{"file": ".trellis/tasks/09-16-investigate-remote-cline-pass-errors/research/empty-message-source-analysis.md", "reason": "上一轮同类错误的证据链与安全聚合方法"}
+{"file": ".trellis/spec/backend/index.md", "reason": "后端开发与验证入口"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "详细日志脱敏、整组省略与资源边界契约"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "诊断失败不得泄漏凭据或改变流量语义"}
+{"file": ".trellis/tasks/09-17-investigate-empty-content-errors/research/escaped-redaction-fix.md", "reason": "本地红绿复现、修复边界和验证证据"}
