@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 10
+- **Total Sessions**: 11
 - **Last Active**: 2026-09-17
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~283 | Active |
+| `journal-1.md` | ~307 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 11 | 2026-09-17 | 排查并修复空 content 详细日志缺失 | `a056bbb`, `1ea9f29`, `f618054` | `feat/quota-forecast-panel` |
 | 10 | 2026-09-17 | 优化 cline-pass 缓存命中调度 | `083b9ea`, `0e03e21` | `feat/quota-forecast-panel` |
 | 9 | 2026-09-17 | Deploy quota forecast panel | `d3c8bd5` | `feat/quota-forecast-panel` |
 | 8 | 2026-09-17 | Add statistics quota forecast | `8b727b1` | `feat/quota-forecast-panel` |

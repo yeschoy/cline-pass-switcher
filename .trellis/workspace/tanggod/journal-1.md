@@ -281,3 +281,27 @@ Directly deployed committed quota forecast UI to production as release 20260916-
 ### Status
 
 [OK] **Completed**
+
+
+## Session 11: 排查并修复空 content 详细日志缺失
+<!-- trellis-session: v=2 fp=5db51df26655d86f -->
+
+**Date**: 2026-09-17
+**Task**: 排查并修复空 content 详细日志缺失
+**Branch**: `feat/quota-forecast-panel`
+
+### Summary
+
+对齐 NewAPI 与 Switcher，确认当前 25 条空消息前置 400；修复完整普通转义导致详细日志整组 omitted-for-safety 的误伤，149/149 测试通过，并部署 release 20260917-113817-1ea9f29-detail-escape。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a056bbb` | fix: preserve safe escaped detailed logs |
+| `1ea9f29` | docs(task): record empty content investigation |
+| `f618054` | docs(task): record detailed log fix deployment |
+
+### Status
+
+[OK] **Completed**
