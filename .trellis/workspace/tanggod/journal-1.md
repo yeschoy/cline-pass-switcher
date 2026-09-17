@@ -258,3 +258,26 @@ Directly deployed committed quota forecast UI to production as release 20260916-
 ### Status
 
 [OK] **Completed**
+
+
+## Session 10: 优化 cline-pass 缓存命中调度
+<!-- trellis-session: v=2 fp=fb4abe246da253f0 -->
+
+**Date**: 2026-09-17
+**Task**: 优化 cline-pass 缓存命中调度
+**Branch**: `feat/quota-forecast-panel`
+
+### Summary
+
+基于只读生产基线实现 cachePoolSize 双活跃账号池、固定优先级与备用溢出策略，补齐 API/控制台/日志/额度刷新契约和测试；146 项测试及真实浏览器桌面/窄屏验证通过，未修改或部署生产。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `083b9ea` | feat: add cache-focused account pool routing |
+| `0e03e21` | docs: document cache pool routing and evidence |
+
+### Status
+
+[OK] **Completed**
