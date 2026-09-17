@@ -204,7 +204,30 @@ test('uncertain credential discovery suppresses earlier headers and every group 
   }
 });
 
-test('ambiguous escaped credentials in headers or nested JSON/SSE fence every earlier group echo', () => {
+test('complete ordinary escaped text remains visible across a detailed group', () => {
+  const ordinary = 'ordinary code \\u0061 and \\x61';
+  const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: { 'x-ordinary': ordinary } });
+  const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
+  let group;
+  const store = { generation: 0, health: { dropped: 0 }, open: async () => true, failure() { assert.fail('unexpected failure'); },
+    publish({ produce, release }) { group = produce(); release(); return Promise.resolve(true); } };
+  const root = new DetailRoot(req, res, store);
+  const payload = JSON.stringify({ model: 'demo', messages: [{ role: 'user', content: ordinary }] });
+  root.input.add(payload); root.input.end(); root.output.add(JSON.stringify({ message: ordinary })); root.output.end();
+  root.responseHeaders = { 'x-ordinary': ordinary };
+  const attempt = root.attempt({ url: 'https://example.org/chat/completions', headers: { 'x-ordinary': ordinary }, body: payload });
+  attempt.responseHeaders = { 'x-ordinary': ordinary }; attempt.output.add(JSON.stringify({ message: ordinary })); attempt.output.end();
+  root.finalize();
+  assert.equal(group.request.state, 'complete');
+  assert.ok(group.bodies.every((body) => body.descriptor.state === 'complete' && body.descriptor.capturedBytes > 0));
+  assert.equal(JSON.parse(group.bodies[0].text).messages[0].content, ordinary);
+  assert.equal(JSON.parse(group.bodies[1].text).message, ordinary);
+  assert.equal(JSON.parse(group.bodies[2].text).messages[0].content, ordinary);
+  assert.equal(JSON.parse(group.bodies[3].text).message, ordinary);
+  for (const headers of [group.request.headers, group.request.responseHeaders, group.attempts[0].headers, group.attempts[0].responseHeaders]) assert.equal(headers['x-ordinary'], ordinary);
+});
+
+test('escaped credentials redact decoded echoes without blanking the detailed group', () => {
   const secret = 'fixture-escaped-secret';
   for (const escaped of ['\\u0066ixture-escaped-secret', '\\x66ixture-escaped-secret']) for (const location of ['header', 'json', 'sse']) {
     const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: { 'x-echo': secret } });
@@ -220,17 +243,49 @@ test('ambiguous escaped credentials in headers or nested JSON/SSE fence every ea
     const payload = JSON.stringify({ nested: { message: 'password=' + escaped } });
     attempt.output.add(location === 'header' ? secret : location === 'sse' ? 'data: ' + payload + '\n\ndata: [DONE]\n\n' : payload); attempt.output.end();
     root.finalize();
-    assert.equal(group.request.state, 'incomplete', location);
-    assert.ok(group.bodies.every((body) => body.text === '' && body.descriptor.capturedBytes === 0 && body.descriptor.state === 'omitted-for-safety' && body.descriptor.complete));
+    assert.equal(group.request.state, 'complete', location);
+    assert.ok(group.bodies.every((body) => body.text !== '' && body.descriptor.capturedBytes > 0 && body.descriptor.state === 'complete' && body.descriptor.complete));
     assert.equal(JSON.stringify(group).includes(secret), false);
-    for (const headers of [group.request.headers, group.request.responseHeaders, group.attempts[0].headers, group.attempts[0].responseHeaders]) assert.match(JSON.stringify(headers), /OMITTED/);
+    for (const headers of [group.request.headers, group.request.responseHeaders, group.attempts[0].headers, group.attempts[0].responseHeaders]) assert.doesNotMatch(JSON.stringify(headers), /OMITTED: incomplete credential discovery/);
   }
+});
+
+test('escaped credential names omit only the affected string and redact cross-group echoes', () => {
+  const secret = 'fixture-escaped-name-secret', escaped = 'pass\\u0077ord=fixture-escaped-name-secret';
+  const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: { 'x-echo': secret } });
+  const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
+  let group;
+  const store = { generation: 0, health: { dropped: 0 }, open: async () => true, failure() { assert.fail('unexpected failure'); },
+    publish({ produce, release }) { group = produce(); release(); return Promise.resolve(true); } };
+  const root = new DetailRoot(req, res, store);
+  root.input.add(JSON.stringify({ messages: [{ role: 'user', content: escaped }], echo: secret })); root.input.end();
+  root.output.add(JSON.stringify({ echo: secret, ordinary: 'visible' })); root.output.end(); root.finalize();
+  assert.equal(group.request.state, 'complete');
+  assert.ok(group.bodies.every((body) => body.descriptor.state === 'complete' && body.descriptor.capturedBytes > 0));
+  assert.equal(JSON.stringify(group).includes(secret), false);
+  assert.equal(JSON.parse(group.bodies[0].text).messages[0].content, '[OMITTED: ambiguous escaped credential]');
+  assert.equal(JSON.parse(group.bodies[1].text).ordinary, 'visible');
+  assert.equal(group.request.headers['x-echo'], '[REDACTED]');
+});
+
+test('escaped structured credential names, cookie components and URL keys redact decoded values', () => {
+  const secret = 'fixture-escaped-structured-secret', cookieSecret = 'fixture-escaped-cookie-secret';
+  const field = 'pass\\u0077ord', cookie = 'set\\u002dcookie', query = 'api\\u005fkey';
+  const result = capture([JSON.stringify({ echo: `${secret} ${cookieSecret}`, [field]: secret, [cookie]: `session=${cookieSecret}; Path=/visible-path`, url: `https://example.test/?${query}=${secret}`, ordinary: 'visible' })]);
+  const output = JSON.parse(result.text);
+  assert.equal(result.descriptor.state, 'complete'); assert.equal(output.ordinary, 'visible');
+  assert.equal(output[field], '[REDACTED]'); assert.equal(output[cookie], '[REDACTED]');
+  for (const value of [secret, cookieSecret]) assert.equal(JSON.stringify(output).includes(value), false);
 });
 
 test('unread, interrupted, malformed and binary are explicit, never raw fallback', () => {
   assert.equal(capture([], undefined, {}, false).descriptor.state, 'unread');
-  for (const text of ['{"password":"secret', 'bad \\u0073ecret', Buffer.from([0xc3, 0x28]), 'data: {"key":"secret"}\n']) {
+  for (const text of ['{"password":"secret', Buffer.from([0xc3, 0x28]), 'data: {"key":"secret"}\n']) {
     const result = capture([text]); assert.equal(result.text, ''); assert.equal(result.descriptor.state, 'omitted-for-safety');
+  }
+  for (const text of ['bad \\u0073ecret', 'nested \\\\u0073ecret']) {
+    const result = capture([text], undefined, {}, text.startsWith('nested'));
+    assert.equal(result.text, ''); assert.equal(result.descriptor.state, 'omitted-for-safety');
   }
   const partial = capture(['plain partial'], undefined, {}, false);
   assert.equal(partial.descriptor.complete, false); assert.equal(partial.text, 'plain partial');

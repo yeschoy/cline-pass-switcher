@@ -1732,12 +1732,12 @@ test('outer scheme shadowing never exposes inner credentials through authenticat
   await waitUntil(async () => (await (await get('/api/logs/settings')).json()).health.retainedPayloadBytes === 0);
 });
 
-test('detailed logging fences ambiguous escaped credential discovery across APIs/files without changing JSON/SSE traffic', async (t) => {
-  const secret = 'fixture-escaped-secret', escaped = 'password=\\u0066ixture-escaped-secret', seen = [];
+test('detailed logging keeps ordinary escapes while redacting decoded credentials across APIs/files without changing JSON/SSE traffic', async (t) => {
+  const secret = 'fixture-escaped-secret', escaped = 'password=\\u0066ixture-escaped-secret', ordinary = 'ordinary code \\u0061 and \\x61', seen = [];
   const upstream = http.createServer((req, res) => {
     const chunks = []; req.on('data', (chunk) => chunks.push(chunk)); req.on('end', () => {
       const input = Buffer.concat(chunks).toString(); seen.push(input); const body = JSON.parse(input);
-      const payload = { choices: [{ message: { content: secret } }], ...(body.model !== 'header' ? { nested: { message: escaped } } : {}) };
+      const payload = { choices: [{ message: { content: secret } }], ordinary, ...(body.model !== 'header' ? { nested: { message: escaped } } : {}) };
       res.setHeader('X-Earlier-Echo', secret);
       if (body.model === 'header') res.setHeader('X-Diagnostic', escaped);
       res.setHeader('Content-Type', body.stream ? 'text/event-stream' : 'application/json');
@@ -1749,7 +1749,7 @@ test('detailed logging fences ambiguous escaped credential discovery across APIs
   t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
   const get = (route) => fetch(`http://127.0.0.1:${port}${route}`);
   for (const model of ['header', 'json', 'sse']) {
-    const input = { model, stream: model === 'sse', messages: [], echo: secret };
+    const input = { model, stream: model === 'sse', messages: [{ role: 'user', content: ordinary }], echo: secret };
     await rawJson(port, '/api/logs/settings', { detailedLogging: false });
     const off = await rawJson(port, '/v1/chat/completions', input, { 'X-Earlier-Echo': secret });
     await rawJson(port, '/api/logs/settings', { detailedLogging: true });
@@ -1757,13 +1757,15 @@ test('detailed logging fences ambiguous escaped credential discovery across APIs
     assert.equal(on.status, off.status); assert.equal(on.text, off.text); assert.equal(seen.at(-1), seen.at(-2));
     assert.match(on.text, /fixture-escaped-secret/, 'traffic retains the original content');
     const route = '/api/logs/details/' + on.headers['x-cline-request-id'];
-    const group = await waitUntil(async () => { const group = await (await get(route)).json(); return group.request?.state === 'incomplete' && group; });
+    const group = await waitUntil(async () => { const group = await (await get(route)).json(); return group.request?.state === 'complete' && group; });
     assert.equal(group.attempts.length, 1); assert.equal(group.bodies.length, 4);
     assert.equal(group.request.complete, true); assert.equal(group.request.result, 'success');
     assert.equal(JSON.stringify(group).includes(secret), false);
+    assert.doesNotMatch(JSON.stringify(group), /OMITTED: incomplete credential discovery/);
     for (const body of group.bodies) {
-      assert.equal(body.state, 'omitted-for-safety'); assert.equal(body.complete, true); assert.equal(body.capturedBytes, 0);
-      const response = await get(route + '/bodies/' + body.bodyId); assert.equal(response.status, 200); assert.equal(await response.text(), '');
+      assert.equal(body.state, 'complete'); assert.equal(body.complete, true); assert.ok(body.capturedBytes > 0);
+      const response = await get(route + '/bodies/' + body.bodyId); assert.equal(response.status, 200);
+      const text = await response.text(); assert.notEqual(text, ''); assert.equal(text.includes(secret), false); assert.match(text, /ordinary code/);
     }
   }
   const allText = (dir) => fs.readdirSync(dir, { withFileTypes: true }).map((entry) => entry.isDirectory() ? allText(path.join(dir, entry.name)) : fs.readFileSync(path.join(dir, entry.name), 'utf8')).join('\n');
