@@ -1,0 +1,30 @@
+{
+  "id": "account-metrics-content-error-rules",
+  "name": "account-metrics-content-error-rules",
+  "title": "增强统计、日志与错误规则体验",
+  "description": "增加模型与账号缓存统计，修正上游发现语义，优化普通日志性能、错误规则面板和额度展示。",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "tanggod",
+  "assignee": "tanggod",
+  "createdAt": "2026-09-18",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "09-19-model-cache-statistics-ui",
+    "09-19-optimize-ordinary-jsonl-logs",
+    "09-19-visual-content-error-rules"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}
