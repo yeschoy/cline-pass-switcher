@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "普通 JSONL 投影、保留、游标与 fail-open 合同"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "启动、存储失败和安全错误边界"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "chat lifecycle 和日志 API 集成门禁"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "复用普通日志 owner，避免第二存储/队列"}
+{"file": ".trellis/tasks/09-18-account-metrics-content-error-rules/research/code-performance-findings.md", "reason": "普通日志性能根因与 5,000 条基线"}
+{"file": ".trellis/tasks/09-19-optimize-ordinary-jsonl-logs/research/local-performance-validation.md", "reason": "新实现同机性能和文件系统调用证据"}

@@ -14,7 +14,7 @@ import { Transform } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
-import { JsonlLogStore, enforceCombinedLimit } from './lib/jsonl-log-store.js';
+import { JsonlLogGroup } from './lib/jsonl-log-store.js';
 import { DetailRoot, detailContext, detailRoute, observeStream, MAX_BODY_BYTES, captureBudget } from './lib/detailed-log-capture.js';
 import { DetailedLogStore, parseDetailQuery, MAX_AGE_MS, MAX_TOTAL_BYTES } from './lib/detailed-log-store.js';
 
@@ -92,9 +92,13 @@ const config = { ...DEFAULT_CONFIG, ...loadJson(CONFIG_PATH, {}) };
 const META = loadJson(META_PATH, { models: {}, history: [], catalog: null, orModelsFetchedAt: 0, orModelList: null });
 const saveConfig = () => atomicWriteJson(CONFIG_PATH, config);
 const saveMeta = () => atomicWriteJson(META_PATH, META);
-const requestLogs = new JsonlLogStore({ dir: LOG_DIR, prefix: 'requests', maxRecords: 50000 });
-const errorLogs = new JsonlLogStore({ dir: LOG_DIR, prefix: 'errors', maxRecords: 10000 });
-enforceCombinedLimit(LOG_DIR, 100 * 1024 * 1024);
+const ordinaryLogs = new JsonlLogGroup({
+  dir: LOG_DIR,
+  streams: { requests: { maxRecords: 50000 }, errors: { maxRecords: 10000 } },
+  maxTotalBytes: 100 * 1024 * 1024,
+});
+const requestLogs = ordinaryLogs.stream('requests');
+const errorLogs = ordinaryLogs.stream('errors');
 const detailedLogs = new DetailedLogStore({ dir: path.join(DATA_DIR, 'detailed-logs') });
 const recentHistory = Array.isArray(META.history) ? [...META.history] : [];
 
@@ -1213,7 +1217,7 @@ function record(modelId, info, detail = detailContext.getStore()) {
       status: attempt.normalizedStatus || attempt.status, upstreamStatus: attempt.upstreamStatus ?? null,
       category: attempt.upstreamStatus === 0 ? (info.proxyError ? 'proxy' : 'network') : 'upstream', reason: safeReason(attempt.note, info.sensitiveValues), accountAction: attempt.action || null }));
   }
-  Promise.all(writes).then(() => enforceCombinedLimit(LOG_DIR, 100 * 1024 * 1024)).catch(() => {});
+  void Promise.all(writes);
   try { saveMeta(); } catch (error) { console.error(`[诊断] metadata 持久化失败：${safeReason(error.message)}`); }
 }
 
@@ -2284,7 +2288,7 @@ async function dispatch(req, res) {
         if (['stream', 'overflow', 'switched'].includes(key) && !['true', 'false'].includes(value)) return sendJSON(res, 400, { error: { message: `invalid boolean log filter: ${key}` } });
         filters[key] = ['stream', 'overflow', 'switched'].includes(key) ? value === 'true' : value;
       }
-      return sendJSON(res, 200, store.query({ limit: Number(rawLimit), cursor, filters }));
+      return sendJSON(res, 200, await store.query({ limit: Number(rawLimit), cursor, filters }));
     }
     if (req.method === 'POST' && p === '/api/accounts/proxy-test') {
       const body = await readJsonBody(req);

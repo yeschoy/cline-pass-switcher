@@ -15,12 +15,12 @@ Ordinary request/error logs are diagnostic projections, not raw request dumps. A
 ### 2. Signatures
 
 ```js
-new JsonlLogStore({ dir, prefix, maxRecords, maxAgeMs, segmentBytes, totalBytes })
-store.append(projectedRecord)
-store.query({ limit, cursor, filters })
-store.clear()
-store.compact()
-enforceCombinedLimit(dir, maxBytes, segmentBytes)
+new JsonlLogGroup({ dir, streams, maxAgeMs, segmentBytes, maxTotalBytes })
+group.stream(prefix)
+stream.append(projectedRecord)
+await stream.query({ limit, cursor, filters })
+await stream.clear()
+await group.maintain()
 record(resolvedModel, diagnosticInfo)
 safeReason(value, extraSecrets)
 ```
@@ -42,13 +42,16 @@ All log APIs use the existing admin/proxy-key authentication boundary. Query `li
 
 #### Storage and retention
 
-- Request and error records are separate JSONL streams. The production limits are 50,000 request records, 10,000 error records, 30 days, 5 MiB per segment, and 100 MiB combined.
-- Appends are serialized inside each store. Compaction writes replacement segments to temporary files and renames them before deleting superseded segments.
+- Request and error records are separate JSONL streams under one directory-level `JsonlLogGroup`. The production limits are 50,000 request records, 10,000 error records, 30 days, 5 MiB per segment, and 100 MiB combined.
+- Construction creates the protected directory and starts asynchronous recovery but never reads, parses, stats, or rewrites the historical corpus before `server.listen()`. Model traffic and new-generation appends remain available during recovery. Ordinary log query/clear returns a safe `503 ordinary logs initializing` until one complete catalog is published; it never exposes a partial historical view. Recovery failure keeps model traffic fail-open and the log API safely unavailable.
+- The group owns one bounded in-memory segment catalog and the combined budget. It stores segment names, stream, bytes, record count and timestamp bounds, never request bodies or a second corpus-sized record index. The catalog is capped at 10,000 segments / 16 MiB projected metadata, and one recovery pass is capped at 120,000 parsed records / 128 MiB input. Crossing a fence preserves disk data, drops further diagnostic admission as needed and keeps the log API safely unavailable instead of growing without bound.
+- Appends use serialized asynchronous writes to one tracked active segment per stream. After recovery, an append performs no historical directory enumeration, stat, read or full rewrite. Segment size/count/timestamp facts update only after a successful write; rolling closes the active handle and creates a new segment.
+- Age, per-stream record and combined-byte maintenance uses the catalog. It deletes fully obsolete immutable segments and reads/atomically rewrites only a boundary segment when a threshold falls inside it. Replacement segments are written with mode `0600` and renamed before superseded segments are deleted. Maintenance is threshold/roll/minute driven, never a fixed every-100-record corpus compaction or per-request directory scan.
 - Combined-size enforcement orders both streams globally by `ts` and removes the oldest records first. It must not apply two independent 100 MiB limits.
-- Startup and every 100 appends enforce retention. A truncated final line and malformed individual lines are ignored rather than preventing startup.
-- Record identity is `requestId` for requests and `(requestId, attemptIndex)` for errors. Compaction deduplicates these identities so an interrupted old/new segment overlap does not duplicate diagnostics.
+- Recovery reads each historical segment once, tolerates a truncated final line and malformed complete lines, enforces retention, and deduplicates record identity (`requestId` for requests and `(requestId, attemptIndex)` for errors). Interrupted old/new replacement overlap therefore does not duplicate diagnostics.
+- Queries are asynchronous and scan catalogued segments newest first, stopping after `limit + 1` matches. Rare filters may inspect the complete bounded corpus but yield to the event loop periodically; ordinary first-page reads do not eagerly parse every segment or retain every record in memory.
 - `metadata.history` is compatibility-only. New chat requests write JSONL and update model/account aggregates, but do not grow the legacy history array.
-- A log append error may produce a redacted service-level `console.error`; it does not change the client response.
+- A log append or background-maintenance error may produce a redacted service-level `console.error`; it does not change the client response.
 
 #### Request projection
 
@@ -109,6 +112,7 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 
 | Condition | Required result |
 |---|---|
+| Ordinary log recovery is still running or failed | `503` with a bounded safe message; model traffic and new diagnostic appends remain fail-open |
 | Unknown query parameter | `400`; do not scan logs |
 | `limit` outside 1-200 or non-integer | `400` |
 | `from`, `to`, `status`, or `upstreamStatus` is not a finite integer | `400` |
@@ -136,11 +140,13 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 - **Base:** a capacity rejection has no account but still records strategy, status, request ID, and safe reason category.
 - **Bad:** `JSON.stringify(req)`, `JSON.stringify(account)`, or persisting a raw upstream error object. These cross the trust boundary.
 - **Bad:** unlinking old segments before replacement segments are durable; a rename failure would lose diagnostics.
+- **Bad:** synchronously compacting the corpus before listening, enumerating/statting files per append, or running combined retention after every request.
+- **Bad:** returning a partial historical list while background recovery is incomplete.
 - **Bad:** paginating errors by request ID alone; multiple attempts for one request will repeat or disappear.
 
 ### 6. Tests Required
 
-`test/jsonl-log-store.test.js` must cover rolling, restart replay, filtering, cursor pagination, expiry, independent clear, malformed/truncated lines, compaction dedupe, segment size, and combined global byte enforcement with small injectable limits.
+`test/jsonl-log-store.test.js` must cover asynchronous startup truthfulness, recovery-time appends, zero historical filesystem calls on ready-state append/below-threshold maintenance, rolling, restart replay, filtering, cursor pagination, expiry, independent clear, malformed/truncated lines, recovery dedupe, segment size, boundary-only retention and combined global byte enforcement with small injectable limits. A same-machine synthetic benchmark records startup/query/maintenance/heap/event-loop facts and must improve the frozen 5,000-record append baseline by at least 10×; absolute timing is not a cross-machine CI assertion.
 
 `test/integration.test.js` must assert:
 
@@ -156,7 +162,7 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 - pipeline diagnostics accept only the documented enum/boolean projection and contain no quota percentages, raw health data, or secrets;
 - simulated log/metadata write failures do not alter the already-determined chat status or body.
 
-Run `node --check lib/jsonl-log-store.js`, `npm test`, and `git diff --check` after changes.
+Run `node --check lib/jsonl-log-store.js`, `node --test test/jsonl-log-store.test.js`, `npm test`, and `git diff --check` after changes.
 
 ### 7. Wrong vs Correct
 
