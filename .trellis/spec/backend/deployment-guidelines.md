@@ -21,6 +21,8 @@ SSH identity:     <repository-root>/167.114.158.4_ubuntu_49555_ed25519
 Remote root:      /opt/cline-pass-switcher
 Compose file:     /opt/cline-pass-switcher/compose.yml
 Service/container: cline-pass-console
+Runtime user:      1000:1000
+Release modes:     directories 0755; regular files 0644
 Local bind check: http://127.0.0.1:3123/api/meta
 Public check:     https://clinepass.yeschoy.com/api/meta
 ```
@@ -47,6 +49,7 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 
 - Deploy a committed local `HEAD`, not uncommitted working-tree files. Build the upload with `git archive HEAD` and an explicit allowlist: `Dockerfile`, package manifests, `server.js`, `lib/`, `public/`, `README.md`, `LICENSE`, `.dockerignore`, and `config.example.json`.
 - Install the archive under `/opt/cline-pass-switcher/releases/<release>/`. Never overwrite an existing release directory.
+- A restrictive deployment `umask` must not make the Docker build context unreadable by the production runtime user. After extraction, normalize release directories to `0755` and regular files to `0644`, then verify those modes before building. `Dockerfile COPY` preserves context modes; root-owned `0600` application files make the hardened `1000:1000` container exit with `EACCES` before health checks can pass.
 - Preserve the existing hardened compose settings. Change only the `cline-pass-switcher:<release>` image tag and `build.context: ./releases/<release>`.
 
 #### Data, switching, and rollback
@@ -54,8 +57,9 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 - Never replace, upload, print, or manually edit production `data/config.json` as part of deployment. Record its SHA-256 before and after; without a declared schema migration they must match.
 - A release that intentionally normalizes a new persisted configuration field may use a predicted post-migration hash only after running the committed image against byte-for-byte config/metadata copies. The copied result must differ solely by the documented non-secret schema projection, and its SHA-256 becomes the exact post-switch gate. Preserve the original bytes for rollback; any additional live diff or hash mismatch requires config restoration and rollback. This exception never permits uploading a local config or printing secrets.
 - Before switching, copy `compose.yml`, `deployment.json`, `data/config.json`, and `data/metadata.json` into versioned backup/verification paths. Metadata may legitimately change while the service runs; retain its backup and report both hashes.
-- Run `docker compose -f compose.yml up -d --build`, then require `cline-pass-console` to be `running`, `healthy`, on the requested image, with zero restarts.
-- Roll back the compose file and restore the previous healthy container when build, startup, health, local endpoint, authenticated management API, internal network alias, or config-hash validation fails. When a declared config migration was applied, rollback also restores the original backed-up config bytes before starting the previous image.
+- Build with the exact candidate Compose/project directory that will be installed, capture its image ID, and use that exact Compose-built image for source/mode checks and any copied-data migration rehearsal. Before touching the live Compose file, start the image against an isolated data copy with the production `1000:1000`, read-only-root, dropped-capability, no-new-privileges, and tmpfs settings; require the process to remain running and reach its startup marker.
+- Atomically install the already-built candidate Compose and switch with `docker compose ... up -d --no-build`. Require `cline-pass-console` to be `running`, `healthy`, on the captured image ID, with zero restarts. Never rebuild during the switch because Compose provenance labels can produce a different image identity from a prior direct build.
+- Roll back the compose file and restore the previous healthy container with `up -d --no-build` when build, startup, health, local endpoint, authenticated management API, internal network alias, or config-hash validation fails. When a declared config migration was applied, rollback also restores the original backed-up config bytes before starting the previous image.
 - Do not prune releases, images, build cache, logs, or operator data during deployment.
 
 #### Endpoint policy
@@ -73,6 +77,8 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 | A nested-shell/argument quoting check fails | Prove no release/backup/compose mutation occurred, then retry with positional arguments; otherwise stop and inspect state |
 | Local deployment files are dirty but not committed | Archive committed `HEAD`; do not include working-tree content |
 | Release directory already exists or uploaded hashes differ | Stop before compose change |
+| Extracted source or built `/app` files are not readable by runtime UID/GID `1000:1000` | Stop before compose change; use a new immutable release with normalized `0755` directories and `0644` files |
+| Hardened isolated startup exits, restarts, or never reaches its startup marker | Stop before compose change and preserve its bounded logs |
 | Build/start/health/image check fails | Restore previous compose and wait for previous image to become healthy |
 | `data/config.json` hash changes without a declared migration, or differs from the copy-predicted migration hash | Restore the backed-up config, roll back, and report |
 | Authenticated loopback API or internal network alias fails | Roll back and retain evidence |
@@ -84,10 +90,12 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 
 - **Good:** archive committed `HEAD`, verify release hashes, back up state, switch two compose fields, wait for health, verify local/authenticated/internal routes, and record a safe report.
 - **Good:** verify `python3` (or another chosen host helper) during read-only preflight and pass the expected archive hash as a positional argument to the remote verifier.
+- **Good:** normalize the immutable release tree to `0755`/`0644`, verify the built image modes, and run the candidate successfully as UID/GID `1000:1000` with the production hardening settings before switching.
 - **Base:** the public hostname has a known pre-switch DNS outage; the new container passes every local/internal gate, deployment stays active, and the DNS limitation is reported separately.
 - **Bad:** ask which server to use even though the user said “remote” and this contract defines the canonical host.
 - **Bad:** use `scp -r .`, which can upload gitignored credentials, local data, `.pi`, `.trellis`, or unrelated dirty files.
 - **Bad:** print the admin key in logs or pass it through a parent-visible command line.
+- **Bad:** extract under `umask 077`, build root-owned `0600` JavaScript files, and test only as container root; production UID/GID `1000:1000` will fail before listening.
 - **Bad:** assume host-level `node` exists or embed a local hash inside a multiply nested quoted SSH command; both can fail at an ambiguous operational boundary.
 
 ### 6. Tests Required
@@ -98,6 +106,8 @@ Before switching:
 - verify the identity path is gitignored and mode `0600` without reading it;
 - verify host-side helper runtime availability and argument passing during read-only preflight;
 - inspect the current container/image/health, account count/mode, safe `/api/meta`, disk space, and config hash;
+- verify release-tree and built-image application modes are readable by UID/GID `1000:1000`;
+- run the exact Compose-built candidate against isolated copied data with the production runtime user and hardening settings, and require successful startup without touching live data;
 - for a declared config migration, run the committed image only against copied data, verify the exact documented structural diff, and record the predicted post-migration hash;
 - verify uploaded `server.js`, `public/index.html`, and security-sensitive module hashes match local `HEAD`.
 
@@ -129,6 +139,9 @@ git -C "$REPO_ROOT" archive --format=tar --output="$release.tar" HEAD -- \
   README.md LICENSE .dockerignore config.example.json
 scp -o BatchMode=yes -o ConnectTimeout=10 -i "$IDENTITY" -P 49555 \
   "$release.tar" ubuntu@167.114.158.4:/tmp/
-# Remote: verify hashes, back up state, switch the two compose fields,
-# require health/API/data checks, and restore the previous compose on failure.
+# Remote: verify hashes, extract into a new immutable release, then normalize
+# directories to 0755 and regular files to 0644. Build with the final Compose
+# path, verify the image as UID/GID 1000:1000 under production hardening, back
+# up state, install the two-field Compose change, and switch with --no-build.
+# On any hard-gate failure, restore the previous Compose with --no-build.
 ```
