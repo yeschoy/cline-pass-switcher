@@ -52,6 +52,7 @@ Use this fail-open form only where the feature contract explicitly says diagnost
 
 - Preserve upstream HTTP status separately from normalized client status.
 - Classify timeout, proxy, network, authentication, rate-limit, server, schema, and client-cancellation outcomes explicitly.
+- Distinguish local empty-input validation from an upstream `empty response content` failure. The latter means the request reached the model path but no visible completion was produced; for reasoning/tool-continuation requests, inspect the caller's `max_tokens` first (values such as 16 can be exhausted before content appears). Preserve the upstream status/error instead of relabeling it as a Switcher input error, and do not silently raise the token limit or replay the request because that changes cost and latency semantics.
 - A configured proxy failure never falls back to direct transport.
 - Client cancellation aborts upstream work, stops replay/failover after output starts, releases leases once, and does not create health penalties or error attempts.
 - Stream finalization is idempotent. A complete `[DONE]` followed by close is success; close before completion is `499 / client_cancelled`; observed stream/transport errors remain failures.
