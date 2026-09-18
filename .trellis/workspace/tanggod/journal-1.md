@@ -328,3 +328,36 @@ Directly deployed committed quota forecast UI to production as release 20260916-
 ### Status
 
 [OK] **Completed**
+
+
+## Session 13: 评估 Switcher Responses 适配
+<!-- trellis-session: v=2 fp=1579fc7e7fe6e370 -->
+
+**Date**: 2026-09-18
+**Task**: 评估 Switcher Responses 适配
+**Branch**: `feat/quota-forecast-panel`
+
+### Summary
+
+完成 Responses-over-Chat 可行性调查；确认 MCP、reasoning、vision、cache 与 usage/billing 无法等价，用户决定不在 Switcher 实施适配并关闭任务。
+
+### Main Changes
+
+- 记录 NewAPI 工具 discriminator 400 的协议边界与三种方案比较
+- 形成不实施有损 Responses 兼容层的最终决策
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] 仅调查与规划，无业务代码和运行时测试
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 如需继续当前 400，另建任务在 NewAPI Responses→Chat 转换边界定位具体 tools[].type 并修复
