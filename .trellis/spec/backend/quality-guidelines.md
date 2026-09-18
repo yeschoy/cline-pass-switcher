@@ -134,9 +134,9 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 
 #### Chat input boundary
 
-- After object/model validation and before session extraction or account selection, every item in `messages` must have non-empty content.
-- Strings must contain non-whitespace text. Content arrays must contain non-empty text or a non-text part with a non-empty payload; empty arrays, `null`, missing content, whitespace-only text, and empty parts return `400 invalid_request_error` naming only `messages.<index>.content`.
-- An assistant message with a non-empty `tool_calls` array or named legacy `function_call` may have empty content. `messages: []` remains compatible.
+- Chat Completions validates the top-level JSON object and model identifier locally, but deliberately does not validate or normalize `messages[*].content`.
+- Empty strings, whitespace-only strings, `null`, missing content, empty arrays, empty multimodal parts, and empty tool results pass through unchanged. This preserves compatibility with clients that represent a successful no-output tool call as `""` or `"\n"`; the upstream owns message-role/content schema acceptance.
+- `messages: []` remains compatible.
 - `POST /v1/responses` returns authenticated `501 unsupported_api` directing callers to `/v1/chat/completions`, without reading/routing the payload or acquiring an account.
 
 #### Abort and SSE lifecycle
@@ -177,7 +177,7 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 |---|---|
 | Chat JSON is malformed or not an object | `400`; no upstream request |
 | Chat `model` is missing, blank, non-string, or over 300 characters | `400` |
-| `messages.<index>.content` is empty without an assistant tool-call exception | `400 invalid_request_error`; report the path only; no account/upstream request |
+| Any `messages.<index>.content` value is empty, whitespace-only, `null`, missing, or an empty array/part | Do not reject or normalize locally; preserve it in the upstream request and return the upstream outcome |
 | `POST /v1/responses` | authenticated `501 unsupported_api`; no account/upstream request |
 | Request body exceeds 50 MiB | Reject promptly with `413` as soon as the limit is crossed, even if the client pauses before request end; discard/drain the remaining body without buffering or destroying the socket |
 | No statically available account | `503` with a redacted error |
@@ -225,6 +225,7 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - **Base:** opening statistics within five minutes of a successful partial snapshot returns cached diagnostics without enabling quota routing.
 - **Base:** no account-specific `perModel[model]` exists, so the global route is used unchanged.
 - **Base:** no identity is extractable, so sticky deliberately behaves as round-robin.
+- **Base:** a tool result containing only `"\n"` is forwarded unchanged instead of becoming a Switcher-generated `400`.
 - **Bad:** calling account selection inside the provider-attempt loop; this breaks request-level account affinity.
 - **Bad:** forwarding the downstream Authorization or relying on `fetch` for chat transport; either leaks proxy credentials or creates synthetic client headers.
 - **Bad:** replaying an SSE request after the first valid event has been written.
@@ -247,7 +248,7 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - fragmented first-event SSE errors are normalized before output; valid SSE contains data and `[DONE]`;
 - a wrapped error after SSE output starts updates the existing provider trace and future account state without replaying or adding a pseudo-attempt;
 - a downstream close after observed `[DONE]` is `200 / success`; a close before `[DONE]` and a non-streaming cancellation are `499 / client_cancelled`, abort upstream work, stop failover, release capacity, and add no error attempt, usage, error/health result, or account action;
-- empty/whitespace/null/missing/empty-array message content is rejected before account/upstream work, while assistant tool calls and non-empty non-text parts remain accepted; errors expose only the indexed field path;
+- empty/whitespace/null/missing/empty-array message content and a newline-only tool result reach the local mock upstream unchanged instead of producing a Switcher validation error;
 - authenticated `POST /v1/responses` returns the stable 501 `unsupported_api` shape without account selection or upstream traffic;
 - oversized clients receive prompt `413` before request end while request buffering remains bounded;
 - persisted history contains no account key or raw session value;
@@ -261,7 +262,7 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - the statistics refresh API rejects invalid/query/overload requests before work, returns bounded outcome counts, changes no configuration, refreshes only enabled keyed persisted accounts and never enters ordinary/detailed chat logs or chat statistics;
 - `/api/statistics` is authenticated, coverage-labelled, bounded, stable-ID keyed, and contains no sensitive/raw provider data.
 
-The current integration suite directly covers stable identities, provider/account failover, capacity overflow, valid SSE, fragmented pre-response SSE errors, wrapped post-start SSE errors without replay, `[DONE]`-then-close success, streaming/non-streaming client cancellation projections, empty-content rejection and exceptions, deliberate Responses API rejection, prompt oversized-body rejection, HRW input-order independence, minimal remapping after account removal, missing usage, oversized CRLF SSE recovery, statistics corruption rejection, and quota generation invalidation.
+The current integration suite directly covers stable identities, provider/account failover, capacity overflow, valid SSE, fragmented pre-response SSE errors, wrapped post-start SSE errors without replay, `[DONE]`-then-close success, streaming/non-streaming client cancellation projections, unchanged empty-content and empty-tool-result pass-through, deliberate Responses API rejection, prompt oversized-body rejection, HRW input-order independence, minimal remapping after account removal, missing usage, oversized CRLF SSE recovery, statistics corruption rejection, and quota generation invalidation.
 
 Run `node --check server.js`, `npm test`, and `git diff --check` after changing this boundary.
 

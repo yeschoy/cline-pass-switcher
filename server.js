@@ -1982,37 +1982,6 @@ function statisticsSegments(trace, finalAccountId, usage, clientDisconnect = fal
   for (const attempt of trace || []) { const list = grouped.get(attempt.accountId) || []; list.push(attempt); grouped.set(attempt.accountId, list); }
   return [...grouped.entries()].map(([accountId, attempts]) => { const success = !clientDisconnect && attempts.at(-1)?.status === 200; return { accountId, trace: attempts, success, error: !clientDisconnect && !success, usage: success && accountId === finalAccountId ? usage : null }; });
 }
-function hasMessageContent(value) {
-  if (typeof value === 'string') return value.trim().length > 0;
-  if (Array.isArray(value)) return value.some(hasMessagePartContent);
-  return false;
-}
-function hasPayload(value) {
-  if (typeof value === 'string') return value.trim().length > 0;
-  if (Array.isArray(value)) return value.some(hasPayload);
-  if (value && typeof value === 'object') return Object.values(value).some(hasPayload);
-  return false;
-}
-function hasMessagePartContent(part) {
-  if (!part || typeof part !== 'object' || Array.isArray(part)) return false;
-  if (part.type === 'text') return typeof part.text === 'string' && part.text.trim().length > 0;
-  if (typeof part.text === 'string' && part.text.trim()) return true;
-  return Object.entries(part).some(([key, value]) => key !== 'type' && key !== 'text' && hasPayload(value));
-}
-function allowsEmptyAssistantContent(message) {
-  if (message?.role !== 'assistant') return false;
-  if (Array.isArray(message.tool_calls) && message.tool_calls.some((call) => call && typeof call === 'object' && Object.keys(call).length)) return true;
-  const call = message.function_call;
-  return !!call && typeof call === 'object' && typeof call.name === 'string' && call.name.trim().length > 0;
-}
-function emptyMessageContentPath(body) {
-  if (!Array.isArray(body.messages)) return null;
-  for (let index = 0; index < body.messages.length; index++) {
-    const message = body.messages[index];
-    if (!hasMessageContent(message?.content) && !allowsEmptyAssistantContent(message)) return `messages.${index}.content`;
-  }
-  return null;
-}
 async function handleChat(req, res) {
   const detail = detailContext.getStore();
   const requestId = detail?.requestId || crypto.randomUUID();
@@ -2024,8 +1993,6 @@ async function handleChat(req, res) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return sendJSON(res, 400, { error: { message: 'JSON body must be an object' } });
   const requestedModel = typeof body.model === 'string' ? body.model.trim() : '';
   if (!requestedModel || requestedModel.length > 300) return sendJSON(res, 400, { error: { message: 'valid model is required' } });
-  const emptyContentPath = emptyMessageContentPath(body);
-  if (emptyContentPath) return sendJSON(res, 400, { error: { message: `${emptyContentPath} must not be empty`, type: 'invalid_request_error', param: emptyContentPath, code: 'invalid_request_error' } });
   const sensitiveValues = sensitiveMessageValues(body);
   let statisticsFinalized = false;
   const finalizeStatistics = (facts) => { if (statisticsFinalized) return; statisticsFinalized = true; try { commitStatistics(facts); } catch (error) { console.error(`[统计] 持久化失败：${safeReason(error.message)}`); } };

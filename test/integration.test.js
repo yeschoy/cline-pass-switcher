@@ -114,7 +114,7 @@ async function waitForRequestLogs(port, count) {
   return page?.items || [];
 }
 
-test('API compatibility, message boundary and request outcomes are explicit', async (t) => {
+test('API compatibility, message pass-through and request outcomes are explicit', async (t) => {
   const seen = [];
   const mock = http.createServer((req, res) => {
     const chunks = [];
@@ -149,16 +149,25 @@ test('API compatibility, message boundary and request outcomes are explicit', as
   assert.deepEqual(unsupported.json, { error: { message: 'OpenAI Responses API is not supported; use /v1/chat/completions instead', type: 'unsupported_api', param: null, code: 'unsupported_api' } });
   assert.equal(seen.length, beforeUnsupported, 'unsupported API must not reach account routing or upstream');
 
-  const invalidContents = ['', '   ', null, [], [{ type: 'text', text: '  ' }], [{}], [{ type: 'image_url', image_url: false }], undefined];
-  for (const [index, content] of invalidContents.entries()) {
+  const passthroughContents = ['', '   ', null, [], [{ type: 'text', text: '  ' }], [{}], [{ type: 'image_url', image_url: false }], undefined];
+  for (const [index, content] of passthroughContents.entries()) {
     const message = { role: 'user' };
     if (content !== undefined) message.content = content;
-    const response = await rawJson(switchPort, '/v1/chat/completions', { model: 'invalid-boundary', messages: [message] });
-    assert.equal(response.status, 400, `invalid content case ${index}`);
-    assert.deepEqual(response.json, { error: { message: 'messages.0.content must not be empty', type: 'invalid_request_error', param: 'messages.0.content', code: 'invalid_request_error' } });
-    assert.equal(response.text.includes('invalid-boundary'), false, 'validation response must contain only the safe field path');
+    const before = seen.length;
+    const response = await rawJson(switchPort, '/v1/chat/completions', { model: 'passthrough-content', messages: [message] });
+    assert.equal(response.status, 200, `empty content pass-through case ${index}`);
+    assert.equal(seen.length, before + 1, `empty content case ${index} must reach upstream`);
+    assert.deepEqual(seen.at(-1).messages, [message]);
   }
-  assert.equal(seen.length, beforeUnsupported, 'invalid messages must be rejected before upstream');
+
+  const emptyToolMessages = [
+    { role: 'user', content: 'read a file' },
+    { role: 'assistant', content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'bash', arguments: '{}' } }] },
+    { role: 'tool', content: '\n', tool_call_id: 'call_1' },
+    { role: 'user', content: '?' },
+  ];
+  assert.equal((await rawJson(switchPort, '/v1/chat/completions', { model: 'empty-tool-content', messages: emptyToolMessages, max_tokens: 5 })).status, 200);
+  assert.deepEqual(seen.at(-1).messages, emptyToolMessages, 'empty tool output must pass through unchanged');
 
   assert.equal((await rawJson(switchPort, '/v1/chat/completions', { model: 'valid-image', messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.test/image.png' } }] }] })).status, 200);
   assert.equal((await rawJson(switchPort, '/v1/chat/completions', { model: 'valid-tool', messages: [{ role: 'assistant', content: null, tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'lookup', arguments: '{}' } }] }] })).status, 200);
@@ -168,8 +177,8 @@ test('API compatibility, message boundary and request outcomes are explicit', as
   await disconnectRequest(switchPort, { model: 'stream-cancel', stream: true, messages: [{ role: 'user', content: 'cancel' }] }, true);
   await disconnectRequest(switchPort, { model: 'nonstream-cancel', messages: [{ role: 'user', content: 'cancel' }] });
 
-  const logs = await waitForRequestLogs(switchPort, 6);
-  assert.equal(logs.length, 6, 'each accepted request must finalize exactly once');
+  const logs = await waitForRequestLogs(switchPort, 15);
+  assert.equal(logs.length, 15, 'each accepted request must finalize exactly once');
   for (const model of ['valid-image', 'valid-tool', 'valid-function-call', 'done-close', 'stream-cancel', 'nonstream-cancel']) {
     assert.equal(logs.filter((item) => item.requestedModel === model).length, 1, `${model} must have one final request record`);
   }
@@ -180,9 +189,9 @@ test('API compatibility, message boundary and request outcomes are explicit', as
   assert.equal((await (await fetch(`http://127.0.0.1:${switchPort}/api/logs/requests?result=client_cancelled`)).json()).items.length, 2);
   assert.equal((await (await fetch(`http://127.0.0.1:${switchPort}/api/logs/errors`)).json()).items.length, 0, 'client cancellation must not create attempt errors');
   const statistics = await (await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json();
-  assert.equal(statistics.lifetime.global.requests, 6); assert.equal(statistics.lifetime.global.errors, 0);
+  assert.equal(statistics.lifetime.global.requests, 15); assert.equal(statistics.lifetime.global.errors, 0);
   assert.equal(statistics.lifetime.global.usageRequests, 0); assert.equal(statistics.lifetime.global.inputTokens, 0, 'usage observed before cancellation must be discarded');
-  assert.equal(statistics.accounts[0].health.results, 4, 'successful requests count for health; cancellations do not');
+  assert.equal(statistics.accounts[0].health.results, 13, 'successful requests count for health; cancellations do not');
   const accounts = (await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json()).accounts;
   assert.equal(accounts[0].activeCount, 0);
   assert.notEqual(accounts[0].state?.banned, true, 'abort-generated transport errors must not apply account rules');
@@ -1532,8 +1541,8 @@ test('detailed logging settings, route matrix, actual-call groups and credential
   }
   const retry = await groupAfter(rawJson(port, '/v1/chat/completions', { model: 'retry', messages: [] }, auth));
   assert.deepEqual(retry.group.attempts.map((a) => a.status), [500, 200]); assert.equal(new Set(retry.group.attempts.map((a) => a.callId)).size, 2);
-  const invalid = await groupAfter(rawJson(port, '/v1/chat/completions', { model: 'alias', messages: [{ role: 'user', content: '' }] }, auth));
-  assert.equal(invalid.response.status, 400); assert.equal(invalid.group.attempts.length, 0);
+  const emptyContent = await groupAfter(rawJson(port, '/v1/chat/completions', { model: 'alias', messages: [{ role: 'user', content: '' }] }, auth));
+  assert.equal(emptyContent.response.status, 200); assert.equal(emptyContent.group.attempts.length, 1);
   const unauthorized = await groupAfter(rawJson(port, '/v1/chat/completions', { key: 'unread-secret' }));
   assert.equal(unauthorized.response.status, 401); assert.equal(unauthorized.group.bodies[0].state, 'unread');
   const unsupported = await groupAfter(rawJson(port, '/v1/responses', { key: 'unread-secret' }, auth));
