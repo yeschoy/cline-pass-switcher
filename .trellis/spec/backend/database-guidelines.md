@@ -130,17 +130,21 @@ Startup normalization preserves legacy behavior while making the schema explicit
   orModelsFetchedAt, orModelList,
   officialModelsFetch,
   statistics: {
-    version: 1,
+    version: 2,
     lifetime: { global: Aggregate, accounts: { [accountId]: Aggregate } },
     minuteBuckets: [{
       minute,
       global: Aggregate,
       accounts: { [accountId]: Aggregate },
-      health: { [accountId]: HealthDelta }
+      health: { [accountId]: HealthDelta },
+      models: { [resolvedModelId]: Aggregate }
     }],
     recentCoverage: {
       droppedAccountMinuteCells,
-      accountIncompleteAt: { [accountId]: minute }
+      accountIncompleteAt: { [accountId]: minute },
+      modelTrackingStartedMinute,
+      droppedModelMinuteCells,
+      modelIncompleteAt: { [resolvedModelId]: minute }
     },
     migration: {
       legacyStatsMigratedAt,
@@ -173,7 +177,7 @@ Startup normalization preserves legacy behavior while making the schema explicit
 
 `metadata.json` must not contain account keys, proxy credentials, custom Header values, account notes, raw session values, HMAC fingerprints, message text, or identity-source labels. Bounded identity-source labels such as `message_hmac` belong only to ordinary request-log projections. Reasons written to metadata are redacted and flattened; bounded model status notes may be truncated, while complete redacted structured provider reasons belong to the separate error JSONL stream.
 
-`Aggregate` has fixed non-negative safe-integer counters for requests, errors, usage coverage, input/output/total tokens, and cache coverage/tokens. A counter that would overflow becomes `null` and its exact field name is added once to `overflowFields`; a `null` field without that marker, or a marker whose field is not `null`, is corrupt. Statistics retain at most 1,440 minute buckets and 50,000 union `(minute, accountId)` cells. Dropped account cells mark recent coverage incomplete rather than inventing zeroes.
+`Aggregate` has fixed non-negative safe-integer counters for requests, errors, usage coverage, input/output/total tokens, and cache coverage/tokens. A counter that would overflow becomes `null` and its exact field name is added once to `overflowFields`; a `null` field without that marker, or a marker whose field is not `null`, is corrupt. Statistics retain at most 1,440 minute buckets, 50,000 union `(minute, accountId)` cells and an independent 50,000 `(minute, resolvedModelId)` cells. Dropped account/model cells mark only their owning recent coverage incomplete rather than inventing zeroes. Model aggregation starts at the v1→v2 migration minute, uses the post-alias resolved model ID, and has no fabricated lifetime baseline; until 1,440 minutes are covered, the API labels the rolling model window incomplete.
 
 Legacy name-keyed `stats` is migration input only. It moves once into the separately labelled `migration` baseline and never fabricates exact chat, token, cache, recent-window, or health facts. Unknown newer statistics versions, malformed aggregates, unordered buckets, excess cells, invalid IDs, and malformed quota snapshots fail startup before any save.
 
@@ -211,7 +215,8 @@ Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/
 | Route has over 20 upstreams, over 50 exclusions, invalid slug/mode/sort, or `maxRetries` outside 0-20 | `400`; no write |
 | Error rule status outside 100-599, unknown action, or non-positive cooldown | `400`; no write |
 | `accountPipeline` lacks any of the four booleans, has unknown fields, has `cachePoolSize` outside integer 0-100000, or has an explicit `order` that is not an exact four-step permutation | `400`; no write; an older client may omit `order` and/or `cachePoolSize`, preserving the current server values |
-| Existing statistics version is missing/unknown or its structure exceeds bounds | startup fails; original metadata bytes remain |
+| Valid statistics v1 | validate completely, migrate to v2 by adding empty per-minute model maps and a current tracking-start minute, then atomically persist without changing global/account facts |
+| Existing statistics version is missing/unknown or its structure exceeds account/model bounds | startup fails; original metadata bytes remain |
 | Aggregate overflow marker and `null` field disagree | startup fails; original metadata bytes remain |
 | Quota percentage is outside 0-100, persisted reset time is not canonical millisecond UTC, or a state field is unknown | startup fails; original metadata bytes remain |
 | Upstream reset time has no timezone, over 9 fractional digits, or an impossible Gregorian date | refresh records safe `schema`; retain the complete last-good snapshot |
@@ -248,11 +253,11 @@ Persistence changes must use a temporary `DATA_DIR` and assert:
 - newly created `metadata.json` has mode `0600` on POSIX;
 - metadata serialization excludes known account keys and raw session values;
 - legacy name-keyed request counts migrate only into the labelled baseline without fabricating exact usage;
-- malformed/future statistics, inconsistent overflow markers, invalid quota timestamps, and more than 50,000 account-minute cells fail before save while preserving exact bytes;
+- valid v1 statistics migrate once to v2 without changing global/account facts; malformed/future statistics, inconsistent overflow markers, invalid quota timestamps, and more than 50,000 account-minute or model-minute cells fail before save while preserving exact bytes;
 - upstream quota reset times with 1, 3, 6 and 9 fractional digits plus numeric offsets normalize to millisecond UTC, while missing timezone, over-precision and impossible dates fail as `schema` and retain the prior snapshot;
 - partial quota success replaces older windows, failure retains last-good values, and metadata never persists owner/generation/queue/controller or raw quota state;
 - key/proxy rotation clears stale quota, disable retains last-good display data without allowing stale publication, and pruning removes deleted-account statistics/quota state without deleting global history;
-- pruning retains 1,440 minute buckets and marks dropped account coverage incomplete;
+- pruning retains 1,440 minute buckets, independently caps account/model cells, and marks only the dropped account/model coverage incomplete;
 - account removal deletes its `accountStates` entry;
 - invalid management payloads return `400` and leave the previous on-disk JSON unchanged;
 - detailed settings default/type/unknown-field/restart tests and injected atomic-write failure preserve previous config bytes/runtime mode; independent detail retention/recovery never changes ordinary logs or metadata.

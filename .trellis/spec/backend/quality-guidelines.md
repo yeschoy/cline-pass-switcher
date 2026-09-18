@@ -29,7 +29,7 @@ clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000,
   account = null, proxyUrl = "" })
 normalizeUsage(raw)
 createSseObserver(maxBytes = 64 * 1024)
-commitStatistics({ ts, globalError, usage, segments, clientDisconnect })
+commitStatistics({ ts, modelId, globalError, usage, segments, clientDisconnect })
 healthProjection(account, now)
 quotaProjection(accountId, now)
 statisticsQuotaProjection(account, now)
@@ -112,6 +112,8 @@ Presence is tested with `hasOwnProperty`; even `{}` is a complete account overri
 
 `maxRetries: null` runs all built provider attempts; an integer `n` permits the first attempt plus at most `n` additional outer attempts.
 
+A successful model probe builds its known provider set from the observed `finalProvider`, strict provider slugs harvested from either string or structured error envelopes, documented fallbacks and direct-pipeline endpoint details. Discovery state is distinct from `upstreamStatus`: observing a provider prevents a false zero count but never claims that provider passed pin validation.
+
 #### Header and credential boundary
 
 Protocol allowlists are exclusive:
@@ -151,13 +153,13 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 
 #### Usage, statistics, and health
 
-- One request-scoped idempotent finalizer owns statistics commit. Each accepted chat increments the global request aggregate once, and each participating account ID appears at most once in that request's account segments.
-- Only explicit normalized upstream usage counts. `0` is known; a missing/invalid field is `null`; input, output, total, cache, or cache ratios are never inferred from another field.
+- One request-scoped idempotent finalizer owns statistics commit. Each accepted chat increments the global aggregate and the post-alias resolved-model minute aggregate once, and each participating account ID appears at most once in that request's account segments. Provider retries and account replacement do not duplicate model usage.
+- Only explicit normalized upstream usage counts. `0` is known; a missing/invalid field is `null`; input, output, total, cache, or cache ratios are never inferred from another field. Model cache Token ratio is likewise computed only from explicit input/cache pairs.
 - Non-stream JSON reads its terminal usage object. Streaming retains only the last cumulative usage snapshot while incrementally observing SSE events. Each event is bounded to 64 KiB; an oversized event is discarded through its CRLF/LF boundary, then observation resumes for later events.
 - Management, probe, model-catalog, and quota traffic never enters chat statistics or health.
 - Health records at most one terminal result per account segment: success `0`, auth `10`, rate-limit `7`, network/proxy/timeout `6`, server 5xx `4`, and other terminal errors `5` penalty units. Ordinary parameter 4xx and client disconnects produce no health result.
 - The 24-hour score is `100 - penaltyUnits / (10 * results) * 100`. Fewer than five results or incomplete recent coverage is `insufficient`; otherwise scores are `available >= 80`, `degraded >= 50`, or `unhealthy < 50`. Ban, cooldown, disablement, and missing coverage remain explicit states.
-- `GET /api/statistics` is authenticated and returns projected global/account lifetime and 1,440-minute aggregates, coverage-labelled usage/cache metrics, health, quota, and a separately labelled legacy migration baseline. It returns no credentials, raw events, messages, sessions, or raw quota responses.
+- `GET /api/statistics` is authenticated and returns projected global/account lifetime and 1,440-minute aggregates, plus per-resolved-model rolling aggregates with model tracking/cell-loss coverage, health, quota, and a separately labelled legacy migration baseline. `GET /api/accounts` embeds a stable-ID account statistics summary for the main table while retaining the legacy name-keyed `stats` projection only for old clients. Neither endpoint returns credentials, raw events, messages, sessions, or raw quota responses.
 
 #### Quota refresh and account pipeline
 
@@ -252,7 +254,7 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - authenticated `POST /v1/responses` returns the stable 501 `unsupported_api` shape without account selection or upstream traffic;
 - oversized clients receive prompt `413` before request end while request buffering remains bounded;
 - persisted history contains no account key or raw session value;
-- non-stream and fragmented/oversized streaming responses count only explicit usage, preserve known zero versus missing, and finalize once across success, failure, and disconnect;
+- non-stream and fragmented/oversized streaming responses count only explicit usage, preserve known zero versus missing, and finalize global/account/resolved-model statistics once across provider retry, account replacement, success, failure and disconnect;
 - health penalty classes, minimum coverage, score thresholds, incomplete coverage, and one-result-per-account-segment behavior are deterministic;
 - all-false size-zero pipeline output is equivalent to each legacy mode, while every stored order round-trips and representative quota/health/sticky permutations prove earlier-stage priority, implicit sticky compatibility, eligibility, capacity fallback and lease release;
 - cache-pool migration/old-client preservation, dormant non-sticky behavior, quota-owner withdrawal on mode/step changes, priority/ID membership, soft-state stability, hard-state replacement, immediate zero-active standby, same-identity HRW, active-only normal traffic, active capacity overflow, delayed standby overflow, 429 without standby, lease release and safe diagnostics are deterministic;
@@ -260,7 +262,7 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - simultaneous routing/save/manual/multi-page demand never exceeds two truly unfinished upstream responses, same-account work joins, force does not bypass backoff, and a success since page-batch acceptance prevents a sequential duplicate even across key/proxy rotation;
 - page close, routing off/on, disable/re-enable, key A→B→A, proxy rotation and deletion fence queued/header/body completions; owner-only cancellation records no failure/backoff; slow-drip responses hit the absolute deadline;
 - the statistics refresh API rejects invalid/query/overload requests before work, returns bounded outcome counts, changes no configuration, refreshes only enabled keyed persisted accounts and never enters ordinary/detailed chat logs or chat statistics;
-- `/api/statistics` is authenticated, coverage-labelled, bounded, stable-ID keyed, and contains no sensitive/raw provider data.
+- `/api/statistics` is authenticated, coverage-labelled, bounded, stable-ID/resolved-model keyed, migrates v1 model coverage truthfully, and contains no sensitive/raw provider data; `/api/accounts` account summaries stay ID-bound across duplicate/renamed names.
 
 The current integration suite directly covers stable identities, provider/account failover, capacity overflow, valid SSE, fragmented pre-response SSE errors, wrapped post-start SSE errors without replay, `[DONE]`-then-close success, streaming/non-streaming client cancellation projections, unchanged empty-content and empty-tool-result pass-through, deliberate Responses API rejection, prompt oversized-body rejection, HRW input-order independence, minimal remapping after account removal, missing usage, oversized CRLF SSE recovery, statistics corruption rejection, and quota generation invalidation.
 

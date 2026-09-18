@@ -169,10 +169,29 @@ test('apply rechecks visible membership even without redraw and deselection upda
   assert.equal(h.calls.length,0);
 });
 
+test('model and account summaries render stable-id statistics without entering account save payloads', async () => {
+  const h=harness();
+  h.run("ACCS.accounts[0].health={status:'available',score:92.5,results:10}; ACCS.accounts[0].statistics={recent24h:{cacheTokenRatio:.25,cacheInputKnownRequests:4,errors:2},lifetimeErrors:3}; renderAccounts()");
+  assert.match(h.el('#accBody').innerHTML,/25\.0%/);assert.equal((h.el('#accBody').innerHTML.match(/25\.0%/g)||[]).length,1,'duplicate names must not share ID-keyed statistics');assert.match(h.el('#accBody').innerHTML,/4 请求有数据/);assert.match(h.el('#accBody').innerHTML,/available/);assert.match(h.el('#accBody').innerHTML,/92\.5/);assert.match(h.el('#accBody').innerHTML,/2 \/ 3/);
+  h.context.sent=[];h.run("api=async(path,body)=>{sent.push({path,body});return {ok:false};}; $('#accountErrorRules').value='{}'");await h.run('saveAccounts()');
+  const saved=JSON.parse(h.run('JSON.stringify(sent[0].body.accounts[0])'));
+  assert.equal(Object.hasOwn(saved,'statistics'),false);assert.equal(Object.hasOwn(saved,'health'),false);
+
+  h.el('#logPanel').hidden=true;
+  h.context.modelData={proxyBase:'http://example/v1',subscription:[{id:'cline-pass/model',config:{upstreams:[],exclude:[]},configSource:'global',meta:{probedAt:1,pinnable:true,pipeline:'planner',canonicalSlug:'private/model',lastProvider:'private',lastMs:10,upstreams:['private'],upstreamDiscovery:'known'},statistics:{recent24h:{cacheTokenRatio:.5,cacheInputKnownRequests:2,cacheInputCachedTokens:5,cacheInputTokens:10},coverage:{complete:false}}}],catalog:[],catalogCount:0,officialFetch:null,accountId:null};
+  h.run('DATA=modelData; render()');
+  assert.match(h.el('#subBody').innerHTML,/50\.0%/);assert.match(h.el('#subBody').innerHTML,/2 请求有数据/);assert.match(h.el('#subBody').innerHTML,/统计积累中/);
+  h.context.zeroModelStat={recent24h:{cacheTokenRatio:0,cacheInputKnownRequests:1,cacheInputCachedTokens:0,cacheInputTokens:10},coverage:{complete:true}};
+  assert.match(h.run('modelCacheMetric(zeroModelStat)'),/0\.0%/);
+  h.context.unknownModelStat={recent24h:{cacheTokenRatio:null,cacheInputKnownRequests:0},coverage:{complete:true}};
+  assert.match(h.run('modelCacheMetric(unknownModelStat)'),/无数据/);
+});
+
 test('quota rendering preserves known zero/full values and labels partial, stale, failed and ineligible snapshots', () => {
   const h=harness();
   h.context.known={limits:{five_hour:{percentUsed:0,resetsAt:'2026-09-15T00:00:00.000Z'},weekly:{percentUsed:100},monthly:{percentUsed:37.5}}};
-  assert.match(h.run("quotaLimit(known,'five_hour','5 小时')"),/已用 0\.0% · 剩余 100\.0%/);assert.match(h.run("quotaLimit(known,'weekly','每周')"),/已用 100\.0% · 剩余 0\.0%/);assert.match(h.run("quotaLimit(known,'monthly','每月')"),/已用 37\.5% · 剩余 62\.5%/);
+  assert.match(h.run("quotaLimit(known,'five_hour','5 小时')"),/^5 小时：剩余 100\.0%/);assert.match(h.run("quotaLimit(known,'weekly','每周')"),/^每周：剩余 0\.0%/);assert.match(h.run("quotaLimit(known,'monthly','每月')"),/^每月：剩余 62\.5%/);
+  assert.doesNotMatch(h.run("quotaLimit(known,'monthly','每月')"),/已用/);
   h.context.invalid={limits:{five_hour:{percentUsed:'0',resetsAt:'bad'},weekly:{percentUsed:25,resetsAt:'2026-09-15'}}};assert.equal(h.run("quotaLimit(invalid,'five_hour','5 小时')"),'5 小时：未知 · 重置时间未提供');assert.match(h.run("quotaLimit(invalid,'weekly','每周')"),/重置时间 未提供/);
   const base={health:{status:'insufficient'},quota:{status:'unknown',pool:'unknown',fetchedAt:1000,lastAttemptAt:1000,lastSuccessAt:1000,limits:{weekly:{percentUsed:25}},errorCategory:null,refresh:{eligible:true,reason:null,state:'idle',nextAttemptAt:2000}}};
   h.context.row=base;assert.match(h.run('quotaState(row,1000)'),/部分可用/);
@@ -278,7 +297,7 @@ test('successful raw save hydrates persisted values and clears obsolete draft fe
   const before=h.snapshot();
   assert.match(h.el('#rawSchedulingFeedback').textContent,/尚未生效/);
   h.context.sent=[];
-  h.context.responses={'/api/models':{},'/api/security':{},'/api/meta':{configured:true},'/api/model-aliases':{aliases:{}}};
+  h.context.responses={'/api/models':{},'/api/security':{},'/api/meta':{configured:true},'/api/model-aliases':{aliases:{}},'/api/statistics':{models:[]}};
   // Only unrelated model rendering and the API are stubbed; saveAccounts/loadAll are production functions.
   h.run(`render=()=>{}; api=async(path,body)=>{
     sent.push({path,body});
@@ -288,7 +307,7 @@ test('successful raw save hydrates persisted values and clears obsolete draft fe
   await h.run('saveAccounts()');
   assert.equal(h.context.sent.filter(call=>call.body).length,1);
   assert.equal(h.context.sent[0].path,'/api/accounts');
-  assert.equal(h.context.sent.filter(call=>!call.body).length,5);
+  assert.equal(h.context.sent.filter(call=>!call.body).length,6);
   assert.deepEqual(h.snapshot().accounts,before.accounts.map(({activeCount,cachePoolRole,...a})=>a));
   assert.equal(h.snapshot().active,1); assert.equal(h.snapshot().accounts[1].maxConcurrent,42);
   assert.equal(h.el('#accMode').value,draft.accountMode);

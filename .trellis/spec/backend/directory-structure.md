@@ -33,7 +33,7 @@ Before changing a shared helper, inspect every route and background caller. Requ
 
 Extract a module only when it owns a cohesive, independently testable boundary:
 
-- `JsonlLogStore` owns ordinary segmented JSONL retention and pagination.
+- `JsonlLogGroup` owns both ordinary segmented JSONL streams, their combined retention budget and pagination.
 - `DetailRedactor`, `BodyCapture`, and `DetailRoot` own bounded capture/sanitization.
 - `DetailedLogStore` owns the separate detailed-log filesystem and serialization queue.
 

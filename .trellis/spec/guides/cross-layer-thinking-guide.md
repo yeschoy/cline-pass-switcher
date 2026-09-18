@@ -72,7 +72,7 @@ The SSH identity and production data stay outside the archive and must never be 
 | Account-bound credentials and proxies | `responseHeadersFor()` / `clineRequest()` | downstream credentials never become upstream credentials; configured proxy failure never falls back direct |
 | Account and model snapshots | `DATA` / `ACCS` / `ALIASES` | reload accepted server state after destructive writes |
 | Stale asynchronous UI work | feature-specific generations/controllers | success, catch, and finally all verify current ownership |
-| Ordinary diagnostics | request/error projections and `JsonlLogStore` | strict allowlist; no bodies, Header values, sessions, notes, or credentials |
+| Ordinary diagnostics | request/error projections and directory-level `JsonlLogGroup` | strict allowlist; no bodies, Header values, sessions, notes, or credentials |
 | Detailed diagnostics | capture/redactor/store boundary | sanitize before publication; failures remain fail-open for model traffic |
 | Deployment switch | canonical production contract | preserve config, verify hashes/health, retain rollback artifacts |
 

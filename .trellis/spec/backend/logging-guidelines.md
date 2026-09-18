@@ -298,7 +298,7 @@ DELETE /api/logs/details
 - **Good:** alias input, rewritten provider requests, rejected SSE head and final client response remain correlated but distinct.
 - **Good:** a Location URL password scrubs an earlier JSON echo and ordinary header echo before temporary files are written.
 - **Base:** mode off creates no captures and leaves all ordinary behavior unchanged.
-- **Bad:** adding bodies to `JsonlLogStore`, consuming a second flowing response stream, or claiming an unread GET body is complete empty.
+- **Bad:** adding bodies to `JsonlLogGroup`, consuming a second flowing response stream, or claiming an unread GET body is complete empty.
 - **Bad:** sanitizing headers only after serializing bodies; field-order-dependent credential leaks result.
 
 ### 6. Tests Required

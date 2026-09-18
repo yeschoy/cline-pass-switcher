@@ -295,29 +295,54 @@ function validateHealth(value, label) {
   if (!isPlainObject(value) || Object.keys(value).some((key) => !HEALTH_FIELDS.includes(key))) throw new Error(`invalid statistics ${label}`);
   for (const key of HEALTH_FIELDS) if (!Number.isSafeInteger(value[key]) || value[key] < 0) throw new Error(`invalid statistics ${label}.${key}`);
 }
-function createStatistics() {
-  return { version: 1, lifetime: { global: emptyAggregate(), accounts: {} }, minuteBuckets: [], recentCoverage: { droppedAccountMinuteCells: 0, accountIncompleteAt: {} }, migration: { legacyStatsMigratedAt: Date.now(), legacyRequests: 0, accountLegacyRequests: {}, ambiguousNames: 0, unmappedNames: 0 } };
+const STATISTICS_VERSION = 2;
+const MAX_ACCOUNT_MINUTE_CELLS = 50000;
+const MAX_MODEL_MINUTE_CELLS = process.env.NODE_ENV === 'test' ? Math.max(1, Number(process.env.CLINE_PASS_TEST_MODEL_CELL_LIMIT) || 50000) : 50000;
+const FORBIDDEN_STATISTIC_KEYS = new Set(['__proto__','prototype','constructor']);
+function validStatisticModelId(id) { return typeof id === 'string' && id.length > 0 && id.length <= 300 && !/[\x00-\x1f\x7f]/.test(id) && !FORBIDDEN_STATISTIC_KEYS.has(id); }
+function aggregateCell(map, key) {
+  if (!Object.hasOwn(map, key)) Object.defineProperty(map, key, { value: emptyAggregate(), enumerable: true, configurable: true, writable: true });
+  return map[key];
+}
+function createStatistics(now = Date.now()) {
+  return { version: STATISTICS_VERSION, lifetime: { global: emptyAggregate(), accounts: {} }, minuteBuckets: [], recentCoverage: { droppedAccountMinuteCells: 0, accountIncompleteAt: {}, modelTrackingStartedMinute: Math.floor(now / 60000), droppedModelMinuteCells: 0, modelIncompleteAt: {} }, migration: { legacyStatsMigratedAt: now, legacyRequests: 0, accountLegacyRequests: {}, ambiguousNames: 0, unmappedNames: 0 } };
 }
 function validateStatistics(stats) {
-  if (!isPlainObject(stats) || stats.version !== 1) throw new Error(stats?.version > 1 ? 'unsupported statistics version' : 'invalid statistics version');
-  if (Object.keys(stats).some((key) => !['version','lifetime','minuteBuckets','recentCoverage','migration'].includes(key)) || !isPlainObject(stats.lifetime) || Object.keys(stats.lifetime).some((key) => !['global','accounts'].includes(key)) || !isPlainObject(stats.lifetime.accounts) || !Array.isArray(stats.minuteBuckets) || stats.minuteBuckets.length > 1440 || !isPlainObject(stats.recentCoverage) || Object.keys(stats.recentCoverage).some((key) => !['droppedAccountMinuteCells','accountIncompleteAt'].includes(key)) || !Number.isSafeInteger(stats.recentCoverage.droppedAccountMinuteCells) || stats.recentCoverage.droppedAccountMinuteCells < 0 || !isPlainObject(stats.recentCoverage.accountIncompleteAt) || !isPlainObject(stats.migration)) throw new Error('invalid statistics structure');
+  if (!isPlainObject(stats) || ![1,STATISTICS_VERSION].includes(stats.version)) throw new Error(stats?.version > STATISTICS_VERSION ? 'unsupported statistics version' : 'invalid statistics version');
+  const version2 = stats.version === STATISTICS_VERSION;
+  const coverageKeys = version2 ? ['droppedAccountMinuteCells','accountIncompleteAt','modelTrackingStartedMinute','droppedModelMinuteCells','modelIncompleteAt'] : ['droppedAccountMinuteCells','accountIncompleteAt'];
+  if (Object.keys(stats).some((key) => !['version','lifetime','minuteBuckets','recentCoverage','migration'].includes(key)) || !isPlainObject(stats.lifetime) || Object.keys(stats.lifetime).some((key) => !['global','accounts'].includes(key)) || !isPlainObject(stats.lifetime.accounts) || !Array.isArray(stats.minuteBuckets) || stats.minuteBuckets.length > 1440 || !isPlainObject(stats.recentCoverage) || Object.keys(stats.recentCoverage).length !== coverageKeys.length || coverageKeys.some((key) => !Object.hasOwn(stats.recentCoverage,key)) || !Number.isSafeInteger(stats.recentCoverage.droppedAccountMinuteCells) || stats.recentCoverage.droppedAccountMinuteCells < 0 || !isPlainObject(stats.recentCoverage.accountIncompleteAt) || !isPlainObject(stats.migration)) throw new Error('invalid statistics structure');
   for (const [id, minute] of Object.entries(stats.recentCoverage.accountIncompleteAt)) if (!/^[A-Za-z0-9_-]{1,100}$/.test(id) || !Number.isSafeInteger(minute) || minute < 0) throw new Error('invalid statistics coverage');
+  if (version2 && (!Number.isSafeInteger(stats.recentCoverage.modelTrackingStartedMinute) || stats.recentCoverage.modelTrackingStartedMinute < 0 || !Number.isSafeInteger(stats.recentCoverage.droppedModelMinuteCells) || stats.recentCoverage.droppedModelMinuteCells < 0 || !isPlainObject(stats.recentCoverage.modelIncompleteAt))) throw new Error('invalid statistics model coverage');
+  if (version2) for (const [id, minute] of Object.entries(stats.recentCoverage.modelIncompleteAt)) if (!validStatisticModelId(id) || !Number.isSafeInteger(minute) || minute < 0) throw new Error('invalid statistics model coverage');
   if (Object.keys(stats.migration).some((key) => !['legacyStatsMigratedAt','legacyRequests','accountLegacyRequests','ambiguousNames','unmappedNames'].includes(key)) || !Number.isSafeInteger(stats.migration.legacyStatsMigratedAt) || stats.migration.legacyStatsMigratedAt < 0 || !Number.isSafeInteger(stats.migration.legacyRequests) || stats.migration.legacyRequests < 0 || !isPlainObject(stats.migration.accountLegacyRequests) || !Number.isSafeInteger(stats.migration.ambiguousNames) || stats.migration.ambiguousNames < 0 || !Number.isSafeInteger(stats.migration.unmappedNames) || stats.migration.unmappedNames < 0) throw new Error('invalid statistics migration');
   for (const [id, requests] of Object.entries(stats.migration.accountLegacyRequests)) if (!/^[A-Za-z0-9_-]{1,100}$/.test(id) || !Number.isSafeInteger(requests) || requests < 0) throw new Error('invalid statistics legacy account');
   validateAggregate(stats.lifetime.global, 'lifetime.global');
   for (const [id, aggregate] of Object.entries(stats.lifetime.accounts)) { if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new Error('invalid statistics account id'); validateAggregate(aggregate, `lifetime.accounts.${id}`); }
-  let previous = -1, cells = 0;
+  let previous = -1, accountCells = 0, modelCells = 0;
   for (const bucket of stats.minuteBuckets) {
-    if (!isPlainObject(bucket) || Object.keys(bucket).some((key) => !['minute','global','accounts','health'].includes(key)) || !Number.isSafeInteger(bucket.minute) || bucket.minute < 0 || bucket.minute <= previous || !isPlainObject(bucket.global) || !isPlainObject(bucket.accounts) || !isPlainObject(bucket.health)) throw new Error('invalid statistics minute bucket');
+    const bucketKeys = version2 ? ['minute','global','accounts','health','models'] : ['minute','global','accounts','health'];
+    if (!isPlainObject(bucket) || Object.keys(bucket).length !== bucketKeys.length || bucketKeys.some((key) => !Object.hasOwn(bucket,key)) || !Number.isSafeInteger(bucket.minute) || bucket.minute < 0 || bucket.minute <= previous || !isPlainObject(bucket.global) || !isPlainObject(bucket.accounts) || !isPlainObject(bucket.health) || (version2 && !isPlainObject(bucket.models))) throw new Error('invalid statistics minute bucket');
     previous = bucket.minute; validateAggregate(bucket.global, `bucket.${bucket.minute}.global`);
-    const ids = new Set([...Object.keys(bucket.accounts), ...Object.keys(bucket.health)]); cells += ids.size;
+    const ids = new Set([...Object.keys(bucket.accounts), ...Object.keys(bucket.health)]); accountCells += ids.size;
     for (const [id, aggregate] of Object.entries(bucket.accounts)) { if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new Error('invalid statistics account id'); validateAggregate(aggregate, `bucket.${bucket.minute}.accounts.${id}`); }
     for (const [id, health] of Object.entries(bucket.health)) { if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new Error('invalid statistics account id'); validateHealth(health, `bucket.${bucket.minute}.health.${id}`); }
+    if (version2) for (const [id, aggregate] of Object.entries(bucket.models)) { if (!validStatisticModelId(id)) throw new Error('invalid statistics model id'); modelCells++; validateAggregate(aggregate, `bucket.${bucket.minute}.models.${id}`); }
   }
-  if (cells > 50000) throw new Error('statistics account-minute cell limit exceeded');
+  if (accountCells > MAX_ACCOUNT_MINUTE_CELLS) throw new Error('statistics account-minute cell limit exceeded');
+  if (modelCells > MAX_MODEL_MINUTE_CELLS) throw new Error('statistics model-minute cell limit exceeded');
 }
 function normalizeStatistics() {
-  if (META.statistics !== undefined) { validateStatistics(META.statistics); return false; }
+  if (META.statistics !== undefined) {
+    validateStatistics(META.statistics);
+    if (META.statistics.version === 1) {
+      const minute = Math.floor(Date.now() / 60000);
+      META.statistics = { ...META.statistics, version: STATISTICS_VERSION, minuteBuckets: META.statistics.minuteBuckets.map((bucket) => ({ ...bucket, models: {} })), recentCoverage: { ...META.statistics.recentCoverage, modelTrackingStartedMinute: minute, droppedModelMinuteCells: 0, modelIncompleteAt: {} } };
+      validateStatistics(META.statistics);
+      return true;
+    }
+    return false;
+  }
   const stats = createStatistics();
   const names = new Map(); for (const account of config.accounts || []) { const ids = names.get(account.name) || []; ids.push(account.id); names.set(account.name, ids); }
   for (const [name, legacy] of Object.entries(isPlainObject(META.stats) ? META.stats : {})) {
@@ -898,6 +923,27 @@ function parseRouting(json) {
 // 故意携带不存在的 only，让网关在路由层报错并列出可用上游（不产生 token 消耗）。
 // - 直连管道（OpenRouter）：provider.only → 404 错误 JSON 里的 metadata.available_providers
 // - 规划器管道（Vercel AI Gateway）：providerOptions.gateway.only → 400 错误文本里的 "Available providers are: ..."
+const PROVIDER_SLUG = /^[a-z0-9][a-z0-9-]{0,199}$/;
+function strictProviderList(value) {
+  if (!Array.isArray(value)) return null;
+  const providers = [...new Set(value.filter((item) => typeof item === 'string').map((item) => item.trim()).filter((item) => PROVIDER_SLUG.test(item)))];
+  return providers.length ? providers : null;
+}
+function providersFromError(value, depth = 0) {
+  if (depth > 4 || value == null) return null;
+  if (Array.isArray(value)) return strictProviderList(value);
+  if (isPlainObject(value)) {
+    for (const candidate of [value.available_providers, value.metadata?.available_providers]) { const providers = strictProviderList(candidate); if (providers) return providers; }
+    for (const candidate of [value.error, value.message]) { const providers = providersFromError(candidate, depth + 1); if (providers) return providers; }
+    return null;
+  }
+  if (typeof value !== 'string') return null;
+  const match = /Available providers are:\s*([a-z0-9-]+(?:\s*,\s*[a-z0-9-]+)*)/i.exec(value);
+  if (match) return strictProviderList(match[1].split(',').map((item) => item.trim().toLowerCase()));
+  const start = value.indexOf('{');
+  if (start >= 0) try { return providersFromError(JSON.parse(value.slice(start)), depth + 1); } catch {}
+  return null;
+}
 async function harvestAvailableProviders(modelId, pipeline) {
   const acc = pickAccount();
   const base = { model: modelId, messages: [{ role: 'user', content: 'hi' }], max_tokens: 16 };
@@ -905,20 +951,7 @@ async function harvestAvailableProviders(modelId, pipeline) {
     ? { ...base, providerOptions: { gateway: { only: ['__probe__'] } } }
     : { ...base, provider: { only: ['__probe__'] } };
   const { json } = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, { headers: chatHeaders(acc.key), body: JSON.stringify(body) }, 60000, acc);
-  const err = json?.error;
-  if (typeof err !== 'string') return null;
-  if (pipeline === 'planner') {
-    const m = /Available providers are:\s*([^.]+)/.exec(err);
-    if (!m) return null;
-    // 错误文本里可能混有 JSON 片段（如 ","type":"invalid_request_error"），必须按 slug 格式过滤
-    const toks = m[1].split(/,\s*/).map((s) => s.trim()).filter((t) => /^[a-z0-9][a-z0-9-]*$/.test(t));
-    return toks.length ? toks : null;
-  }
-  const i = err.indexOf('{');
-  if (i < 0) return null;
-  try {
-    return JSON.parse(err.slice(i))?.error?.metadata?.available_providers || null;
-  } catch { return null; }
+  return providersFromError(upstreamErrorOf(json));
 }
 function parseTier0(plan) {
   const m = /([\w-]+) won tier 0 over ([^."]+)/.exec(plan || '');
@@ -954,8 +987,8 @@ async function probeModel(modelId) {
   const detail = { ...prev.upstreamDetail };
   for (const e of endpoints) detail[e.slug] = e;
   const upstreams = r.pipeline === 'planner'
-    ? [...new Set([...(harvest || []), ...r.fallbacks])]
-    : [...new Set([...r.fallbacks, ...(harvest || []), ...Object.keys(detail)])];
+    ? [...new Set([r.finalProvider, ...(harvest || []), ...r.fallbacks].filter((provider) => PROVIDER_SLUG.test(provider || '')))]
+    : [...new Set([r.finalProvider, ...r.fallbacks, ...(harvest || []), ...Object.keys(detail)].filter((provider) => PROVIDER_SLUG.test(provider || '')))];
   const tier0 = [...new Set([...(prev.tier0 || []), ...parseTier0(r.plan)])];
   META.models[modelId] = {
     ...prev,
@@ -967,6 +1000,7 @@ async function probeModel(modelId) {
     openrouterSlug: orSlug,
     upstreamDetail: detail,
     upstreams,
+    upstreamDiscovery: upstreams.length ? 'known' : 'unavailable',
     tier0,
     lastProvider: r.finalProvider || prev.lastProvider,
     lastMs: ms,
@@ -1139,31 +1173,42 @@ function pruneStatistics(now = Date.now()) {
   const stats = META.statistics, minMinute = Math.floor(now / 60000) - 1439;
   stats.minuteBuckets = stats.minuteBuckets.filter((bucket) => bucket.minute >= minMinute);
   for (const [id, minute] of Object.entries(stats.recentCoverage.accountIncompleteAt)) if (minute < minMinute) delete stats.recentCoverage.accountIncompleteAt[id];
-  let cells = stats.minuteBuckets.reduce((sum,bucket) => sum + new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health)]).size, 0);
+  for (const [id, minute] of Object.entries(stats.recentCoverage.modelIncompleteAt)) if (minute < minMinute) delete stats.recentCoverage.modelIncompleteAt[id];
+  let accountCells = stats.minuteBuckets.reduce((sum,bucket) => sum + new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health)]).size, 0);
   for (const bucket of stats.minuteBuckets) {
-    if (cells <= 50000) break;
+    if (accountCells <= MAX_ACCOUNT_MINUTE_CELLS) break;
     for (const id of new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health)])) {
-      if (cells-- <= 50000) break;
+      if (accountCells-- <= MAX_ACCOUNT_MINUTE_CELLS) break;
       delete bucket.accounts[id]; delete bucket.health[id]; stats.recentCoverage.droppedAccountMinuteCells++;
       stats.recentCoverage.accountIncompleteAt[id] = Math.max(stats.recentCoverage.accountIncompleteAt[id] || 0, bucket.minute);
     }
   }
+  let modelCells = stats.minuteBuckets.reduce((sum,bucket) => sum + Object.keys(bucket.models).length, 0);
+  for (const bucket of stats.minuteBuckets) {
+    if (modelCells <= MAX_MODEL_MINUTE_CELLS) break;
+    for (const id of Object.keys(bucket.models)) {
+      if (modelCells-- <= MAX_MODEL_MINUTE_CELLS) break;
+      delete bucket.models[id]; stats.recentCoverage.droppedModelMinuteCells++;
+      stats.recentCoverage.modelIncompleteAt[id] = Math.max(stats.recentCoverage.modelIncompleteAt[id] || 0, bucket.minute);
+    }
+  }
 }
-function commitStatistics({ ts = Date.now(), globalError = false, usage = null, segments = [], clientDisconnect = false }) {
+function commitStatistics({ ts = Date.now(), modelId = null, globalError = false, usage = null, segments = [], clientDisconnect = false }) {
   const stats = META.statistics; pruneStatistics(ts);
   const minute = Math.floor(ts / 60000);
   let bucket = stats.minuteBuckets.at(-1);
-  if (!bucket || bucket.minute !== minute) { bucket = { minute, global: emptyAggregate(), accounts: {}, health: {} }; stats.minuteBuckets.push(bucket); }
+  if (!bucket || bucket.minute !== minute) { bucket = { minute, global: emptyAggregate(), accounts: {}, health: {}, models: {} }; stats.minuteBuckets.push(bucket); }
   const globalDelta = emptyAggregate(); addCounter(globalDelta, 'requests'); globalDelta.lastUsedAt = ts;
   if (globalError) { addCounter(globalDelta, 'errors'); globalDelta.lastErrorAt = ts; }
   addUsage(globalDelta, usage); mergeAggregate(stats.lifetime.global, globalDelta); mergeAggregate(bucket.global, globalDelta);
+  if (validStatisticModelId(modelId)) mergeAggregate(aggregateCell(bucket.models, modelId), globalDelta);
   const currentIds = new Set(config.accounts.map((account) => account.id));
   for (const segment of new Map(segments.filter((s) => currentIds.has(s.accountId)).map((s) => [s.accountId,s])).values()) {
     const delta = emptyAggregate(); addCounter(delta, 'requests'); delta.lastUsedAt = ts;
     if (segment.error) { addCounter(delta, 'errors'); delta.lastErrorAt = ts; }
     if (segment.usage) addUsage(delta, segment.usage);
-    const lifetime = (stats.lifetime.accounts[segment.accountId] ||= emptyAggregate()); mergeAggregate(lifetime, delta);
-    const recent = (bucket.accounts[segment.accountId] ||= emptyAggregate()); mergeAggregate(recent, delta);
+    const lifetime = aggregateCell(stats.lifetime.accounts, segment.accountId); mergeAggregate(lifetime, delta);
+    const recent = aggregateCell(bucket.accounts, segment.accountId); mergeAggregate(recent, delta);
     const result = classifyHealth(segment.trace, { success: segment.success, clientDisconnect });
     if (result) { const hd = emptyHealth(); hd.results = 1; hd.penaltyUnits = result.penaltyUnits; if (result.error) hd.errors = 1; if (result.class) hd[result.class] = 1; mergeHealth((bucket.health[segment.accountId] ||= emptyHealth()), hd); }
   }
@@ -1176,6 +1221,23 @@ function aggregateRange(accountId = null, now = Date.now()) {
     if (accountId && bucket.health[accountId]) mergeHealth(health, bucket.health[accountId]);
   }
   return { aggregate: out, health };
+}
+function aggregateModelRange(modelId, now = Date.now()) {
+  const aggregate = emptyAggregate(), min = Math.floor(now / 60000) - 1439;
+  for (const bucket of META.statistics.minuteBuckets) if (bucket.minute >= min && Object.hasOwn(bucket.models, modelId)) mergeAggregate(aggregate, bucket.models[modelId]);
+  return aggregate;
+}
+function modelCoverage(modelId, now = Date.now()) {
+  const min = Math.floor(now / 60000) - 1439, coverage = META.statistics.recentCoverage;
+  const incompleteAt = Object.hasOwn(coverage.modelIncompleteAt, modelId) ? coverage.modelIncompleteAt[modelId] : null;
+  const fromMinute = Math.max(min, coverage.modelTrackingStartedMinute, incompleteAt === null ? min : incompleteAt + 1);
+  return { complete: coverage.modelTrackingStartedMinute <= min && incompleteAt === null, from: fromMinute * 60000 };
+}
+function statisticsModelIds() {
+  const ids = new Set([...(config.knownModels || []), ...Object.keys(config.perModel || {})]);
+  for (const account of config.accounts || []) for (const id of Object.keys(account.perModel || {})) ids.add(id);
+  for (const bucket of META.statistics.minuteBuckets) for (const id of Object.keys(bucket.models)) ids.add(id);
+  return [...ids].filter(validStatisticModelId);
 }
 function ratio(numerator, denominator, valid = true) { return valid && Number.isSafeInteger(numerator) && Number.isSafeInteger(denominator) && denominator > 0 ? numerator / denominator : null; }
 function projectAggregate(aggregate) {
@@ -1999,7 +2061,7 @@ async function handleChat(req, res) {
   if (!requestedModel || requestedModel.length > 300) return sendJSON(res, 400, { error: { message: 'valid model is required' } });
   const sensitiveValues = sensitiveMessageValues(body);
   let statisticsFinalized = false;
-  const finalizeStatistics = (facts) => { if (statisticsFinalized) return; statisticsFinalized = true; try { commitStatistics(facts); } catch (error) { console.error(`[统计] 持久化失败：${safeReason(error.message)}`); } };
+  const finalizeStatistics = (facts) => { if (statisticsFinalized) return; statisticsFinalized = true; try { commitStatistics({ ...facts, modelId }); } catch (error) { console.error(`[统计] 持久化失败：${safeReason(error.message)}`); } };
   const modelId = resolveModelAlias(requestedModel);
   const recordChat = (info) => record(modelId, info, detail);
   body = { ...body, model: modelId };
@@ -2338,13 +2400,14 @@ async function dispatch(req, res) {
       pruneStatistics();
       const generatedAt = Date.now(), recentGlobal = aggregateRange().aggregate;
       const accounts = config.accounts.map((account) => { const recent = aggregateRange(account.id).aggregate; return { id: account.id, name: account.name, enabled: account.enabled !== false, lifetime: projectAggregate(META.statistics.lifetime.accounts[account.id] || emptyAggregate()), recent24h: projectAggregate(recent), health: healthProjection(account), quota: statisticsQuotaProjection(account, generatedAt) }; });
-      return sendJSON(res, 200, { generatedAt, window: { kind: 'last-1440-minutes', from: (Math.floor(generatedAt/60000)-1439)*60000, to: generatedAt }, lifetime: { global: projectAggregate(META.statistics.lifetime.global) }, recent24h: { global: projectAggregate(recentGlobal) }, accounts, migration: META.statistics.migration });
+      const models = statisticsModelIds().map((id) => ({ id, recent24h: projectAggregate(aggregateModelRange(id, generatedAt)), coverage: modelCoverage(id, generatedAt) }));
+      return sendJSON(res, 200, { generatedAt, window: { kind: 'last-1440-minutes', from: (Math.floor(generatedAt/60000)-1439)*60000, to: generatedAt }, lifetime: { global: projectAggregate(META.statistics.lifetime.global) }, recent24h: { global: projectAggregate(recentGlobal) }, accounts, models, migration: META.statistics.migration });
     }
     if (req.method === 'GET' && p === '/api/accounts') {
       clearExpiredCooldowns();
       const cacheRoles = cachePoolRoles();
       return sendJSON(res, 200, {
-        accounts: config.accounts.map((a) => ({ ...a, state: getAccountState(a.id), activeCount: activeCounts.get(a.id) || 0, health: healthProjection(a), quota: quotaProjection(a.id), cachePoolRole: cacheRoles.get(a.id) ?? null })),
+        accounts: config.accounts.map((a) => { const recent = projectAggregate(aggregateRange(a.id).aggregate),lifetime=META.statistics.lifetime.accounts[a.id]; return { ...a, state: getAccountState(a.id), activeCount: activeCounts.get(a.id) || 0, health: healthProjection(a), quota: quotaProjection(a.id), cachePoolRole: cacheRoles.get(a.id) ?? null, statistics: { recent24h: recent, lifetimeRequests: lifetime ? lifetime.requests : 0, lifetimeErrors: lifetime ? lifetime.errors : 0 } }; }),
         mode: config.accountMode, active: config.activeAccount, concurrencyWaitMs: config.concurrencyWaitMs,
         accountErrorRules: config.accountErrorRules, accountPipeline: config.accountPipeline,
         stats: Object.fromEntries(config.accounts.map((a) => [a.name, { requests: META.statistics.lifetime.accounts[a.id]?.requests ?? 0 }])),

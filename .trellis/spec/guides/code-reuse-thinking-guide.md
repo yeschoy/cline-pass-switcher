@@ -24,7 +24,7 @@ Read the implementation and its focused tests before deciding whether to extend 
 | Account selection and capacity | `acquireAccountLease()`, `tryLease()`, account-mode helpers | routing, overflow, and lease-release integration cases |
 | Account-bound HTTP transport | `clineRequest()`, `proxyAgentFor()`, `responseHeadersFor()` | HTTP/HTTPS/SOCKS proxy integration cases |
 | Quota admission | `requestQuota()` and the shared `quotaJobs`/global-slot pump | quota concurrency, cancellation, and generation tests |
-| Ordinary diagnostic storage | `JsonlLogStore` and `enforceCombinedLimit()` | `test/jsonl-log-store.test.js` |
+| Ordinary diagnostic storage | directory-level `JsonlLogGroup` with requests/errors stream views | `test/jsonl-log-store.test.js` |
 | Detailed capture/storage | `DetailRoot`, `BodyCapture`, `DetailRedactor`, `DetailedLogStore` | detailed capture/store/integration suites |
 | Browser API access | `api()` in `public/index.html` | production-script VM tests |
 | Browser state ownership | `DATA`, `ACCS`, `ALIASES`, and feature-specific generation/controller state | account-draft and detailed-log UI tests |
@@ -57,7 +57,7 @@ Do not create a second generic store or cursor. Extend the snapshot/generation/c
 
 ### Diagnostic data
 
-Do not copy request projection, redaction, or retention logic into route handlers. Build the approved bounded projection and pass it to the existing ordinary or detailed owner. Detailed bodies never belong in `JsonlLogStore` or `metadata.json`.
+Do not copy request projection, redaction, or retention logic into route handlers. Build the approved bounded projection and pass it to the existing ordinary or detailed owner. Detailed bodies never belong in `JsonlLogGroup` or `metadata.json`.
 
 ## When Extraction Is Appropriate
 

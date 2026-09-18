@@ -254,7 +254,7 @@ test('account routing, header boundary, failover, state and streaming', async (t
       if (body.model === 'planner-model') {
         if (only === '__probe__') {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ error: 'Available providers are: alpha, beta.' }));
+          return res.end(JSON.stringify({ error: { message: 'Available providers are: alpha, beta.', type: 'invalid_request_error' } }));
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ choices: [{ message: { content: 'OK', provider_metadata: { gateway: { routing: { finalProvider: only || 'alpha', canonicalSlug: 'mock/planner' } } } } }] }));
@@ -356,7 +356,10 @@ test('account routing, header boundary, failover, state and streaming', async (t
 
   // Probe both known pipelines and verify each receives only its native routing shape.
   assert.equal((await rawJson(switchPort, '/api/probe', { model: 'test-model' })).status, 200);
-  assert.equal((await rawJson(switchPort, '/api/probe', { model: 'planner-model' })).status, 200);
+  const plannerProbe = await rawJson(switchPort, '/api/probe', { model: 'planner-model' });
+  assert.equal(plannerProbe.status, 200);
+  assert.deepEqual(plannerProbe.json.upstreams, ['alpha', 'beta'], 'observed final provider and structured harvest providers form one known set');
+  assert.equal(plannerProbe.json.upstreamDiscovery, 'known');
   await rawJson(switchPort, '/api/config', { scope: 'global', perModel: { 'planner-model': { upstreams: ['alpha'], pinMode: 'strict' } } });
   seen.length = 0;
   assert.equal((await rawJson(switchPort, '/v1/chat/completions', { model: 'planner-model', messages: [] }, { 'Session-Id': 'planner-session' })).status, 200);
@@ -675,6 +678,9 @@ test('legacy migration and cooldown state survive restart', async (t) => {
   const beforeRestart = JSON.parse(fs.readFileSync(metadataPath));
   assert.equal(fs.statSync(metadataPath).mode & 0o777, 0o600, 'new metadata containing the routing secret must be owner-only');
   assert.ok(beforeRestart.routingSecret);
+  assert.equal(beforeRestart.statistics.version, 2);
+  assert.ok(Number.isSafeInteger(beforeRestart.statistics.recentCoverage.modelTrackingStartedMinute));
+  assert.equal(beforeRestart.statistics.minuteBuckets.at(-1).models['cooldown-model'].requests, 1);
   assert.ok(beforeRestart.accountStates[migrated.accounts[0].id].cooldownUntil > Date.now());
   assert.equal(beforeRestart.statistics.migration.legacyRequests, 10);
   assert.equal(beforeRestart.statistics.migration.accountLegacyRequests[migrated.accounts[0].id], 7);
@@ -691,6 +697,7 @@ test('legacy migration and cooldown state survive restart', async (t) => {
   assert.deepEqual(seen, ['Bearer legacy-b']);
   const afterMeta = JSON.parse(fs.readFileSync(path.join(running.dir, 'metadata.json')));
   assert.equal(afterMeta.routingSecret, beforeRestart.routingSecret);
+  assert.equal(afterMeta.statistics.version, 2);
   assert.deepEqual(afterMeta.statistics.migration, beforeRestart.statistics.migration, 'legacy stats migration must be idempotent across restart');
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(running.dir, 'config.json'))).accounts.map((a) => a.id), migrated.accounts.map((a) => a.id));
 });
@@ -730,6 +737,9 @@ test('new scheduling modes, account fields, model aliases and independent logs',
   assert.equal((await rawJson(switchPort,'/api/model-aliases',{aliases:{bad:'cline-pass/missing'}})).status,400);
   seen.length=0; const aliased=await rawJson(switchPort,'/v1/chat/completions',{model:'friendly',messages:[]}); assert.equal(aliased.status,200);assert.equal(seen[0].body.model,'cline-pass/target');assert.ok(aliased.headers['x-cline-request-id']);
   const models=await (await fetch(`http://127.0.0.1:${switchPort}/v1/models`)).json();assert.ok(models.data.some(x=>x.id==='friendly')&&models.data.some(x=>x.id==='cline-pass/target'));
+  const aliasStats=await(await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json();
+  assert.equal(aliasStats.models.some(x=>x.id==='friendly'),false,'aliases do not split resolved-model statistics');
+  assert.ok(aliasStats.models.find(x=>x.id==='cline-pass/target').recent24h.requests>=1);
   await new Promise(r=>setTimeout(r,30)); const logs=await (await fetch(`http://127.0.0.1:${switchPort}/api/logs/requests?requestedModel=friendly`)).json();
   assert.equal(logs.items[0].resolvedModel,'cline-pass/target');assert.equal(logs.items[0].requestId,aliased.headers['x-cline-request-id']);assert.equal(JSON.stringify(logs).includes('primary account'),false);assert.equal(JSON.stringify(logs).includes('ka'),false);
   assert.equal((await rawJson(switchPort,'/api/accounts',{accounts,mode:'single',active:0,concurrencyWaitMs:20,accountErrorRules:{}})).status,200);
@@ -852,7 +862,11 @@ test('usage statistics, health, pipeline validation and quota refresh are bounde
   assert.equal(stats.accounts[0].health.status, 'available');
   assert.equal(stats.accounts[0].health.results, 7);
   assert.equal(stats.accounts[0].quota.pool, 'hot'); assert.ok(quotaHits >= 1);
+  const statsModel=stats.models.find(model=>model.id==='stats-model'),missingModel=stats.models.find(model=>model.id==='no-usage');
+  assert.equal(statsModel.recent24h.requests,6);assert.equal(statsModel.recent24h.cacheInputKnownRequests,6);assert.equal(statsModel.recent24h.cacheInputTokens,58);assert.equal(statsModel.recent24h.cacheInputCachedTokens,14);assert.equal(statsModel.recent24h.cacheTokenRatio,14/58);assert.equal(statsModel.coverage.complete,false);
+  assert.equal(missingModel.recent24h.requests,1);assert.equal(missingModel.recent24h.cacheInputKnownRequests,0);assert.equal(missingModel.recent24h.cacheTokenRatio,null);
   const accountView = await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json();
+  assert.equal(accountView.accounts[0].statistics.recent24h.cacheTokenRatio,14/58);assert.equal(accountView.accounts[0].statistics.lifetimeErrors,0);
   const before = fs.readFileSync(path.join(running.dir, 'config.json'));
   const invalid = await rawJson(switchPort, '/api/accounts', { accounts: accountView.accounts, mode: 'single', active: 0, concurrencyWaitMs: 0, accountErrorRules: {}, accountPipeline: { quotaPool: true, excludeUnhealthy: false, healthSort: false, sticky: 'yes' } });
   assert.equal(invalid.status, 400); assert.deepEqual(fs.readFileSync(path.join(running.dir, 'config.json')), before);
@@ -875,6 +889,14 @@ test('corrupt versioned statistics fail startup without overwriting metadata', a
   const code = await new Promise((resolve) => child.once('exit', resolve));
   assert.notEqual(code, 0); assert.match(output, /invalid statistics structure/); assert.deepEqual(fs.readFileSync(metadataPath), bytes);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('future statistics versions fail startup without overwriting metadata', async () => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-future-statistics-')),holder=http.createServer(),port=await listen(holder);await close(holder);
+  fs.writeFileSync(path.join(dir,'config.json'),JSON.stringify({port,accounts:[{id:'a',name:'A',key:'key',enabled:true,perModel:{}}],accountMode:'single',activeAccount:0,accountErrorRules:{},perModel:{},knownModels:['test']}));
+  const metadataPath=path.join(dir,'metadata.json'),bytes=Buffer.from(JSON.stringify({models:{},history:[],routingSecret:'secret',accountStates:{},statistics:{version:3}}));fs.writeFileSync(metadataPath,bytes);
+  const child=spawn(process.execPath,['server.js'],{cwd:path.resolve('.'),env:{...process.env,DATA_DIR:dir,BIND_HOST:'127.0.0.1'},stdio:['ignore','pipe','pipe']});let output='';child.stderr.on('data',chunk=>{output+=chunk;});child.stdout.on('data',chunk=>{output+=chunk;});
+  const code=await new Promise(resolve=>child.once('exit',resolve));assert.notEqual(code,0);assert.match(output,/unsupported statistics version/);assert.deepEqual(fs.readFileSync(metadataPath),bytes);fs.rmSync(dir,{recursive:true,force:true});
 });
 
 test('overflow markers must exactly match null counters and corrupt metadata bytes remain unchanged', async () => {
@@ -954,9 +976,16 @@ test('all explicit usage aliases, precedence, cache ratios, stream snapshots, re
   assert.deepEqual({requests:global.requests,usageRequests:global.usageRequests,inputKnownRequests:global.inputKnownRequests,inputTokens:global.inputTokens,outputKnownRequests:global.outputKnownRequests,outputTokens:global.outputTokens,totalKnownRequests:global.totalKnownRequests,totalTokens:global.totalTokens,cacheKnownRequests:global.cacheKnownRequests,cacheHitRequests:global.cacheHitRequests,cachedTokens:global.cachedTokens},
     {requests:11,usageRequests:10,inputKnownRequests:9,inputTokens:188,outputKnownRequests:9,outputTokens:39,totalKnownRequests:10,totalTokens:229,cacheKnownRequests:9,cacheHitRequests:8,cachedTokens:53});
   assert.equal(global.cacheInputKnownRequests,9);assert.equal(global.cacheInputTokens,188);assert.equal(global.cacheInputCachedTokens,53);assert.equal(global.cacheTokenRatio,53/188);assert.equal(global.cacheHitRequestRate,8/9);
+  const byModel=Object.fromEntries(stats.models.map(model=>[model.id,model]));
+  assert.equal(byModel.u1.recent24h.cacheTokenRatio,3/10);assert.equal(byModel.u1.recent24h.cacheInputKnownRequests,1);
+  assert.equal(byModel.retry.recent24h.requests,1);assert.equal(byModel.retry.recent24h.cacheTokenRatio,6/13);
+  assert.equal(byModel.switch.recent24h.requests,1);assert.equal(byModel.switch.recent24h.cacheTokenRatio,8/17);
+  assert.equal(byModel.stream.recent24h.requests,1);assert.equal(byModel.stream.recent24h.cacheTokenRatio,4/8);
+  assert.equal(byModel.zero.recent24h.cacheInputKnownRequests,1);assert.equal(byModel.zero.recent24h.cacheInputTokens,0);assert.equal(byModel.zero.recent24h.cacheTokenRatio,null);
+  assert.equal(byModel.missing.recent24h.requests,1);assert.equal(byModel.missing.recent24h.cacheInputKnownRequests,0);
   assert.equal(seen.filter(x=>x.model==='retry').length,2,'provider retry must not duplicate usage');
   const a=stats.accounts.find(x=>x.id==='a'),b=stats.accounts.find(x=>x.id==='b');assert.equal(a.lifetime.inputTokens,171);assert.equal(b.lifetime.inputTokens,17);assert.equal(a.lifetime.requests,11);assert.equal(b.lifetime.requests,1);assert.equal(a.health.results,11);assert.equal(a.health.penaltyUnits,7);assert.equal(b.health.results,1);assert.equal(b.health.penaltyUnits,0,'A→B replacement records one independent terminal health result per account');
-  const globalBeforeRestart=stats.lifetime.global;await stop(running.child);running.child=null;running=await startSwitcher(null,running.dir);stats=await(await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json();assert.deepEqual(stats.lifetime.global,globalBeforeRestart,'statistics must survive restart exactly');
+  const globalBeforeRestart=stats.lifetime.global,modelsBeforeRestart=stats.models;await stop(running.child);running.child=null;running=await startSwitcher(null,running.dir);stats=await(await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json();assert.deepEqual(stats.lifetime.global,globalBeforeRestart,'statistics must survive restart exactly');assert.deepEqual(stats.models,modelsBeforeRestart,'model statistics must survive restart exactly');
   const accountView=await(await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json();assert.equal((await rawJson(switchPort,'/api/accounts',{accounts:accountView.accounts.filter(x=>x.id==='a'),mode:'single',active:0,concurrencyWaitMs:0,accountErrorRules:{}})).status,200);
   stats=await(await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json();assert.equal(stats.accounts.some(x=>x.id==='b'),false);assert.deepEqual(stats.lifetime.global,globalBeforeRestart,'deleting an account retains global history');
 });
@@ -1271,7 +1300,19 @@ test('the 50,000 account-minute union cap evicts an aggregate/health cell atomic
   fs.writeFileSync(path.join(dir,'metadata.json'),JSON.stringify({models:{},history:[],accountStates:{},accountQuotas:{},routingSecret:'cell-cap-secret',statistics}));
   let running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'single',activeAccount:50000,concurrencyWaitMs:0,accounts,knownModels:['m'],perModel:{},accountErrorRules:{}},dir);t.after(async()=>{if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
   assert.equal((await rawJson(port,'/v1/chat/completions',{model:'m',messages:[]})).status,200);const persisted=JSON.parse(fs.readFileSync(path.join(dir,'metadata.json'))),bucket=persisted.statistics.minuteBuckets[0];
+  assert.equal(persisted.statistics.version,2,'valid v1 statistics migrate before the new request is committed');
   const cells=new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health)]);assert.equal(cells.size,50000);assert.equal(bucket.accounts.a0,undefined);assert.equal(bucket.health.a0,undefined);assert.ok(bucket.accounts.a50000);assert.ok(bucket.health.a50000);assert.equal(persisted.statistics.recentCoverage.droppedAccountMinuteCells,1);assert.equal(persisted.statistics.recentCoverage.accountIncompleteAt.a0,minute);
+});
+
+test('the model-minute cap evicts independently and marks only model coverage incomplete', async (t) => {
+  const upstream=http.createServer((req,res)=>{req.resume();req.on('end',()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));});}),upstreamPort=await listen(upstream),port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-model-cell-cap-'));
+  const minute=Math.floor(Date.now()/60000),modelCells={m0:emptyAggregateFixture(),m1:emptyAggregateFixture()};
+  const statistics={version:2,lifetime:{global:emptyAggregateFixture(),accounts:{}},minuteBuckets:[{minute,global:emptyAggregateFixture(),accounts:{},health:{},models:modelCells}],recentCoverage:{droppedAccountMinuteCells:0,accountIncompleteAt:{},modelTrackingStartedMinute:minute-2000,droppedModelMinuteCells:0,modelIncompleteAt:{}},migration:{legacyStatsMigratedAt:Date.now(),legacyRequests:0,accountLegacyRequests:{},ambiguousNames:0,unmappedNames:0}};
+  fs.writeFileSync(path.join(dir,'metadata.json'),JSON.stringify({models:{},history:[],accountStates:{},accountQuotas:{},routingSecret:'model-cell-cap-secret',statistics}));
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'single',activeAccount:0,accounts:[{id:'a',name:'A',key:'ka',enabled:true,perModel:{}}],knownModels:['m2'],perModel:{},accountErrorRules:{}},dir,{NODE_ENV:'test',CLINE_PASS_TEST_MODEL_CELL_LIMIT:'2'});t.after(async()=>{await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
+  assert.equal((await rawJson(port,'/v1/chat/completions',{model:'m2',messages:[]})).status,200);
+  const persisted=JSON.parse(fs.readFileSync(path.join(dir,'metadata.json'))),bucket=persisted.statistics.minuteBuckets[0];
+  assert.deepEqual(Object.keys(bucket.models),['m1','m2']);assert.equal(persisted.statistics.recentCoverage.droppedModelMinuteCells,1);assert.equal(persisted.statistics.recentCoverage.modelIncompleteAt.m0,minute);assert.equal(persisted.statistics.recentCoverage.droppedAccountMinuteCells,0);
 });
 
 test('quota reset timestamps accept one through nine fractional digits and reject unsafe variants', async (t) => {

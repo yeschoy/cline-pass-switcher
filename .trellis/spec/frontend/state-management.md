@@ -51,8 +51,8 @@ API signatures:
 
 ```text
 GET /api/accounts
-  -> { accounts, mode, active, concurrencyWaitMs, accountErrorRules,
-       accountPipeline, stats }
+  -> { accounts: [{ ..., health, statistics: { recent24h, lifetimeRequests, lifetimeErrors } }],
+       mode, active, concurrencyWaitMs, accountErrorRules, accountPipeline, stats }
 
 POST /api/accounts
   <- { accounts, mode, active, concurrencyWaitMs, accountErrorRules,
@@ -72,6 +72,7 @@ GET /api/statistics
         refresh: { eligible, reason, state, nextAttemptAt }
       }
     }],
+    models: [{ id, recent24h, coverage: { complete, from } }],
     migration
   }
 
@@ -118,7 +119,7 @@ The browser sends the proxy/admin credential as `X-Admin-Key`; it stores that cr
 
 #### Server-state snapshots
 
-`DATA` owns the current `/api/models` response. `ACCS` owns the current `/api/accounts` response. `loadAll()` reloads both snapshots plus security/meta state; successful destructive writes reload rather than continuing from an assumed server shape.
+`DATA` owns the current `/api/models` response plus the ID-joined model-statistics projection from the concurrently accepted `/api/statistics` read. `ACCS` owns the current `/api/accounts` response, including safe runtime account summaries. `loadAll()` reloads these snapshots plus security/meta/alias state; successful destructive writes reload rather than continuing from an assumed server shape. Statistics join by resolved model ID and account statistics arrive embedded by stable account ID; names are never join keys.
 
 The route scope selector is explicit:
 
@@ -224,7 +225,7 @@ Error-rule presets are separate from the seven scheduling presets. The cache-hit
 
 The top-level section is projected by `consolePanel.hidden`, `statisticsPanel.hidden`, `logPanel.hidden`, `detailsPanel.hidden`, and five navigation buttons' `aria-pressed` values. Console, statistics, request logs, error logs and detailed logs are mutually exclusive. Request and error navigation share one `logPanel`; `logType` remains the single selected-type owner, while the title and live status are projections of it.
 
-`STATISTICS_QUERY_ID` is independent of log state. `loadStatistics()` may render only when its captured query/visit generation still matches and `statisticsPanel` is visible. A coverage count of zero, `null` overflow, missing ratio, missing quota window, or insufficient health must render as unknown/no data rather than numeric zero. All account/provider text is escaped, and raw quota/provider payloads never become frontend state.
+`STATISTICS_QUERY_ID` is independent of log state. `loadStatistics()` may render only when its captured query/visit generation still matches and `statisticsPanel` is visible. A coverage count of zero, `null` overflow, missing ratio, missing quota window, or insufficient health must render as unknown/no data rather than numeric zero. The model table displays only rolling cache Token ratio (`cacheInputCachedTokens / cacheInputTokens`) plus paired-usage sample count and incomplete-window label; it does not display request hit rate. The account main table reads only each account object's stable-ID summary and never submits runtime health/statistics through `collectAccounts()`. All account/provider text is escaped, and raw quota/provider payloads never become frontend state.
 
 #### Statistics quota visit ownership
 
@@ -339,9 +340,9 @@ Cross-layer changes must assert:
 - scheduling preset preview/cancel/apply changes only allowed fields and round-trips through the normal save; the cache-hit preset drafts sticky/2/5000, exposes priorities, and cancellation changes nothing;
 - every error-rule preset previews the live textarea for merge/replace/clear, preserves custom rules when merging, reports exact diff groups, and cancel changes nothing;
 - all four pipeline booleans, the four-step order, and `cachePoolSize` survive a full account save; older omission preserves server values while partial/unknown/non-boolean/out-of-range payloads fail without persistence;
-- statistics generation invalidation prevents stale rendering, coverage-zero/null values remain unknown, and all rendered server text is escaped;
+- statistics generation invalidation prevents stale rendering, coverage-zero/null values remain unknown, per-model cache Token summaries join by resolved ID, account summaries stay stable-ID keyed, and all rendered server text is escaped;
 - statistics entry/manual/five-minute refresh coalesces per visit, aborts page ownership on leave, restores one visit on pageshow, and guards success/catch/finally from older visits;
-- used/remaining/reset rendering preserves known 0%/100% and labels unconfigured, disabled, unknown, partial, failed and stale snapshots truthfully without changing drafts or quota routing;
+- remaining/reset-only quota rendering preserves known 0%/100%, omits redundant used text, and labels unconfigured, disabled, unknown, partial, failed and stale snapshots truthfully without changing drafts or quota routing;
 - fixed-time quota forecast fixtures assert account-minimum-before-sum, current/+2h/+8h/+24h target boundaries, 0%/100%, eligible/excluded counts, conservative missing-reset behavior, invalid `generatedAt`, no-data rendering, and update from the accepted statistics snapshot;
 - alias generation/save/reload and log type/filter/cursor/clear keep separate state owners;
 - request logs alone filter/render `result`, historical rows without it use a display-only fallback, and the shared description distinguishes one final request from potentially many failed attempts;

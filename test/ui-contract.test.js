@@ -104,6 +104,10 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   assert.match(html,/cachePoolRole==='active'/);assert.match(html,/缓存活跃/);assert.match(html,/缓存备用/);
   assert.match(html, /api\('\/api\/statistics'\)/);
   assert.match(html, /id="statisticsStatus"[^>]+aria-live="polite"/);
+  assert.match(html, /24h 缓存 Token 占比/);
+  assert.match(html, /modelCacheMetric/);
+  const modelRenderer=html.slice(html.indexOf('function modelCacheMetric'),html.indexOf('function renderCatalog'));
+  assert.match(modelRenderer,/cacheTokenRatio/);assert.match(modelRenderer,/cacheInputKnownRequests/);assert.doesNotMatch(modelRenderer,/cacheHitRequestRate/);
   assert.match(html, /cacheTokenRatio/); assert.match(html, /cacheHitRequestRate/);
   assert.match(html, /coverage!==undefined&&Number\(coverage\)===0\)\?'无数据'/);
   assert.match(html, /value===null\|\|value===undefined/);
@@ -117,7 +121,9 @@ test('statistics quota controls expose labelled lifecycle, truthful units and ca
   assert.match(html, /进入本页及停留期间每 5 分钟刷新启用且已配置的账号额度/);assert.match(html,/查看额度不会启用额度池路由/);
   assert.match(html, /额度 5 小时\/周\/月/);assert.match(html, /table style="min-width:1500px"/);
   const statistics=html.slice(html.indexOf('function statisticValue'),html.indexOf('async function switchSection'));
-  for(const label of ['已用','剩余','重置时间','未提供','未知','部分可用','刷新失败','过期 · 上次快照','已禁用 · 上次额度','未配置','上次成功','等待刷新','刷新中'])assert.ok(statistics.includes(label),label);
+  for(const label of ['剩余','重置时间','未提供','未知','部分可用','刷新失败','过期 · 上次快照','已禁用 · 上次额度','未配置','上次成功','等待刷新','刷新中'])assert.ok(statistics.includes(label),label);
+  const quotaLimit=html.slice(html.indexOf('function quotaLimit'),html.indexOf('const QUOTA_FORECAST_TYPES'));
+  assert.doesNotMatch(quotaLimit,/已用/);
   assert.match(statistics,/typeof used!==['"]number['"]\|\|!Number\.isFinite\(used\)\|\|used<0\|\|used>100/);
   assert.match(statistics,/\(100-used\)\.toFixed\(1\)/);assert.match(statistics,/api\('\/api\/statistics\/quota-refresh',\{force\}/);
   assert.match(statistics,/new AbortController\(\)/);assert.match(statistics,/signal:controller\.signal/);assert.match(html,/async function api\(path, body, method, asText=false, options=\{\}\)/);

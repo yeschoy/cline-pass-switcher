@@ -229,9 +229,9 @@
     <div id="bulkSummary" aria-live="polite" style="max-height:120px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere"></div>
     <p class="dim">批量应用仅更新草稿，尚未生效；请点击“保存账号配置”使其生效。更改搜索条件会清空选择，不会丢弃草稿。</p>
     <div id="bulkFeedback" aria-live="polite"></div>
-    <div class="table-wrap"><table style="min-width:980px">
-      <thead><tr><th>批量选择</th><th>使用</th><th>名称</th><th>备注</th><th>启用</th><th>并发</th><th>权重/优先级</th><th>代理</th><th>运行状态</th><th>请求数</th><th>操作</th></tr></thead>
-      <tbody id="accBody"><tr><td colspan="11" class="empty">加载中…</td></tr></tbody>
+    <div class="table-wrap"><table style="min-width:1250px">
+      <thead><tr><th>批量选择</th><th>使用</th><th>名称</th><th>备注</th><th>启用</th><th>并发</th><th>权重/优先级</th><th>代理</th><th>运行/健康</th><th>累计请求</th><th>24h 缓存 Token</th><th>失败 24h/累计</th><th>操作</th></tr></thead>
+      <tbody id="accBody"><tr><td colspan="13" class="empty">加载中…</td></tr></tbody>
     </table></div>
     <div style="margin-top:12px">
       <div class="toolbar"><label class="dim" for="errorRulePreset">错误规则快捷预设：</label><select id="errorRulePreset"><option value="standard">标准限流保护</option><option value="fast">快速恢复</option><option value="conservative">保守保护</option><option value="observe">只观察不处置</option><option value="clear">清空全部规则</option></select><label class="dim"><input id="errorPresetReplace" type="checkbox"> 完整替换（默认合并）</label><button class="ghost" type="button" onclick="previewErrorPreset()">预览应用</button></div>
@@ -291,12 +291,12 @@
       </div>
     </div>
     <div class="result" id="fetchResult" style="display:none; margin-bottom:12px;"></div>
-    <table>
+    <div class="table-wrap"><table style="min-width:1250px">
       <thead><tr>
-        <th>模型</th><th>背后模型</th><th>上游数</th><th>最近实际上游</th><th>上游优先级 / 排除（多选）</th><th>模式 / 排序</th><th>操作</th>
+        <th>模型</th><th>背后模型</th><th>上游数</th><th>最近实际上游</th><th>24h 缓存 Token 占比</th><th>上游优先级 / 排除（多选）</th><th>模式 / 排序</th><th>操作</th>
       </tr></thead>
-      <tbody id="subBody"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
-    </table>
+      <tbody id="subBody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+    </table></div>
   </div>
 
   <div class="card">
@@ -449,11 +449,23 @@ function summaryChips(cfg) {
   return html;
 }
 
+function modelCacheMetric(statistics) {
+  const recent=statistics?.recent24h,known=recent?.cacheInputKnownRequests,ratio=recent?.cacheTokenRatio;
+  const coverage=statistics?.coverage?.complete===true?'':`<div class="dim" style="font-size:11px">统计积累中${statistics?.coverage?.from?` · 自 ${escapeHtml(new Date(statistics.coverage.from).toLocaleString())}`:''}</div>`;
+  if(!recent||known===null||known===undefined||Number(known)===0)return `<span class="dim">无数据</span>${coverage}`;
+  const samples=`${Number(known).toLocaleString()} 请求有数据`;
+  if(ratio===null||ratio===undefined)return `<span class="dim">无可计算输入 Token</span><div class="dim" style="font-size:11px">${samples}</div>${coverage}`;
+  return `<b>${statisticPercent(ratio)}</b><div class="dim" style="font-size:11px">${samples} · ${statisticValue(recent.cacheInputCachedTokens)}/${statisticValue(recent.cacheInputTokens)} Token</div>${coverage}`;
+}
+function modelUpstreamCount(meta) {
+  if(!meta?.probedAt)return '<span class="dim">未探测</span>';
+  if(meta.upstreamDiscovery==='unavailable'||!Array.isArray(meta.upstreams)||meta.upstreams.length===0)return '<span class="dim">未发现</span>';
+  return String(meta.upstreams.length);
+}
 function render() {
   $('#proxyBase').textContent = '代理地址：' + DATA.proxyBase + '（点击复制）';
   const rows = DATA.subscription.map((s) => {
     const m = s.meta;
-    const ups = (m?.upstreams?.length ?? null);
     const last = m?.lastProvider ? `<span class="badge">${escapeHtml(m.lastProvider)}</span>` : '<span class="dim">未探测</span>';
     const canon = m?.canonicalSlug ? `<span class="mono dim">${escapeHtml(m.canonicalSlug)}</span>` : '<span class="dim">—</span>';
     const tier0 = m?.tier0?.length ? `<div class="dim" style="font-size:11px">tier-0: ${m.tier0.map(escapeHtml).join(', ')}</div>` : '';
@@ -463,8 +475,9 @@ function render() {
     return `<tr${LAST_ADDED.includes(s.id) ? ' class="row-new"' : ''} data-id="${escapeHtml(s.id)}">
       <td class="mono">${escapeHtml(s.id)}<div style="margin-top:4px">${pipe}</div>${tier0}</td>
       <td>${canon}</td>
-      <td>${ups === null ? '<span class="dim">—</span>' : ups}</td>
+      <td>${modelUpstreamCount(m)}</td>
       <td>${last}${m?.lastMs ? `<div class="dim" style="font-size:11px">${m.lastMs} ms</div>` : ''}</td>
+      <td>${modelCacheMetric(s.statistics)}</td>
       <td>
         ${upstreamPanel(s.id, m, s.config)}
       </td>
@@ -516,8 +529,9 @@ function renderCatalog() {
 
 async function loadAll() {
   const accountId = $('#routeScope')?.value || '';
-  const [models, accs, sec, meta, aliases] = await Promise.all([api('/api/models' + (accountId ? '?accountId=' + encodeURIComponent(accountId) : '')), api('/api/accounts'), api('/api/security'), api('/api/meta'), api('/api/model-aliases')]);
-  DATA = models;
+  const [models, accs, sec, meta, aliases, statistics] = await Promise.all([api('/api/models' + (accountId ? '?accountId=' + encodeURIComponent(accountId) : '')), api('/api/accounts'), api('/api/security'), api('/api/meta'), api('/api/model-aliases'), api('/api/statistics')]);
+  const modelStatistics=new Map((statistics?.models||[]).map(item=>[item.id,item]));
+  DATA = {...models,subscription:(models.subscription||[]).map(item=>({...item,statistics:modelStatistics.get(item.id)||null}))};
   ACCS = accs; ALIASES = aliases;
   $('#accMode').value = ACCS.mode; $('#concurrencyWaitMs').value = ACCS.concurrencyWaitMs ?? 2000; $('#cachePoolSize').value = ACCS.accountPipeline?.cachePoolSize ?? 0; $('#accountErrorRules').value = JSON.stringify(ACCS.accountErrorRules || {}, null, 2);
   setPipelineOrder(ACCS.accountPipeline?.order || PIPELINE_DEFAULT_ORDER);
@@ -915,14 +929,16 @@ function renderAccounts() {
   if (!ACCS) return;
   updateBulkSelection();
   const rows = visibleAccountRows().map(({a,i}) => {
-    const usage=(ACCS.stats||{})[a.name]||{}, checked=$('#accMode').value==='single'&&i===ACCS.active;
-    const state=a.state?.banned?'封禁':a.state?.cooldownUntil>Date.now()?`冷却至 ${new Date(a.state.cooldownUntil).toLocaleTimeString()}`:'健康';
+    const checked=$('#accMode').value==='single'&&i===ACCS.active,statistics=a.statistics||{},recent=statistics.recent24h||{},health=a.health||{};
+    const state=a.state?.banned?'封禁':a.state?.cooldownUntil>Date.now()?`冷却至 ${new Date(a.state.cooldownUntil).toLocaleTimeString()}`:(health.status||'insufficient');
+    const score=health.score===null||health.score===undefined?'数据不足':Number(health.score).toFixed(1);
     const cacheRole=a.cachePoolRole==='active'?'缓存活跃':a.cachePoolRole==='standby'?'缓存备用':null;
+    const cacheSummary=modelCacheMetric({recent24h:recent,coverage:{complete:health.coverageComplete!==false}});
     let proxy='直连'; try { if(a.proxyUrl) proxy=new URL(a.proxyUrl).protocol.replace(':','').toUpperCase(); } catch {}
     const note=String(a.note||'').replace(/\s+/g,' ').slice(0,50);
-    return `<tr><td><input type="checkbox" aria-label="批量选择 ${escapeHtml(a.name)}" ${BULK_SELECTION.has(a)?'checked':''} onchange="selectAccount(${i},this.checked)"></td><td><input type="radio" name="accActive" data-i="${i}" ${checked?'checked':''} ${$('#accMode').value!=='single'?'disabled':''} onchange="ACCS.active=${i}"></td><td class="account-name" title="${escapeHtml(a.name)}">${escapeHtml(a.name)}</td><td class="dim">${escapeHtml(note||'—')}</td><td><input type="checkbox" ${a.enabled!==false?'checked':''} onchange="ACCS.accounts[${i}].enabled=this.checked"></td><td>${a.maxConcurrent||0} / ${a.activeCount||0}</td><td>${a.weight||1} / ${a.priority||100}</td><td><span class="badge">${escapeHtml(proxy)}</span></td><td><span class="badge ${state==='健康'?'green':'orange'}">${escapeHtml(state)}</span>${cacheRole?` <span class="badge">${cacheRole}</span>`:''}</td><td>${usage.requests===null?'无数据':Number(usage.requests)||0}</td><td><div class="row-actions"><button class="ghost" onclick="openAccountDrawer(${i},this)">设置</button><button class="ghost" onclick="testAccount(${i},this)">测试</button>${a.state?`<button class="ghost" onclick="recoverAccount(${jsArg(a.id)})">恢复</button>`:''}<button class="ghost" onclick="delAccount(${i})">删除</button></div></td></tr>`;
+    return `<tr><td><input type="checkbox" aria-label="批量选择 ${escapeHtml(a.name)}" ${BULK_SELECTION.has(a)?'checked':''} onchange="selectAccount(${i},this.checked)"></td><td><input type="radio" name="accActive" data-i="${i}" ${checked?'checked':''} ${$('#accMode').value!=='single'?'disabled':''} onchange="ACCS.active=${i}"></td><td class="account-name" title="${escapeHtml(a.name)}">${escapeHtml(a.name)}</td><td class="dim">${escapeHtml(note||'—')}</td><td><input type="checkbox" ${a.enabled!==false?'checked':''} onchange="ACCS.accounts[${i}].enabled=this.checked"></td><td>${a.maxConcurrent||0} / ${a.activeCount||0}</td><td>${a.weight||1} / ${a.priority||100}</td><td><span class="badge">${escapeHtml(proxy)}</span></td><td><span class="badge ${['available'].includes(state)?'green':'orange'}">${escapeHtml(state)}</span><div class="dim" style="font-size:11px">评分 ${score}</div>${cacheRole?` <span class="badge">${cacheRole}</span>`:''}</td><td>${statisticValue(statistics.lifetimeRequests)}</td><td>${cacheSummary}</td><td>${statisticValue(recent.errors)} / ${statisticValue(statistics.lifetimeErrors)}</td><td><div class="row-actions"><button class="ghost" onclick="openAccountDrawer(${i},this)">设置</button><button class="ghost" onclick="testAccount(${i},this)">测试</button>${a.state?`<button class="ghost" onclick="recoverAccount(${jsArg(a.id)})">恢复</button>`:''}<button class="ghost" onclick="delAccount(${i})">删除</button></div></td></tr>`;
   }).join('');
-  $('#accBody').innerHTML=rows||'<tr><td colspan="11" class="empty">无匹配账号</td></tr>';
+  $('#accBody').innerHTML=rows||'<tr><td colspan="13" class="empty">无匹配账号</td></tr>';
 }
 // Editor snapshots detect stale sources; existing controls remain the scheduling draft owner.
 let RAW_SCHEDULING = null;
@@ -1027,7 +1043,7 @@ async function saveAliases(){try{const r=await api('/api/model-aliases',{aliases
 function statisticValue(value,coverage){return value===null||value===undefined||(coverage!==undefined&&Number(coverage)===0)?'无数据':`${Number(value).toLocaleString()}${coverage!==undefined?`（${Number(coverage)} 请求有数据）`:''}`;}
 function statisticPercent(value){return value===null||value===undefined?'无数据':`${(Number(value)*100).toFixed(1)}%`;}
 function quotaResetAt(value){if(typeof value!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value))return null;const timestamp=Date.parse(value);return Number.isFinite(timestamp)&&new Date(timestamp).toISOString()===value?timestamp:null;}
-function quotaLimit(quota,type,label){const value=quota?.limits?.[type],used=value?.percentUsed;if(typeof used!=='number'||!Number.isFinite(used)||used<0||used>100)return `${label}：未知 · 重置时间未提供`;const resetAt=quotaResetAt(value.resetsAt),reset=resetAt===null?'未提供':new Date(resetAt).toLocaleString();return `${label}：已用 ${used.toFixed(1)}% · 剩余 ${(100-used).toFixed(1)}%<br><span class="dim">重置时间 ${escapeHtml(reset)}</span>`;}
+function quotaLimit(quota,type,label){const value=quota?.limits?.[type],used=value?.percentUsed;if(typeof used!=='number'||!Number.isFinite(used)||used<0||used>100)return `${label}：未知 · 重置时间未提供`;const resetAt=quotaResetAt(value.resetsAt),reset=resetAt===null?'未提供':new Date(resetAt).toLocaleString();return `${label}：剩余 ${(100-used).toFixed(1)}%<br><span class="dim">重置时间 ${escapeHtml(reset)}</span>`;}
 const QUOTA_FORECAST_TYPES=['five_hour','weekly','monthly'],QUOTA_FORECAST_TARGETS=[['current',0],['twoHours',2*60*60*1000],['eightHours',8*60*60*1000],['twentyFourHours',24*60*60*1000]];
 function statisticsQuotaForecast(data){const accounts=Array.isArray(data?.accounts)?data.accounts:[],generatedAt=data?.generatedAt,validGeneratedAt=Number.isSafeInteger(generatedAt)&&generatedAt>0&&Number.isFinite(new Date(generatedAt+24*60*60*1000).getTime()),totals={current:0,twoHours:0,eightHours:0,twentyFourHours:0};let included=0,excluded=0,incompleteResets=0;for(const account of accounts){const used=QUOTA_FORECAST_TYPES.map(type=>account?.quota?.limits?.[type]?.percentUsed),eligible=account?.enabled===true&&account?.quota?.status==='fresh'&&used.every(value=>typeof value==='number'&&Number.isFinite(value)&&value>=0&&value<=100);if(!eligible){excluded++;continue;}included++;const remaining=used.map(value=>100-value),resets=QUOTA_FORECAST_TYPES.map(type=>quotaResetAt(account.quota.limits[type].resetsAt));if(!validGeneratedAt||resets.some(reset=>reset===null||reset<=generatedAt))incompleteResets++;for(const [key,offset] of QUOTA_FORECAST_TARGETS){const projected=remaining.map((value,index)=>offset>0&&validGeneratedAt&&resets[index]!==null&&resets[index]>generatedAt&&resets[index]<=generatedAt+offset?100:value);totals[key]+=Math.min(...projected);}}return {totals,maximum:included*100,included,excluded,incompleteResets};}
 function renderStatisticsQuotaForecast(data){const forecast=statisticsQuotaForecast(data),targets=[['statisticsQuotaCurrent','current'],['statisticsQuota2h','twoHours'],['statisticsQuota8h','eightHours'],['statisticsQuota24h','twentyFourHours']];for(const [id,key] of targets){const total=forecast.totals[key];$('#'+id).textContent=forecast.included===0?'无可用数据':`可用 ${total.toFixed(1)} / ${forecast.maximum.toFixed(1)} 账号额度点（${(total/forecast.maximum*100).toFixed(1)}%）`;}$('#statisticsQuotaForecastMeta').textContent=`纳入 ${forecast.included} 个账号 · 排除 ${forecast.excluded} 个账号 · 重置时间不完整 ${forecast.incompleteResets} 个账号${forecast.incompleteResets?' · 未来值为保守预测下限':''}`;return forecast;}
