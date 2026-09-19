@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Resolve combined Chat routing, content-rule and affinity/provider contracts"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Resolve combined route and statistics migration schema"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Preserve ordinary/detailed diagnostic boundaries"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Preserve unified drafts, setup preview and log state owners"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Preserve combined UI safety/accessibility contracts"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Trace merged Chat-to-statistics/log/UI lifecycle"}
+{"file": ".trellis/tasks/09-20-merge-upstream-affinity/research/conflict-inventory.md", "reason": "Exact merge revisions, conflict list and resolution ownership"}

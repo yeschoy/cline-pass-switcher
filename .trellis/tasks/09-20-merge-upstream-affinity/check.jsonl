@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify no routing/error-rule/affinity regression"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Verify config and statistics migrations"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify no sensitive diagnostic regression"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Verify combined UI contracts"}
+{"file": ".trellis/tasks/09-20-merge-upstream-affinity/research/conflict-inventory.md", "reason": "Verify every identified conflict and auto-merge overlap"}
+{"file": ".trellis/tasks/09-20-merge-upstream-affinity/research/verification.md", "reason": "Merged conflict and full-gate evidence plus dirty-target preservation"}
