@@ -169,6 +169,8 @@ Editing any inherited field creates an account-owned route. `copyGlobalCfg()` ex
 
 Probe/validation/setup use the explicit route-scope account ID when present. One setup operation keeps probe, harvest and validation on that account, builds three local proposals (cache-first strict, availability-first preferred, automatic sticky), and opens a preview. Cancel writes nothing; test sends only the proposal to `/api/test`; confirm alone calls the existing complete-route save and reloads accepted state. Changing route scope while the preview is open makes it stale and blocks test/save.
 
+`pinMode: "preferred"` remains a round-trip configuration value, but both modes now mean switcher-owned outer attempts with one provider per HTTP request. The browser must not describe `preferred` as gateway-side `order`. `meta.upstreamStatus[provider]` is a server projection of model/provider health (`status`, success/failure timestamps, failure count/class, `cooldownUntil`, and bounded note). It is display-only: frontend sorting must never override configured provider priority or claim to be the routing authority.
+
 #### Full account save
 
 `POST /api/accounts` replaces the account array. The implemented route field is `perModel` (not `modelRouting`). Therefore every row collected by `collectAccounts()` must carry:
@@ -237,7 +239,7 @@ Validation precedes every control write: six existing modes; integer wait 0–30
 
 #### Rendering and sensitive values
 
-All server-provided text used in HTML strings passes through `escapeHtml()` (or `jsArg()` where a JavaScript string argument is needed). Status regions use `aria-live="polite"`. Account keys are password inputs unless the operator explicitly enables “show keys.” This is display protection only; account data comes from the management API and must be protected by the configured proxy key.
+All server-provided text used in HTML strings passes through `escapeHtml()` (or `jsArg()` where a JavaScript string argument is needed). Provider health renders `degraded`, active cooldown remaining time, and expired/half-open state without reordering the stable provider list. Status regions use `aria-live="polite"`. Account keys are password inputs unless the operator explicitly enables “show keys.” This is display protection only; account data comes from the management API and must be protected by the configured proxy key.
 
 Key visibility is transient drawer UI state: every `openAccountDrawer()` clears the show control and restores `drawerKey.type = "password"`. Visibility state is excluded from `drawerValue()`, so showing or hiding an unchanged Key never marks the account draft dirty.
 
@@ -367,6 +369,7 @@ Cross-layer changes must assert:
 
 - `/api/models?accountId=` reports `account` for an own route and `inherited` after `action: "inherit"`;
 - provider attempts use the selected account route, while an account without an own entry uses the global route;
+- preferred-mode copy says fallback is switcher-managed with singleton `only`, and health/cooldown labels render escaped without reordering configured or discovered provider lists;
 - posting `/api/accounts` with the full account snapshot preserves stable IDs, `perModel`, notes, proxy/Header fields, weight/priority, mode, active account, wait, and rules;
 - filtering/searching account rows or a blank-key row does not change which account is active;
 - scheduling preset preview/cancel/apply changes only allowed fields and round-trips through the normal save; the cache-hit preset drafts sticky/2/5000, exposes priorities, and cancellation changes nothing;

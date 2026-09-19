@@ -1,0 +1,10 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend guideline entry point and pre-development checklist."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Owns account-bound provider failover, transport, SSE, account actions, and integration-test contracts."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Owns metadata schema, migration, validation, and atomic persistence for provider health state."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Owns bounded diagnostic projections and sensitive-data exclusions for new scope/health fields."}
+{"file":".trellis/spec/frontend/index.md","reason":"Frontend guideline entry point for the static console changes."}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Owns /api/models metadata projection and route-config round-trip behavior."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Owns safe provider status rendering, help text, and UI contract tests."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"The feature spans transport, metadata, diagnostics, API projection, and console rendering."}
+{"file":".trellis/tasks/09-19-cline-429-upstream-retry/research/diagnosis.md","reason":"Contains the original request-path evidence and bounded 429 diagnosis."}
+{"file":".trellis/tasks/09-19-cline-429-upstream-retry/research/architecture-analysis.md","reason":"Contains the selected error classification, health routing, retry, and compatibility design evidence."}

@@ -22,6 +22,10 @@ acquireAccountLease(identity, { excludeIds = new Set(), allowOverflow = true })
 strategyRank(mode, accounts)
 resolveModelAlias(requestedModel)
 resolveModelConfig(account, resolvedModel)
+buildProviderAttempts(modelId, routeConfig, now)
+injectPrefs(body, modelId, attempt)
+classifyAttemptFailure(result, attempt, account, now)
+updateProviderHealth(modelId, upstream, outcome, now)
 responseHeadersFor(account, forwardedHeaders)
 proxyAgentFor(proxyUrl)
 runChatChain(req, body, modelId, cfg, account, forwardedHeaders,
@@ -96,13 +100,13 @@ Runtime environment keys are `DATA_DIR`, `CLINE_PASS_KEY`, `PROXY_KEY`, `PUBLIC_
 - The three new modes wait only when every statically available account is full, and recompute candidates after capacity notifications.
 - Selection returns stable diagnostic facts (`strategy`, preferred/selected account, enumerated reason, overflow, session source). These facts may be logged, but the session value/fingerprint may not.
 - `runChatChain()` receives one explicit `account`; every provider attempt in that invocation uses that account's Authorization.
-- For a normalized failure, ordered `accountContentErrorRules` inspect one bounded, flattened string after configured credentials/Header/proxy values and current request message values are redacted. Matching is case-insensitive literal contains with an optional inclusive normalized-status range; no regex/JSONPath/success-output scan is allowed. The first matching content rule is final, including `ignore`; only when none matches does exact `accountErrorRules[status]` apply.
-- `ignore` or an unmatched failure continues the provider chain on the same account. `cooldown` and `ban` stop that account's chain. The matcher returns only status/action/cooldown facts; keywords, matched text and raw response bodies never enter account state/history/ordinary logs.
-- `handleChat()` permits one replacement account only when `cooldown` or `ban` occurs before `chain.started`. The replacement starts its own model route from the first provider. The two-iteration account loop forbids a third account. A post-start SSE content action may change future account state but never replays the current stream; client cancellation never evaluates an error action.
+- For a normalized failure, ordered `accountContentErrorRules` inspect one bounded, flattened string after configured credentials/Header/proxy values and current request message values are redacted. Matching is case-insensitive literal contains with an optional inclusive normalized-status range; no regex/JSONPath/success-output scan is allowed. The first matching content rule is final, including `ignore`; this explicit operator rule may override the conservative 429 default. Only when no content rule matches does exact `accountErrorRules[status]` apply.
+- `ignore` or an unmatched non-429 failure continues the provider chain on the same account. For 429 status fallback, account rules are consulted only after conservative classification proves `scope=account`; provider/unknown 429 continues on the same Authorization. `cooldown` and `ban` stop that account's chain. The matcher/log projection returns only bounded status/action/scope/cooldown facts; keywords, matched text and raw response bodies never enter account state/history/ordinary logs.
+- `handleChat()` permits one replacement account only when `cooldown` or `ban` occurs before `chain.started`. The replacement starts its own health-planned provider route. The two-iteration account loop forbids a third account. A post-start SSE content/status action may change future account/provider state but never replays the current stream; client cancellation evaluates neither.
 
 Session identity values are validated, HMACed with `META.routingSecret`, and never logged or persisted. The request-local identity also carries only bounded `keyType` and `confidence` enums. Trusted parent identifiers precede child identifiers. Codex checks parent thread metadata/header before `prompt_cache_key`, session, and thread values; Claude checks parent-agent information before session/agent values. Generic parent headers precede generic current-session fields. `X-Client-Request-Id` alone never establishes affinity. The fallback HMAC input contains only the first system/developer message and first user message (each capped at 4096 characters); if neither is extractable, selection falls back to round-robin.
 
-For Chat Completions, a valid caller `prompt_cache_key` or `session_id` is preserved byte-for-byte. When an explicit Codex/Claude identity reached the Switcher but neither body field exists, `prepareChatAffinity()` injects a domain-separated 64-hex `prompt_cache_key` derived from the local fingerprint. A `message_hmac` fallback is never promoted into an explicit upstream key. The derived value is reused across account/provider attempts but never enters ordinary logs, metadata, responses or management projections. `preferred` routes that emit `provider.order` are diagnosed as overriding OpenRouter sticky routing; this is a bounded fact, not proof that a remote provider used the key.
+For Chat Completions, a valid caller `prompt_cache_key` or `session_id` is preserved byte-for-byte. When an explicit Codex/Claude identity reached the Switcher but neither body field exists, `prepareChatAffinity()` injects a domain-separated 64-hex `prompt_cache_key` derived from the local fingerprint. A `message_hmac` fallback is never promoted into an explicit upstream key. The derived value is reused across account/provider attempts but never enters ordinary logs, metadata, responses or management projections. A `preferred` route with an explicit singleton-provider plan is diagnosed as overriding remote sticky provider selection; this is a bounded fact, not proof that a remote provider used the key.
 
 #### Account-level model routing
 
@@ -120,9 +124,21 @@ Presence is tested with `hasOwnProperty`; even `{}` is a complete account overri
 { upstream, upstreams, exclude, pinMode, sort, maxRetries, providerCooldownMs }
 ```
 
-`maxRetries: null` runs all built provider attempts; an integer `n` permits the first attempt plus at most `n` additional outer attempts. `providerCooldownMs` is an integer 0-300000; 0 preserves the legacy sequence. When enabled, only pre-output provider transport/server/rate-limit/unavailable failures cool an `(accountId, resolvedModel, provider)` runtime entry. Account auth/quota/proxy, parameter 4xx, cancellation and post-start failures do not. Expiry admits one half-open owner; success clears state and an allowed failure renews the bounded cooldown. This state is process-local, contains no session/credential/body, and is cleared on account identity changes and route replacement.
+`maxRetries: null` runs all built provider attempts; an integer `n` permits the first attempt plus at most `n` additional outer attempts. The cap is applied after durable health planning. `providerCooldownMs` remains an integer 0-300000: when positive it adds a process-local `(accountId, resolvedModel, provider)` circuit used to serialize half-open ownership and may override the short 5xx/network/timeout delay; zero disables only that extra per-account circuit, not the shared model/provider health state. Circuit state contains no session/credential/body and is cleared on account identity changes and route replacement; stale-generation completions update neither circuit nor durable health.
 
 A successful model probe builds its known provider set from the observed `finalProvider`, strict provider slugs harvested from either string or structured error envelopes, documented fallbacks and direct-pipeline endpoint details. Discovery state is distinct from `upstreamStatus`: observing a provider prevents a false zero count but never claims that provider passed pin validation.
+
+#### Single-provider attempt planning and health
+
+- Configured `upstreams` are the authoritative provider order. Without a configured order, the stable discovered `META.models[modelId].upstreams` order is used.
+- Exclusions are applied before health routing. A known list that becomes empty after exclusion returns a safe no-provider error and never falls back to auto.
+- Providers with durable `cooldownUntil > now` are skipped. All other providers retain source order regardless of `ok`, `degraded`, or `unknown` labels. An expired cooldown returns to its original position; a positive per-account circuit admits at most one concurrent half-open owner.
+- If every durable provider state is cooling, exactly one provider fails open: smallest `cooldownUntil`, then source priority. If the optional per-account circuit still owns that provider's half-open probe, return bounded `503/Retry-After` rather than opening another. If no provider is known at all, exactly one `auto`/unattributed attempt is allowed.
+- Every named attempt injects exactly one provider through `providerOptions.gateway.only` (planner), `provider.only` (direct), or the same singleton in both shapes for an unknown pipeline. `order` is removed even if supplied downstream. `preferred` remains a persisted UI/config mode but its fallback is switcher-managed outer retry.
+- A 429 is account-scoped only with a fresh complete 100%-used quota snapshot or explicit structured account/subscription/plan quota-exhaustion semantics. Routing/final-provider or structured provider fields make it provider-scoped. HTML and other ambiguous 429 responses are unknown.
+- Provider and unknown 429 update only the named model/provider health entry and continue the same account. Valid delta-seconds or HTTP-date `Retry-After` is clamped to 1 second-30 minutes; otherwise rate-limit cooldown starts at 60 seconds with bounded exponential backoff.
+- 5xx/network/timeout failures use 15-second bounded backoff capped at 2 minutes unless a positive `providerCooldownMs` supplies the short delay. Unsupported/unpinnable providers cool for one hour. Account proxy/auth/quota, request-parameter failures and client disconnects never penalize shared provider health. Success clears failures/cooldown immediately.
+- Provider health is keyed by `(modelId, provider)` and intentionally shared across accounts. An unattributed auto attempt never creates a named health entry.
 
 #### Header and credential boundary
 
@@ -155,10 +171,10 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 
 - A client socket close aborts the active upstream request.
 - The stream path buffers at most the first 64 KiB while waiting for a complete first SSE event. A pre-response error event is normalized and may still trigger provider/account failover.
-- After a valid SSE response is exposed (`started: true`), the request is never replayed. A later SSE error may update future cooldown/ban state only.
+- After a valid SSE response is exposed (`started: true`), the request is never replayed. Clean completion recovers the named provider and releases any half-open owner; a later classified SSE error updates future provider/account state only.
 - The SSE observer records a complete `data: [DONE]` event. A downstream close after `[DONE]` finalizes once as `200 / success`; a close before `[DONE]` finalizes once as `499 / client_cancelled`.
-- An observed SSE error or upstream transport error takes precedence over `[DONE]` and remains a real failure. A client cancellation creates no error attempt, usage, error statistic, health result, or account action.
-- The account lease stays held until normal stream flush, upstream error, or downstream close. Stream finalization, listener cleanup, statistics submission, and lease release are idempotent.
+- An observed SSE error or upstream transport error takes precedence over `[DONE]` and remains a real failure. A client cancellation creates no error attempt, usage, error statistic, health result, account action, or provider-health update.
+- The account lease stays held until normal stream flush, upstream error, or downstream close. Stream finalization, listener cleanup, statistics submission, provider settlement and lease release are idempotent.
 - Detailed capture, when enabled, observes native responses before SSE-head consumers with a single pass-through Transform and two-way destruction propagation. Use native `stream.finished(source, { readable: true, writable: false }, callback)` to observe terminal source errors: `aborted` may precede Node's actual `error`, and synthesizing an earlier error changes downstream error bodies with logging enabled. Preserve the native error object/code (`ECONNRESET`); a silent premature close still terminates the tap with `ERR_STREAM_PREMATURE_CLOSE`. The 5 MiB capture cap never becomes a traffic limit; asynchronous store publication is not awaited here. Preserve downstream write/end/writeHead overloads/return values and explicitly carry the detail root into chat result recording because close callbacks may run outside the originating AsyncLocalStorage context. See the detailed logging contract for route exclusions and failure states.
 
 #### Usage, statistics, and health
@@ -203,7 +219,10 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 | Log filter is unknown or has an invalid integer/boolean | `400` |
 | Session identity is over 512 characters or invalid | ignore it and continue identity fallback |
 | Upstream has an HTTP 4xx/5xx status | preserve it as `upstreamStatus` and normally as `normalizedStatus` |
-| HTTP 200 error envelope has a recognized status/message | normalize before ordered content-rule matching and status fallback; otherwise `502` |
+| HTTP 200 error envelope has a recognized status/message | normalize and classify before ordered content-rule matching and conservative status fallback; otherwise `502` |
+| Ambiguous or non-JSON HTML 429 from Cline | `scope=unknown`; absent an explicit matching content rule, do not cool the account and continue the next named provider on the same Authorization |
+| Explicit account quota 429 with a configured removal action | stop that provider chain, do not penalize provider health, and replace the account at most once |
+| Every known provider is excluded | no upstream request; safe `503`; never auto-bypass exclusions |
 | Error output/history contains a configured key, Bearer token, or request message | replace with `[REDACTED]`; retain the complete structured error reason without substring-corrupting short-message redaction |
 | `/api/accounts` mode/wait/status rules/content rules/id/name/key/capacity/route is invalid | `400`; do not save; omission of `accountContentErrorRules` preserves the current array |
 | `/api/accounts.accountPipeline` is missing on an older client | preserve the current server value |
@@ -225,7 +244,8 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 ### 5. Good / Base / Bad Cases
 
 - **Good:** sticky identity leases account A; provider `first` fails and `second` succeeds; both upstream requests use account A's Authorization.
-- **Good:** account A receives a configured `429 -> cooldown` before output; its state is persisted, its lease is released, and account B starts from B's own first provider. A second removal action returns an error without selecting account C.
+- **Good:** account A receives an explicit account-quota 429 matching configured `429 -> cooldown` before output; its state is persisted without penalizing the provider, its lease is released, and account B starts from B's own first health-planned provider. A second removal action returns an error without selecting account C.
+- **Good:** account A receives an HTML 429 from named provider `first`; the error remains unknown, `first` cools, and `second` is attempted with A's unchanged Authorization.
 - **Good:** an alias request logs both names, applies the resolved target's account route, and returns the internal request ID used by request/error logs.
 - **Good:** a SOCKS/HTTPS-proxied account reaches Cline through its Agent; a bad proxy produces no direct request.
 - **Good:** a streaming request receives fragmented events and one oversized event, then commits the final later cumulative usage exactly once.
@@ -249,9 +269,12 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - repeated session, parent/child identities, and stable opening messages select the same account; request-id-only requests use round-robin;
 - caller prompt/session keys are preserved; explicit Codex/Claude header/metadata identities derive one stable upstream key across retries/account replacement; message fallback derives none; ordinary logs contain only safe source/confidence/applied/cache-hit facts;
 - HRW rank is independent of account input order, and removing one account remaps only sessions that ranked that account first;
-- provider attempts have identical Authorization and occur in configured order; `maxRetries` caps the attempt count; `providerCooldownMs: 0` is sequence-equivalent, while enabled cooldown skips repeated allowed failures, admits one half-open probe and ignores parameter/auth/proxy/cancel/post-start outcomes;
-- cooldown/ban can switch from A to B, a second removal action cannot select C, and banned accounts leave the candidate set;
+- planner/direct/unknown-pipeline named attempts use singleton `only`, contain no `order`, keep identical Authorization, preserve configured order among non-cooling providers, and apply `maxRetries` after health planning;
+- discovered providers become named attempts, no-known-provider uses one unattributed auto attempt, all-excluded sends none, active durable cooldowns are skipped, expired cooldowns recover in place, and all-cooling fails open only the earliest provider;
+- a positive `providerCooldownMs` additionally skips repeated allowed failures and admits one concurrent half-open owner; zero disables only that per-account circuit, while parameter/auth/proxy/cancel outcomes do not poison shared provider health;
+- unknown/provider 429 continues within A, while explicit account 429 can switch A to B without provider penalty; a second removal action cannot select C, and banned accounts leave the candidate set;
 - ordered content rules prove first-match/range/ignore/status-fallback behavior for nested HTTP-200 errors, non-stream, pre-stream SSE, post-start SSE and provider retry; current messages/keys/Header values are absent from metadata and ordinary logs;
+- provider health tests cover valid/missing Retry-After, 5xx/transport/unsupported cooldowns, model isolation, success recovery, stale-generation rejection, restart persistence, and late SSE updates without replay;
 - account override reports `configSource: "account"`; `action: "inherit"` restores `"inherited"`; account-scoped probe/validation keeps one account/proxy and never promotes account auth/proxy/quota failures into global provider health;
 - real allowed and safe account Headers arrive, prohibited Headers do not, downstream Authorization is replaced, and no synthetic User-Agent appears;
 - HTTP, HTTPS, SOCKS5, and SOCKS5H proxies create real local tunnels; bad proxy tests prove no direct fallback and no credential leakage;

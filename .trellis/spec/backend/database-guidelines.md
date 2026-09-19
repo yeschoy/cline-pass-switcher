@@ -123,6 +123,21 @@ Startup normalization preserves legacy behavior while making the schema explicit
 
 ```js
 {
+  models: {
+    [modelId]: {
+      upstreams,
+      upstreamStatus: {
+        [provider]: {
+          status: "ok" | "limited" | "degraded" | "bad" | "unknown",
+          checkedAt, lastSuccessAt, lastFailureAt,
+          consecutiveFailures, cooldownUntil,
+          failureClass: null | "rate_limit" | "auth" | "server" |
+                        "network" | "timeout" | "unsupported" | "other",
+          note
+        }
+      }
+    }
+  },
   accountStates: {
     [accountId]: {
       banned,
@@ -185,7 +200,9 @@ Startup normalization preserves legacy behavior while making the schema explicit
 
 `routingSecret` is generated once and persisted so HRW mapping survives restart. `accountStates` entries for removed accounts are deleted; the deterministic environment-account ID remains valid while `CLINE_PASS_KEY` is present. Expired, non-banned cooldown entries are deleted when candidates are read. Ban/cooldown state persists until expiry or `POST /api/accounts/recover` removes it.
 
-`metadata.json` must not contain account keys, proxy credentials, custom Header values, account notes, raw session values, HMAC fingerprints, message text, or identity-source labels. Bounded identity-source labels such as `message_hmac` belong only to ordinary request-log projections. Reasons written to metadata are redacted and flattened; bounded model status notes may be truncated, while complete redacted structured provider reasons belong to the separate error JSONL stream.
+Provider health is durable runtime metadata keyed by model and provider, never by account. Legacy `upstreamStatus` entries are normalized additively: invalid/missing timestamps become zero, missing counters/cooldowns become zero, unsupported legacy statuses become `unknown`, and notes are bounded/redacted. Timestamps are non-negative safe integers and failure counts are bounded. Runtime attempt updates are persisted by the ordinary request finalizer rather than a synchronous write per attempt. A provider/account error must never copy credentials, raw response bodies, or request content into this map.
+
+`metadata.json` must not contain account keys, proxy credentials, custom Header values, account notes, raw session values, HMAC fingerprints, message text, or identity-source labels. Bounded identity-source labels such as `message_hmac` belong only to ordinary request-log projections. Reasons written to metadata are redacted and flattened; bounded model/provider health notes may be truncated, while complete redacted structured provider reasons belong to the separate error JSONL stream.
 
 `Aggregate` has fixed non-negative safe-integer counters for requests, errors, usage coverage, input/output/total tokens, cache coverage/tokens, explicit/fallback affinity, provider fallback, provider circuit cooldown and half-open requests. v3 records `routingTrackingStartedMinute`; migrated routing counters are explicitly scoped from that minute instead of pretending the historical zeros are complete. A counter that would overflow becomes `null` and its exact field name is added once to `overflowFields`; a `null` field without that marker, or a marker whose field is not `null`, is corrupt. Statistics retain at most 1,440 minute buckets, 50,000 union `(minute, accountId)` cells and an independent 50,000 `(minute, resolvedModelId)` cells. Dropped account/model cells mark only their owning recent coverage incomplete rather than inventing zeroes. Model aggregation starts at the v1→v2 migration minute, uses the post-alias resolved model ID, and has no fabricated lifetime baseline; until 1,440 minutes are covered, the API labels the rolling model window incomplete.
 
@@ -226,6 +243,8 @@ Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/
 | Error rule status outside 100-599, unknown action, or non-positive cooldown | `400`; no write |
 | Content rules are non-array/over 100/over 64 KiB, have blank/over-500/control text, one-sided/invalid status range, unknown field/action, or invalid cooldown | `400`; no write; an older client omitting the entire field preserves the current server array |
 | `accountPipeline` lacks any of the four booleans, has unknown fields, has `cachePoolSize` outside integer 0-100000, or has an explicit `order` that is not an exact four-step permutation | `400`; no write; an older client may omit `order` and/or `cachePoolSize`, preserving the current server values |
+| Legacy provider health lacks new fields | normalize to bounded defaults while preserving safe status/note/timestamps |
+| Invalid provider-health timestamp/count/status | normalize to zero/unknown/bounded values; never copy raw payload data |
 | Valid statistics v1/v2 | validate the old exact field set, add v2 model maps/coverage when needed, add v3 routing counters as known zero from the migration point, then atomically persist without changing prior request/token/cache facts |
 | Existing statistics version is missing/unknown or its structure exceeds account/model bounds | startup fails; original metadata bytes remain |
 | Aggregate overflow marker and `null` field disagree | startup fails; original metadata bytes remain |
@@ -260,7 +279,8 @@ Persistence changes must use a temporary `DATA_DIR` and assert:
 - all new account fields, model aliases, and all 24 pipeline order permutations survive an authenticated save/restart round trip without erasing account routes;
 - missing legacy pipeline order and cache-pool size migrate to the compatibility defaults, old-client saves preserve the current order/size, valid cache-pool sizes survive restart, and malformed explicit values fail without changing file bytes;
 - invalid proxy/Header/note/weight/priority/alias payloads return `400` and preserve the previous file bytes;
-- `routingSecret` and cooldown state survive restart, and the cooled account is excluded afterward;
+- `routingSecret`, account cooldown state, and model/provider health cooldowns survive restart; routing skips only still-cooling providers and keeps model isolation;
+- legacy provider status rows gain bounded timestamps/count/class/cooldown fields without leaking secrets, while successful half-open attempts persist immediate recovery;
 - newly created `metadata.json` has mode `0600` on POSIX;
 - metadata serialization excludes known account keys and raw session values;
 - legacy name-keyed request counts migrate only into the labelled baseline without fabricating exact usage;

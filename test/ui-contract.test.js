@@ -133,6 +133,10 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   assert.match(modelRenderer,/cacheTokenRatio/);assert.match(modelRenderer,/cacheInputKnownRequests/);assert.doesNotMatch(modelRenderer,/cacheHitRequestRate/);
   assert.match(html, /cacheTokenRatio/); assert.match(html, /cacheHitRequestRate/);
   assert.match(html, /function affinityMetrics/); assert.match(html, /explicitAffinityRequests/); assert.match(html, /providerCircuitCooldownRequests/); assert.match(html, /providerHalfOpenRequests/);
+  assert.match(html, /每次 HTTP attempt 仅发送一个 provider\.only/);
+  assert.match(html, /function providerHealthView\(state\)/);assert.match(html, /degraded: '⚠退化'/);assert.match(html, /⏸冷却/);assert.match(html, /◐待半开/);
+  const providerOrder = html.slice(html.indexOf('function sortedUpstreams'), html.indexOf('function upstreamOptions'));
+  assert.doesNotMatch(providerOrder, /\.sort\(/);assert.match(providerOrder, /meta && meta\.upstreams/);
   assert.match(html, /coverage!==undefined&&Number\(coverage\)===0\)\?'无数据'/);
   assert.match(html, /value===null\|\|value===undefined/);
   const statistics = html.slice(html.indexOf('function statisticValue'), html.indexOf('async function switchSection'));

@@ -80,7 +80,7 @@
   .upinfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
   .upname { color: var(--dim); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .upstat { flex: none; font-size: 11.5px; min-width: 52px; text-align: right; }
-  .upstat.ok { color: var(--green); } .upstat.limited { color: var(--orange); } .upstat.bad { color: var(--red); } .upstat.auth { color: var(--red); } .upstat.unknown { color: var(--dim); }
+  .upstat.ok { color: var(--green); } .upstat.limited, .upstat.degraded, .upstat.cooling { color: var(--orange); } .upstat.bad { color: var(--red); } .upstat.auth { color: var(--red); } .upstat.unknown { color: var(--dim); }
   .upstat.excl { color: var(--red); font-weight: 600; }
   /* 药丸切换按钮：整颗可点（约 60×30px），三态：默认灰 / 优先蓝 / 排除红 */
   .pill { flex: none; border: 1px solid var(--border); background: transparent; color: var(--dim); border-radius: 15px; padding: 5px 14px; font-size: 12px; cursor: pointer; min-width: 56px; text-align: center; line-height: 1; }
@@ -188,12 +188,12 @@
     ① <b>上游可枚举、可观测</b>：订阅模型响应元数据里带背后真正的模型 ID、可用上游列表与本次实际命中的上游；
     「探测」按钮还会用一次零 token 消耗的假上游请求让网关报出精确的可用上游清单（直连→OpenRouter，规划器→Vercel AI Gateway）。<br>
     ② <b>两类管道都能精确钉住上游</b>（已实测 <code class="mono">finalProvider</code> 随之改变）：
-    直连管道（OpenRouter）用顶层 <code class="mono">provider.only / order</code>；
-    规划器管道（Vercel AI Gateway）必须用 <code class="mono">providerOptions.gateway.only / order</code>——
-    Cline 会丢弃顶层 <code class="mono">provider</code> 简写里的 <code class="mono">only/order</code>，但会透传 <code class="mono">providerOptions.gateway</code>。
+    直连管道（OpenRouter）用顶层 <code class="mono">provider.only</code>；
+    规划器管道（Vercel AI Gateway）必须用 <code class="mono">providerOptions.gateway.only</code>——
+    switcher 的每次 HTTP attempt 只注入一个 provider，避免网关内部不可观测的多渠道 <code class="mono">order</code> 回退。
     两类管道还都支持 <code class="mono">sort</code>（最低成本 / 最快首字 / 最高吞吐）。<br>
     ③ <b>目录模型 :free 变体</b>：属于直连管道，可精确钉住。<br>
-    ④ <b>多上游优先级 + 故障转移</b>：勾选多个上游即按勾选顺序逐个尝试——第一个异常（报错/网络失败/超时）自动顺切下一个，全部失败才把错误透传给客户端；「排除」的上游永不被使用（自动模式下会向网关注入排除偏好）。流式请求在首包（SSE 开始）前同样可切换，SSE 开始后透传不可重试。
+    ④ <b>多上游优先级 + 健康故障转移</b>：switcher 严格按人工顺序逐次发送单 provider 请求，只临时绕过仍在冷却的渠道，不按健康标签重排其余渠道；全部冷却时仅放行最早恢复者。流式请求在首包（SSE 开始）前同样可切换，SSE 开始后只更新未来健康状态、绝不重放。
   </div>
 
   <div class="toolbar">
@@ -236,7 +236,7 @@
     <section id="errorRulesEditor" style="margin-top:12px" aria-labelledby="errorRulesTitle">
       <h3 id="errorRulesTitle" style="font-size:14px;margin-bottom:8px">账号错误规则</h3>
       <div class="toolbar"><label class="dim" for="errorRulePreset">错误规则快捷预设：</label><select id="errorRulePreset"><option value="standard">标准限流保护</option><option value="fast">快速恢复</option><option value="conservative">保守保护</option><option value="observe">只观察不处置</option><option value="clear">清空全部状态规则</option></select><label class="dim"><input id="errorPresetReplace" type="checkbox"> 完整替换状态规则（默认合并）</label><button class="ghost" type="button" onclick="previewErrorPreset()">预览应用</button><button type="button" class="ghost" onclick="addStatusErrorRule()">＋ 状态码规则</button><button type="button" class="ghost" onclick="addContentErrorRule()">＋ 内容规则</button></div>
-      <p class="dim" style="font-size:12px;margin-bottom:8px">内容规则仅检查已判定失败的规范化错误文本，按顺序首条命中；未命中才回退状态码规则。更改仅进入页面草稿，点击“保存账号配置”后生效。</p>
+      <p class="dim" style="font-size:12px;margin-bottom:8px">内容规则仅检查已判定失败的规范化错误文本，按顺序首条命中；未命中才回退状态码规则。429 状态码规则仅在明确账号额度/套餐耗尽证据下执行；provider 或归属不明的 429 会保留账号并切换下一渠道。显式命中的内容规则仍按操作员配置执行。更改仅进入页面草稿，点击“保存账号配置”后生效。</p>
       <div class="table-wrap"><table style="min-width:980px"><thead><tr><th>类型</th><th>匹配条件</th><th>动作</th><th>冷却时间(ms)</th><th>顺序</th><th>操作</th></tr></thead><tbody id="errorRuleBody"></tbody></table></div>
       <div id="errorRuleFeedback" aria-live="polite" class="dim" style="font-size:12px;margin-top:6px"></div>
       <details id="advancedErrorRules" style="margin-top:10px" ontoggle="if(this.open)openAdvancedErrorRules()">
@@ -385,14 +385,19 @@ async function tryLogin() {
   }
 }
 
-const ST_TAG = { ok: '✔可用', limited: '⏳限流', bad: '✘不可钉', auth: '🔑key错' };
-const ST_RANK = { ok: 0, limited: 1, unknown: 2, auth: 3, bad: 4 };
-const ST_CLS = { ok: 'ok', limited: 'limited', bad: 'bad', auth: 'auth' };
+const ST_TAG = { ok: '✔可用', limited: '⏳限流', degraded: '⚠退化', bad: '✘不可钉', unknown: '？未知', auth: '🔑key错' };
+const ST_CLS = { ok: 'ok', limited: 'limited', degraded: 'degraded', bad: 'bad', unknown: 'unknown', auth: 'auth' };
+function providerHealthView(state) {
+  if (!state) return { text: '', cls: 'unknown' };
+  const now = Date.now(), cooldownUntil = Number(state.cooldownUntil) || 0;
+  if (cooldownUntil > now) return { text: `⏸冷却 ${Math.ceil((cooldownUntil - now) / 1000)}s`, cls: 'cooling' };
+  if (cooldownUntil && ['limited','degraded','bad'].includes(state.status)) return { text: '◐待半开', cls: ST_CLS[state.status] || 'unknown' };
+  return { text: ST_TAG[state.status] || ST_TAG.unknown, cls: ST_CLS[state.status] || 'unknown' };
+}
 
-// 排序后的上游 slug 列表（按校验状态：可用优先），供面板与测试台共用
+// 保持探测清单的稳定顺序；健康标签只解释状态，服务端不会用标签重排人工优先级。
 function sortedUpstreams(meta) {
-  const stMap = (meta && meta.upstreamStatus) || {};
-  return [...((meta && meta.upstreams) || [])].sort((a, b) => (ST_RANK[stMap[a]?.status] ?? 2) - (ST_RANK[stMap[b]?.status] ?? 2));
+  return [...((meta && meta.upstreams) || [])];
 }
 
 // 测试台仍用单选下拉（选中即作为唯一优先上游测试）
@@ -402,8 +407,8 @@ function upstreamOptions(meta, selected) {
     const stMap = (meta && meta.upstreamStatus) || {};
     const detail = (meta && meta.upstreamDetail) || {};
     const d = detail[u];
-    const st = stMap[u]?.status;
-    const tag = st && ST_TAG[st] ? ' · ' + ST_TAG[st] : '';
+    const health = providerHealthView(stMap[u]);
+    const tag = health.text ? ' · ' + health.text : '';
     const label = d ? `${u}（${d.name}${d.endpoints > 1 ? ' ×' + d.endpoints : ''}${tag}）` : `${u}${tag}`;
     html += `<option value="${escapeHtml(u)}" ${u === selected ? 'selected' : ''}>${escapeHtml(label)}</option>`;
   }
@@ -420,12 +425,12 @@ function upstreamPanel(id, meta, cfg) {
   const excSet = new Set(cfg.exclude || []);
   const rows = ups.map((u) => {
     const d = detail[u];
-    const st = stMap[u]?.status;
+    const health = providerHealthView(stMap[u]);
     const no = selected.indexOf(u);
     const isSel = no >= 0;
     const isEx = excSet.has(u);
-    const stTxt = st && ST_TAG[st] ? ST_TAG[st] : '';
-    const stCls = ST_CLS[st] || 'unknown';
+    const stTxt = health.text;
+    const stCls = health.cls;
     return `<div class="uprow${isEx ? ' excluded' : ''}" data-m="${escapeHtml(id)}" data-u="${escapeHtml(u)}" data-stat="${escapeHtml(stTxt)}" data-statcls="${escapeHtml(stCls)}">
       <span class="upno" title="优先级顺序（尝试顺序）">${no >= 0 ? no + 1 : ''}</span>
       <span class="upinfo"><span class="upslug mono">${escapeHtml(u)}</span><span class="upname" title="${escapeHtml(d ? d.name : '')}">${escapeHtml(d ? d.name : '')}${d && d.endpoints > 1 ? ' ×' + Number(d.endpoints) : ''}</span></span>
@@ -440,7 +445,7 @@ function upstreamPanel(id, meta, cfg) {
     <summary><span class="ups-sum">${summaryChips(cfg)}</span></summary>
     <div class="ups-panel">${rows || '<div class="empty">尚未探测到上游，先点「探测」</div>'}
       <div class="ups-tools">
-        <button class="ghost mini" onclick="bulkUp(${jsArg(id)},'all')" title="全部按可用状态排序加入优先序列">全选优先</button>
+        <button class="ghost mini" onclick="bulkUp(${jsArg(id)},'all')" title="全部按探测清单稳定顺序加入人工优先序列">全选优先</button>
         <button class="ghost mini" onclick="bulkUp(${jsArg(id)},'clear')" title="清空优先与排除（回到自动）">清空</button>
         <span class="dim" style="font-size:11px; align-self:center;">点「优先」按序尝试（异常自动顺切）；点「排除」永不使用</span>
       </div>
@@ -452,7 +457,7 @@ function upstreamPanel(id, meta, cfg) {
 function summaryChips(cfg) {
   const ups = cfg.upstreams || [];
   const exc = cfg.exclude || [];
-  if (!ups.length && !exc.length) return '<span class="sum-auto">自动 · 网关智能选择</span>';
+  if (!ups.length && !exc.length) return '<span class="sum-auto">自动 · 已探测渠道健康路由（无探测时 auto）</span>';
   let html = '';
   for (let i = 0; i < Math.min(ups.length, 4); i++) html += `<span class="sum-chip">${i + 1}&nbsp;${escapeHtml(ups[i])}</span>`;
   if (ups.length > 4) html += `<span class="sum-chip sum-more">+${ups.length - 4}</span>`;
@@ -493,11 +498,11 @@ function render() {
         ${upstreamPanel(s.id, m, s.config)}
       </td>
       <td>
-        <div><select onchange="saveCfg(${jsArg(s.id)},'pinMode',this.value)" title="严格：逐个只钉勾选的上游；优先：当前上游排 order 首位，其余勾选项作为网关侧回退">
+        <div><select onchange="saveCfg(${jsArg(s.id)},'pinMode',this.value)" title="严格与优先+回退都由 switcher 外层逐次执行；每次 HTTP attempt 仅发送一个 provider.only">
           <option value="strict" ${mode === 'strict' ? 'selected' : ''}>严格钉住</option>
           <option value="preferred" ${mode === 'preferred' ? 'selected' : ''}>优先+回退</option>
         </select></div>
-        <select onchange="saveCfg(${jsArg(s.id)},'sort',this.value)" style="margin-top:4px" title="按指标排序上游（不选上游时也可单独使用）">
+        <select onchange="saveCfg(${jsArg(s.id)},'sort',this.value)" style="margin-top:4px" title="仅排序当前 provider 内部端点，不改变人工 provider 优先级">
           <option value="" ${!sort ? 'selected' : ''}>网关智能选</option>
           <option value="cost" ${sort === 'cost' ? 'selected' : ''}>最低成本</option>
           <option value="ttft" ${sort === 'ttft' ? 'selected' : ''}>最快首字</option>
@@ -663,7 +668,7 @@ async function validate(id, btn) {
   status(`正在校验 ${id} 的全部上游渠道（约需 1 分钟）…`);
   try {
     const r = await api('/api/validate-upstreams', { model: id, accountId: $('#routeScope').value || undefined });
-    status(`校验完成：✔可用 ${r.summary.ok} · ⏳限流 ${r.summary.limited} · ✘不可钉 ${r.summary.bad} · 🔑key错 ${r.summary.auth} · 未判定 ${r.summary.unknown}（下拉框已标注并排序）`);
+    status(`校验完成：✔可用 ${r.summary.ok} · ⏳限流 ${r.summary.limited} · ✘不可钉 ${r.summary.bad} · 🔑key错 ${r.summary.auth} · 未判定 ${r.summary.unknown}（仅标注状态，不重排人工顺序）`);
   } catch (e) {
     status('校验失败');
   }

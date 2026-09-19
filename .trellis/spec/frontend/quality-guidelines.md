@@ -121,6 +121,10 @@ Each model row exposes one native “one-click setup” button. It uses the curr
 
 The model route controls also expose bounded `providerCooldownMs` 0-300000. Zero is the explicit off/compatibility value. The complete route save must retain this field together with upstreams/exclude/pinMode/sort/maxRetries.
 
+#### Provider routing status
+
+The model table preserves the server's discovered provider order and the operator's numbered priority. Health labels (`ok`, `limited`, `degraded`, `bad`, `unknown`) and active/expired cooldown text are explanatory only; they must not sort the list. The preferred-mode help text states that the switcher performs sequential outer fallback and sends exactly one provider in each `only`. All health/provider text remains escaped before HTML insertion.
+
 #### Model aliases
 
 The alias editor uses one `alias = cline-pass/target` pair per line. Batch generation removes `cline-pass/` and applies the optional common prefix/suffix. Duplicate/malformed rows are rejected in the browser for feedback, and the complete object is still validated by the server.
@@ -189,6 +193,8 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 | Detail body missing/expired or read rejected | Announce safe missing state; no stale body/copy content |
 | Details filter changes during a read | Invalidate list/selection; reset cursor and disable Next until refreshed |
 | Clipboard write fails | Announce failure; select loaded sanitized text for manual copy |
+| Active provider cooldown | show bounded remaining/expiry state; do not move other providers out of artificial priority order |
+| Expired provider cooldown | show half-open eligibility and retain the provider's original position |
 | Narrow viewport | maintain usable controls and horizontal table scrolling |
 
 ### 5. Good / Base / Bad Cases
@@ -221,7 +227,8 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 - statistics entry/manual/timer coalescing, abort and pageshow restoration ownership; remaining/reset-only quota text plus disabled/partial/error/stale states; draft preservation and routing-independent refresh;
 - model-table Token ratio/sample/coverage and provider-discovery states, plus stable-ID account cache/health/failure summaries that never enter save payloads;
 - the labelled responsive four-card quota forecast, truthful account-point units/assumptions, `textContent` rendering, exact fixed-time calculations, eligibility/exclusion counts, reset boundaries, lower-bound fallback, invalid snapshot time, and no-data state;
-- log query invalidation, filters/pagination, captured-type clear controls, request-only result filtering, safe historical fallback, bounded affinity/cache/circuit labels, explicit final-request versus failed-attempt wording, and model-alias batch controls;
+- log query invalidation, filters/pagination, captured-type clear controls, request-only result filtering, safe historical fallback, bounded affinity/cache/circuit/health labels, explicit final-request versus failed-attempt wording, and model-alias batch controls;
+- preferred-mode singleton-attempt wording, stable provider ordering, escaped `degraded`/cooling/half-open health labels, and no health-rank sort;
 - independent detailed settings/privacy/retention/auth warnings, safe metadata/text and on-demand copy/clear controls; production VM tests must verify stale reads, cursor reset and no account-draft mutation.
 
 Manual browser review remains required for visual width, narrow-screen scrolling, focus order, keyboard-only drawer use, password masking, preview readability, and log/alias interaction. Static string tests must not be reported as visual browser automation.

@@ -215,19 +215,19 @@ test('account routing, header boundary, failover, state and streaming', async (t
       const auth = req.headers.authorization;
       const only = body.provider?.only?.[0] || body.providerOptions?.gateway?.only?.[0];
       if ((body.model === 'cooldown-model' && auth === 'Bearer key-a') || (body.model === 'double-cooldown-model' && (auth === 'Bearer key-a' || auth === 'Bearer key-b'))) {
-        res.writeHead(429, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'rate limited', status: 429 } }));
+        res.writeHead(429, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'account subscription quota exhausted', code: 'account_quota_exhausted', status: 429 } }));
       }
       if (body.model === 'wrapped-cooldown-model' && auth === 'Bearer key-a') {
-        res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ data: { error: { message: 'wrapped rate limited', status: 429 } } }));
+        res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ data: { error: { message: 'account plan quota exhausted', code: 'plan_quota_exhausted', status: 429 } } }));
       }
       if (body.model === 'wrapped-sse-error-model' && body.stream && auth === 'Bearer key-a') {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
-        return res.end('data: {"data":{"error":{"message":"wrapped stream limited","status":429}}}\n\n');
+        return res.end('data: {"data":{"error":{"message":"account subscription quota exhausted","code":"account_quota_exhausted","status":429}}}\n\n');
       }
       if (body.model === 'post-start-wrapped-sse-error-model' && body.stream) {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
         res.write('data: {"choices":[{"delta":{"content":"started"}}]}\n\n');
-        return setTimeout(() => res.end('data: {"data":{"error":{"message":"late wrapped stream limited","status":429}}}\n\ndata: [DONE]\n\n'), 5);
+        return setTimeout(() => res.end('data: {"data":{"error":{"message":"account subscription quota exhausted","code":"account_quota_exhausted","status":429}}}\n\ndata: [DONE]\n\n'), 5);
       }
       if (body.model === 'long-sse-error-model' && body.stream) {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -420,7 +420,7 @@ test('account routing, header boundary, failover, state and streaming', async (t
   const postStartWrapped = await rawJson(switchPort, '/v1/chat/completions', { model: 'post-start-wrapped-sse-error-model', stream: true, messages: [] });
   assert.equal(postStartWrapped.status, 200);
   assert.match(postStartWrapped.text, /started/);
-  assert.match(postStartWrapped.text, /late wrapped stream limited/);
+  assert.match(postStartWrapped.text, /account subscription quota exhausted/);
   assert.equal(postStartWrapped.headers['x-cline-attempts'], '1');
   assert.equal(seen.length, 1, 'an error after SSE starts must not replay the upstream request');
   const postStartHistory = await (await fetch(`http://127.0.0.1:${switchPort}/api/history`)).json();
@@ -494,6 +494,8 @@ test('account routing, header boundary, failover, state and streaming', async (t
   const [slow1, slow2] = await Promise.all([p1, p2]);
   assert.equal(slow1.status, 200); assert.equal(slow2.status, 200); assert.notEqual(slow1.headers['x-cline-account'], slow2.headers['x-cline-account']);
   assert.equal(full.status, 429); assert.ok(Number(full.headers['retry-after']) >= 1);
+  const capacityLog = await waitUntil(async () => { const page = await (await fetch(`http://127.0.0.1:${switchPort}/api/logs/requests?requestId=${full.headers['x-cline-request-id']}`)).json(); return page.items[0] ? page : null; });
+  assert.equal(capacityLog.items[0].errorCategory, 'capacity');assert.equal(capacityLog.items[0].upstreamStatus, null);assert.deepEqual(capacityLog.items[0].attempts, []);
   const after = await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json();
   assert.ok(after.accounts.every((a) => a.activeCount === 0));
 
@@ -731,7 +733,7 @@ test('provider cooldown skips repeated failures and admits only one half-open pr
   assert.deepEqual(seen.filter((entry) => entry.model === 'parameter').map((entry) => entry.provider), ['first','second','first','second'], 'ordinary parameter errors must not open the circuit');
   seen.length = 0;
   assert.equal((await request('disabled')).status, 200); assert.equal((await request('disabled')).status, 200);
-  assert.deepEqual(seen.filter((entry) => entry.model === 'disabled').map((entry) => entry.provider), ['first','second','first','second'], 'providerCooldownMs=0 must preserve legacy attempts');
+  assert.deepEqual(seen.filter((entry) => entry.model === 'disabled').map((entry) => entry.provider), ['first','second','second'], 'providerCooldownMs=0 disables only the per-account circuit; shared model/provider health still skips an active cooldown');
 
   seen.length = 0;
   const staleRequest = request('stale');
@@ -846,7 +848,7 @@ test('legacy migration and cooldown state survive restart', async (t) => {
       seen.push(req.headers.authorization);
       if (body.model === 'cooldown-model' && req.headers.authorization === 'Bearer legacy-a') {
         res.writeHead(429, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: { message: 'retry later', status: 429 } }));
+        return res.end(JSON.stringify({ error: { message: 'account subscription quota exhausted', code: 'account_quota_exhausted', status: 429 } }));
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }));
@@ -917,7 +919,7 @@ test('new scheduling modes, account fields, model aliases and independent logs',
   const mock = http.createServer((req, res) => {
     const chunks=[]; req.on('data',(c)=>chunks.push(c)); req.on('end',()=>{
       const body=JSON.parse(Buffer.concat(chunks).toString()||'{}'); seen.push({ auth:req.headers.authorization, headers:req.headers, body });
-      if (body.model === 'cool' && req.headers.authorization === 'Bearer ka' && coolFailures-- > 0) { res.writeHead(429, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'limited' } })); }
+      if (body.model === 'cool' && req.headers.authorization === 'Bearer ka' && coolFailures-- > 0) { res.writeHead(429, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'account subscription quota exhausted', code: 'account_quota_exhausted' } })); }
       if (body.model === 'leak') { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: `failed ${req.headers['x-safe-account']} ${body.messages?.[0]?.content}` } })); }
       const reply=()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}],provider:'Mock'}));};
       if(body.model==='slow')setTimeout(reply,100);else reply();
@@ -1168,7 +1170,7 @@ test('all explicit usage aliases, precedence, cache ratios, stream snapshots, re
   const seen = [];
   const upstream = http.createServer((req,res)=>{const chunks=[];req.on('data',c=>chunks.push(c));req.on('end',()=>{
     const body=JSON.parse(Buffer.concat(chunks).toString()||'{}'), auth=req.headers.authorization, only=body.provider?.only?.[0]||body.providerOptions?.gateway?.only?.[0]; seen.push({model:body.model,auth,only});
-    if(body.model==='switch'&&auth==='Bearer key-a'){res.writeHead(429,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:'limited',status:429}}));}
+    if(body.model==='switch'&&auth==='Bearer key-a'){res.writeHead(429,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:'account subscription quota exhausted',code:'account_quota_exhausted',status:429}}));}
     if(body.model==='retry'&&only==='first'){res.writeHead(500,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:'retry',status:500}}));}
     if(body.model==='stream'){res.writeHead(200,{'Content-Type':'text/event-stream'});return res.end('data: {"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4,"prompt_tokens_details":{"cached_tokens":1}}}\n\ndata: {"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6,"prompt_tokens_details":{"cached_tokens":2}}}\n\ndata: {"usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10,"prompt_tokens_details":{"cached_tokens":4}}}\n\ndata: [DONE]\n\n');}
     res.writeHead(200,{'Content-Type':'application/json'});const payload={choices:[{message:{content:'OK'}}]};if(body.model!=='missing')payload.usage=usageByModel[body.model];res.end(JSON.stringify(payload));
@@ -2112,7 +2114,7 @@ test('detailed logging preserves JSON/SSE bytes, cancellation, retries, snapshot
       const body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); seen.push(body);
       if (body.model === 'network') return res.destroy();
       if (body.model === 'nonstream-cancel') { held.set(body.model, res); return; }
-      if (body.model === 'replace' && req.headers.authorization === 'Bearer stream-detail-secret') { res.writeHead(429, { 'Content-Type': 'application/json' }); return res.end('{"error":{"message":"retry replacement","status":429}}'); }
+      if (body.model === 'replace' && req.headers.authorization === 'Bearer stream-detail-secret') { res.writeHead(429, { 'Content-Type': 'application/json' }); return res.end('{"error":{"message":"account subscription quota exhausted","code":"account_quota_exhausted","status":429}}'); }
       if (body.stream) {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
         if (body.model === 'hold' || body.model === 'cancel') { res.write('data: {"choices":[{"delta":{"content":"safe partial output"}}]}\n\n'); held.set(body.mark || body.model, res); return; }
@@ -2286,4 +2288,101 @@ fsp.writeFile=async(a,...args)=>{while(String(a).endsWith('.txt')&&fs.existsSync
     } else assert.ok(group.bodies.every((body) => body.state === 'resource-limited' && body.capturedBytes === 0));
     assert.ok((await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json()).accounts.every((account) => account.activeCount === 0));
   }
+});
+
+test('single-provider planning, conservative 429 scope and model provider health survive restart', async (t) => {
+  const seen=[];const html429='<html>edge limit</html>';
+  const upstream=http.createServer((req,res)=>{const chunks=[];req.on('data',c=>chunks.push(c));req.on('end',()=>{
+    const body=JSON.parse(Buffer.concat(chunks).toString()||'{}'),auth=req.headers.authorization;
+    const direct=body.provider?.only,planner=body.providerOptions?.gateway?.only,only=direct?.[0]||planner?.[0]||null;
+    seen.push({model:body.model,auth,only,body});
+    const ok=()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}],provider:only||'Auto Provider',model:'mock/model'}));};
+    if(body.model==='unknown-429'&&only==='deepseek'){res.writeHead(429,{'Content-Type':'text/html; charset=UTF-8','Content-Length':Buffer.byteLength(html429)});return res.end(html429);}
+    if(body.model==='provider-429'&&only==='p-rate'){res.writeHead(429,{'Content-Type':'application/json','Retry-After':'2'});return res.end(JSON.stringify({error:{message:'provider pool limited',provider:'p-rate',status:429}}));}
+    if(body.model==='provider-mixed'&&only==='p-mixed'){res.writeHead(429,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:'provider quota exceeded',provider:'p-mixed',account:'account-a',status:429}}));}
+    if(body.model==='retry-date'&&only==='p-date'){res.writeHead(429,{'Content-Type':'application/json','Retry-After':new Date(Date.now()+5000).toUTCString()});return res.end(JSON.stringify({error:{message:'provider limited',provider:'p-date',status:429}}));}
+    if(body.model==='retry-invalid'&&only==='p-invalid'){res.writeHead(429,{'Content-Type':'application/json','Retry-After':'later'});return res.end(JSON.stringify({error:{message:'provider limited',provider:'p-invalid',status:429}}));}
+    if(body.model==='rate-backoff'){res.writeHead(429,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:'provider limited',provider:'rate-only',status:429}}));}
+    if(body.model==='server-backoff'){res.writeHead(500,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:'server failed',status:500}}));}
+    if(body.model==='manual-order'&&only==='first'){res.writeHead(500,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:'server failed',status:500}}));}
+    if(body.model==='discovered'&&only==='disc-one'){res.writeHead(500,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:'server failed',status:500}}));}
+    if(body.model==='unsupported'&&only==='bad-pin'){res.writeHead(400,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:'provider is unsupported',provider:'bad-pin',status:400}}));}
+    if(body.model==='account-429'&&auth==='Bearer key-a'){res.writeHead(429,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:`account subscription quota exhausted for ${body.messages?.[0]?.content}`,code:'account_quota_exhausted',status:429}}));}
+    if(body.model==='double-account'&&(auth==='Bearer key-a'||auth==='Bearer key-b')){res.writeHead(429,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:'account plan quota exhausted',code:'plan_quota_exhausted',status:429}}));}
+    if(body.model==='stream-pre'&&only==='stream-one'){res.writeHead(200,{'Content-Type':'text/event-stream'});return res.end('data: {"error":{"message":"rate limited","status":429}}\n\n');}
+    if(body.model==='stream-pre'&&only==='stream-two'){res.writeHead(200,{'Content-Type':'text/event-stream'});return res.end('data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n');}
+    if(body.model==='stream-network'&&only==='stream-reset'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.flushHeaders();return setImmediate(()=>res.destroy());}
+    if(body.model==='stream-network'&&only==='stream-ok'){res.writeHead(200,{'Content-Type':'text/event-stream'});return res.end('data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n');}
+    if(body.model==='stream-late'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write('data: {"choices":[{"delta":{"content":"started"}}]}\n\n');return setTimeout(()=>res.end('data: {"error":{"message":"provider limited","provider":"late-one","status":429}}\n\ndata: [DONE]\n\n'),5);}
+    ok();
+  });});
+  const upstreamPort=await listen(upstream),port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-provider-health-')),now=Date.now();
+  const state=(status,cooldownUntil=0)=>({status,checkedAt:now,lastSuccessAt:0,lastFailureAt:now,consecutiveFailures:status==='ok'?0:1,cooldownUntil,failureClass:status==='ok'?null:'rate_limit',note:'fixture'});
+  fs.writeFileSync(path.join(dir,'metadata.json'),JSON.stringify({routingSecret:'provider-health-secret',accountStates:{},accountQuotas:{},history:[],models:{
+    'manual-order':{upstreams:['first','second'],upstreamStatus:{first:state('degraded'),second:state('ok')}},
+    cooling:{upstreams:['cool-first','cool-second'],upstreamStatus:{'cool-first':state('limited',now+60000),'cool-second':state('ok')}},
+    'fail-open':{upstreams:['late-recovery','early-recovery'],upstreamStatus:{'late-recovery':state('limited',now+60000),'early-recovery':state('degraded',now+30000)}},
+    'half-open':{upstreams:['half-first','half-second'],upstreamStatus:{'half-first':state('limited',now-1000),'half-second':state('ok')}},
+    'max-after-health':{upstreams:['max-cooling','max-eligible','max-extra'],upstreamStatus:{'max-cooling':state('limited',now+60000)}},
+    'legacy-health':{upstreams:['legacy','invalid'],upstreamStatus:{legacy:{status:'limited',checkedAt:now,note:'legacy'},invalid:{status:'auth',checkedAt:-1,consecutiveFailures:999,cooldownUntil:'bad',failureClass:'bogus',note:'legacy'}}},
+    discovered:{pipeline:'direct',upstreams:['disc-one','disc-two'],upstreamStatus:{}},planner:{pipeline:'planner',upstreams:['plan-one']},direct:{pipeline:'direct',upstreams:['direct-one']}
+  }}));
+  const route=(upstreams,pinMode='preferred',extra={})=>({upstreams,exclude:[],pinMode,sort:null,maxRetries:null,...extra});
+  const perModel={
+    'unknown-429':route(['deepseek','fireworks']),'provider-429':route(['p-rate','p-ok']),'provider-mixed':route(['p-mixed','p-mixed-ok']),
+    'retry-date':route(['p-date','p-date-ok']),'retry-invalid':route(['p-invalid','p-invalid-ok']),'rate-backoff':route(['rate-only']),'server-backoff':route(['server-only']),'manual-order':route(['first','second']),cooling:route(['cool-first','cool-second']),
+    'fail-open':route(['late-recovery','early-recovery']),'half-open':route(['half-first','half-second']),'max-after-health':route(['max-cooling','max-eligible','max-extra'],'preferred',{maxRetries:0}),planner:route(['plan-one']),'direct':route(['direct-one'],'strict'),
+    'all-excluded':route(['blocked'],'preferred',{exclude:['blocked']}),'account-429':route(['account-provider','backup']),'double-account':route(['account-provider','backup']),
+    isolation:route(['first']),'unsupported':route(['bad-pin','good-pin']),'stream-pre':route(['stream-one','stream-two']),'stream-network':route(['stream-reset','stream-ok']),'stream-late':route(['late-one'])
+  };
+  const accounts=['a','b','c'].map(id=>({id,name:id.toUpperCase(),key:`key-${id}`,enabled:true,perModel:{}}));
+  const cfg={port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'single',activeAccount:0,concurrencyWaitMs:0,accounts,knownModels:[...Object.keys(perModel),'discovered','auto'],perModel,accountErrorRules:{429:{action:'cooldown',cooldownMs:60000}}};
+  let running=await startSwitcher(cfg,dir);t.after(async()=>{if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
+  const call=(model,extra={})=>rawJson(port,'/v1/chat/completions',{model,messages:[{role:'user',content:'super-secret-prompt'}],...extra});
+  let metadata=JSON.parse(fs.readFileSync(path.join(dir,'metadata.json')));
+  assert.deepEqual(metadata.models['legacy-health'].upstreamStatus.legacy,{status:'limited',checkedAt:now,lastSuccessAt:0,lastFailureAt:0,consecutiveFailures:0,cooldownUntil:0,failureClass:null,note:'legacy'});
+  assert.deepEqual(metadata.models['legacy-health'].upstreamStatus.invalid,{status:'unknown',checkedAt:0,lastSuccessAt:0,lastFailureAt:0,consecutiveFailures:30,cooldownUntil:0,failureClass:null,note:'legacy'});
+
+  let start=seen.length,r=await call('manual-order',{provider:{order:['evil-a','evil-b']},providerOptions:{gateway:{order:['evil-a','evil-b']}}});assert.equal(r.status,200);
+  let rows=seen.slice(start);assert.deepEqual(rows.map(x=>x.only),['first','second'],'health labels must not reorder eligible manual providers');assert.equal(new Set(rows.map(x=>x.auth)).size,1);
+  for(const row of rows){assert.deepEqual(row.body.provider.only,[row.only]);assert.deepEqual(row.body.providerOptions.gateway.only,[row.only]);assert.equal(row.body.provider.order,undefined);assert.equal(row.body.providerOptions.gateway.order,undefined);}
+  start=seen.length;assert.equal((await call('cooling')).status,200);assert.deepEqual(seen.slice(start).map(x=>x.only),['cool-second'],'active cooldown is bypassed');
+  start=seen.length;assert.equal((await call('fail-open')).status,200);assert.deepEqual(seen.slice(start).map(x=>x.only),['early-recovery'],'all-cooling fail-open chooses earliest recovery only');
+  start=seen.length;assert.equal((await call('half-open')).status,200);assert.deepEqual(seen.slice(start).map(x=>x.only),['half-first'],'expired cooldown returns to its original position');
+  start=seen.length;assert.equal((await call('max-after-health')).status,200);assert.deepEqual(seen.slice(start).map(x=>x.only),['max-eligible'],'maxRetries is applied after cooling providers are removed');
+
+  start=seen.length;r=await call('unknown-429');assert.equal(r.status,200);rows=seen.slice(start);assert.deepEqual(rows.map(x=>x.only),['deepseek','fireworks']);assert.equal(new Set(rows.map(x=>x.auth)).size,1,'unknown 429 stays on one Authorization');assert.equal(r.headers['x-cline-target-upstream'],'deepseek>fireworks');
+  metadata=JSON.parse(fs.readFileSync(path.join(dir,'metadata.json')));assert.equal(metadata.accountStates.a,undefined);assert.equal(metadata.models['unknown-429'].upstreamStatus.deepseek.status,'limited');assert.ok(metadata.models['unknown-429'].upstreamStatus.deepseek.cooldownUntil-Date.now()>50000);
+  start=seen.length;r=await call('provider-429');assert.equal(r.status,200);assert.deepEqual(seen.slice(start).map(x=>x.only),['p-rate','p-ok']);metadata=JSON.parse(fs.readFileSync(path.join(dir,'metadata.json')));const retryDelay=metadata.models['provider-429'].upstreamStatus['p-rate'].cooldownUntil-metadata.models['provider-429'].upstreamStatus['p-rate'].lastFailureAt;assert.equal(retryDelay,2000);
+  start=seen.length;r=await call('provider-mixed');assert.equal(r.status,200);rows=seen.slice(start);assert.deepEqual(rows.map(x=>x.only),['p-mixed','p-mixed-ok']);assert.equal(new Set(rows.map(x=>x.auth)).size,1,'a provider quota plus an unrelated account field is not account evidence');
+  start=seen.length;assert.equal((await call('retry-date')).status,200);metadata=JSON.parse(fs.readFileSync(path.join(dir,'metadata.json')));const dateDelay=metadata.models['retry-date'].upstreamStatus['p-date'].cooldownUntil-metadata.models['retry-date'].upstreamStatus['p-date'].lastFailureAt;assert.ok(dateDelay>=3000&&dateDelay<=5000,'HTTP-date Retry-After is honored within second precision');
+  start=seen.length;assert.equal((await call('retry-invalid')).status,200);metadata=JSON.parse(fs.readFileSync(path.join(dir,'metadata.json')));const invalidDelay=metadata.models['retry-invalid'].upstreamStatus['p-invalid'].cooldownUntil-metadata.models['retry-invalid'].upstreamStatus['p-invalid'].lastFailureAt;assert.equal(invalidDelay,60000,'invalid Retry-After uses the first local backoff');
+  for(let i=0;i<7;i++)assert.equal((await call('rate-backoff')).status,429);metadata=JSON.parse(fs.readFileSync(path.join(dir,'metadata.json')));const rateState=metadata.models['rate-backoff'].upstreamStatus['rate-only'];assert.equal(rateState.consecutiveFailures,7);assert.equal(rateState.cooldownUntil-rateState.lastFailureAt,1800000,'rate-limit exponential backoff is capped at 30 minutes');
+  for(let i=0;i<5;i++)assert.equal((await call('server-backoff')).status,500);metadata=JSON.parse(fs.readFileSync(path.join(dir,'metadata.json')));const serverState=metadata.models['server-backoff'].upstreamStatus['server-only'];assert.equal(serverState.consecutiveFailures,5);assert.equal(serverState.cooldownUntil-serverState.lastFailureAt,120000,'server exponential backoff is capped at two minutes');
+  start=seen.length;assert.equal((await call('unsupported')).status,200);assert.deepEqual(seen.slice(start).map(x=>x.only),['bad-pin','good-pin']);metadata=JSON.parse(fs.readFileSync(path.join(dir,'metadata.json')));assert.equal(metadata.models.unsupported.upstreamStatus['bad-pin'].status,'bad');assert.equal(metadata.models.unsupported.upstreamStatus['bad-pin'].cooldownUntil-metadata.models.unsupported.upstreamStatus['bad-pin'].lastFailureAt,3600000);
+  assert.equal(metadata.models['manual-order'].upstreamStatus.first.status,'degraded');assert.ok(metadata.models['manual-order'].upstreamStatus.first.cooldownUntil-metadata.models['manual-order'].upstreamStatus.first.lastFailureAt>=15000);
+  assert.equal(metadata.models['half-open'].upstreamStatus['half-first'].status,'ok');assert.equal(metadata.models['half-open'].upstreamStatus['half-first'].cooldownUntil,0);
+
+  start=seen.length;assert.equal((await call('planner')).status,200);rows=seen.slice(start);assert.deepEqual(rows[0].body.providerOptions.gateway.only,['plan-one']);assert.equal(rows[0].body.provider,undefined);assert.equal(rows[0].body.providerOptions.gateway.order,undefined);
+  start=seen.length;assert.equal((await call('direct')).status,200);rows=seen.slice(start);assert.deepEqual(rows[0].body.provider.only,['direct-one']);assert.equal(rows[0].body.providerOptions,undefined);assert.equal(rows[0].body.provider.order,undefined);
+  start=seen.length;assert.equal((await call('discovered')).status,200);assert.deepEqual(seen.slice(start).map(x=>x.only),['disc-one','disc-two'],'discovered providers become named health-aware attempts');
+  start=seen.length;assert.equal((await call('auto')).status,200);rows=seen.slice(start);assert.equal(rows.length,1);assert.equal(rows[0].only,null);assert.equal(rows[0].body.provider,undefined);assert.equal(rows[0].body.providerOptions,undefined);
+  start=seen.length;r=await call('all-excluded');assert.equal(r.status,503);assert.equal(seen.length,start,'all excluded must not bypass with auto');assert.equal(r.headers['x-cline-attempts'],'0');
+  const noProviderLog=await waitUntil(async()=>{const page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${r.headers['x-cline-request-id']}`)).json();return page.items[0]||null;});assert.equal(noProviderLog.errorCategory,'routing');assert.deepEqual(noProviderLog.attempts,[]);
+
+  start=seen.length;r=await call('account-429');assert.equal(r.status,200);assert.deepEqual(seen.slice(start).map(x=>[x.auth,x.only]),[['Bearer key-a','account-provider'],['Bearer key-b','account-provider']]);metadata=JSON.parse(fs.readFileSync(path.join(dir,'metadata.json')));assert.ok(metadata.accountStates.a.cooldownUntil>Date.now());assert.equal(JSON.stringify(metadata).includes('super-secret-prompt'),false,'account action and provider metadata must redact request content');assert.equal(metadata.models['account-429'].upstreamStatus['account-provider'].status,'ok','replacement success may recover provider, but account failure must not penalize it');
+  const historyAfterAccount=await(await fetch(`http://127.0.0.1:${port}/api/history`)).json();assert.equal(JSON.stringify(historyAfterAccount).includes('super-secret-prompt'),false,'compatibility history must redact echoed request content');
+  await rawJson(port,'/api/accounts/recover',{id:'a'});start=seen.length;r=await call('double-account');assert.equal(r.status,429);assert.deepEqual(seen.slice(start).map(x=>x.auth),['Bearer key-a','Bearer key-b'],'a second account action must not select C');await rawJson(port,'/api/accounts/recover',{id:'a'});await rawJson(port,'/api/accounts/recover',{id:'b'});
+
+  start=seen.length;r=await call('isolation');assert.equal(r.status,200);assert.deepEqual(seen.slice(start).map(x=>x.only),['first'],'provider health is isolated by model');
+  start=seen.length;r=await call('stream-pre',{stream:true});assert.equal(r.status,200);assert.match(r.text,/OK/);assert.deepEqual(seen.slice(start).map(x=>x.only),['stream-one','stream-two']);
+  start=seen.length;r=await call('stream-network',{stream:true});assert.equal(r.status,200);assert.match(r.text,/OK/);assert.deepEqual(seen.slice(start).map(x=>x.only),['stream-reset','stream-ok']);metadata=JSON.parse(fs.readFileSync(path.join(dir,'metadata.json')));assert.equal(metadata.models['stream-network'].upstreamStatus['stream-reset'].failureClass,'network','pre-response SSE transport failure must not be mislabeled as server');
+  start=seen.length;r=await call('stream-late',{stream:true});assert.equal(r.status,200);assert.match(r.text,/started/);assert.equal(seen.slice(start).length,1,'post-start SSE error must not replay');
+  metadata=JSON.parse(fs.readFileSync(path.join(dir,'metadata.json')));assert.equal(metadata.models['stream-pre'].upstreamStatus['stream-one'].status,'limited');assert.equal(metadata.models['stream-late'].upstreamStatus['late-one'].status,'limited');
+
+  await new Promise(resolve=>setTimeout(resolve,30));const errorLogs=await(await fetch(`http://127.0.0.1:${port}/api/logs/errors?requestId=${r.headers['x-cline-request-id']}`)).json();assert.equal(errorLogs.items[0].errorScope,'provider');
+  const unknownLogs=await(await fetch(`http://127.0.0.1:${port}/api/logs/errors?requestedModel=unknown-429`)).json();assert.equal(unknownLogs.items[0].errorScope,'unknown');assert.equal(unknownLogs.items[0].scopeEvidence,'ambiguous_rate_limit');assert.equal(unknownLogs.items[0].healthAction,'cooldown');assert.equal(unknownLogs.items[0].responseContentType,'text/html');assert.equal(unknownLogs.items[0].responseBytes,Buffer.byteLength(html429));assert.equal(JSON.stringify(unknownLogs).includes(html429),false);assert.equal(JSON.stringify(unknownLogs).includes('super-secret-prompt'),false);
+  const accountLogs=await(await fetch(`http://127.0.0.1:${port}/api/logs/errors?requestedModel=account-429`)).json();assert.equal(accountLogs.items[0].errorScope,'account');assert.equal(accountLogs.items[0].healthAction,'none');assert.equal(accountLogs.items[0].accountAction,'cooldown');assert.equal(JSON.stringify(accountLogs).includes('super-secret-prompt'),false);
+
+  await stop(running.child);running.child=null;running=await startSwitcher(null,dir);start=seen.length;assert.equal((await call('unknown-429')).status,200);assert.deepEqual(seen.slice(start).map(x=>x.only),['fireworks'],'provider cooldown must survive restart');
 });

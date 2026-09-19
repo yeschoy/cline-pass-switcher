@@ -2,9 +2,8 @@
 // Node >= 18。
 //
 // 网关行为（实测结论，README 有证据）：
-// - 订阅模型（cline-pass/*）与非 free 目录模型：请求体里的 provider.* 会被 Cline 网关丢弃，
-//   由其规划器在系统凭证上游中自行挑选，响应元数据可回读实际上游。
-// - 目录模型 :free 变体：provider.only 真正透传到 OpenRouter，可精确钉住。
+// - planner 管道只接受 providerOptions.gateway.only；direct 管道接受 provider.only。
+// - switcher 的每个具名 HTTP attempt 只注入一个 provider，外层负责健康路由和顺序回退。
 import http from 'node:http';
 import https from 'node:https';
 import crypto from 'node:crypto';
@@ -110,15 +109,57 @@ function envAccountId(key) {
   return `env_${crypto.createHmac('sha256', META.routingSecret).update(String(key)).digest('hex').slice(0, 24)}`;
 }
 const ROUTE_SORTS = new Set(['cost', 'ttft', 'tps']);
+const PROVIDER_HEALTH_STATUSES = new Set(['ok', 'limited', 'degraded', 'bad', 'unknown']);
+const PROVIDER_FAILURE_CLASSES = new Set(['rate_limit', 'auth', 'server', 'network', 'timeout', 'unsupported', 'other']);
+const PROVIDER_FAILURE_COUNT_MAX = 30;
 function normalizeStringList(v, max = 20) {
-  return [...new Set((Array.isArray(v) ? v : []).map((s) => String(s).trim()).filter((s) => /^[a-z0-9][a-z0-9._/-]*$/i.test(s)))].slice(0, max);
+  return [...new Set((Array.isArray(v) ? v : []).map((s) => String(s).trim()).filter((s) => /^[a-z0-9][a-z0-9._/-]{0,199}$/i.test(s)))].slice(0, max);
+}
+function safeProviderTimestamp(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : 0;
+}
+function boundedProviderNote(value) {
+  let note = String(value || '').replace(/[\r\n\t]+/g, ' ');
+  const secrets = [config.apiKey, config.proxyKey, process.env.CLINE_PASS_KEY, process.env.PROXY_KEY, ...(config.accounts || []).flatMap((account) => {
+    const values = [account.key, account.proxyUrl, ...Object.values(account.headers || {})];
+    try { const url = new URL(account.proxyUrl); values.push(decodeURIComponent(url.username), decodeURIComponent(url.password)); } catch {}
+    return values;
+  })].filter(Boolean);
+  for (const secret of secrets) note = note.split(String(secret)).join('[REDACTED]');
+  return note.replace(/(?:https?|socks5h?):\/\/[^\s]+/gi, '[REDACTED_PROXY]').replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, 'Bearer [REDACTED]').slice(0, 160);
+}
+function normalizeProviderHealthState(value = {}) {
+  const raw = isPlainObject(value) ? value : {};
+  return {
+    status: PROVIDER_HEALTH_STATUSES.has(raw.status) ? raw.status : 'unknown',
+    checkedAt: safeProviderTimestamp(raw.checkedAt),
+    lastSuccessAt: safeProviderTimestamp(raw.lastSuccessAt),
+    lastFailureAt: safeProviderTimestamp(raw.lastFailureAt),
+    consecutiveFailures: Math.min(PROVIDER_FAILURE_COUNT_MAX, Math.max(0, Math.floor(Number(raw.consecutiveFailures) || 0))),
+    cooldownUntil: safeProviderTimestamp(raw.cooldownUntil),
+    failureClass: PROVIDER_FAILURE_CLASSES.has(raw.failureClass) ? raw.failureClass : null,
+    note: boundedProviderNote(raw.note),
+  };
+}
+function normalizeProviderHealthMetadata() {
+  let dirty = false;
+  for (const meta of Object.values(META.models || {})) {
+    if (!isPlainObject(meta) || meta.upstreamStatus === undefined) continue;
+    if (!isPlainObject(meta.upstreamStatus)) { meta.upstreamStatus = {}; dirty = true; continue; }
+    const normalized = {};
+    for (const [provider, state] of Object.entries(meta.upstreamStatus)) {
+      if (!/^[a-z0-9][a-z0-9._/-]{0,199}$/i.test(provider)) { dirty = true; continue; }
+      normalized[provider] = normalizeProviderHealthState(state);
+    }
+    if (JSON.stringify(normalized) !== JSON.stringify(meta.upstreamStatus)) { meta.upstreamStatus = normalized; dirty = true; }
+  }
+  return dirty;
 }
 function normalizeRouteConfig(c = {}) {
   const raw = c && typeof c === 'object' ? c : {};
-  let upstreams = normalizeStringList(raw.upstreams !== undefined ? raw.upstreams : (raw.upstream ? [raw.upstream] : []), 20);
+  const upstreams = normalizeStringList(raw.upstreams !== undefined ? raw.upstreams : (raw.upstream ? [raw.upstream] : []), 20);
   const exclude = normalizeStringList(raw.exclude, 50);
-  const excl = new Set(exclude);
-  upstreams = upstreams.filter((u) => !excl.has(u));
   const maxRetries = raw.maxRetries === null || raw.maxRetries === undefined || raw.maxRetries === ''
     ? null
     : Math.min(20, Math.max(0, Math.floor(Number(raw.maxRetries) || 0)));
@@ -476,6 +517,7 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   if (config.activeAccount !== activeAccount) { config.activeAccount = activeAccount; dirty = true; }
   META.models ||= {}; META.history ||= []; META.accountStates ||= {};
   if (!META.routingSecret || typeof META.routingSecret !== 'string') { META.routingSecret = crypto.randomBytes(32).toString('hex'); dirty = true; }
+  if (normalizeProviderHealthMetadata()) dirty = true;
   if (normalizeStatistics()) dirty = true;
   if (normalizeAccountQuotas()) dirty = true;
   const ids = new Set((config.accounts || []).map((a) => a.id));
@@ -1073,16 +1115,6 @@ async function probeModel(modelId, acc) {
   return { ok: true, ms, ...META.models[modelId] };
 }
 
-const UPSTREAM_STATUS_TTL_MS = 24 * 60 * 60 * 1000;
-function projectModelMeta(meta, now = Date.now()) {
-  if (!meta || typeof meta !== 'object') return meta || null;
-  const upstreamStatus = {};
-  for (const [provider, fact] of Object.entries(meta.upstreamStatus || {})) {
-    const fresh = Number.isSafeInteger(fact?.checkedAt) && fact.checkedAt <= now && now - fact.checkedAt <= UPSTREAM_STATUS_TTL_MS;
-    upstreamStatus[provider] = { status: fresh ? fact.status : 'unknown', ms: Number(fact?.ms) || 0, checkedAt: fact?.checkedAt || null, stale: !fresh };
-  }
-  return { ...meta, upstreamStatus };
-}
 // 上游渠道可用性分类：渠道被单独钉住时的真实状态
 function classifyUpstreamError(msg) {
   const m = String(msg || '');
@@ -1092,17 +1124,56 @@ function classifyUpstreamError(msg) {
   if (/unauthorized|re-authenticate|401/i.test(m)) return 'auth';        // 账号 key 问题，与渠道无关
   return 'unknown';
 }
-// 钉住请求失败时自动学习该渠道状态（仅确定性失败，瞬时限流标 limited 不拉黑）
-function learnUpstreamStatus(modelId, upstream, errMsg) {
-  if (!upstream || !errMsg) return;
-  const st = classifyUpstreamError(errMsg);
-  if (st === 'unknown' || st === 'auth') return;
+function providerHealthState(modelId, upstream) {
   const meta = (META.models[modelId] ||= {});
-  meta.upstreamStatus = { ...(meta.upstreamStatus || {}), [upstream]: { status: st, note: String(errMsg).slice(0, 160), checkedAt: Date.now() } };
+  const statuses = (meta.upstreamStatus ||= {});
+  const state = normalizeProviderHealthState(statuses[upstream]);
+  statuses[upstream] = state;
+  return state;
+}
+function projectModelMeta(meta) {
+  if (!isPlainObject(meta)) return null;
+  const upstreamStatus = {};
+  for (const [provider, state] of Object.entries(isPlainObject(meta.upstreamStatus) ? meta.upstreamStatus : {})) {
+    if (/^[a-z0-9][a-z0-9._/-]{0,199}$/i.test(provider)) upstreamStatus[provider] = normalizeProviderHealthState(state);
+  }
+  return { ...meta, upstreamStatus };
+}
+function updateProviderHealth(modelId, upstream, { success = false, classification = null, note = '', cooldownOverrideMs = null } = {}, now = Date.now()) {
+  if (!upstream) return 'none';
+  const previous = providerHealthState(modelId, upstream);
+  if (success) {
+    const action = previous.status !== 'ok' || previous.consecutiveFailures > 0 || previous.cooldownUntil > 0 ? 'recover' : 'success';
+    (META.models[modelId].upstreamStatus ||= {})[upstream] = {
+      ...previous, status: 'ok', checkedAt: now, lastSuccessAt: now,
+      consecutiveFailures: 0, cooldownUntil: 0, failureClass: null, note: boundedProviderNote(note || 'success'),
+    };
+    return action;
+  }
+  const scope = classification?.scope;
+  const failureClass = classification?.failureClass;
+  const affectsProvider = scope === 'provider' || scope === 'unknown';
+  if (!affectsProvider || !['rate_limit','server','network','timeout','unsupported'].includes(failureClass)) return 'none';
+  const failures = Math.min(PROVIDER_FAILURE_COUNT_MAX, previous.consecutiveFailures + 1);
+  let status = 'degraded', delayMs;
+  if (failureClass === 'rate_limit') {
+    status = 'limited';
+    delayMs = classification.retryAfterMs ?? Math.min(30 * 60e3, 60e3 * (2 ** Math.min(20, failures - 1)));
+  } else if (failureClass === 'unsupported') {
+    status = 'bad'; delayMs = 60 * 60e3;
+  } else {
+    delayMs = Number.isInteger(cooldownOverrideMs) && cooldownOverrideMs > 0
+      ? cooldownOverrideMs
+      : Math.min(2 * 60e3, 15e3 * (2 ** Math.min(20, failures - 1)));
+  }
+  (META.models[modelId].upstreamStatus ||= {})[upstream] = {
+    ...previous, status, checkedAt: now, lastFailureAt: now, consecutiveFailures: failures,
+    cooldownUntil: now + delayMs, failureClass, note: boundedProviderNote(note || `${classification.evidence || 'failure'}:${failureClass}`),
+  };
+  return 'cooldown';
 }
 
-// 自动+排除模式：only 白名单与网关侧渠道清单不一致时，网关报错会附最新清单，合并学习
-// （触发场景：探测缓存过期，网关侧新增了渠道而本地 known 列表没有——白名单漏掉新渠道）
+// 无已知渠道的 auto/unattributed 兼容请求若收到网关返回的可用清单，则只合并为后续请求的稳定探测顺序。
 function learnAvailableProviders(modelId, errMsg) {
   const m = /Available providers are:\s*([^.]+)/.exec(String(errMsg || ''));
   if (!m) return;
@@ -1139,15 +1210,20 @@ async function validateUpstreams(modelId, acc) {
       let status = 'unknown', accountFault = null, note = '';
       if (json?.error && !json?.data) {
         const msg = typeof json.error === 'string' ? json.error : JSON.stringify(json.error);
-        status = classifyUpstreamError(msg); note = safeReason(msg);
+        status = classifyUpstreamError(msg);
+        note = safeReason(msg);
         if (httpStatus === 401 || status === 'auth') { accountFault = 'auth'; status = 'unknown'; }
         else if (/quota\s*(?:exceeded|exhausted)|subscription\s*(?:limit|expired)/i.test(msg)) { accountFault = 'quota'; status = 'unknown'; }
-      } else if (json?.data?.choices || json?.choices) status = 'ok';
+        else if (status === 'limited') updateProviderHealth(modelId, slug, { classification: { scope: 'provider', evidence: 'probe_rate_limit', failureClass: 'rate_limit', retryAfterMs: null }, note });
+        else if (status === 'bad') updateProviderHealth(modelId, slug, { classification: { scope: 'provider', evidence: 'probe_unsupported', failureClass: 'unsupported', retryAfterMs: null }, note });
+      } else if (json?.data?.choices || json?.choices) {
+        status = 'ok';
+        updateProviderHealth(modelId, slug, { success: true, note: 'validation success' });
+      }
       results[slug] = { status, ...(accountFault ? { accountFault } : {}), ms: Date.now() - t0, note };
     }));
   }
-  const shareable = Object.fromEntries(Object.entries(results).filter(([, fact]) => !fact.accountFault && ['ok','limited','bad'].includes(fact.status)).map(([provider, fact]) => [provider, { status: fact.status, ms: fact.ms, note: fact.note, checkedAt: Date.now() }]));
-  META.models[modelId] = { ...meta, upstreamStatus: { ...(meta.upstreamStatus || {}), ...shareable }, validatedAt: Date.now() };
+  (META.models[modelId] ||= {}).validatedAt = Date.now();
   saveMeta();
   return results;
 }
@@ -1345,7 +1421,12 @@ function record(modelId, info, detail = detailContext.getStore()) {
   const ts = Date.now();
   META.models[modelId] = { ...(META.models[modelId] || {}), provider: info.provider, canonical: info.canonical, lastMs: info.ms };
   const result = ['success', 'client_cancelled', 'failed'].includes(info.result) ? info.result : (info.error ? 'failed' : 'success');
-  const legacy = { ts, model: modelId, ...info, result };
+  const { sensitiveValues: _sensitiveValues, ...safeInfo } = info;
+  const legacy = {
+    ts, model: modelId, ...safeInfo, result,
+    error: safeInfo.error ? safeReason(safeInfo.error, info.sensitiveValues) : safeInfo.error,
+    trace: Array.isArray(safeInfo.trace) ? safeInfo.trace.map((attempt) => ({ ...attempt, note: safeReason(attempt.note, info.sensitiveValues) })) : safeInfo.trace,
+  };
   recentHistory.unshift(legacy); if (recentHistory.length > 100) recentHistory.length = 100;
   const request = {
     ts, requestId: info.requestId || crypto.randomUUID(), requestedModel: info.requestedModel || modelId,
@@ -1363,10 +1444,16 @@ function record(modelId, info, detail = detailContext.getStore()) {
     pipelineSteps: Array.isArray(info.pipeline?.diagnostics) ? info.pipeline.diagnostics.slice(0, 8) : [], selectedQuotaPool: info.pipeline?.selectedQuota || null, selectedHealthLayer: info.pipeline?.selectedHealth || null, capacityFallback: !!info.pipeline?.capacityFallback,
     cachePoolSize: Number.isInteger(info.pipeline?.cachePoolSize) ? info.pipeline.cachePoolSize : configuredCachePoolSize(), cachePoolTier: ['active','standby'].includes(info.pipeline?.cachePoolTier) ? info.pipeline.cachePoolTier : null, cachePoolFallback: info.pipeline?.cachePoolFallback === true,
     targetProviders: Array.isArray(info.targets) ? info.targets : [], actualProvider: info.provider || null,
-    attempts: Array.isArray(info.trace) ? info.trace.map((t) => ({ provider: t.upstream || 'auto', status: t.status, upstreamStatus: t.upstreamStatus, ms: t.ms, account: t.account, action: t.action || null, providerCircuitAction: ['cooldown','half-open-success','half-open-failed'].includes(t.providerCircuitAction) ? t.providerCircuitAction : null })) : [],
+    attempts: Array.isArray(info.trace) ? info.trace.map((t) => ({
+      provider: t.upstream || 'auto', status: t.status, upstreamStatus: t.upstreamStatus, ms: t.ms, account: t.account, action: t.action || null,
+      providerCircuitAction: ['cooldown','half-open-success','half-open-failed'].includes(t.providerCircuitAction) ? t.providerCircuitAction : null,
+      errorScope: t.errorScope || null, scopeEvidence: t.scopeEvidence || null, failureClass: t.failureClass || null,
+      healthAction: t.healthAction || 'none', retryAfterMs: t.retryAfterMs ?? null,
+      responseContentType: t.responseContentType || null, responseBytes: Number.isSafeInteger(t.responseBytes) ? t.responseBytes : null,
+    })) : [],
     status: result === 'client_cancelled' ? 499 : result === 'success' ? 200 : (info.normalizedStatus || 502), result, upstreamStatus: info.upstreamStatus ?? null,
     durationMs: Number(info.ms) || 0, accountActions: info.accountActions || [], switched: (info.accountPath || []).length > 1, appliedHeaderNames: info.appliedHeaderNames || [],
-    errorCategory: result === 'failed' && info.error ? (info.proxyError ? 'proxy' : 'upstream') : null,
+    errorCategory: info.errorCategory || (result === 'failed' && info.error ? (info.proxyError ? 'proxy' : 'upstream') : null),
   };
   if (detail?.requestId === request.requestId) detail.result = result;
   const writes = [requestLogs.append(request)];
@@ -1376,7 +1463,10 @@ function record(modelId, info, detail = detailContext.getStore()) {
       accountId: attempt.accountId || info.accountId || null, accountName: attempt.account || info.account || null, attemptIndex,
       targetProvider: attempt.upstream || null, providerPath: (info.trace || []).slice(0, attemptIndex + 1).map((t) => t.upstream || 'auto'),
       status: attempt.normalizedStatus || attempt.status, upstreamStatus: attempt.upstreamStatus ?? null,
-      category: attempt.upstreamStatus === 0 ? (info.proxyError ? 'proxy' : 'network') : 'upstream', reason: safeReason(attempt.note, info.sensitiveValues), accountAction: attempt.action || null }));
+      category: attempt.upstreamStatus === 0 ? (info.proxyError ? 'proxy' : 'network') : 'upstream', reason: safeReason(attempt.note, info.sensitiveValues), accountAction: attempt.action || null,
+      errorScope: attempt.errorScope || null, scopeEvidence: attempt.scopeEvidence || null, failureClass: attempt.failureClass || null,
+      healthAction: attempt.healthAction || 'none', retryAfterMs: attempt.retryAfterMs ?? null,
+      responseContentType: attempt.responseContentType || null, responseBytes: Number.isSafeInteger(attempt.responseBytes) ? attempt.responseBytes : null }));
   }
   void Promise.all(writes);
   try { saveMeta(); } catch (error) { console.error(`[诊断] metadata 持久化失败：${safeReason(error.message)}`); }
@@ -1788,7 +1878,7 @@ function scheduleQuotaRefresh() {
   arm();
 }
 function createSseObserver(maxBytes = 64 * 1024) {
-  let pending = Buffer.alloc(0), discardTail = Buffer.alloc(0), discarding = false, usage = null, provider = null, canonical = null, error = null, normalizedStatus = null, done = false;
+  let pending = Buffer.alloc(0), discardTail = Buffer.alloc(0), discarding = false, usage = null, provider = null, canonical = null, error = null, errorPayload = null, normalizedStatus = null, responseBytes = 0, done = false;
   const observeEvent = (buffer) => {
     const payload = buffer.toString('utf8').split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.replace(/^data:\s?/, '')).join('\n');
     if (!payload) return;
@@ -1798,11 +1888,12 @@ function createSseObserver(maxBytes = 64 * 1024) {
     const normalized = normalizeUsage(raw?.usage); if (normalized) usage = normalized;
     const routing = parseRouting(raw || {}); if (routing.finalProvider) provider = routing.finalProvider; if (routing.canonicalSlug) canonical = routing.canonicalSlug;
     if (typeof raw?.provider === 'string') provider = slugify(raw.provider); if (typeof raw?.model === 'string') canonical = raw.model;
-    const eventError = upstreamErrorOf(event); if (!error && eventError) { error = safeReason(errText(eventError)); normalizedStatus = normalizeStatus(200, event, 502); }
+    const eventError = upstreamErrorOf(event); if (!error && eventError) { error = safeReason(errText(eventError)); errorPayload = eventError; normalizedStatus = normalizeStatus(200, event, 502); }
   };
   return {
     push(chunk) {
       let data = Buffer.from(chunk);
+      responseBytes = Math.min(Number.MAX_SAFE_INTEGER, responseBytes + data.length);
       if (discarding) {
         data = Buffer.concat([discardTail, data]);
         const match = /\r?\n\r?\n/.exec(data.toString('latin1'));
@@ -1816,7 +1907,7 @@ function createSseObserver(maxBytes = 64 * 1024) {
       }
       if (pending.length > maxBytes) { discardTail = pending.subarray(Math.max(0, pending.length - 3)); pending = Buffer.alloc(0); discarding = true; }
     },
-    result() { return { usage, provider, canonical, error, normalizedStatus, done }; },
+    result() { return { usage, provider, canonical, error, errorPayload, normalizedStatus, responseBytes, done }; },
   };
 }
 function readFirstSseEvent(stream, maxBytes = 64 * 1024) {
@@ -1929,7 +2020,7 @@ function unwrap(json, httpStatus = 200) {
   if (d?.error && !d?.choices) {
     const msg = errText(d.error);
     const status = normalizeStatus(httpStatus, d, 502);
-    return { status, upstreamStatus: httpStatus, normalizedStatus: status, body: { error: { message: msg, type: 'upstream_error' } }, routing: {} };
+    return { status, upstreamStatus: httpStatus, normalizedStatus: status, body: { error: { message: msg, type: 'upstream_error' } }, routing: parseRouting(d || {}) };
   }
   if (httpStatus < 200 || httpStatus >= 300) {
     const msg = errText(d?.error || d || `upstream HTTP ${httpStatus}`);
@@ -1940,74 +2031,55 @@ function unwrap(json, httpStatus = 200) {
   return { status: 200, upstreamStatus: httpStatus, normalizedStatus: 200, body: d, routing: r };
 }
 
-// 按管道注入上游偏好（实测结论）：
-// - 规划器管道（Vercel AI Gateway）：顶层 provider 简写里的 only/order 会被 Cline 吞掉，
-//   必须用 providerOptions.gateway.{only,order,sort}；流式同样生效。
-// - 直连管道（OpenRouter）：顶层 provider.{only,order,sort} 生效；providerOptions 被忽略。
-// - 管道未知时两种形式同时注入，各自取用、互不干扰。
+// 每个具名 HTTP attempt 只钉住一个 provider。preferred 与 strict 都由 switcher 外层逐次回退；
+// planner 使用 providerOptions.gateway.only，direct 使用 provider.only，未知管道同时注入同一个单元素 only。
 const OR_SORT = { cost: 'price', ttft: 'latency', tps: 'throughput' };
-
-// upstream: 本次尝试钉住的上游（null=自动）；orderRest: preferred 模式下排在当前上游之后的回退序列；
-// excludeList: 排除列表。网关不支持 exclude/ignore 字段（实测被静默忽略），因此排除统一换算成 only 白名单：
-// 自动模式 only=已知上游-排除；preferred 钉住模式 order=[当前,...] 且 only=已知上游-排除（防止网关回退到被排除渠道）；
-// 严格钉住模式 only=[当前上游]，天然排除其他一切渠道。
-function injectPrefs(body, modelId, { upstream, orderRest = [], excludeList = [], strict = true, sort = null }) {
+function injectPrefs(body, modelId, { upstream, sort = null }) {
   const b = JSON.parse(JSON.stringify(body));
-  const exclude = (excludeList || []).filter((u) => u !== upstream);
-  const meta = META.models[modelId] || {};
-  const known = meta.upstreams || [];
-  const allowList = exclude.length ? known.filter((u) => !exclude.includes(u)) : null;
-  if (!upstream && !sort && !(allowList && allowList.length)) return b;
-  const pipeline = meta.pipeline || null;
+  const provider = isPlainObject(b.provider) ? { ...b.provider } : {};
+  const gateway = isPlainObject(b.providerOptions?.gateway) ? { ...b.providerOptions.gateway } : {};
+  delete provider.only; delete provider.order;
+  delete gateway.only; delete gateway.order;
+  if (isPlainObject(b.provider)) b.provider = provider;
+  if (isPlainObject(b.providerOptions?.gateway)) b.providerOptions = { ...b.providerOptions, gateway };
+  const pipeline = META.models[modelId]?.pipeline || null;
   const useVercel = pipeline === 'planner' || pipeline === null;
   const useOpenRouter = pipeline === 'direct' || pipeline === null;
-  if (useVercel) {
-    const gw = {};
-    if (upstream) {
-      if (strict) gw.only = [upstream];
-      else {
-        gw.order = [upstream, ...orderRest];
-        if (allowList && allowList.length) gw.only = allowList;
-      }
-    } else if (allowList && allowList.length) {
-      gw.only = allowList;
-    }
-    if (sort) gw.sort = sort;
-    b.providerOptions = { ...(b.providerOptions || {}), gateway: { ...(b.providerOptions?.gateway || {}), ...gw } };
+  if (useVercel && (upstream || sort)) {
+    if (upstream) gateway.only = [upstream];
+    if (sort) gateway.sort = sort;
+    b.providerOptions = { ...(b.providerOptions || {}), gateway };
   }
-  if (useOpenRouter) {
-    const p = { ...(b.provider || {}) };
-    if (upstream) {
-      if (strict) p.only = [upstream];
-      else {
-        p.order = [upstream, ...orderRest];
-        if (allowList && allowList.length) p.only = allowList;
-      }
-    } else if (allowList && allowList.length) {
-      p.only = allowList;
-    }
-    if (sort) p.sort = OR_SORT[sort] || sort;
-    b.provider = p;
+  if (useOpenRouter && (upstream || sort)) {
+    if (upstream) provider.only = [upstream];
+    if (sort) provider.sort = OR_SORT[sort] || sort;
+    b.provider = provider;
   }
   return b;
 }
 
-// 由 perModel 配置展开出故障转移候选序列：[{ upstream, orderRest, excludeList, strict, sort }, ...]
-// - 勾选了上游（排除后非空）：逐个尝试，排除的永不在候选中
-// - 未勾选：单候选自动模式，排除换算成 only 白名单注入（见 injectPrefs）
-function buildAttempts(modelId, cfg) {
-  const listed = (cfg?.upstreams || []).filter((u) => typeof u === 'string' && u);
-  const exclude = (cfg?.exclude || []).filter((u) => typeof u === 'string' && u);
-  const excl = new Set(exclude);
-  const wanted = listed.filter((u) => !excl.has(u));
-  const strict = (cfg?.pinMode || 'strict') === 'strict';
-  const sort = cfg?.sort || null;
-  const base = { strict, sort, excludeList: exclude };
-  if (wanted.length) {
-    // preferred 模式：当前上游排在 order 首位，其余勾选项作为网关侧回退序列；排除列表随行（限制网关回退范围）
-    return wanted.map((u, i) => ({ ...base, upstream: u, orderRest: strict ? [] : wanted.filter((_, j) => j !== i) }));
+function buildProviderAttempts(modelId, cfg = {}, now = Date.now()) {
+  const configuredOrder = normalizeStringList(cfg.upstreams, 20);
+  const discoveredOrder = normalizeStringList(META.models[modelId]?.upstreams, 100);
+  const exclude = new Set(normalizeStringList(cfg.exclude, 50));
+  const source = configuredOrder.length ? 'configured' : discoveredOrder.length ? 'discovered' : 'auto';
+  const sourceOrder = source === 'configured' ? configuredOrder : source === 'discovered' ? discoveredOrder : [];
+  if (source === 'auto') {
+    return { attempts: [{ upstream: null, attribution: 'auto', sort: cfg.sort || null }], configuredOrder, plannedOrder: [], failOpen: false, source, allExcluded: false };
   }
-  return [{ ...base, upstream: null, orderRest: [], excludeList: exclude }];
+  const allowed = sourceOrder.filter((provider) => !exclude.has(provider));
+  if (!allowed.length) return { attempts: [], configuredOrder, plannedOrder: [], failOpen: false, source, allExcluded: true };
+  const eligible = allowed.filter((provider) => providerHealthState(modelId, provider).cooldownUntil <= now);
+  let failOpen = false;
+  let planned = eligible;
+  if (!planned.length) {
+    failOpen = true;
+    planned = [allowed.map((provider, index) => ({ provider, index, cooldownUntil: providerHealthState(modelId, provider).cooldownUntil }))
+      .sort((a, b) => a.cooldownUntil - b.cooldownUntil || a.index - b.index)[0].provider];
+  }
+  if (cfg.maxRetries !== null && cfg.maxRetries !== undefined) planned = planned.slice(0, Math.max(1, Number(cfg.maxRetries) + 1));
+  const attempts = planned.map((upstream) => ({ upstream, attribution: 'named', sort: cfg.sort || null }));
+  return { attempts, configuredOrder, plannedOrder: [...planned], failOpen, source, allExcluded: false };
 }
 function providerCircuitKey(accountId, modelId, provider) { return `${accountId}\0${modelId}\0${provider}`; }
 function providerCircuitRouteKey(accountId, modelId) { return `${accountId}\0${modelId}`; }
@@ -2033,25 +2105,35 @@ function ensureProviderCircuitCapacity(now = Date.now()) {
   return true;
 }
 function planProviderAttempts(modelId, cfg, account) {
-  const attempts = applyMaxRetries(buildAttempts(modelId, cfg), cfg);
-  const cooldownMs = Number(cfg?.providerCooldownMs) || 0;
-  if (cooldownMs <= 0) return { attempts, retryAfter: null };
-  const now = Date.now(), ready = [], blocked = [], accountGeneration = providerCircuitAccountGenerations.get(account.id) || 0, routeKey = providerCircuitRouteKey(account.id, modelId), routeGeneration = providerCircuitRouteGenerations.get(routeKey) || 0;
-  for (const attempt of attempts) {
+  const base = buildProviderAttempts(modelId, cfg), attempts = base.attempts;
+  if (!attempts.length) return { ...base, retryAfter: null };
+  const now = Date.now(), cooldownMs = Number(cfg?.providerCooldownMs) || 0;
+  const accountGeneration = providerCircuitAccountGenerations.get(account.id) || 0;
+  const routeKey = providerCircuitRouteKey(account.id, modelId), routeGeneration = providerCircuitRouteGenerations.get(routeKey) || 0;
+  const annotate = (attempt) => ({ ...attempt, circuitAccountGeneration: accountGeneration, circuitRouteGeneration: routeGeneration });
+  if (cooldownMs <= 0) return { ...base, attempts: attempts.map(annotate), retryAfter: null };
+  const ready = [], blocked = [];
+  for (const rawAttempt of attempts) {
+    const attempt = annotate(rawAttempt);
     if (!attempt.upstream) { ready.push(attempt); continue; }
-    const key = providerCircuitKey(account.id, modelId, attempt.upstream), circuitAttempt = { ...attempt, circuitKey: key, circuitAccountGeneration: accountGeneration, circuitRouteGeneration: routeGeneration }, state = providerCircuitStates.get(key);
+    const key = providerCircuitKey(account.id, modelId, attempt.upstream), circuitAttempt = { ...attempt, circuitKey: key }, state = providerCircuitStates.get(key);
     if (!state) { ready.push(circuitAttempt); continue; }
-    if (state.cooldownUntil > now) { blocked.push(state); continue; }
-    if (state.halfOpen) { blocked.push(state); continue; }
+    if (state.cooldownUntil > now || state.halfOpen) { blocked.push(state); continue; }
     ready.push({ ...circuitAttempt, circuitHalfOpen: true });
   }
-  if (ready.length) return { attempts: ready, retryAfter: null };
+  if (ready.length) return { ...base, attempts: ready, plannedOrder: ready.map((attempt) => attempt.upstream).filter(Boolean), retryAfter: null };
   const earliest = Math.min(...blocked.map((state) => state.cooldownUntil > now ? state.cooldownUntil : now + 1000));
-  return { attempts: [], retryAfter: retryAfterSeconds(Math.max(1000, earliest - now)) };
+  return { ...base, attempts: [], plannedOrder: [], retryAfter: retryAfterSeconds(Math.max(1000, earliest - now)) };
+}
+function providerAttemptGenerationIsCurrent(modelId, account, attempt) {
+  const routeKey = providerCircuitRouteKey(account.id, modelId);
+  return attempt?.circuitAccountGeneration === (providerCircuitAccountGenerations.get(account.id) || 0)
+    && attempt?.circuitRouteGeneration === (providerCircuitRouteGenerations.get(routeKey) || 0);
 }
 function providerCircuitFailure(outcome, account) {
   const status = Number(outcome?.normalizedStatus || outcome?.status || 0), message = String(outcome?.netError || outcome?.out?.error?.message || '');
   if (/abort|cancel/i.test(message) || status === 401 || /unauthorized|re-authenticate|invalid\s*api/i.test(message)) return null;
+  if (outcome?.classification?.scope === 'account' || outcome?.classification?.scope === 'request') return null;
   if (outcome?.terminalOrigin === 'proxy' || (account?.proxyUrl && outcome?.upstreamStatus === 0)) return null;
   if (status === 429) return 'rate_limit';
   if (status >= 500 || outcome?.terminalOrigin === 'network' || outcome?.terminalOrigin === 'timeout') return outcome?.terminalOrigin || 'server';
@@ -2094,16 +2176,111 @@ function redactSecrets(value) {
   s = s.replace(/(?:https?|socks5h?):\/\/[^\s]+/gi, '[REDACTED_PROXY]').replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, 'Bearer [REDACTED]');
   return s;
 }
-// 把上游错误信息归一成单行脱敏字符串（用于学习与尝试日志，保留完整原因）
+// 把结构化上游错误归一成单行脱敏字符串；非 JSON 响应只使用通用原因，原始正文不进入诊断。
 const errText = (e) => redactSecrets(e == null ? '' : typeof e === 'string' ? e : JSON.stringify(e));
+function responseHeader(headers, name) {
+  const value = headers?.[String(name).toLowerCase()];
+  return Array.isArray(value) ? value[0] : value;
+}
+function normalizeResponseContentType(headers) {
+  const mediaType = String(responseHeader(headers, 'content-type') || '').split(';', 1)[0].trim().toLowerCase();
+  return /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(mediaType) && mediaType.length <= 100 ? mediaType : null;
+}
+function safeResponseBytes(value) {
+  const bytes = Buffer.isBuffer(value) ? value.length : Buffer.byteLength(String(value || ''), 'utf8');
+  return Number.isSafeInteger(bytes) && bytes >= 0 ? bytes : null;
+}
+function parseRetryAfter(value, now = Date.now()) {
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (typeof raw !== 'string' && typeof raw !== 'number') return null;
+  const text = String(raw).trim();
+  let delay = null;
+  if (/^\d+$/.test(text)) delay = Number(text) * 1000;
+  else if (/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s\d{2}\s[A-Za-z]{3}\s\d{4}\s\d{2}:\d{2}:\d{2}\sGMT$/.test(text)) {
+    const date = Date.parse(text); if (Number.isFinite(date)) delay = date - now;
+  }
+  if (!Number.isFinite(delay)) return null;
+  return Math.min(30 * 60e3, Math.max(1000, Math.floor(delay)));
+}
+function structuredErrorText(error) {
+  if (error == null) return '';
+  try { return (typeof error === 'string' ? error : JSON.stringify(error)).slice(0, 8192); } catch { return ''; }
+}
+function structuredErrorStrings(error) {
+  if (typeof error === 'string') return [error.slice(0, 8192)];
+  if (!error || typeof error !== 'object') return [];
+  const strings = [], stack = [[error, 0]];
+  let total = 0;
+  while (stack.length && strings.length < 64 && total < 8192) {
+    const [value, depth] = stack.pop();
+    if (!value || typeof value !== 'object' || depth > 4) continue;
+    for (const [key, child] of Object.entries(value)) {
+      if (strings.length >= 64 || total >= 8192) break;
+      const keyText = key.slice(0, 8192 - total);
+      strings.push(keyText); total += keyText.length;
+      if (typeof child === 'string' && strings.length < 64 && total < 8192) {
+        const text = child.slice(0, 8192 - total);
+        strings.push(text); total += text.length;
+      } else if (child && typeof child === 'object') stack.push([child, depth + 1]);
+    }
+  }
+  return strings;
+}
+function hasExplicitAccountQuotaEvidence(error) {
+  return structuredErrorStrings(error).some((text) => {
+    const words = text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    if (!words) return false;
+    const owner = '(?:account(?: subscription| plan| billing)?|subscription|plan|billing)';
+    const quota = '(?:quota|limit|allowance|credits?|usage limit)';
+    const exhausted = '(?:exhausted|depleted|reached|exceeded|used up)';
+    return new RegExp(`${owner}(?: [a-z0-9]+){0,4} ${quota}(?: [a-z0-9]+){0,4} ${exhausted}`).test(words)
+      || new RegExp(`${quota}(?: [a-z0-9]+){0,4} ${exhausted}(?: [a-z0-9]+){0,4} ${owner}`).test(words);
+  });
+}
+function hasExplicitProviderEvidence(error, upstream) {
+  if (!error || !upstream || typeof error !== 'object') return false;
+  const stack = [[error, 0]];
+  while (stack.length) {
+    const [value, depth] = stack.pop();
+    if (!value || typeof value !== 'object' || depth > 4) continue;
+    for (const [key, child] of Object.entries(value)) {
+      if (/^(?:provider|providerName|provider_name|upstream|finalProvider)$/i.test(key) && typeof child === 'string' && norm(child) === norm(upstream)) return true;
+      if (child && typeof child === 'object') stack.push([child, depth + 1]);
+    }
+  }
+  return false;
+}
+function quotaShowsExhausted(account, now = Date.now()) {
+  if (!account?.id) return false;
+  const quota = quotaProjection(account.id, now);
+  return quota.status === 'fresh' && Object.values(quota.limits || {}).some((limit) => Number(limit?.percentUsed) >= 100);
+}
+function classifyAttemptFailure(result, attempt, account, now = Date.now()) {
+  const status = Number(result?.normalizedStatus || result?.status || 0);
+  const origin = result?.terminalOrigin || '';
+  const error = result?.structuredError;
+  const errorText = structuredErrorText(error || result?.out?.error?.message);
+  if (status === 429) {
+    const retryAfterMs = parseRetryAfter(result?.retryAfter, now);
+    if (quotaShowsExhausted(account, now)) return { scope: 'account', evidence: 'fresh_account_quota', failureClass: 'rate_limit', retryAfterMs };
+    if (hasExplicitAccountQuotaEvidence(error)) return { scope: 'account', evidence: 'structured_account_quota', failureClass: 'rate_limit', retryAfterMs };
+    if (result?.routing?.finalProvider) return { scope: 'provider', evidence: 'routing_final_provider', failureClass: 'rate_limit', retryAfterMs };
+    if (hasExplicitProviderEvidence(error, attempt?.upstream)) return { scope: 'provider', evidence: 'structured_provider', failureClass: 'rate_limit', retryAfterMs };
+    return { scope: 'unknown', evidence: 'ambiguous_rate_limit', failureClass: 'rate_limit', retryAfterMs };
+  }
+  if (status === 401 || status === 403) return { scope: 'account', evidence: 'http_auth', failureClass: 'auth', retryAfterMs: null };
+  if (origin === 'timeout') return { scope: 'provider', evidence: 'transport_timeout', failureClass: 'timeout', retryAfterMs: null };
+  if (origin === 'proxy') return { scope: 'account', evidence: 'transport_proxy', failureClass: 'network', retryAfterMs: null };
+  if (origin === 'network' || result?.upstreamStatus === 0) return { scope: 'provider', evidence: 'transport_network', failureClass: 'network', retryAfterMs: null };
+  if (/unsupported|not supported|no allowed providers|no available providers|model\s*id[^\n]*not found|invalid[^\n]*provider|provider[^\n]*not found|cannot[^\n]*pin/i.test(errorText)) return { scope: 'provider', evidence: 'structured_unsupported', failureClass: 'unsupported', retryAfterMs: null };
+  if (status >= 500 && status <= 599) return { scope: 'provider', evidence: 'http_server', failureClass: 'server', retryAfterMs: null };
+  if (status >= 400 && status <= 499) return { scope: 'request', evidence: 'http_request', failureClass: 'other', retryAfterMs: null };
+  return { scope: attempt?.upstream ? 'provider' : 'unknown', evidence: 'unclassified_failure', failureClass: 'other', retryAfterMs: null };
+}
 
 function resolveModelConfig(account, modelId) {
   if (account?.perModel && Object.prototype.hasOwnProperty.call(account.perModel, modelId)) return account.perModel[modelId] || {};
   return config.perModel[modelId] || {};
-}
-function applyMaxRetries(attempts, cfg) {
-  if (cfg?.maxRetries === null || cfg?.maxRetries === undefined) return attempts;
-  return attempts.slice(0, Math.max(1, Math.min(attempts.length, Number(cfg.maxRetries) + 1)));
 }
 const MAX_RULE_FAILURE_TEXT = 16 * 1024;
 let contentRuleCacheSource = null, contentRuleCache = [];
@@ -2120,7 +2297,7 @@ function normalizeFailureForRules(value, sensitiveValues = []) {
 function projectedAccountAction(statusCode, rule) {
   return { statusCode, action: rule.action, ...(rule.action === 'cooldown' ? { cooldownMs: rule.cooldownMs } : {}) };
 }
-function accountActionFor(result, sensitiveValues = []) {
+function accountActionFor(result, classification, sensitiveValues = []) {
   const statusCode = Number(result?.normalizedStatus || result?.status);
   if (!Number.isInteger(statusCode) || statusCode < 400 || statusCode > 599) return null;
   const failureText = normalizeFailureForRules(result?.failureText ?? result?.out?.error?.message ?? result?.body?.error?.message ?? result?.error ?? result?.netError ?? '', sensitiveValues).toLowerCase();
@@ -2128,6 +2305,7 @@ function accountActionFor(result, sensitiveValues = []) {
     if (rule.statusMin !== undefined && (statusCode < rule.statusMin || statusCode > rule.statusMax)) continue;
     if (failureText.includes(rule.needle)) return projectedAccountAction(statusCode, rule);
   }
+  if (statusCode === 429 && classification?.scope !== 'account') return null;
   const rule = config.accountErrorRules?.[String(statusCode)];
   return rule ? projectedAccountAction(statusCode, rule) : null;
 }
@@ -2139,35 +2317,82 @@ function persistAccountAction(account, action, reason, sensitiveValues = []) {
   if (action.action === 'ban') state.banned = true;
   META.accountStates ||= {};
   META.accountStates[account.id] = state;
-  saveMeta();
+  clearProviderCircuitForAccount(account.id);
+  try { saveMeta(); } catch (error) { console.error(`[账号] 状态持久化失败：${safeReason(error.message)}`); }
 }
 function responseHeadersFor(account, forwardedHeaders) {
   return { ...forwardedHeaders, ...(account?.headers || {}), 'Content-Type': 'application/json', Authorization: `Bearer ${account.key}` };
 }
-// 单次向上游网关发起非流式请求；返回 { status, out, routing, acc, upstreamStatus, normalizedStatus }
 async function attemptOnce(modelId, body, attempt, account, forwardedHeaders, signal) {
   const send = injectPrefs(body, modelId, attempt);
   try {
     const res = await clineRequestJSON(`${config.upstreamBase}/chat/completions`, {
       headers: responseHeadersFor(account, forwardedHeaders), body: JSON.stringify(send), signal, account,
     });
+    const responseContentType = normalizeResponseContentType(res.headers);
+    const responseBytes = safeResponseBytes(res.text);
+    const retryAfter = responseHeader(res.headers, 'retry-after');
     let json = null;
     try { json = JSON.parse(res.text); } catch {}
-    if (!json) return { status: 502, upstreamStatus: res.status, normalizedStatus: normalizeStatus(res.status, null, 502), out: { error: { message: 'upstream returned non-JSON', type: 'upstream_error' } }, routing: {}, netError: 'non-JSON response', terminalOrigin: 'upstream_envelope', acc: account };
+    if (!json) {
+      const status = normalizeStatus(res.status, null, 502);
+      return { status, upstreamStatus: res.status, normalizedStatus: status, out: { error: { message: 'upstream returned non-JSON', type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter, responseContentType, responseBytes, netError: 'non-JSON response', terminalOrigin: res.status >= 400 ? 'upstream_http' : 'upstream_envelope', acc: account };
+    }
     const un = unwrap(json, res.status);
-    return { status: un.status, upstreamStatus: un.upstreamStatus, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing, netError: null, terminalOrigin: un.status === 200 ? 'success' : (res.status >= 400 ? 'upstream_http' : 'upstream_envelope'), acc: account };
+    return { status: un.status, upstreamStatus: un.upstreamStatus, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing, structuredError: upstreamErrorOf(json), retryAfter, responseContentType, responseBytes, netError: null, terminalOrigin: un.status === 200 ? 'success' : (res.status >= 400 ? 'upstream_http' : 'upstream_envelope'), acc: account };
   } catch (e) {
     const origin = /timeout/i.test(e.message) ? 'timeout' : account?.proxyUrl ? 'proxy' : 'network';
-    return { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${errText(e.message)}`, type: 'upstream_error' } }, routing: {}, netError: errText(e.message), terminalOrigin: origin, acc: account };
+    return { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${errText(e.message)}`, type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter: null, responseContentType: null, responseBytes: 0, netError: errText(e.message), terminalOrigin: origin, acc: account };
   }
 }
+function settleAttempt(modelId, attempt, result, account, { clientDisconnected = false, updateSuccess = true, cfg = {}, sensitiveValues = [] } = {}) {
+  const currentGeneration = providerAttemptGenerationIsCurrent(modelId, account, attempt);
+  if (clientDisconnected) {
+    const providerCircuitAction = currentGeneration
+      ? settleProviderCircuit(modelId, cfg, account, attempt, { status: 499, normalizedStatus: 499, netError: 'client cancelled', classification: { scope: 'request' } })
+      : null;
+    return { classification: null, accountAction: null, healthAction: 'none', providerCircuitAction };
+  }
+  if (result.status === 200) {
+    const healthAction = updateSuccess && currentGeneration ? updateProviderHealth(modelId, attempt.upstream, { success: true }) : 'none';
+    const providerCircuitAction = updateSuccess && currentGeneration ? settleProviderCircuit(modelId, cfg, account, attempt, result) : null;
+    return { classification: null, accountAction: null, healthAction, providerCircuitAction };
+  }
+  const classification = classifyAttemptFailure(result, attempt, account);
+  result.classification = classification;
+  const accountAction = accountActionFor(result, classification, sensitiveValues);
+  const removesAccount = accountAction?.action === 'cooldown' || accountAction?.action === 'ban';
+  const cooldownOverrideMs = Number(cfg?.providerCooldownMs) > 0 ? Number(cfg.providerCooldownMs) : null;
+  const healthAction = currentGeneration && !removesAccount
+    ? updateProviderHealth(modelId, attempt.upstream, { classification, note: `${classification.evidence}:${classification.failureClass}`, cooldownOverrideMs })
+    : 'none';
+  const providerCircuitAction = currentGeneration && !removesAccount ? settleProviderCircuit(modelId, cfg, account, attempt, result) : null;
+  return { classification, accountAction, healthAction, providerCircuitAction };
+}
+function traceAttempt(attempt, result, account, ms, diagnostic) {
+  return {
+    upstream: attempt.upstream, status: result.status, upstreamStatus: result.upstreamStatus, normalizedStatus: result.normalizedStatus,
+    terminalOrigin: result.terminalOrigin, ms, note: result.note, account: account.name, accountId: account.id,
+    action: diagnostic.accountAction?.action || null, providerCircuitAction: diagnostic.providerCircuitAction || null,
+    errorScope: diagnostic.classification?.scope || null,
+    scopeEvidence: diagnostic.classification?.evidence || null, failureClass: diagnostic.classification?.failureClass || null,
+    healthAction: diagnostic.healthAction || 'none', retryAfterMs: diagnostic.classification?.retryAfterMs ?? null,
+    responseContentType: result.responseContentType || null, responseBytes: Number.isSafeInteger(result.responseBytes) ? result.responseBytes : null,
+  };
+}
 
-// 顺序故障转移：依次执行候选，普通错误不换账号。cooldown/ban 由 handleChat 负责最多换号一次。
+// 两级重试：本函数固定一个账号，仅在该账号内按健康计划逐个尝试 provider。
+// 只有 account-scoped 错误命中 cooldown/ban 时，外层 handleChat 才能终止本链并最多换号一次。
 async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream = false, attemptTimeoutMs = 120000, sensitiveValues = [] } = {}) {
   const t0 = Date.now();
-  const planned = planProviderAttempts(modelId, cfg, account), attempts = planned.attempts;
+  const plan = planProviderAttempts(modelId, cfg, account), attempts = plan.attempts;
   const trace = [];
-  if (!attempts.length) return { status: 503, upstreamStatus: 0, normalizedStatus: 503, out: { error: { message: 'all configured providers are cooling down', type: 'upstream_error' } }, routing: {}, acc: account, trace, t0, retryAfter: planned.retryAfter || 1, netError: null, clientDisconnected: false };
+  if (!attempts.length) {
+    const allExcluded = plan.allExcluded === true;
+    return { status: 503, upstreamStatus: allExcluded ? null : 0, normalizedStatus: 503,
+      out: { error: { message: allExcluded ? 'no provider available after exclusions' : 'all configured providers are cooling down', type: 'upstream_error' } },
+      routing: {}, acc: account, trace, t0, plan, retryAfter: plan.retryAfter || null, netError: null, accountAction: null, clientDisconnected: false };
+  }
   let last = null;
   let activeReq = null;
   let keepCloseHook = false;
@@ -2186,17 +2411,18 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
       }
       const t1 = Date.now();
       const ctrl = new AbortController();
+      let timedOut = false;
       activeReq = ctrl;
-      const timer = setTimeout(() => ctrl.abort(), attemptTimeoutMs);
+      const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, attemptTimeoutMs);
       try {
         if (stream) {
           const send = injectPrefs(body, modelId, attempt);
-          let up = null, netError = null;
+          let up = null, netError = null, transportOrigin = null;
           try {
             up = await clineRequest(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, forwardedHeaders), body: JSON.stringify(send), signal: ctrl.signal, timeoutMs: attemptTimeoutMs, account });
-          } catch (e) { netError = errText(e.message); }
-          const ctype = String(up?.headers?.['content-type'] || '');
-          let isSSE = !!up && up.status === 200 && ctype.toLowerCase().includes('event-stream');
+          } catch (e) { netError = timedOut ? 'upstream timeout' : errText(e.message); }
+          const responseContentType = normalizeResponseContentType(up?.headers);
+          let isSSE = !!up && up.status === 200 && responseContentType === 'text/event-stream';
           let firstChunk = null;
           if (isSSE) {
             try {
@@ -2206,7 +2432,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
               else {
                 const head = firstChunk.toString('utf8').trimStart();
                 if (!first.complete || !head.startsWith('data:')) {
-                  isSSE = false; netError = `unexpected stream head: ${head.slice(0, 60)}`;
+                  isSSE = false; netError = 'unexpected stream head';
                 } else {
                   const eventText = head.split(/\r?\n\r?\n/, 1)[0];
                   const payload = eventText.split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.replace(/^data:\s?/, '')).join('\n');
@@ -2215,11 +2441,20 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
                   if (eventError) { isSSE = false; netError = `stream error: ${errText(eventError)}`; }
                 }
               }
-            } catch (e) { isSSE = false; netError = errText(e.message); }
+            } catch (e) {
+              isSSE = false;
+              netError = timedOut ? 'upstream timeout' : errText(e.message);
+              transportOrigin = timedOut || /timeout/i.test(netError) ? 'timeout' : account.proxyUrl ? 'proxy' : 'network';
+            }
           }
           const ms = Date.now() - t1;
           if (up && !isSSE) {
-            const rest = await streamToString(up.body).catch(() => '');
+            let rest = '';
+            try { rest = await streamToString(up.body); }
+            catch (e) {
+              if (!netError) netError = timedOut ? 'upstream timeout' : errText(e.message);
+              transportOrigin = timedOut || /timeout/i.test(netError) ? 'timeout' : account.proxyUrl ? 'proxy' : 'network';
+            }
             const text = (firstChunk ? firstChunk.toString('utf8') : '') + rest;
             let json = null;
             try { json = JSON.parse(text); } catch {
@@ -2228,46 +2463,53 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
             }
             const inferred = normalizeStatus(up.status, json, normalizeStatus(0, { error: text }, 502));
             const un = json ? unwrap(json, up.status) : { status: inferred, upstreamStatus: up.status, normalizedStatus: inferred, body: { error: { message: netError || 'upstream returned an invalid error response', type: 'upstream_error' } }, routing: {} };
-            const msg = errText(un.body?.error?.message || netError);
-            trace.push({ upstream: attempt.upstream, status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, terminalOrigin: up.status >= 400 ? 'upstream_http' : 'upstream_envelope', ms, note: msg, account: account.name, accountId: account.id });
-            if (attempt.upstream) learnUpstreamStatus(modelId, attempt.upstream, msg);
-            if (!attempt.upstream && (attempt.excludeList || []).length) learnAvailableProviders(modelId, msg);
-            last = { status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing, acc: account, netError: null, terminalOrigin: up.status >= 400 ? 'upstream_http' : 'upstream_envelope', accountAction: clientClosed ? null : accountActionFor(un, sensitiveValues) };
-            trace[trace.length - 1].action = last.accountAction?.action || null;
-            trace[trace.length - 1].providerCircuitAction = settleProviderCircuit(modelId, cfg, account, attempt, last);
+            const result = {
+              status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing,
+              structuredError: json ? upstreamErrorOf(json) : null, retryAfter: responseHeader(up.headers, 'retry-after'), responseContentType,
+              responseBytes: safeResponseBytes(text), netError: transportOrigin ? netError : null,
+              terminalOrigin: up.status >= 400 ? 'upstream_http' : transportOrigin || 'upstream_envelope', acc: account,
+            };
+            result.note = errText(un.body?.error?.message || netError);
+            const diagnostic = settleAttempt(modelId, attempt, result, account, { clientDisconnected: clientClosed, cfg, sensitiveValues });
+            trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
+            if (!attempt.upstream) learnAvailableProviders(modelId, result.note);
+            last = { ...result, accountAction: diagnostic.accountAction, classification: diagnostic.classification };
             if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'ban') break;
             continue;
           }
           if (!up) {
-            trace.push({ upstream: attempt.upstream, status: 502, upstreamStatus: 0, normalizedStatus: 502, terminalOrigin: /timeout/i.test(netError || '') ? 'timeout' : account.proxyUrl ? 'proxy' : 'network', ms, note: netError || 'no response', account: account.name, accountId: account.id });
-            last = { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${netError || 'no response'}`, type: 'upstream_error' } }, routing: {}, acc: account, netError: netError || 'no response', terminalOrigin: /timeout/i.test(netError || '') ? 'timeout' : account.proxyUrl ? 'proxy' : 'network', accountAction: clientClosed ? null : accountActionFor({ normalizedStatus: 502, failureText: netError || 'no response' }, sensitiveValues) };
-            trace[trace.length - 1].action = last.accountAction?.action || null;
-            trace[trace.length - 1].providerCircuitAction = settleProviderCircuit(modelId, cfg, account, attempt, last);
+            const origin = timedOut || /timeout/i.test(netError || '') ? 'timeout' : account.proxyUrl ? 'proxy' : 'network';
+            const result = { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${netError || 'no response'}`, type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter: null, responseContentType: null, responseBytes: 0, netError: netError || 'no response', terminalOrigin: origin, acc: account, note: netError || 'no response' };
+            const diagnostic = settleAttempt(modelId, attempt, result, account, { clientDisconnected: clientClosed, cfg, sensitiveValues });
+            trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
+            last = { ...result, accountAction: diagnostic.accountAction, classification: diagnostic.classification };
             if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'ban') break;
             continue;
           }
           keepCloseHook = true;
-          trace.push({ upstream: attempt.upstream, status: 200, upstreamStatus: 200, normalizedStatus: 200, terminalOrigin: 'success', ms, note: 'stream', account: account.name, accountId: account.id, providerCircuitAction: settleProviderCircuit(modelId, cfg, account, attempt, { status: 200 }) });
-          return { status: 200, streamUp: up, streamHead: firstChunk, acc: account, trace, t0, started: true, cleanupClientClose };
+          const result = { status: 200, upstreamStatus: 200, normalizedStatus: 200, terminalOrigin: 'success', responseContentType, responseBytes: safeResponseBytes(firstChunk), note: 'stream' };
+          const diagnostic = settleAttempt(modelId, attempt, result, account, { updateSuccess: false, cfg, sensitiveValues });
+          trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
+          return { status: 200, streamUp: up, streamHead: firstChunk, streamAttempt: attempt, acc: account, trace, t0, plan, started: true, cleanupClientClose };
         }
-        const r = await attemptOnce(modelId, body, attempt, account, forwardedHeaders, ctrl.signal);
+        const result = await attemptOnce(modelId, body, attempt, account, forwardedHeaders, ctrl.signal);
+        if (timedOut && result.status !== 200) { result.terminalOrigin = 'timeout'; result.netError = 'upstream timeout'; result.out = { error: { message: 'upstream fetch failed: upstream timeout', type: 'upstream_error' } }; }
         const ms = Date.now() - t1;
-        const note = r.netError || (r.status !== 200 ? errText(r.out?.error?.message) : 'ok');
-        trace.push({ upstream: attempt.upstream, status: r.status, upstreamStatus: r.upstreamStatus, normalizedStatus: r.normalizedStatus, terminalOrigin: r.terminalOrigin, ms, note, account: account.name, accountId: account.id });
-        if (r.status !== 200 && attempt.upstream) learnUpstreamStatus(modelId, attempt.upstream, errText(r.out?.error?.message));
-        if (r.status !== 200 && !attempt.upstream && (attempt.excludeList || []).length) learnAvailableProviders(modelId, r.netError || note);
-        last = { ...r, accountAction: clientClosed ? null : accountActionFor(r, sensitiveValues) };
-        trace[trace.length - 1].action = last.accountAction?.action || null;
-        trace[trace.length - 1].providerCircuitAction = settleProviderCircuit(modelId, cfg, account, attempt, r);
-        if (r.status === 200) break;
+        result.note = result.netError || (result.status !== 200 ? errText(result.out?.error?.message) : 'ok');
+        const diagnostic = settleAttempt(modelId, attempt, result, account, { clientDisconnected: clientClosed, cfg, sensitiveValues });
+        trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
+        if (result.status !== 200 && !attempt.upstream) learnAvailableProviders(modelId, result.note);
+        last = { ...result, accountAction: diagnostic.accountAction, classification: diagnostic.classification };
+        if (result.status === 200) break;
         if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'ban') break;
       } finally { clearTimeout(timer); }
     }
   } finally {
     if (!keepCloseHook) cleanupClientClose();
   }
-  if (!last && !clientClosed) return { status: 503, upstreamStatus: 0, normalizedStatus: 503, out: { error: { message: 'provider half-open probe is already in progress', type: 'upstream_error' } }, routing: {}, acc: account, trace, t0, retryAfter: 1, netError: null, clientDisconnected: false };
-  return { ...last, status: last?.status ?? 502, trace, t0, netError: last?.netError || null, clientDisconnected: clientClosed };
+  if (!last && !clientClosed) return { status: 503, upstreamStatus: 0, normalizedStatus: 503, out: { error: { message: 'provider half-open probe is already in progress', type: 'upstream_error' } }, routing: {}, acc: account, trace, t0, plan, retryAfter: plan.retryAfter || 1, netError: null, clientDisconnected: false };
+  if (!last) last = { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: 'upstream request aborted', type: 'upstream_error' } }, routing: {}, acc: account, netError: 'upstream request aborted', accountAction: null };
+  return { ...last, trace, t0, plan, netError: last.netError || null, clientDisconnected: clientClosed };
 }
 
 function statisticsSegments(trace, finalAccountId, usage, clientDisconnect = false) {
@@ -2317,12 +2559,12 @@ async function handleChat(req, res) {
   if (!selected.lease) {
     const status = enabledAccounts().length ? 429 : 503;
     finalizeStatistics({ globalError: true, segments: [] });
-    recordChat({ requestId, requestedModel, resolvedModel: modelId, stream: isStream, strategy: selected.strategy, ...affinityFacts(), selectionReason: 'capacity-unavailable', normalizedStatus: status, upstreamStatus: null, error: selected.error, ms: 0 });
+    recordChat({ requestId, requestedModel, resolvedModel: modelId, stream: isStream, strategy: selected.strategy, ...affinityFacts(), selectionReason: 'capacity-unavailable', normalizedStatus: status, upstreamStatus: null, errorCategory: 'capacity', error: selected.error, ms: 0 });
     return sendBusy(res, selected.error, selected.retryAfter, status);
   }
   const initialSelection = { ...selected };
 
-  let chain, cfg, targets, chainLease = selected.lease;
+  let chain, cfg, targets = [], targetSource = 'auto', chainLease = selected.lease;
   const completedTrace = [];
   const accountActions = [];
   for (let accountAttempt = 0; accountAttempt < 2; accountAttempt++) {
@@ -2331,11 +2573,12 @@ async function handleChat(req, res) {
     const account = lease.account;
     accountPath.push(account.name);
     cfg = resolveModelConfig(account, modelId);
-    targets = applyMaxRetries(buildAttempts(modelId, cfg), cfg).map((a) => a.upstream).filter(Boolean);
-    if (cfg?.pinMode === 'preferred' && targets.length > 0) providerOrderOverridesSticky = true;
     try {
       upstreamAffinitySent = true;
       chain = await runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream: isStream, sensitiveValues });
+      targets = chain.plan?.plannedOrder || [];
+      targetSource = chain.plan?.source || 'auto';
+      if (cfg?.pinMode === 'preferred' && chain.plan?.source === 'configured' && targets.length > 0) providerOrderOverridesSticky = true;
     } catch (e) {
       lease.release();
       throw e;
@@ -2368,7 +2611,7 @@ async function handleChat(req, res) {
     const ctype = String(up.headers['content-type'] || 'text/event-stream');
     res.writeHead(up.status, {
       'Content-Type': ctype, 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'Access-Control-Allow-Origin': '*',
-      'X-Cline-Target-Upstream': targets.length ? targets.join('>') : 'auto', 'X-Cline-Attempts': String(chain.trace.length), 'X-Cline-Account': headerSafe(acc.name),
+      'X-Cline-Target-Upstream': targets.length ? targets.join('>') : targetSource === 'auto' ? 'auto' : 'none', 'X-Cline-Attempts': String(chain.trace.length), 'X-Cline-Account': headerSafe(acc.name),
     });
     const observer = createSseObserver();
     if (chain.streamHead) { observer.push(chain.streamHead); res.write(chain.streamHead); }
@@ -2382,22 +2625,40 @@ async function handleChat(req, res) {
       res.off('close', onResponseClose);
       lease.release();
       const observed = observer.result();
+      const streamError = observed.error || (error ? safeReason(error) : null);
+      const providerAttempt = chain.trace.at(-1);
+      const attempt = chain.streamAttempt || { upstream: providerAttempt?.upstream || null };
+      const disconnected = origin === 'client_disconnect';
+      if (observed.error && providerAttempt) {
+        const result = { status: observed.normalizedStatus, upstreamStatus: 200, normalizedStatus: observed.normalizedStatus, routing: { finalProvider: observed.provider }, structuredError: observed.errorPayload, failureText: observed.error, retryAfter: null, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: 'upstream_envelope', note: safeReason(observed.error, sensitiveValues) };
+        const diagnostic = settleAttempt(modelId, attempt, result, acc, { cfg, sensitiveValues });
+        Object.assign(providerAttempt, traceAttempt(attempt, result, acc, providerAttempt.ms, diagnostic));
+        const action = diagnostic.accountAction;
+        if (action) { if (action.action !== 'ignore') persistAccountAction(acc, action, streamError, sensitiveValues); accountActions.push({ account: acc.name, action: action.action, statusCode: action.statusCode }); }
+      } else if (error && !disconnected && providerAttempt) {
+        const result = { status: 502, upstreamStatus: 0, normalizedStatus: 502, routing: {}, structuredError: null, failureText: error, retryAfter: null, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: /timeout/i.test(String(error)) ? 'timeout' : acc.proxyUrl ? 'proxy' : 'network', note: 'stream transport error' };
+        const diagnostic = settleAttempt(modelId, attempt, result, acc, { cfg, sensitiveValues });
+        Object.assign(providerAttempt, traceAttempt(attempt, result, acc, providerAttempt.ms, diagnostic));
+        const action = diagnostic.accountAction;
+        if (action) { if (action.action !== 'ignore') persistAccountAction(acc, action, error, sensitiveValues); accountActions.push({ account: acc.name, action: action.action, statusCode: action.statusCode }); }
+      } else if (!disconnected && providerAttempt) {
+        const result = { status: 200, upstreamStatus: 200, normalizedStatus: 200, routing: { finalProvider: observed.provider }, structuredError: null, retryAfter: null, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: 'success', note: 'stream' };
+        const diagnostic = settleAttempt(modelId, attempt, result, acc, { cfg, sensitiveValues });
+        Object.assign(providerAttempt, traceAttempt(attempt, result, acc, providerAttempt.ms, diagnostic));
+      } else if (providerAttempt) {
+        const diagnostic = settleAttempt(modelId, attempt, { status: 499, normalizedStatus: 499 }, acc, { clientDisconnected: true, cfg, sensitiveValues });
+        providerAttempt.healthAction = 'none';
+        providerAttempt.providerCircuitAction = diagnostic.providerCircuitAction || null;
+        providerAttempt.responseBytes = observed.responseBytes;
+      }
       const transportFailed = !!error && origin !== 'client_disconnect';
       const clientCancelled = origin === 'client_disconnect' && !observed.done && !observed.error;
-      const result = observed.error || transportFailed ? 'failed' : clientCancelled ? 'client_cancelled' : 'success';
-      const normalizedStatus = result === 'failed' ? (observed.error ? observed.normalizedStatus : 502) : result === 'client_cancelled' ? 499 : 200;
-      const streamError = result === 'failed' ? (observed.error || safeReason(error)) : null;
-      if (observed.error) {
-        const action = accountActionFor({ normalizedStatus: observed.normalizedStatus, failureText: streamError }, sensitiveValues);
-        if (action) { if (action.action !== 'ignore') persistAccountAction(acc, action, streamError, sensitiveValues); accountActions.push({ account: acc.name, action: action.action, statusCode: action.statusCode }); }
-        const providerAttempt = chain.trace.at(-1);
-        if (providerAttempt) { providerAttempt.action = action?.action || null; providerAttempt.normalizedStatus = observed.normalizedStatus; providerAttempt.status = observed.normalizedStatus; providerAttempt.terminalOrigin = 'upstream_envelope'; providerAttempt.note = 'stream error after response started'; }
-      } else if (transportFailed) {
-        const providerAttempt = chain.trace.at(-1); if (providerAttempt) { providerAttempt.status = 502; providerAttempt.normalizedStatus = 502; providerAttempt.terminalOrigin = acc.proxyUrl ? 'proxy' : 'network'; providerAttempt.note = 'stream transport error'; }
-      }
-      const usage = result === 'success' ? observed.usage : null;
-      finalizeStatistics({ globalError: result === 'failed', usage, clientDisconnect: clientCancelled, segments: statisticsSegments(chain.trace, acc.id, usage, clientCancelled) });
-      recordChat({ requestId, requestedModel, resolvedModel: modelId, provider: observed.provider, canonical: observed.canonical, ms: Date.now() - chain.t0, stream: true, result, normalizedStatus, error: streamError, account: acc.name, accountId: acc.id, attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, accountPath, accountActions, ...affinityFacts(usage), strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, appliedHeaderNames: Object.keys(acc.headers || {}), proxyError: !!acc.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues });
+      const requestResult = observed.error || transportFailed ? 'failed' : clientCancelled ? 'client_cancelled' : 'success';
+      const normalizedStatus = requestResult === 'failed' ? (observed.error ? observed.normalizedStatus : 502) : requestResult === 'client_cancelled' ? 499 : 200;
+      const safeStreamError = requestResult === 'failed' ? (streamError ? safeReason(streamError, sensitiveValues) : 'stream transport error') : null;
+      const usage = requestResult === 'success' ? observed.usage : null;
+      finalizeStatistics({ globalError: requestResult === 'failed', usage, clientDisconnect: clientCancelled, segments: statisticsSegments(chain.trace, acc.id, usage, clientCancelled) });
+      recordChat({ requestId, requestedModel, resolvedModel: modelId, provider: observed.provider, canonical: observed.canonical, ms: Date.now() - chain.t0, stream: true, result: requestResult, error: safeStreamError, upstreamStatus: providerAttempt?.upstreamStatus ?? null, normalizedStatus, account: acc.name, accountId: acc.id, attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, accountPath, accountActions, ...affinityFacts(usage), strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, appliedHeaderNames: Object.keys(acc.headers || {}), proxyError: !!acc.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues });
     };
     const tap = new Transform({ transform(c, enc, cb) { observer.push(c); cb(null, c); }, flush(cb) { finalize(); cb(); } });
     onUpstreamError = (e) => { finalize(e.message, 'upstream'); if (!res.destroyed) res.destroy(e); };
@@ -2426,12 +2687,12 @@ async function handleChat(req, res) {
     requestId, requestedModel, resolvedModel: modelId, provider: routing.finalProvider || null, canonical: routing.canonicalSlug || null, ms: Date.now() - chain.t0, stream: false, result: disconnected ? 'client_cancelled' : status === 200 ? 'success' : 'failed',
     attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, error: disconnected ? null : status !== 200 ? safeOut.error.message : null,
     account: acc?.name || null, accountId: acc?.id || null, accountPath, accountActions, accountAction: chain.accountAction?.action || accountActions.at(-1)?.action || null, upstreamStatus: chain.upstreamStatus, normalizedStatus: chain.normalizedStatus, ...affinityFacts(usage),
-    strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, appliedHeaderNames: Object.keys(acc?.headers || {}), proxyError: !!acc?.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues,
+    strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, appliedHeaderNames: Object.keys(acc?.headers || {}), proxyError: !!acc?.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), errorCategory: chain.plan?.allExcluded ? 'routing' : null, sensitiveValues,
   });
   if (res.destroyed) return;
   res.writeHead(disconnected ? 499 : status, {
     'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', ...(chain.retryAfter ? { 'Retry-After': String(chain.retryAfter) } : {}),
-    'X-Cline-Target-Upstream': targets.length ? targets.join('>') : 'auto', 'X-Cline-Actual-Upstream': routing.finalProvider || 'unknown',
+    'X-Cline-Target-Upstream': targets.length ? targets.join('>') : targetSource === 'auto' ? 'auto' : 'none', 'X-Cline-Actual-Upstream': routing.finalProvider || 'unknown',
     'X-Cline-Canonical-Model': routing.canonicalSlug || '', 'X-Cline-Attempts': String(chain.trace.length), 'X-Cline-Account': headerSafe(acc?.name || ''),
   });
   res.end(JSON.stringify(safeOut));
@@ -2543,7 +2804,7 @@ async function dispatch(req, res) {
       try { chain = await runChatChain(req, body, model, normalizeRouteConfig(cfg), selected.lease.account, {}, { stream: false, attemptTimeoutMs: 180000 }); }
       finally { selected.lease.release(); }
       const trace = chain.trace || [];
-      if (chain.status !== 200) return sendJSON(res, 200, { ok: false, error: safeReason(chain.out?.error?.message || 'upstream error'), targets: cfg.upstreams || [], exclude: cfg.exclude || [], trace });
+      if (chain.status !== 200) { try { saveMeta(); } catch (error) { console.error(`[测试] provider 健康持久化失败：${safeReason(error.message)}`); } return sendJSON(res, 200, { ok: false, error: safeReason(chain.out?.error?.message || 'upstream error'), targets: cfg.upstreams || [], exclude: cfg.exclude || [], trace }); }
       const r = parseRouting(chain.out);
       record(model, { provider: r.finalProvider, canonical: r.canonicalSlug, ms: Date.now() - t0, stream: false, attempts: trace.map((t) => t.upstream || 'auto'), error: null, account: chain.acc?.name || null });
       return sendJSON(res, 200, { ok: true, ms: Date.now() - t0, targets: cfg.upstreams || [], exclude: cfg.exclude || [], actual: r.finalProvider, actualName: r.finalProviderName, pipeline: r.pipeline, pinnable: r.pipeline !== null, canonicalSlug: r.canonicalSlug, fallbacks: r.fallbacks, content: (r.content || '').slice(0, 120), account: chain.acc?.name || null, trace });
@@ -2590,7 +2851,7 @@ async function dispatch(req, res) {
       const store = p.endsWith('/errors') ? errorLogs : requestLogs;
       if (req.method === 'DELETE') { await store.clear(); return sendJSON(res, 200, { ok: true }); }
       const allowed = p.endsWith('/errors')
-        ? ['from','to','requestId','model','requestedModel','resolvedModel','account','accountId','accountName','status','upstreamStatus','category','provider','targetProvider','accountAction']
+        ? ['from','to','requestId','model','requestedModel','resolvedModel','account','accountId','accountName','status','upstreamStatus','category','provider','targetProvider','accountAction','errorScope','scopeEvidence','failureClass','healthAction','responseContentType']
         : ['from','to','requestId','model','requestedModel','resolvedModel','account','accountId','accountName','strategy','status','result','upstreamStatus','stream','provider','actualProvider','targetProviders','overflow','switched','accountAction','errorCategory'];
       const rawLimit = url.searchParams.get('limit') || '50', cursor = url.searchParams.get('cursor') || '';
       const allowedParams = new Set([...allowed, 'limit', 'cursor']);
