@@ -398,3 +398,26 @@ Implemented Codex/Claude Chat affinity key propagation, safe cache-hit diagnosti
 ### Status
 
 [OK] **Completed**
+
+
+## Session 16: Merge upstream affinity into quota branch
+<!-- trellis-session: v=2 fp=69e04b8fa0c58550 -->
+
+**Date**: 2026-09-20
+**Task**: Merge upstream affinity into quota branch
+**Branch**: `integration/upstream-affinity-into-quota`
+
+### Summary
+
+Merged feat/upstream-session-affinity into feat/quota-forecast-panel in an isolated integration worktree, resolved seven conflicts while preserving content-error rules and affinity/provider features, passed 165 tests, and fast-forwarded the target without changing 52 pre-existing dirty entries.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ca3becd` | merge: integrate upstream affinity routing |
+| `01109cb` | docs(task): record upstream affinity merge |
+
+### Status
+
+[OK] **Completed**
