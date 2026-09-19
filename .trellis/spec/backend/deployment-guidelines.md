@@ -47,7 +47,8 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 
 #### Release layout and source
 
-- Deploy a committed local `HEAD`, not uncommitted working-tree files. Build the upload with `git archive HEAD` and an explicit allowlist: `Dockerfile`, package manifests, `server.js`, `lib/`, `public/`, `README.md`, `LICENSE`, `.dockerignore`, and `config.example.json`.
+- Normal production releases must deploy a committed `HEAD` from local `main`, with local `main` already pushed and equal to `origin/main`. Completed feature/task branches are merged into `main` and pass the full gate before release creation; do not deploy a feature branch merely because its code is committed. A feature-branch deployment is allowed only as an explicit user-approved emergency exception, must be labelled as such in evidence, and must be merged back to `main` immediately after stabilization.
+- Never deploy uncommitted working-tree files. Build the upload with `git archive HEAD` from `main` and an explicit allowlist: `Dockerfile`, package manifests, `server.js`, `lib/`, `public/`, `README.md`, `LICENSE`, `.dockerignore`, and `config.example.json`.
 - Install the archive under `/opt/cline-pass-switcher/releases/<release>/`. Never overwrite an existing release directory.
 - A restrictive deployment `umask` must not make the Docker build context unreadable by the production runtime user. After extraction, normalize release directories to `0755` and regular files to `0644`, then verify those modes before building. `Dockerfile COPY` preserves context modes; root-owned `0600` application files make the hardened `1000:1000` container exit with `EACCES` before health checks can pass.
 - Preserve the existing hardened compose settings. Change only the `cline-pass-switcher:<release>` image tag and `build.context: ./releases/<release>`.
@@ -78,7 +79,8 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 | A nested-shell/argument quoting check fails | Prove no release/backup/compose mutation occurred, then retry with positional arguments; otherwise stop and inspect state |
 | Deployment orchestration fails before candidate Compose/data installation | Prove current hashes/image are unchanged and leave the healthy old container running; do not invoke a stop-first rollback path |
 | Atomic replacement/restore helper fails its private scratch self-test | Stop before the live mutation boundary; preserve evidence and fix the helper before a new attempt |
-| Local deployment files are dirty but not committed | Archive committed `HEAD`; do not include working-tree content |
+| Deployment source is not `main`, or local `main` differs from `origin/main` | Stop before release creation; merge, run the full gate and push `main` first unless the user explicitly authorizes a documented emergency exception |
+| Local deployment files are dirty but not committed | Archive committed `main` HEAD; do not include working-tree content |
 | Release directory already exists or uploaded hashes differ | Stop before compose change |
 | Extracted source or built `/app` files are not readable by runtime UID/GID `1000:1000` | Stop before compose change; use a new immutable release with normalized `0755` directories and `0644` files |
 | Hardened isolated startup exits, restarts, or never reaches its startup marker | Stop before compose change and preserve its bounded logs |
@@ -105,6 +107,7 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 
 Before switching:
 
+- prove the checked-out deployment source is `main` and local `main` equals `origin/main`;
 - run the repository full test suite against committed code;
 - verify the identity path is gitignored and mode `0600` without reading it;
 - verify host-side helper runtime availability and argument passing during read-only preflight;
