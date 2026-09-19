@@ -16,11 +16,11 @@
 
 ## Acceptance Criteria
 
-- [ ] main fast-forward 包含 feature 全部提交和部署证据。
-- [ ] 部署规范明确 main-only 正常发布流程。
-- [ ] main 完整门禁通过并成功推送到 origin/main，无 force。
-- [ ] 原工作区切到 main，三个既有未提交路径未变化。
-- [ ] 已批准的本地/远端临时产物和本地已合并 feature 分支完成清理。
+- [x] main fast-forward 包含 feature 全部提交和部署证据。
+- [x] 部署规范明确 main-only 正常发布流程。
+- [x] main 完整门禁通过并成功推送到 origin/main，无 force。
+- [x] 原工作区切到 main，既有未提交路径状态与 SHA-256 未变化。
+- [x] 已批准的本地/远端临时产物和本地已合并 feature 分支完成清理。
 
 ## Out of Scope
 
