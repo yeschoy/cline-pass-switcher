@@ -361,3 +361,28 @@ Directly deployed committed quota forecast UI to production as release 20260916-
 ### Next Steps
 
 - 如需继续当前 400，另建任务在 NewAPI Responses→Chat 转换边界定位具体 tools[].type 并修复
+
+
+## Session 14: 增强统计、日志与错误规则体验
+<!-- trellis-session: v=2 fp=0d59c1dbfaf1d484 -->
+
+**Date**: 2026-09-19
+**Task**: 增强统计、日志与错误规则体验
+**Branch**: `feat/quota-forecast-panel`
+
+### Summary
+
+完成普通 JSONL 增量高性能存储、按模型 24h 缓存 Token 统计与上游发现修正、账号摘要和剩余额度展示，以及有序内容错误规则与统一可视化/高级 JSON 编辑器；完整测试 161/161 通过，真实浏览器验证因本机工具与 Accessibility 权限阻塞。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `61e5067` | docs(task): plan statistics logging and error rule improvements |
+| `d0dbc74` | fix: optimize ordinary JSONL logging |
+| `74913e0` | feat: add per-model cache statistics |
+| `939b62e` | feat: add visual content error rules |
+
+### Status
+
+[OK] **Completed**

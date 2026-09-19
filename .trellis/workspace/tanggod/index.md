@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 13
-- **Last Active**: 2026-09-18
+- **Total Sessions**: 14
+- **Last Active**: 2026-09-19
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~363 | Active |
+| `journal-1.md` | ~388 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 14 | 2026-09-19 | 增强统计、日志与错误规则体验 | `61e5067`, `d0dbc74`, `74913e0`, `939b62e` | `feat/quota-forecast-panel` |
 | 13 | 2026-09-18 | 评估 Switcher Responses 适配 | - | `feat/quota-forecast-panel` |
 | 12 | 2026-09-18 | 优化详细日志扫描并部署 | `d6c0087`, `983dacb` | `feat/quota-forecast-panel` |
 | 11 | 2026-09-17 | 排查并修复空 content 详细日志缺失 | `a056bbb`, `1ea9f29`, `f618054` | `feat/quota-forecast-panel` |
