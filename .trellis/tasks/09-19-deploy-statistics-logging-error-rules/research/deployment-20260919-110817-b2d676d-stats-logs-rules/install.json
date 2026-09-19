@@ -1,0 +1,19 @@
+{
+  "archiveSha256": "9b7ff1f5a010af30847d88c79e4c8d17036cc566cee795b145fa73bf20d6d89c",
+  "candidateCompose": "/opt/cline-pass-switcher/.candidate-20260919-110817-b2d676d-stats-logs-rules.yml",
+  "composeDiff": "image-and-context-only",
+  "modes": "0755-directories/0644-files",
+  "newContext": "./releases/20260919-110817-b2d676d-stats-logs-rules",
+  "newImage": "cline-pass-switcher:20260919-110817-b2d676d-stats-logs-rules",
+  "oldContext": "./releases/20260918-070946-2e7dc37-empty-content-r3",
+  "oldImage": "cline-pass-switcher:20260918-070946-2e7dc37-empty-content-r3",
+  "release": "20260919-110817-b2d676d-stats-logs-rules",
+  "releaseDir": "/opt/cline-pass-switcher/releases/20260919-110817-b2d676d-stats-logs-rules",
+  "sourceHashes": {
+    "lib/detailed-log-capture.js": "9af7ab1090b4ef2b2cee971a2bc5cfc20f70527bc6f4e3550a8bcd8f2ac44a5f",
+    "lib/detailed-log-store.js": "5d8a25aa36cbf8a9b857f486e7ae855d2dba99a5c7954dc8e3c7ac8d0e6d294d",
+    "lib/jsonl-log-store.js": "1c287f804fa299d41469b52200b1853e471dfd8daf20989c0b04410ce73d3afc",
+    "public/index.html": "03e365f1c627ec9fcc9132917b12f8a4a18fa5acd728332d4edf0a8a5fb89678",
+    "server.js": "3f78466be20c015d461d6ba742580057f192f790e52cda46912e1963e42f891a"
+  }
+}

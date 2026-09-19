@@ -1,0 +1,84 @@
+{
+  "api": {
+    "accountCount": 10,
+    "accountStatus": 200,
+    "cachePoolSize": 5,
+    "contentRuleCount": 0,
+    "contentRulesPresent": true,
+    "mode": "sticky",
+    "statisticsModelProjection": true,
+    "statisticsStatus": 200,
+    "wait": 2000
+  },
+  "attempt1": "safe_stop_no_host_port_on_internal_network",
+  "attempts": 2,
+  "hardening": {
+    "capDrop": [
+      "ALL"
+    ],
+    "networkInternal": true,
+    "readOnlyRoot": true,
+    "securityOpt": [
+      "no-new-privileges:true"
+    ],
+    "sourceReadableByRuntimeUser": true,
+    "tmpfs": {
+      "/tmp": "rw,noexec,nosuid,size=16m"
+    },
+    "user": "1000:1000"
+  },
+  "image": "cline-pass-switcher:20260919-110817-b2d676d-stats-logs-rules",
+  "imageId": "sha256:fb5d9de7dc6643201a333ed47e7064464df3615598cd0fb3c91ad3ffc2f91cf2",
+  "migration": {
+    "configDiff": [
+      "accountContentErrorRules: missing -> []"
+    ],
+    "configSha256": "3661444eeb0ba540f59b660c310256b7981273fdd76578aaa01adfaed0cbba4d",
+    "factsPreserved": true,
+    "minuteBuckets": 756,
+    "modelTrackingStartedMinute": 29830273,
+    "statisticsFrom": 1,
+    "statisticsTo": 2
+  },
+  "ordinaryLogs": {
+    "bytesPreserved": true,
+    "errorQueryStatus": 200,
+    "filesAfter": 2,
+    "filesBefore": 2,
+    "requestQueryStatus": 200
+  },
+  "productionUnchangedDuringRehearsal": true,
+  "release": "20260919-110817-b2d676d-stats-logs-rules",
+  "result": "passed",
+  "sourceData": {
+    "configSha256": "196309103302e3796d7ddc19f9901489f60798d843d908bd5af892d6bd7d398b",
+    "metadataSha256": "e595ff6cc732a8be0bee144e8fc18f5a0217baf5e6fa4a8190e6fe7a0d1a258c",
+    "ordinaryLogBytes": 5351300,
+    "ordinaryLogFiles": 2
+  },
+  "startup": {
+    "initialization503Observed": true,
+    "logsReadyMs": 410.63,
+    "metaReadyMs": 331.75,
+    "observedStates": [
+      {
+        "atMs": 253.56,
+        "errorLogs": null,
+        "meta": null,
+        "requestLogs": null
+      },
+      {
+        "atMs": 331.75,
+        "errorLogs": 200,
+        "meta": 200,
+        "requestLogs": 503
+      },
+      {
+        "atMs": 410.63,
+        "errorLogs": 200,
+        "meta": 200,
+        "requestLogs": 200
+      }
+    ]
+  }
+}

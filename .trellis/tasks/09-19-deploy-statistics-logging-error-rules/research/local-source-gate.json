@@ -1,0 +1,35 @@
+{
+  "archive": {
+    "bytes": 430080,
+    "path": "/tmp/cps-deploy-b2d676d.2JxhUQ/release.tar",
+    "sha256": "9b7ff1f5a010af30847d88c79e4c8d17036cc566cee795b145fa73bf20d6d89c"
+  },
+  "archiveAllowlist": "passed",
+  "broadRepositoryDiffCheck": {
+    "reason": "pre-existing whitespace exists only in non-production .agents/.trellis files",
+    "status": "not_applicable_to_archive"
+  },
+  "npmCi": "passed",
+  "productionAllowlistDiffCheck": "passed",
+  "productionDiffBase": "61e5067f4899103db18a18f35578a844391f7b1f",
+  "safeStopsBeforeUpload": [
+    "initial broad diff check included pre-existing non-production documentation whitespace",
+    "first report parser expected TAP # metrics while Node emitted information-symbol metrics"
+  ],
+  "sourceCommit": "b2d676d11e0d4422aef83854670b6bceb89401a0",
+  "sourceHashes": {
+    "lib/detailed-log-capture.js": "9af7ab1090b4ef2b2cee971a2bc5cfc20f70527bc6f4e3550a8bcd8f2ac44a5f",
+    "lib/detailed-log-store.js": "5d8a25aa36cbf8a9b857f486e7ae855d2dba99a5c7954dc8e3c7ac8d0e6d294d",
+    "lib/jsonl-log-store.js": "1c287f804fa299d41469b52200b1853e471dfd8daf20989c0b04410ce73d3afc",
+    "public/index.html": "03e365f1c627ec9fcc9132917b12f8a4a18fa5acd728332d4edf0a8a5fb89678",
+    "server.js": "3f78466be20c015d461d6ba742580057f192f790e52cda46912e1963e42f891a"
+  },
+  "syntax": "passed",
+  "tempDir": "/tmp/cps-deploy-b2d676d.2JxhUQ",
+  "tests": {
+    "failed": 0,
+    "passed": 161,
+    "total": 161
+  },
+  "uiScript": "passed"
+}

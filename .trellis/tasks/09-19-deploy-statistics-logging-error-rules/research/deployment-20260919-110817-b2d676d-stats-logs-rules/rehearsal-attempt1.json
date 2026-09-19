@@ -1,0 +1,7 @@
+{
+  "container": "cps-rehearsal-20260919-110817-b2d676d-stats-logs-rules",
+  "containerExitAfterStop": 137,
+  "productionUnchanged": true,
+  "reason": "docker internal network intentionally exposed no host port",
+  "result": "safe_stop"
+}

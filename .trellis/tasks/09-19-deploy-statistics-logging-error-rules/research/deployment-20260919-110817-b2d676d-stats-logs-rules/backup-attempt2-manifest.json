@@ -1,0 +1,16 @@
+{
+  "atomicSelftest": "passed",
+  "attempt": 2,
+  "createdAt": "2026-09-19T11:17:59.140019+00:00",
+  "hashes": {
+    "compose": "1c6f4a29312149cee63068d78b0b5f29100d44cca3722ef91b07c5f11766e344",
+    "config": "196309103302e3796d7ddc19f9901489f60798d843d908bd5af892d6bd7d398b",
+    "deployment": "a78dacb861ac6aa911d7b150428210d4ccb189fb6a0cf6ce465e51f05d145b97",
+    "metadata": "bbdd5ad30b4cfcd81deee0d097e6c4cead63d482d8972020a2028bd84829dc13"
+  },
+  "oldImageId": "sha256:a5ffbbc7a1185e69bf3d9e6767d80ff86bb20762dce456d90833d6179e0f1d7d",
+  "ordinaryLogs": {
+    "files": 2,
+    "totalBytes": 5351300
+  }
+}

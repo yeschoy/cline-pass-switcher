@@ -60,6 +60,7 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 - Build with the exact candidate Compose/project directory that will be installed, capture its image ID, and use that exact Compose-built image for source/mode checks and any copied-data migration rehearsal. Before touching the live Compose file, start the image against an isolated data copy with the production `1000:1000`, read-only-root, dropped-capability, no-new-privileges, and tmpfs settings; require the process to remain running and reach its startup marker.
 - Atomically install the already-built candidate Compose and switch with `docker compose ... up -d --no-build`. Require `cline-pass-console` to be `running`, `healthy`, on the captured image ID, with zero restarts. Never rebuild during the switch because Compose provenance labels can produce a different image identity from a prior direct build.
 - Roll back the compose file and restore the previous healthy container with `up -d --no-build` when build, startup, health, local endpoint, authenticated management API, internal network alias, or config-hash validation fails. When a declared config migration was applied, rollback also restores the original backed-up config bytes before starting the previous image.
+- Rollback automation must detect whether execution actually crossed the live-mutation boundary before stopping a container. A failure while preparing backups, reading modes, or staging the candidate—before Compose/data/image state changes—requires a proved no-op recovery and must not stop or restart the still-healthy old container. Before the live switch, exercise atomic replacement/restore helpers against private scratch files and require the old Compose/config hashes plus exact running image to remain unchanged.
 - Do not prune releases, images, build cache, logs, or operator data during deployment.
 
 #### Endpoint policy
@@ -75,6 +76,8 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 | SSH identity is missing, readable by others, or authentication fails | Stop before upload or mutation |
 | A host-side preflight helper is unavailable | Use an already verified host runtime or the known container runtime while still read-only; otherwise stop before upload/mutation |
 | A nested-shell/argument quoting check fails | Prove no release/backup/compose mutation occurred, then retry with positional arguments; otherwise stop and inspect state |
+| Deployment orchestration fails before candidate Compose/data installation | Prove current hashes/image are unchanged and leave the healthy old container running; do not invoke a stop-first rollback path |
+| Atomic replacement/restore helper fails its private scratch self-test | Stop before the live mutation boundary; preserve evidence and fix the helper before a new attempt |
 | Local deployment files are dirty but not committed | Archive committed `HEAD`; do not include working-tree content |
 | Release directory already exists or uploaded hashes differ | Stop before compose change |
 | Extracted source or built `/app` files are not readable by runtime UID/GID `1000:1000` | Stop before compose change; use a new immutable release with normalized `0755` directories and `0644` files |
@@ -107,6 +110,7 @@ Before switching:
 - verify host-side helper runtime availability and argument passing during read-only preflight;
 - inspect the current container/image/health, account count/mode, safe `/api/meta`, disk space, and config hash;
 - verify release-tree and built-image application modes are readable by UID/GID `1000:1000`;
+- exercise atomic install/restore helpers on private scratch files and prove the rollback no-op guard will not stop the old container before any live mutation;
 - run the exact Compose-built candidate against isolated copied data with the production runtime user and hardening settings, and require successful startup without touching live data;
 - for a declared config migration, run the committed image only against copied data, verify the exact documented structural diff, and record the predicted post-migration hash;
 - verify uploaded `server.js`, `public/index.html`, and security-sensitive module hashes match local `HEAD`.

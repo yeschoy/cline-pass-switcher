@@ -1,0 +1,149 @@
+{
+  "api": {
+    "accounts": {
+      "accountCount": 10,
+      "cachePoolSize": 5,
+      "concurrencyWaitMs": 2000,
+      "contentRuleCount": 0,
+      "contentRulesPresent": false,
+      "keys": [
+        "accountErrorRules",
+        "accountPipeline",
+        "accounts",
+        "active",
+        "concurrencyWaitMs",
+        "mode",
+        "stats"
+      ],
+      "mode": "sticky",
+      "status": 200,
+      "statusRuleCount": 5
+    },
+    "detailSettings": {
+      "authRequired": true,
+      "detailedLogging": true,
+      "keys": [
+        "authRequired",
+        "detailedLogging",
+        "health",
+        "maxAgeMs",
+        "maxBodyBytes",
+        "maxTotalBytes"
+      ],
+      "status": 200
+    },
+    "errorLogs": {
+      "itemCount": 1,
+      "keys": [
+        "items",
+        "nextCursor"
+      ],
+      "status": 200
+    },
+    "meta": {
+      "keys": [
+        "authRequired",
+        "configured",
+        "proxyBase"
+      ],
+      "status": 200
+    },
+    "models": {
+      "keys": [
+        "accountId",
+        "catalog",
+        "catalogCount",
+        "officialFetch",
+        "proxyBase",
+        "subscription"
+      ],
+      "status": 200,
+      "subscriptionCount": 16
+    },
+    "requestLogs": {
+      "itemCount": 1,
+      "keys": [
+        "items",
+        "nextCursor"
+      ],
+      "status": 200
+    },
+    "statistics": {
+      "accountCount": 10,
+      "keys": [
+        "accounts",
+        "generatedAt",
+        "lifetime",
+        "migration",
+        "recent24h",
+        "window"
+      ],
+      "modelCount": null,
+      "status": 200
+    }
+  },
+  "checkedAt": "2026-09-19T10:06:01.242277+00:00",
+  "configProjection": {
+    "accountContentErrorRuleCount": 0,
+    "accountContentErrorRulesPresent": false,
+    "accountCount": 10,
+    "accountErrorRuleCount": 5,
+    "accountMode": "sticky",
+    "accountPipeline": {
+      "cachePoolSize": 5,
+      "excludeUnhealthy": true,
+      "healthSort": true,
+      "order": [
+        "excludeUnhealthy",
+        "quotaPool",
+        "healthSort",
+        "sticky"
+      ],
+      "quotaPool": true,
+      "sticky": true
+    },
+    "concurrencyWaitMs": 2000
+  },
+  "container": {
+    "health": "healthy",
+    "imageId": "sha256:a5ffbbc7a1185e69bf3d9e6767d80ff86bb20762dce456d90833d6179e0f1d7d",
+    "imageLookupMatches": true,
+    "oomKilled": false,
+    "restartCount": 0,
+    "startedAt": "2026-09-18T07:13:22.342892002Z",
+    "status": "running"
+  },
+  "deployment": {
+    "commit": "2e7dc37355fe9385a44d7de7c2da5015fd391f82",
+    "image": null,
+    "imageId": "sha256:a5ffbbc7a1185e69bf3d9e6767d80ff86bb20762dce456d90833d6179e0f1d7d",
+    "previousRelease": "20260917-213954-d6c0087-detail-index",
+    "release": "20260918-070946-2e7dc37-empty-content-r3"
+  },
+  "hashes": {
+    "compose": "1c6f4a29312149cee63068d78b0b5f29100d44cca3722ef91b07c5f11766e344",
+    "config": "196309103302e3796d7ddc19f9901489f60798d843d908bd5af892d6bd7d398b",
+    "deployment": "a78dacb861ac6aa911d7b150428210d4ccb189fb6a0cf6ce465e51f05d145b97",
+    "metadata": "fcacd6755a89370614e3343f06c0434707d8655ad339fd445bb06f9aea5402c7"
+  },
+  "host": {
+    "composeVersion": "5.5.0",
+    "diskFreeBytes": 424478420992,
+    "dockerVersion": "29.7.2"
+  },
+  "internalAliasMetaReachable": true,
+  "metadataProjection": {
+    "minuteBucketCount": 776,
+    "statisticsVersion": 1
+  },
+  "ordinaryLogs": {
+    "fileCount": 2,
+    "totalBytes": 5285403
+  },
+  "public": {
+    "dns": false,
+    "dnsErrorType": "gaierror",
+    "status": null
+  },
+  "rollbackCurrentImageAvailable": true
+}

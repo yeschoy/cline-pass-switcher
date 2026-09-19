@@ -1,0 +1,113 @@
+{
+  "api": {
+    "accounts": {
+      "allHaveStableId": true,
+      "allHaveStatisticsSummary": true,
+      "cachePoolSize": 5,
+      "contentRuleCount": 0,
+      "contentRulesPresent": true,
+      "count": 10,
+      "keys": [
+        "accountContentErrorRules",
+        "accountErrorRules",
+        "accountPipeline",
+        "accounts",
+        "active",
+        "concurrencyWaitMs",
+        "mode",
+        "stats"
+      ],
+      "mode": "sticky",
+      "status": 200,
+      "wait": 2000
+    },
+    "detailSettings": {
+      "authRequired": true,
+      "detailedLogging": true,
+      "keys": [
+        "authRequired",
+        "detailedLogging",
+        "health",
+        "maxAgeMs",
+        "maxBodyBytes",
+        "maxTotalBytes"
+      ],
+      "status": 200
+    },
+    "errorLogs": {
+      "itemCount": 1,
+      "keys": [
+        "items",
+        "nextCursor"
+      ],
+      "status": 200
+    },
+    "invalidQuotaRefresh": {
+      "status": 400
+    },
+    "meta": {
+      "keys": [
+        "authRequired",
+        "configured",
+        "proxyBase"
+      ],
+      "status": 200
+    },
+    "models": {
+      "keys": [
+        "accountId",
+        "catalog",
+        "catalogCount",
+        "officialFetch",
+        "proxyBase",
+        "subscription"
+      ],
+      "status": 200,
+      "subscriptionCount": 16
+    },
+    "requestLogs": {
+      "itemCount": 1,
+      "keys": [
+        "items",
+        "nextCursor"
+      ],
+      "status": 200
+    },
+    "statistics": {
+      "accountCount": 10,
+      "keys": [
+        "accounts",
+        "generatedAt",
+        "lifetime",
+        "migration",
+        "models",
+        "recent24h",
+        "window"
+      ],
+      "modelCount": 16,
+      "modelsPresent": true,
+      "status": 200
+    }
+  },
+  "checkedAt": "2026-09-19T11:20:14.961590+00:00",
+  "container": {
+    "health": "healthy",
+    "oomKilled": false,
+    "restartCount": 0,
+    "status": "running"
+  },
+  "imageId": "sha256:fb5d9de7dc6643201a333ed47e7064464df3615598cd0fb3c91ad3ffc2f91cf2",
+  "internalAliasMetaReachable": true,
+  "public": {
+    "dns": false,
+    "dnsErrorType": "gaierror",
+    "status": null
+  },
+  "publicPolicy": "preexisting_dns_unavailable_is_nonblocking",
+  "release": "20260919-110817-b2d676d-stats-logs-rules",
+  "result": "passed",
+  "ui": {
+    "allMarkersPresent": true,
+    "markerCount": 7
+  }
+}

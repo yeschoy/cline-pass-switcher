@@ -1,0 +1,86 @@
+{
+  "api": {
+    "accountCount": 10,
+    "authRequired": true,
+    "detailedLogging": true,
+    "statisticsModelCount": 16,
+    "statisticsModelsPresent": true,
+    "statuses": {
+      "accounts": 200,
+      "detailSettings": 200,
+      "errorLogs": 200,
+      "meta": 200,
+      "models": 200,
+      "requestLogs": 200,
+      "statistics": 200
+    }
+  },
+  "composeProjection": {
+    "context": "/opt/cline-pass-switcher/releases/20260919-110817-b2d676d-stats-logs-rules",
+    "image": "cline-pass-switcher:20260919-110817-b2d676d-stats-logs-rules"
+  },
+  "configProjection": {
+    "accountCount": 10,
+    "cachePoolSize": 5,
+    "contentRuleCount": 0,
+    "contentRulesPresent": true,
+    "mode": "sticky",
+    "statusRuleCount": 5,
+    "wait": 2000
+  },
+  "container": {
+    "health": "healthy",
+    "oomKilled": false,
+    "restartCount": 0,
+    "status": "running"
+  },
+  "deploymentRecord": {
+    "commit": "b2d676d11e0d4422aef83854670b6bceb89401a0",
+    "imageId": "sha256:fb5d9de7dc6643201a333ed47e7064464df3615598cd0fb3c91ad3ffc2f91cf2",
+    "previousImageId": "sha256:a5ffbbc7a1185e69bf3d9e6767d80ff86bb20762dce456d90833d6179e0f1d7d",
+    "previousRelease": "20260918-070946-2e7dc37-empty-content-r3",
+    "release": "20260919-110817-b2d676d-stats-logs-rules",
+    "verification": {
+      "authenticatedManagement": "passed",
+      "delayed90s": "passed",
+      "detailedSettings": "passed",
+      "immediate": "passed",
+      "internalAlias": "passed",
+      "localMeta": 200,
+      "ordinaryLogs": "ready",
+      "publicIngress": "dns_unavailable_preexisting",
+      "rollbackReady": true,
+      "status": "passed",
+      "switchAttempts": 2
+    }
+  },
+  "hashes": {
+    "compose": "426324909268ae952baaa0e152b66ad028060ecb0b0b1d50d178306fa6926f49",
+    "config": "3661444eeb0ba540f59b660c310256b7981273fdd76578aaa01adfaed0cbba4d",
+    "deployment": "353bfac09c388ebcc1a6bc0420530e3175504eb0534f1730bb5705cd744a6eda",
+    "metadata": "de530127d97a17c2f60b267ec5fa2d8fc53bcacf4130dc70ae5306d042ca9126"
+  },
+  "imageId": "sha256:fb5d9de7dc6643201a333ed47e7064464df3615598cd0fb3c91ad3ffc2f91cf2",
+  "internalAliasMetaReachable": true,
+  "knownSecretValuesEmitted": 0,
+  "metadataProjection": {
+    "minuteBuckets": 741,
+    "statisticsVersion": 2
+  },
+  "public": {
+    "dns": false,
+    "dnsErrorType": "gaierror",
+    "status": null
+  },
+  "release": "20260919-110817-b2d676d-stats-logs-rules",
+  "result": "passed",
+  "rollback": {
+    "backupCompose": true,
+    "backupConfig": true,
+    "backupDeployment": true,
+    "backupLogs": true,
+    "backupMetadata": true,
+    "oldExactImageAvailable": true
+  },
+  "sourceCommit": "b2d676d11e0d4422aef83854670b6bceb89401a0"
+}

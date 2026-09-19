@@ -1,0 +1,7 @@
+{
+  "build": "passed",
+  "image": "cline-pass-switcher:20260919-110817-b2d676d-stats-logs-rules",
+  "imageId": "sha256:fb5d9de7dc6643201a333ed47e7064464df3615598cd0fb3c91ad3ffc2f91cf2",
+  "rebuildAllowed": false,
+  "release": "20260919-110817-b2d676d-stats-logs-rules"
+}

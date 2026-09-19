@@ -1,0 +1,46 @@
+{
+  "api": {
+    "errorItems": 1,
+    "errorLogs": 200,
+    "meta": 200,
+    "requestItems": 1,
+    "requestLogs": 200
+  },
+  "composeDiff": "image-and-context-only",
+  "config": {
+    "accountCount": 10,
+    "afterSha256": "3661444eeb0ba540f59b660c310256b7981273fdd76578aaa01adfaed0cbba4d",
+    "beforeSha256": "196309103302e3796d7ddc19f9901489f60798d843d908bd5af892d6bd7d398b",
+    "cachePoolSize": 5,
+    "contentRuleCount": 0,
+    "diff": [
+      "accountContentErrorRules: missing -> []"
+    ],
+    "mode": "sticky",
+    "statusRuleCount": 5,
+    "wait": 2000
+  },
+  "container": {
+    "health": "healthy",
+    "oomKilled": false,
+    "restartCount": 0,
+    "status": "running"
+  },
+  "newImageId": "sha256:fb5d9de7dc6643201a333ed47e7064464df3615598cd0fb3c91ad3ffc2f91cf2",
+  "oldImageId": "sha256:a5ffbbc7a1185e69bf3d9e6767d80ff86bb20762dce456d90833d6179e0f1d7d",
+  "release": "20260919-110817-b2d676d-stats-logs-rules",
+  "result": "passed",
+  "rollbackReady": true,
+  "sourceCommit": "b2d676d11e0d4422aef83854670b6bceb89401a0",
+  "sourceHashes": {
+    "lib/detailed-log-capture.js": "9af7ab1090b4ef2b2cee971a2bc5cfc20f70527bc6f4e3550a8bcd8f2ac44a5f",
+    "lib/detailed-log-store.js": "5d8a25aa36cbf8a9b857f486e7ae855d2dba99a5c7954dc8e3c7ac8d0e6d294d",
+    "lib/jsonl-log-store.js": "1c287f804fa299d41469b52200b1853e471dfd8daf20989c0b04410ce73d3afc",
+    "public/index.html": "03e365f1c627ec9fcc9132917b12f8a4a18fa5acd728332d4edf0a8a5fb89678",
+    "server.js": "3f78466be20c015d461d6ba742580057f192f790e52cda46912e1963e42f891a"
+  },
+  "startupHardMarkers": 0,
+  "statisticsVersion": 2,
+  "switchAttempt": 2,
+  "switchedAt": "2026-09-19T11:19:10.299253+00:00"
+}

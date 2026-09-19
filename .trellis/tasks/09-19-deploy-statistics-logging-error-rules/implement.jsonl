@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/deployment-guidelines.md", "reason": "生产目标、不可变发布、复制数据预演、健康门禁和 exact-image 回滚契约"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "config 与 statistics v1→v2 迁移、原子持久化和安全字段边界"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "普通日志异步恢复、503 readiness、保留和敏感数据契约"}
+{"file": ".trellis/tasks/09-17-deploy-cache-pool-validation/research/deployment-build-path-analysis.md", "reason": "既往 Compose image identity 失败根因与 --no-build 安全路径"}
+{"file": ".trellis/tasks/09-19-deploy-statistics-logging-error-rules/research/current-production-preflight.json", "reason": "2026-09-19 当前生产 release、健康、配置 schema、日志规模与入口只读快照"}
+{"file": ".trellis/tasks/09-19-deploy-statistics-logging-error-rules/research/deployment-20260919-110817-b2d676d-stats-logs-rules.md", "reason": "最终生产发布结果、迁移门禁、短暂中断与回滚证据"}
+{"file": ".trellis/tasks/09-19-deploy-statistics-logging-error-rules/research/deployment-20260919-110817-b2d676d-stats-logs-rules/independent-postcheck.json", "reason": "fresh-process 独立只读生产复核"}

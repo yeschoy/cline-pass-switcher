@@ -1,0 +1,19 @@
+{
+  "failure": "AttributeError in compose mode expression before candidate compose installation",
+  "hashes": {
+    "compose": "1c6f4a29312149cee63068d78b0b5f29100d44cca3722ef91b07c5f11766e344",
+    "config": "196309103302e3796d7ddc19f9901489f60798d843d908bd5af892d6bd7d398b",
+    "deployment": "a78dacb861ac6aa911d7b150428210d4ccb189fb6a0cf6ce465e51f05d145b97"
+  },
+  "oomKilled": false,
+  "productionFilesChanged": false,
+  "recoveredHealth": "healthy",
+  "recoveredImageId": "sha256:a5ffbbc7a1185e69bf3d9e6767d80ff86bb20762dce456d90833d6179e0f1d7d",
+  "recoveredStartedAt": "2026-09-19T11:16:12.369948611Z",
+  "recoveredStatus": "running",
+  "recoveryCommand": "docker compose -f compose.yml up -d --no-build",
+  "restartCount": 0,
+  "result": "safe_recovery",
+  "rollbackIssue": "old container was stopped before the same expression failed",
+  "verifiedAt": "2026-09-19T11:17:59.133172+00:00"
+}

@@ -1,0 +1,60 @@
+{
+  "api": {
+    "accounts": {
+      "cachePoolSize": 5,
+      "contentRuleCount": 0,
+      "count": 10,
+      "mode": "sticky",
+      "status": 200,
+      "wait": 2000
+    },
+    "detailSettings": {
+      "authRequired": true,
+      "detailedLogging": true,
+      "status": 200
+    },
+    "errorLogs": {
+      "status": 200
+    },
+    "invalidQuotaRefresh": {
+      "status": 400
+    },
+    "meta": {
+      "status": 200
+    },
+    "models": {
+      "status": 200
+    },
+    "requestLogs": {
+      "status": 200
+    },
+    "statistics": {
+      "modelCount": 16,
+      "modelsPresent": true,
+      "status": 200
+    }
+  },
+  "checkedAt": "2026-09-19T11:21:43.370963+00:00",
+  "configSha256": "3661444eeb0ba540f59b660c310256b7981273fdd76578aaa01adfaed0cbba4d",
+  "container": {
+    "health": "healthy",
+    "oomKilled": false,
+    "restartCount": 0,
+    "status": "running"
+  },
+  "imageId": "sha256:fb5d9de7dc6643201a333ed47e7064464df3615598cd0fb3c91ad3ffc2f91cf2",
+  "internalAliasMetaReachable": true,
+  "metadataSha256": "de530127d97a17c2f60b267ec5fa2d8fc53bcacf4130dc70ae5306d042ca9126",
+  "oldExactImageAvailable": true,
+  "public": {
+    "dns": false,
+    "dnsErrorType": "gaierror",
+    "status": null
+  },
+  "release": "20260919-110817-b2d676d-stats-logs-rules",
+  "result": "passed",
+  "rollbackBackup": "backup-attempt2",
+  "secondsSinceSwitch": 153.07,
+  "startupHardMarkers": 0,
+  "statisticsVersion": 2
+}
