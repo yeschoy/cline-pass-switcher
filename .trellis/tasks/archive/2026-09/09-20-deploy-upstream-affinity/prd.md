@@ -39,7 +39,7 @@
 - [x] 新容器 exact image 匹配、healthy、restart=0、OOM=false，config hash 与副本预测一致。
 - [x] 认证 API、日志、统计 routing coverage、控制台标记和内部别名门禁通过；90 秒复核稳定。
 - [x] 公开 DNS 仅按切换前既有故障报告；未修改 NewAPI/CPA，未发送真实模型请求。
-- [x] 完整脱敏部署证据已持久化；秘密模式扫描和提交仍需完成。
+- [x] 完整脱敏部署证据已持久化并提交；秘密模式扫描为零命中，无生产数据正文或原始会话进入证据。
 
 ## Out of Scope
 
