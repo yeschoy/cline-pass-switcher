@@ -443,3 +443,26 @@ Deployed committed HEAD 3ccb929 as immutable release 20260919-172057-3ccb929-ups
 ### Status
 
 [OK] **Completed**
+
+
+## Session 18: Consolidate deployment workflow on main
+<!-- trellis-session: v=2 fp=ddeb0f8fc4b2138a -->
+
+**Date**: 2026-09-20
+**Task**: Consolidate deployment workflow on main
+**Branch**: `main`
+
+### Summary
+
+Fast-forwarded all completed feature work into main, codified main-only normal production deployments, passed 165 tests, pushed origin/main without force, preserved unrelated dirty files, deleted the local merged feature branch, and cleaned approved local/remote temporary artifacts.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f599805` | docs: deploy production from main |
+| `bb881ee` | docs(task): record main consolidation |
+
+### Status
+
+[OK] **Completed**
