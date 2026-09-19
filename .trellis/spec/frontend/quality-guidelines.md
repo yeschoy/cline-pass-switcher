@@ -87,6 +87,10 @@ The separate five error-rule presets are `standard`, `fast`, `conservative`, `ob
 
 Cancel discards the relevant draft. Confirm submits through the ordinary complete account save, so the server applies the same validation as manual edits. No persistent “selected preset” state exists. Pipeline controls submit exactly `quotaPool`, `excludeUnhealthy`, `healthSort`, and `sticky` in that fixed order.
 
+#### Provider routing status
+
+The model table preserves the server's discovered provider order and the operator's numbered priority. Health labels (`ok`, `limited`, `degraded`, `bad`, `unknown`) and active/expired cooldown text are explanatory only; they must not sort the list. The preferred-mode help text states that the switcher performs sequential outer fallback and sends exactly one provider in each `only`. All health/provider text remains escaped before HTML insertion.
+
 #### Model aliases
 
 The alias editor uses one `alias = cline-pass/target` pair per line. Batch generation removes `cline-pass/` and applies the optional common prefix/suffix. Duplicate/malformed rows are rejected in the browser for feedback, and the complete object is still validated by the server.
@@ -126,6 +130,8 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 | Log filter changes | reset cursor before querying |
 | Clear log selected | confirm with the captured type, delete only that type, and reload only if that same section remains visible |
 | API returns `401` | show login overlay and reject the operation |
+| Active provider cooldown | show bounded remaining/expiry state; do not move other providers out of artificial priority order |
+| Expired provider cooldown | show half-open eligibility and retain the provider's original position |
 | Narrow viewport | maintain usable controls and horizontal table scrolling |
 
 ### 5. Good / Base / Bad Cases
@@ -150,7 +156,8 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 - account snapshot preservation for new hidden fields and all four pipeline booleans;
 - four mutually exclusive top sections with one statistics panel, one shared log DOM, explicit active state, and no anchor/scroll shortcut;
 - statistics stale-response guards, escaped server text, unknown/known-zero rendering, table wrapping, and forbidden sensitive fields;
-- log query invalidation, filters/pagination, captured-type clear controls, and model-alias batch controls.
+- log query invalidation, filters/pagination, captured-type clear controls, and model-alias batch controls;
+- preferred-mode singleton-attempt wording, stable provider ordering, escaped `degraded`/cooling/half-open health labels, and no health-rank sort.
 
 Manual browser review remains required for visual width, narrow-screen scrolling, focus order, keyboard-only drawer use, password masking, preview readability, and log/alias interaction. Static string tests must not be reported as visual browser automation.
 

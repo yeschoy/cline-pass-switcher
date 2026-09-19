@@ -67,7 +67,9 @@ A request record may contain only:
 }
 ```
 
-`attempts` is a projection of provider/status/timing/account/action facts. It is not the raw upstream object. Pipeline fields are server-owned bounded values: `pipelineSteps` contains at most eight of `health-filtered`, `health-filter-fallback`, and `quota-all-unknown`; `selectedQuotaPool` is `ordinary`, `hot`, `warm`, `unknown`, or `reserve`; `selectedHealthLayer` is `ordinary`, `available-or-insufficient`, `degraded`, or `unhealthy`; and `capacityFallback` is boolean. Raw health buckets, quota payloads, percentages, identities, credentials, proxy data, and messages remain forbidden.
+`attempts` is a projection of provider/status/timing/account/action facts. It is not the raw upstream object. Each attempt may additionally contain only bounded classification facts: `errorScope`, `scopeEvidence`, `failureClass`, `healthAction`, `retryAfterMs`, normalized `responseContentType`, and `responseBytes`. These fields describe switcher-visible HTTP attempts; target lists and gateway-internal behavior are never promoted into an actual provider path.
+
+Pipeline fields are server-owned bounded values: `pipelineSteps` contains at most eight of `health-filtered`, `health-filter-fallback`, and `quota-all-unknown`; `selectedQuotaPool` is `ordinary`, `hot`, `warm`, `unknown`, or `reserve`; `selectedHealthLayer` is `ordinary`, `available-or-insufficient`, `degraded`, or `unhealthy`; and `capacityFallback` is boolean. `errorCategory` distinguishes the bounded request outcomes `capacity`, `routing`, `proxy`, and `upstream`; in particular a local capacity 429 has no upstream attempt and must never be labelled as an upstream 429. Raw health buckets, quota payloads, percentages, identities, credentials, proxy data, and messages remain forbidden.
 
 An error record may contain only:
 
@@ -76,11 +78,13 @@ An error record may contain only:
   ts, requestId, requestedModel, resolvedModel,
   accountId, accountName, attemptIndex,
   targetProvider, providerPath,
-  status, upstreamStatus, category, reason, accountAction
+  status, upstreamStatus, category, reason, accountAction,
+  errorScope, scopeEvidence, failureClass, healthAction,
+  retryAfterMs, responseContentType, responseBytes
 }
 ```
 
-Each real failed provider/proxy attempt gets one error record. A request and all its error attempts share the same internal UUID, which is also returned as `X-Cline-Request-Id`.
+Each real failed provider/proxy attempt gets one error record. A request and all its error attempts share the same internal UUID, which is also returned as `X-Cline-Request-Id`. `X-Cline-Target-Upstream` is a plan, `X-Cline-Attempts` is the real HTTP-attempt count, and `X-Cline-Actual-Upstream` is only a parsed terminal provider; the JSONL attempt rows are authoritative for the full account/provider path.
 
 #### Sensitive-data boundary
 
@@ -118,7 +122,9 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 | Clear errors | delete error segments only |
 | Candidate reason contains a known Key/Header value/message | persisted form contains `[REDACTED]`, never the source value |
 | Upstream returns a long structured error | persist the complete redacted error field, including its final nested provider cause |
-| Upstream returns a non-JSON/invalid error body | persist a generic diagnostic, never the raw response body |
+| Upstream returns a non-JSON/invalid error body | persist a generic diagnostic plus normalized media type/byte count, never the raw response body |
+| Switcher local capacity 429 | request row has `errorCategory=capacity`, `upstreamStatus=null`, and no attempts |
+| Ambiguous HTML 429 | persist `errorScope=unknown`, bounded evidence/class/health action, and no account action or response body |
 | Pipeline diagnostics contain a non-owned/raw value | omit it; persist only the bounded enum/boolean projection |
 | Diagnostic JSONL or metadata persistence fails | report only a redacted service error; do not change the chat response |
 
@@ -147,6 +153,7 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 - long structured SSE/JSON errors retain their final diagnostic text, and short message redaction does not corrupt unrelated words containing the same substring;
 - SSE, account replacement, proxy failure, capacity failure, and normal JSON responses finalize no more than one request record;
 - pipeline diagnostics accept only the documented enum/boolean projection and contain no quota percentages, raw health data, or secrets;
+- unknown/provider/account 429 rows expose the correct bounded scope/evidence/health/account action, while raw HTML/JSON bodies and request content remain absent;
 - simulated log/metadata write failures do not alter the already-determined chat status or body.
 
 Run `node --check lib/jsonl-log-store.js`, `npm test`, and `git diff --check` after changes.

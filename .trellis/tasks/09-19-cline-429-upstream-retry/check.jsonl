@@ -1,0 +1,10 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend quality-check entry point."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verify two-level routing, single-provider attempts, SSE boundaries, and required integration coverage."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Verify provider health persistence, legacy migration, bounds, and atomic metadata writes."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Verify new diagnostics remain bounded and contain no bodies, prompts, or credentials."}
+{"file":".trellis/spec/frontend/index.md","reason":"Frontend quality-check entry point."}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Verify model metadata and route configuration round-trip without destructive state loss."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Verify safe health rendering, preferred-mode wording, accessibility, and static UI contracts."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Audit persistence-to-API-to-console consistency and single ownership of classification/projections."}
+{"file":".trellis/tasks/09-19-cline-429-upstream-retry/research/diagnosis.md","reason":"Check that implementation preserves the evidence boundaries of the reported request."}
+{"file":".trellis/tasks/09-19-cline-429-upstream-retry/research/architecture-analysis.md","reason":"Check implementation against selected cooldown, fail-open, classification, and compatibility decisions."}

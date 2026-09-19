@@ -102,6 +102,21 @@ Startup normalization preserves legacy behavior while making the schema explicit
 
 ```js
 {
+  models: {
+    [modelId]: {
+      upstreams,
+      upstreamStatus: {
+        [provider]: {
+          status: "ok" | "limited" | "degraded" | "bad" | "unknown",
+          checkedAt, lastSuccessAt, lastFailureAt,
+          consecutiveFailures, cooldownUntil,
+          failureClass: null | "rate_limit" | "auth" | "server" |
+                        "network" | "timeout" | "unsupported" | "other",
+          note
+        }
+      }
+    }
+  },
   accountStates: {
     [accountId]: {
       banned,
@@ -156,6 +171,8 @@ Startup normalization preserves legacy behavior while making the schema explicit
 
 `routingSecret` is generated once and persisted so HRW mapping survives restart. `accountStates` entries for removed accounts are deleted; the deterministic environment-account ID remains valid while `CLINE_PASS_KEY` is present. Expired, non-banned cooldown entries are deleted when candidates are read. Ban/cooldown state persists until expiry or `POST /api/accounts/recover` removes it.
 
+Provider health is durable runtime metadata keyed by model and provider, never by account. Legacy `upstreamStatus` entries are normalized additively: invalid/missing timestamps become zero, missing counters/cooldowns become zero, unsupported legacy statuses become `unknown`, and notes are bounded/redacted. Timestamps are non-negative safe integers and failure counts are bounded. Runtime attempt updates are persisted by the ordinary request finalizer rather than a synchronous write per attempt. A provider/account error must never copy credentials, raw response bodies, or request content into this map.
+
 Metadata may contain the identity source label (for example `message_hmac`) but must not contain account keys, proxy credentials, custom Header values, account notes, raw session values, HMAC fingerprints, or message text. Error reasons are redacted and flattened before persistence; structured upstream reasons remain complete so their final provider diagnostics are retained.
 
 `Aggregate` has fixed non-negative safe-integer counters for requests, errors, usage coverage, input/output/total tokens, and cache coverage/tokens. A counter that would overflow becomes `null` and its exact field name is added once to `overflowFields`; a `null` field without that marker, or a marker whose field is not `null`, is corrupt. Statistics retain at most 1,440 minute buckets and 50,000 union `(minute, accountId)` cells. Dropped account cells mark recent coverage incomplete rather than inventing zeroes.
@@ -194,6 +211,8 @@ Durable request/error diagnostics no longer grow `metadata.history`; they are se
 | Route has over 20 upstreams, over 50 exclusions, invalid slug/mode/sort, or `maxRetries` outside 0-20 | `400`; no write |
 | Error rule status outside 100-599, unknown action, or non-positive cooldown | `400`; no write |
 | `accountPipeline` is not an exact four-boolean object on management save | `400`; no write |
+| Legacy provider health lacks new fields | normalize to bounded defaults while preserving safe status/note/timestamps |
+| Invalid provider-health timestamp/count/status | normalize to zero/unknown/bounded values; never copy raw payload data |
 | Existing statistics version is missing/unknown or its structure exceeds bounds | startup fails; original metadata bytes remain |
 | Aggregate overflow marker and `null` field disagree | startup fails; original metadata bytes remain |
 | Quota percentage is outside 0-100, reset time is not strict ISO, or a state field is unknown | startup fails; original metadata bytes remain |
@@ -223,7 +242,8 @@ Persistence changes must use a temporary `DATA_DIR` and assert:
 - legacy accounts gain non-empty stable IDs, `maxConcurrent: 0`, `weight: 1`, `priority: 100`, empty note/proxy/Header fields, and `perModel`, then retain IDs across restart;
 - all new account fields and model aliases survive an authenticated save/restart round trip without erasing account routes;
 - invalid proxy/Header/note/weight/priority/alias payloads return `400` and preserve the previous file bytes;
-- `routingSecret` and cooldown state survive restart, and the cooled account is excluded afterward;
+- `routingSecret`, account cooldown state, and model/provider health cooldowns survive restart; routing skips only still-cooling providers and keeps model isolation;
+- legacy provider status rows gain bounded timestamps/count/class/cooldown fields without leaking secrets, while successful half-open attempts persist immediate recovery;
 - newly created `metadata.json` has mode `0600` on POSIX;
 - metadata serialization excludes known account keys and raw session values;
 - legacy name-keyed request counts migrate only into the labelled baseline without fabricating exact usage;

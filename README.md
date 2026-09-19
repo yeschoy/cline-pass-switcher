@@ -7,9 +7,9 @@
 Node.js 本地/服务器代理 + 网页控制台，用于 [Cline Pass](https://cline.bot/cline-pass) 订阅：
 
 - 🔍 **上游枚举与校验** —— 列出订阅模型背后每一条上游渠道，并一键实测哪些「✔可用 / ⏳限流 / ✘不可钉」
-- 🎯 **精确钉住上游** —— 严格钉住 / 优先+回退两种模式，支持按最低成本、最快首字、最高吞吐排序
-- 🧬 **多上游优先级故障转移（2026-09-06 新增）** —— 勾选多个上游即按勾选顺序逐个尝试：第一个异常（报错 / 网络失败 / 超时）自动顺切下一个，全部失败才透传错误；每次尝试有独立 120s 超时与逐次尝试明细（请求头 X-Cline-Target-Upstream: a>b 与 X-Cline-Attempts，历史与测试台展示逐次尝试路径 upstream(502) 到 upstream(200)）
-- 🚫 **上游排除** —— 勾「排除」的渠道永不被使用：勾选模式下从候选中剔除；自动模式与优先+回退模式下把排除换算成 only 白名单（已知上游 - 排除项）注入，两类管道均实测生效；网关侧渠道清单更新导致白名单过期时，报错中附带的最新渠道清单会被自动学习合并
+- 🎯 **精确钉住上游** —— 严格钉住 / 优先+回退均由 switcher 外层执行；每个具名 HTTP attempt 只注入当前 provider 的单元素 `only`（完全无探测数据时允许一次 unattributed auto 兼容请求）
+- 🧬 **健康感知的多上游故障转移** —— 严格保持人工顺序，只临时绕过仍在冷却的渠道；429、5xx、网络/超时按模型×provider 有界冷却，全部冷却时仅 fail-open 最早恢复者
+- 🚫 **上游排除** —— 勾「排除」的已知渠道不会进入 attempt 计划；已知渠道全部被排除时安全失败，不会用 auto 绕过排除
 - 👥 **账号池** —— 支持单账号、轮询、HRW 粘性、最少连接、加权轮询和优先级容灾；六种安全预设可先预览再应用
 - 🛡️ **账号高级设置** —— 备注、并发、权重、优先级、安全自定义 Header，以及 HTTP/HTTPS/SOCKS5/SOCKS5H 出站代理（故障绝不回退直连）
 - 🔗 **账号级模型路由** —— 每个账号可为模型整项覆盖全局上游顺序、模式、排除、排序与重试上限，删除专属配置即可恢复继承
@@ -102,7 +102,7 @@ location / {
 | `accountMode` | `single` / `roundrobin` / `sticky` / `least-connections` / `weighted-roundrobin` / `priority-failover` |
 | `activeAccount` | 单账号模式下使用的下标 |
 | `concurrencyWaitMs` | 容量等待时间，0～30000 ms，默认 2000 |
-| `accountErrorRules` | 全局账号处置规则，例如 `{"429":{"action":"cooldown","cooldownMs":1800000},"500":{"action":"ban"}}`；控制台另提供五组可预览、合并或替换的快捷预设，高级 JSON 始终可编辑 |
+| `accountErrorRules` | 全局账号处置规则，例如 `{"429":{"action":"cooldown","cooldownMs":1800000},"500":{"action":"ban"}}`；429 只有在明确账号额度/套餐证据下才应用账号动作，模糊或 provider 429 留在同账号切换渠道 |
 | `accountPipeline` | 可选叠加层：`{ quotaPool, excludeUnhealthy, healthSort, sticky }`；四项默认均为 `false` |
 | `proxyKey` | 下游代理密钥；空 = 不鉴权 |
 | `publicBaseUrl` | 公网代理地址（控制台展示用） |
@@ -120,11 +120,11 @@ Cline Pass 订阅模型在 Cline 网关之后分成两条管道，钉住上游�
 
 | 管道 | 实际后端 | 识别特征 | 钉住方式 |
 |---|---|---|---|
-| **直连**（direct） | OpenRouter | 响应顶层带 `provider` 与真实 `model` 字段 | 顶层 `provider.only / order` |
-| **规划器**（planner） | **Vercel AI Gateway** | 响应带 `provider_metadata.gateway.routing` | **`providerOptions.gateway.only / order / sort`** |
+| **直连**（direct） | OpenRouter | 响应顶层带 `provider` 与真实 `model` 字段 | 顶层 `provider.only`（单元素） |
+| **规划器**（planner） | **Vercel AI Gateway** | 响应带 `provider_metadata.gateway.routing` | **`providerOptions.gateway.only / sort`**（`only` 单元素） |
 
-**关键发现**：规划器管道的请求由 Vercel AI Gateway 执行，请求体里的顶层 `provider.only/order` 会被 Cline 丢弃
-（这也是官方 API 上"换上游不生效"的原因），但 `providerOptions.gateway` 嵌套形式会**原样透传**：
+**关键发现**：规划器管道的请求由 Vercel AI Gateway 执行，请求体里的顶层 `provider.only/order` 会被 Cline 丢弃。
+本项目只通过 `providerOptions.gateway` 注入当前单一 provider，不再把多 provider `order` 委托给网关；因此每次外层 attempt 可观测、可归因：
 
 ```json
 {
@@ -172,7 +172,7 @@ Cline Pass 订阅模型在 Cline 网关之后分成两条管道，钉住上游�
 | 模型别名 | 批量生成去前缀别名、统一前后缀、冲突校验和完整映射保存 |
 | 完整目录 | Cline 公开目录模型，`:free` 变体可精确钉住 |
 
-代理同时做了兼容性标准化：解包 Cline 的 `{"data":...}` 包装为标准 OpenAI 格式，并在可验证时保留真实上游 HTTP 状态；仅网络失败、非 JSON 或无有效状态的错误包使用 502。响应附加不含密钥/会话值的 `X-Cline-Target-Upstream / X-Cline-Actual-Upstream / X-Cline-Account` 等诊断头。
+代理同时做了兼容性标准化：解包 Cline 的 `{"data":...}` 包装为标准 OpenAI 格式，并在可验证时保留真实上游 HTTP 状态；仅网络失败或无有效状态的错误包使用 502。响应附加不含密钥/会话值的诊断头：`X-Cline-Target-Upstream` 是最终账号的外层规划顺序，`X-Cline-Attempts` 是跨账号累计的真实 HTTP attempt 数，`X-Cline-Actual-Upstream` 只在响应 routing 中可解析终态 provider 时有值。三者都不能代替请求/错误日志中的逐次账号与 provider 路径。
 
 ## NewAPI、会话粘性与 Header 边界
 
@@ -180,7 +180,7 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 
 `sticky` 模式分别识别 Codex 的 parent thread / `prompt_cache_key` / session/thread 字段，以及 Claude Code 的 parent-agent / session / agent 字段；无显式会话时只对首个 system/developer 与首个 user 消息做本机 HMAC 路由指纹。原始会话值和消息不会持久化。客户端真实提供的 Codex、Claude 或通用会话/SDK Header 按允许列表透传；`Authorization`、`Proxy-Authorization`、Cookie、逐跳 Header、Installation ID 和 Attestation 始终剔除，也不会伪造 User-Agent、设备、浏览器或 TLS 指纹。
 
-账号错误规则默认空以兼容旧行为。快捷预设的 4xx 只处理 429；`ignore` 保持账号可用；`cooldown` 到期自动恢复；`ban` 只能在控制台手动恢复。普通供应商故障转移固定使用同一账号，只有 cooldown/ban 且 SSE 尚未开始时最多换号一次。
+账号错误规则默认空以兼容旧行为。快捷预设的 4xx 只处理 429；但规则只会作用于有新鲜 100% 额度快照或明确账号/套餐/订阅额度耗尽结构化证据的 429。带 routing/provider 证据的 429 归为 provider，无充分证据（包括 HTML 429）的归为 unknown；后两者都不冷却账号，而是在同一 Authorization 下继续下一 provider。只有明确账号错误命中 `cooldown`/`ban` 且 SSE 尚未开始时才最多换号一次。
 
 调度流水线固定为硬过滤 → 可选健康过滤 → 可选额度池 → 可选健康分层 → 可选/隐式会话粘性 → 现有账号模式。额度通过账号 Bearer 后台读取半公开的 `GET /users/me/plan/usage-limits`，15 分钟后过期；失败、缺窗或接口变化均归为未知并回退普通调度，聊天请求不会等待额度刷新。健康度使用最近 24 小时每请求每账号最多一个终态结果；少于 5 个结果为数据不足，禁用/封禁/冷却优先覆盖评分。
 
@@ -190,7 +190,7 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 
 认证管理 API `GET /api/statistics` 返回累计、最近 24 小时、当前账号健康与严格投影的额度信息，不返回分钟桶、密钥、代理、Header、消息、会话或原始额度响应。
 
-请求与错误日志分别写入 `DATA_DIR/logs/requests-*.jsonl` 和 `errors-*.jsonl`。默认保留 30 天、请求 50,000 条、错误 10,000 条，两类合计不超过 100 MiB；查询 API 为 `GET /api/logs/{requests|errors}`（`limit` 1～200、`cursor` 游标和字段筛选），对应 `DELETE` 只清空指定类型。每个代理请求返回 `X-Cline-Request-Id`。
+请求与错误日志分别写入 `DATA_DIR/logs/requests-*.jsonl` 和 `errors-*.jsonl`。默认保留 30 天、请求 50,000 条、错误 10,000 条，两类合计不超过 100 MiB；查询 API 为 `GET /api/logs/{requests|errors}`（`limit` 1～200、`cursor` 游标和字段筛选），对应 `DELETE` 只清空指定类型。每个代理请求返回 `X-Cline-Request-Id`。逐次日志记录受控的 `errorScope / scopeEvidence / failureClass / healthAction / retryAfterMs / responseContentType / responseBytes`，不会保存原始响应正文。
 
 账号代理支持 `http://`、`https://`、`socks5://`、`socks5h://` 和可选 URL 用户名/密码，只应用于该账号的 Cline 请求；代理失败进入网络/代理错误记录，并且不会回退直连。账号 Header 在客户端协议白名单之后合并，随后由系统强制覆盖 `Content-Type` 和账号 `Authorization`。Authorization、Cookie、逐跳 Header、会话/线程/设备身份及凭据类 Header 均禁止配置。
 
@@ -205,7 +205,10 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 把所有渠道实测一遍，下拉框会标注 ✔可用 / ⏳限流 / ✘不可钉。钉住失败的渠道会被自动学习标记。
 
 **Q：限流的渠道还能用吗？**
-能。限流是共享池的临时状态，过段时间重新「校验」即可；或改用「优先+回退」模式，限流时自动跳到其他渠道。
+能。provider/unknown 429 优先采用合法 `Retry-After`，否则从 60 秒开始有界退避；冷却到期后渠道回到原人工位置接受半开请求，成功立即恢复。人工顺序不会被 `ok/degraded/unknown` 标签重排。
+
+**Q：如何确认一次 429 到底换了账号还是换了 provider？**
+先用响应的 `X-Cline-Request-Id` 查询 `/api/logs/requests?requestId=...` 与 `/api/logs/errors?requestId=...`：前者给出账号路径和全部真实 attempts，后者给出每次 `targetProvider/errorScope/scopeEvidence/accountAction`。`X-Cline-Target-Upstream` 只是规划目标，`X-Cline-Actual-Upstream: unknown` 只是未解析到终态 provider，二者都不是切换证据。若仍需区分 Cline 边缘 HTML 429 与内部 provider 限流，应做短期、受控的响应捕获并立即脱敏，不要开启持久化正文日志。
 
 **Q：直接用官方 API 写 `provider.only` 为什么不生效？**
 对规划器管道（走 Vercel AI Gateway 的模型）会被 Cline 网关丢弃，请改用 `providerOptions.gateway`，见上文。
