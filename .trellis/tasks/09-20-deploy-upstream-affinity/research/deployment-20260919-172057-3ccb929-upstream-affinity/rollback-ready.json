@@ -1,0 +1,6 @@
+{
+  "backupDir": "/opt/cline-pass-switcher/verification/deploy-20260919-172057-3ccb929-upstream-affinity/backup",
+  "composeNoBuild": true,
+  "previousImageId": "sha256:fb5d9de7dc6643201a333ed47e7064464df3615598cd0fb3c91ad3ffc2f91cf2",
+  "ready": true
+}

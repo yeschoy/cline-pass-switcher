@@ -1,0 +1,45 @@
+{
+  "config": {
+    "expected": true,
+    "predictedSha256": "897bc79377b16c5ae4ca284bab311041a0d0bde83cf5e74260c4b2525315caa6",
+    "providerCooldownFieldsAdded": 16
+  },
+  "firstStart": {
+    "containerExitCode": 0,
+    "iteration": 1,
+    "logStatuses": [
+      200
+    ],
+    "metaStatus": 200,
+    "readyMs": 207,
+    "running": true,
+    "startupMarker": true
+  },
+  "idempotentSecondStart": true,
+  "imageId": "sha256:5a26c0c0fd6f78b0c19fc72d840f00cfcb87e990e74d1e32646843ff56577935",
+  "metadata": {
+    "aggregateCellsUpgraded": 2169,
+    "expected": true,
+    "fromVersion": 2,
+    "migratedSha256": "3612ae5e13b9aeb68c2a48dbe2ef618b8d3900757539e609455af2a9db669514",
+    "routingTrackingStartedMinutePresent": true,
+    "toVersion": 3
+  },
+  "ordinaryLogs": {
+    "fileCount": 3,
+    "totalBytes": 5842489,
+    "unchanged": true
+  },
+  "release": "20260919-172057-3ccb929-upstream-affinity",
+  "secondStart": {
+    "containerExitCode": 0,
+    "iteration": 2,
+    "logStatuses": [
+      200
+    ],
+    "metaStatus": 200,
+    "readyMs": 195,
+    "running": true,
+    "startupMarker": true
+  }
+}

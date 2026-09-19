@@ -1,0 +1,17 @@
+{
+  "checks": {
+    "liveHealthy": true,
+    "liveOomFalse": true,
+    "liveRestartZero": true,
+    "liveRunning": true,
+    "rehearsal1Preserved": true,
+    "tempContainerAbsent": true,
+    "tempNetworkAbsent": true
+  },
+  "crossedLiveMutationBoundary": false,
+  "failure": "docker random published port lookup unsupported",
+  "liveHashes": {
+    "compose": "426324909268ae952baaa0e152b66ad028060ecb0b0b1d50d178306fa6926f49",
+    "config": "0a8c2a87d12a215b16ae59e3a5d2bcfb24bb944ff503b956aa1249b359d55a2a"
+  }
+}

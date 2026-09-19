@@ -1,0 +1,8 @@
+{
+  "composeBuilt": true,
+  "imageId": "sha256:5a26c0c0fd6f78b0c19fc72d840f00cfcb87e990e74d1e32646843ff56577935",
+  "liveImageUnchanged": true,
+  "previousImageId": "sha256:fb5d9de7dc6643201a333ed47e7064464df3615598cd0fb3c91ad3ffc2f91cf2",
+  "release": "20260919-172057-3ccb929-upstream-affinity",
+  "runtimeUidReadable": true
+}

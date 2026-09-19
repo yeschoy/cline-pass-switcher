@@ -1,0 +1,58 @@
+{
+  "apis": {
+    "accounts": 200,
+    "detailedSettings": 200,
+    "errorLogs": 200,
+    "invalidQuota": 400,
+    "meta": 200,
+    "models": 200,
+    "requestLogs": 200,
+    "statistics": 200
+  },
+  "checks": {
+    "apis": true,
+    "backups": true,
+    "commit": true,
+    "configHash": true,
+    "configProjection": true,
+    "healthy": true,
+    "image": true,
+    "internalAlias": true,
+    "oldImage": true,
+    "oomFalse": true,
+    "release": true,
+    "restartZero": true,
+    "rollbackReady": true,
+    "sourceHashes": true,
+    "statisticsV3": true
+  },
+  "commit": "3ccb92984eca4b282e158027bf571b7ffab06bb0",
+  "configuration": {
+    "accountCount": 10,
+    "allProviderCooldownZero": true,
+    "cachePoolSize": 5,
+    "contentRuleCount": 0,
+    "enabledCount": 8,
+    "mode": "sticky",
+    "routeCount": 16,
+    "statusRuleCount": 5,
+    "waitMs": 2000
+  },
+  "hashes": {
+    "config": "897bc79377b16c5ae4ca284bab311041a0d0bde83cf5e74260c4b2525315caa6",
+    "deployment": "7e3b1fc054c954a592d3a8eed002ffe200f94099c359c78528b288d6b784b5af"
+  },
+  "imageId": "sha256:5a26c0c0fd6f78b0c19fc72d840f00cfcb87e990e74d1e32646843ff56577935",
+  "internalAlias": {
+    "alias": "cline-pass-switcher",
+    "network": "ai-internal",
+    "ok": true
+  },
+  "previousImageId": "sha256:fb5d9de7dc6643201a333ed47e7064464df3615598cd0fb3c91ad3ffc2f91cf2",
+  "publicDns": [],
+  "release": "20260919-172057-3ccb929-upstream-affinity",
+  "statistics": {
+    "routingCoverage": true,
+    "version": 3
+  }
+}

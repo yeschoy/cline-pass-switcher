@@ -1,0 +1,38 @@
+{
+  "archive": "/tmp/cps-affinity-source-QX3qQK/20260919-172057-3ccb929-upstream-affinity.tar",
+  "archiveBytes": 460800,
+  "archiveSha256": "95969d2f49c303d646f981cfefd23a87d51c7e9097cc6bdfa87dde34249776b6",
+  "commit": "3ccb92984eca4b282e158027bf571b7ffab06bb0",
+  "embeddedScript": true,
+  "keyHashes": {
+    "lib/detailed-log-capture.js": "9af7ab1090b4ef2b2cee971a2bc5cfc20f70527bc6f4e3550a8bcd8f2ac44a5f",
+    "lib/detailed-log-store.js": "5d8a25aa36cbf8a9b857f486e7ae855d2dba99a5c7954dc8e3c7ac8d0e6d294d",
+    "lib/jsonl-log-store.js": "1c287f804fa299d41469b52200b1853e471dfd8daf20989c0b04410ce73d3afc",
+    "public/index.html": "af802af57458943ca7306a425a0be68141ac1cb8b72039367f754faa6c00cdcb",
+    "server.js": "65e2cdb3d71bc0e9c3057a36373e4e33c30a4d69e08bb58e0a0b19479de8f00f"
+  },
+  "memberCount": 14,
+  "members": [
+    ".dockerignore",
+    "Dockerfile",
+    "LICENSE",
+    "README.md",
+    "config.example.json",
+    "lib",
+    "lib/detailed-log-capture.js",
+    "lib/detailed-log-store.js",
+    "lib/jsonl-log-store.js",
+    "package-lock.json",
+    "package.json",
+    "public",
+    "public/index.html",
+    "server.js"
+  ],
+  "npmTestPassed": true,
+  "npmTestSummary": {
+    "failed": 0,
+    "tests": 165
+  },
+  "release": "20260919-172057-3ccb929-upstream-affinity",
+  "syntax": true
+}

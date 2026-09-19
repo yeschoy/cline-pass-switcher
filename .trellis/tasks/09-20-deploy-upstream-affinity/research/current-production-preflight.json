@@ -1,0 +1,108 @@
+{
+  "apis": {
+    "detailedSettings": {
+      "itemCount": null,
+      "status": 200,
+      "topKeys": [
+        "authRequired",
+        "detailedLogging",
+        "health",
+        "maxAgeMs",
+        "maxBodyBytes",
+        "maxTotalBytes"
+      ]
+    },
+    "errorLogs": {
+      "itemCount": 1,
+      "status": 200,
+      "topKeys": [
+        "items",
+        "nextCursor"
+      ]
+    },
+    "meta": {
+      "itemCount": null,
+      "status": 200,
+      "topKeys": [
+        "authRequired",
+        "configured",
+        "proxyBase"
+      ]
+    },
+    "requestLogs": {
+      "itemCount": 1,
+      "status": 200,
+      "topKeys": [
+        "items",
+        "nextCursor"
+      ]
+    },
+    "statistics": {
+      "itemCount": null,
+      "status": 200,
+      "topKeys": [
+        "accounts",
+        "generatedAt",
+        "lifetime",
+        "migration",
+        "models",
+        "recent24h",
+        "window"
+      ]
+    }
+  },
+  "capturedAt": "2026-09-19T17:18:29.896602+00:00",
+  "configuration": {
+    "accountCount": 10,
+    "accountRouteCount": 0,
+    "cachePoolSize": 5,
+    "contentRuleCount": 0,
+    "enabledCount": 8,
+    "globalRouteCount": 16,
+    "mode": "sticky",
+    "statusRuleCount": 5,
+    "waitMs": 2000
+  },
+  "container": {
+    "health": "healthy",
+    "imageId": "sha256:fb5d9de7dc6643201a333ed47e7064464df3615598cd0fb3c91ad3ffc2f91cf2",
+    "oldImageInspectable": true,
+    "oomKilled": false,
+    "restartCount": 0,
+    "running": true,
+    "startedAt": "2026-09-19T11:19:10.725662091Z",
+    "status": "running"
+  },
+  "deployment": {
+    "commit": "b2d676d11e0d4422aef83854670b6bceb89401a0",
+    "imageId": "sha256:fb5d9de7dc6643201a333ed47e7064464df3615598cd0fb3c91ad3ffc2f91cf2",
+    "release": "20260919-110817-b2d676d-stats-logs-rules"
+  },
+  "disk": {
+    "availableKiB": 416062560
+  },
+  "hashes": {
+    "compose": "426324909268ae952baaa0e152b66ad028060ecb0b0b1d50d178306fa6926f49",
+    "config": "0a8c2a87d12a215b16ae59e3a5d2bcfb24bb944ff503b956aa1249b359d55a2a",
+    "deployment": "353bfac09c388ebcc1a6bc0420530e3175504eb0534f1730bb5705cd744a6eda",
+    "metadata": "e240e63d3cba034d3ebb704914d101084e594f682fb00b72651600de731ec39d"
+  },
+  "internalAlias": {
+    "alias": "cline-pass-switcher",
+    "containerPresent": true,
+    "metaJson": true,
+    "network": "ai-internal",
+    "status": "ok"
+  },
+  "metadata": {
+    "minuteBuckets": 653,
+    "modelTracking": true,
+    "routingTracking": false,
+    "statisticsVersion": 2
+  },
+  "ordinaryLogs": {
+    "fileCount": 3,
+    "totalBytes": 5842489
+  },
+  "publicDns": []
+}

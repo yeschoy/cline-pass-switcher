@@ -1,0 +1,112 @@
+{
+  "actualConfigSha256": "897bc79377b16c5ae4ca284bab311041a0d0bde83cf5e74260c4b2525315caa6",
+  "commit": "3ccb92984eca4b282e158027bf571b7ffab06bb0",
+  "crossedLiveMutationBoundary": true,
+  "delayed": {
+    "apis": {
+      "accounts": 200,
+      "detailedSettings": 200,
+      "errorLogs": 200,
+      "invalidQuota": 400,
+      "meta": 200,
+      "models": 200,
+      "requestLogs": 200,
+      "statistics": 200
+    },
+    "configSha256": "897bc79377b16c5ae4ca284bab311041a0d0bde83cf5e74260c4b2525315caa6",
+    "configuration": {
+      "accountCount": 10,
+      "allProviderCooldownZero": true,
+      "cachePoolSize": 5,
+      "contentRuleCount": 0,
+      "enabledCount": 8,
+      "mode": "sticky",
+      "routeCount": 16,
+      "statusRuleCount": 5,
+      "waitMs": 2000
+    },
+    "containerSourceHashesMatch": true,
+    "fatalLogIndicators": 0,
+    "health": "healthy",
+    "imageId": "sha256:5a26c0c0fd6f78b0c19fc72d840f00cfcb87e990e74d1e32646843ff56577935",
+    "internalAlias": {
+      "alias": "cline-pass-switcher",
+      "network": "ai-internal",
+      "ok": true
+    },
+    "label": "delayed",
+    "logReadinessStatuses": [
+      200
+    ],
+    "oomKilled": false,
+    "publicDns": [],
+    "restartCount": 0,
+    "routingCoverage": true,
+    "running": true,
+    "statisticsVersion": 3,
+    "uiMarkers": [
+      "upstreamSetupModal",
+      "affinityLogLabel",
+      "providerCooldownMs",
+      "accountContentErrorRules"
+    ],
+    "waitHealthyMs": 7
+  },
+  "deploymentSha256": "7e3b1fc054c954a592d3a8eed002ffe200f94099c359c78528b288d6b784b5af",
+  "imageId": "sha256:5a26c0c0fd6f78b0c19fc72d840f00cfcb87e990e74d1e32646843ff56577935",
+  "immediate": {
+    "apis": {
+      "accounts": 200,
+      "detailedSettings": 200,
+      "errorLogs": 200,
+      "invalidQuota": 400,
+      "meta": 200,
+      "models": 200,
+      "requestLogs": 200,
+      "statistics": 200
+    },
+    "configSha256": "897bc79377b16c5ae4ca284bab311041a0d0bde83cf5e74260c4b2525315caa6",
+    "configuration": {
+      "accountCount": 10,
+      "allProviderCooldownZero": true,
+      "cachePoolSize": 5,
+      "contentRuleCount": 0,
+      "enabledCount": 8,
+      "mode": "sticky",
+      "routeCount": 16,
+      "statusRuleCount": 5,
+      "waitMs": 2000
+    },
+    "containerSourceHashesMatch": true,
+    "fatalLogIndicators": 0,
+    "health": "healthy",
+    "imageId": "sha256:5a26c0c0fd6f78b0c19fc72d840f00cfcb87e990e74d1e32646843ff56577935",
+    "internalAlias": {
+      "alias": "cline-pass-switcher",
+      "network": "ai-internal",
+      "ok": true
+    },
+    "label": "immediate",
+    "logReadinessStatuses": [
+      200
+    ],
+    "oomKilled": false,
+    "publicDns": [],
+    "restartCount": 0,
+    "routingCoverage": true,
+    "running": true,
+    "statisticsVersion": 3,
+    "uiMarkers": [
+      "upstreamSetupModal",
+      "affinityLogLabel",
+      "providerCooldownMs",
+      "accountContentErrorRules"
+    ],
+    "waitHealthyMs": 6047
+  },
+  "predictedConfigSha256": "897bc79377b16c5ae4ca284bab311041a0d0bde83cf5e74260c4b2525315caa6",
+  "previousImageId": "sha256:fb5d9de7dc6643201a333ed47e7064464df3615598cd0fb3c91ad3ffc2f91cf2",
+  "release": "20260919-172057-3ccb929-upstream-affinity",
+  "rollbackReady": true,
+  "status": "deployed"
+}

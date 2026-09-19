@@ -1,0 +1,19 @@
+{
+  "config": {
+    "expected": true,
+    "predictedSha256": "897bc79377b16c5ae4ca284bab311041a0d0bde83cf5e74260c4b2525315caa6",
+    "providerCooldownFieldsAdded": 16
+  },
+  "imageId": "sha256:5a26c0c0fd6f78b0c19fc72d840f00cfcb87e990e74d1e32646843ff56577935",
+  "liveStaticStateUnchanged": true,
+  "metadata": {
+    "aggregateCellsUpgraded": 2169,
+    "expected": true,
+    "fromVersion": 2,
+    "routingTrackingStartedMinute": 29830661,
+    "toVersion": 3
+  },
+  "ordinaryLogsUnchanged": true,
+  "readyMs": 473,
+  "release": "20260919-172057-3ccb929-upstream-affinity"
+}

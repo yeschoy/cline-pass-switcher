@@ -1,0 +1,16 @@
+{
+  "atomicHelperSelfTest": true,
+  "hashes": {
+    "compose": "426324909268ae952baaa0e152b66ad028060ecb0b0b1d50d178306fa6926f49",
+    "config": "0a8c2a87d12a215b16ae59e3a5d2bcfb24bb944ff503b956aa1249b359d55a2a",
+    "deployment": "353bfac09c388ebcc1a6bc0420530e3175504eb0534f1730bb5705cd744a6eda",
+    "metadata": "0dbce10299b2e9e54617e6af7cb6deea2a6149830617aed90bf1aee1f67fd410"
+  },
+  "oldImageInspectable": true,
+  "ordinaryLogs": {
+    "fileCount": 3,
+    "totalBytes": 5842489
+  },
+  "previousImageId": "sha256:fb5d9de7dc6643201a333ed47e7064464df3615598cd0fb3c91ad3ffc2f91cf2",
+  "release": "20260919-172057-3ccb929-upstream-affinity"
+}
