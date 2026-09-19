@@ -1,0 +1,10 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend entry point and pre-development routing checks"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Chat identity, account/provider failover, transport and statistics contracts"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Ordinary log projection and session secrecy boundary"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Metadata/config migration and forbidden persisted identity data"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Inline console entry point and UI verification"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Request-log UI state ownership and draft preservation"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Safe rendering, accessibility and real-browser checks"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Trace Chat, logs, statistics and UI as one lifecycle"}
+{"file": ".trellis/tasks/09-19-analyze-upstream-stickiness/research/dsh-cline-pass-comparison.md", "reason": "Comparison findings and mechanisms not to copy"}
+{"file": ".trellis/tasks/09-19-analyze-upstream-stickiness/research/session-key-contract.md", "reason": "Codex/Claude field evidence and safe affinity log design"}

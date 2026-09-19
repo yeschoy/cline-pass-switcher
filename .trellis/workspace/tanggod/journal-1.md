@@ -373,6 +373,16 @@ Directly deployed committed quota forecast UI to production as release 20260916-
 ### Summary
 
 完成普通 JSONL 增量高性能存储、按模型 24h 缓存 Token 统计与上游发现修正、账号摘要和剩余额度展示，以及有序内容错误规则与统一可视化/高级 JSON 编辑器；完整测试 161/161 通过，真实浏览器验证因本机工具与 Accessibility 权限阻塞。
+## Session 15: Strengthen upstream session affinity
+<!-- trellis-session: v=2 fp=2a65c74af388ffac -->
+
+**Date**: 2026-09-19
+**Task**: Strengthen upstream session affinity
+**Branch**: `feat/upstream-session-affinity`
+
+### Summary
+
+Implemented Codex/Claude Chat affinity key propagation, safe cache-hit diagnostics, account-scoped provider setup, bounded provider cooldown/half-open, routing statistics v3, docs/specs, and isolated-worktree verification (162 tests passed; browser blocked by missing agent-browser).
 
 ### Git Commits
 
@@ -382,6 +392,8 @@ Directly deployed committed quota forecast UI to production as release 20260916-
 | `d0dbc74` | fix: optimize ordinary JSONL logging |
 | `74913e0` | feat: add per-model cache statistics |
 | `939b62e` | feat: add visual content error rules |
+| `88ee54b` | feat: strengthen upstream affinity routing |
+| `ae78e01` | docs(task): record upstream affinity implementation |
 
 ### Status
 

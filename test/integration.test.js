@@ -252,6 +252,10 @@ test('account routing, header boundary, failover, state and streaming', async (t
         return;
       }
       if (body.model === 'planner-model') {
+        if (only === 'beta' && auth === 'Bearer key-b') {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: { message: 'unauthorized account', status: 401 } }));
+        }
         if (only === '__probe__') {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ error: { message: 'Available providers are: alpha, beta.', type: 'invalid_request_error' } }));
@@ -311,6 +315,7 @@ test('account routing, header boundary, failover, state and streaming', async (t
   assert.equal(seen.at(-1).headers['http-referer'], undefined, 'Claude allowlist must not include generic-only headers');
 
   assert.equal((await rawJson(switchPort, '/api/config', { scope: 'typo', perModel: {} })).status, 400);
+  assert.equal((await rawJson(switchPort, '/api/config', { scope: 'global', perModel: { 'test-model': { providerCooldownMs: 300001 } } })).status, 400);
   const malformed = await new Promise((resolve, reject) => {
     const req = http.request({ hostname: '127.0.0.1', port: switchPort, path: '/api/config', method: 'POST', headers: { 'Content-Type': 'application/json' } }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
     req.on('error', reject); req.end('{');
@@ -360,6 +365,16 @@ test('account routing, header boundary, failover, state and streaming', async (t
   assert.equal(plannerProbe.status, 200);
   assert.deepEqual(plannerProbe.json.upstreams, ['alpha', 'beta'], 'observed final provider and structured harvest providers form one known set');
   assert.equal(plannerProbe.json.upstreamDiscovery, 'known');
+  seen.length = 0;
+  const validationAccount = accounts.find((account) => account.id === 'b');
+  const scopedProbe = await rawJson(switchPort, '/api/probe', { model: 'planner-model', accountId: validationAccount.id });
+  assert.equal(scopedProbe.status, 200); assert.equal(scopedProbe.json.accountId, validationAccount.id);
+  assert.deepEqual(new Set(seen.map((entry) => entry.headers.authorization)), new Set(['Bearer key-b']), 'probe and harvest must keep one selected account');
+  const scopedValidation = await rawJson(switchPort, '/api/validate-upstreams', { model: 'planner-model', accountId: validationAccount.id });
+  assert.equal(scopedValidation.status, 200); assert.equal(scopedValidation.json.results.beta.accountFault, 'auth'); assert.equal(scopedValidation.json.results.beta.status, 'unknown');
+  const scopedView = await (await fetch(`http://127.0.0.1:${switchPort}/api/models?accountId=${validationAccount.id}`)).json();
+  assert.notEqual(scopedView.subscription.find((entry) => entry.id === 'planner-model').meta.upstreamStatus?.beta?.status, 'auth', 'account auth must not contaminate global provider health');
+  assert.equal((await rawJson(switchPort, '/api/probe', { model: 'planner-model', accountId: 'missing' })).status, 400);
   await rawJson(switchPort, '/api/config', { scope: 'global', perModel: { 'planner-model': { upstreams: ['alpha'], pinMode: 'strict' } } });
   seen.length = 0;
   assert.equal((await rawJson(switchPort, '/v1/chat/completions', { model: 'planner-model', messages: [] }, { 'Session-Id': 'planner-session' })).status, 200);
@@ -592,6 +607,153 @@ test('invalid persisted content rules normalize to the disabled default without 
   assert.deepEqual(view.accountContentErrorRules,[]);assert.deepEqual(persisted.accountContentErrorRules,[]);assert.equal(view.accounts[0].id,'a');assert.deepEqual(view.accountErrorRules,{429:{action:'ignore'}});
 });
 
+test('Chat affinity preserves caller keys, derives Claude keys and logs only safe cache facts', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+      seen.push(body);
+      const usage = body.model === 'cache-hit'
+        ? { prompt_tokens: 10, prompt_tokens_details: { cached_tokens: 4 } }
+        : body.model === 'cache-miss'
+          ? { prompt_tokens: 10, prompt_tokens_details: { cached_tokens: 0 } }
+          : undefined;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }], ...(usage ? { usage } : {}) }));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const models = ['codex-key','claude-key','claude-child','message-key','session-key','cache-hit','cache-miss','cache-unknown'];
+  const running = await startSwitcher({
+    port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'sticky', concurrencyWaitMs: 0,
+    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }, { id: 'b', name: 'B', key: 'key-b', enabled: true, perModel: {} }],
+    knownModels: models, perModel: {}, accountErrorRules: {},
+  });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+
+  const rawCodexKey = 'codex-raw-prompt-key';
+  assert.equal((await rawJson(port, '/v1/chat/completions', { model: 'codex-key', prompt_cache_key: rawCodexKey, messages: [] }, { Originator: 'codex_cli_rs' })).status, 200);
+  assert.equal(seen.at(-1).prompt_cache_key, rawCodexKey, 'caller prompt_cache_key must remain byte-for-byte unchanged');
+
+  const rawClaudeSession = 'claude-root-session';
+  assert.equal((await rawJson(port, '/v1/chat/completions', { model: 'claude-key', messages: [] }, { 'X-Claude-Code-Session-Id': rawClaudeSession })).status, 200);
+  const derivedClaudeKey = seen.at(-1).prompt_cache_key;
+  assert.match(derivedClaudeKey, /^[a-f0-9]{64}$/);
+  assert.notEqual(derivedClaudeKey, rawClaudeSession);
+  assert.equal((await rawJson(port, '/v1/chat/completions', { model: 'claude-key', messages: [{ role: 'user', content: 'next' }] }, { 'X-Claude-Code-Session-Id': rawClaudeSession })).status, 200);
+  assert.equal(seen.at(-1).prompt_cache_key, derivedClaudeKey, 'the same explicit Claude session must derive one stable upstream key');
+  assert.equal((await rawJson(port, '/v1/chat/completions', { model: 'claude-child', messages: [] }, { 'X-Claude-Code-Parent-Agent-Id': rawClaudeSession, 'X-Claude-Code-Session-Id': 'child-session' })).status, 200);
+  assert.equal(seen.at(-1).prompt_cache_key, derivedClaudeKey, 'Claude child requests must share the parent upstream key');
+
+  assert.equal((await rawJson(port, '/v1/chat/completions', { model: 'message-key', messages: [{ role: 'user', content: 'stable opening' }] })).status, 200);
+  assert.equal(seen.at(-1).prompt_cache_key, undefined, 'message_hmac fallback must not be promoted into an explicit upstream key');
+  const callerSession = 'caller-session-id';
+  assert.equal((await rawJson(port, '/v1/chat/completions', { model: 'session-key', session_id: callerSession, messages: [] })).status, 200);
+  assert.equal(seen.at(-1).session_id, callerSession);
+  assert.equal(seen.at(-1).prompt_cache_key, undefined, 'caller session_id must not be replaced or duplicated');
+
+  for (const model of ['cache-hit','cache-miss','cache-unknown']) {
+    assert.equal((await rawJson(port, '/v1/chat/completions', { model, messages: [] }, { 'X-Claude-Code-Session-Id': `${rawClaudeSession}-${model}` })).status, 200);
+  }
+
+  let page;
+  for (let i = 0; i < 50; i++) {
+    page = await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?limit=50`)).json();
+    if ((page.items || []).some((item) => item.requestedModel === 'cache-unknown')) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const byModel = Object.fromEntries(page.items.map((item) => [item.requestedModel, item]));
+  assert.deepEqual({ source: byModel['codex-key'].sessionSource, type: byModel['codex-key'].affinityKeyType, confidence: byModel['codex-key'].affinityConfidence, prompt: byModel['codex-key'].upstreamPromptCacheKeySource, applied: byModel['codex-key'].upstreamPromptCacheKeyApplied },
+    { source: 'codex_body', type: 'prompt_cache_key', confidence: 'explicit', prompt: 'caller_prompt_cache_key', applied: true });
+  assert.deepEqual({ source: byModel['claude-key'].sessionSource, type: byModel['claude-key'].affinityKeyType, confidence: byModel['claude-key'].affinityConfidence, prompt: byModel['claude-key'].upstreamPromptCacheKeySource, applied: byModel['claude-key'].upstreamPromptCacheKeyApplied },
+    { source: 'claude_header', type: 'session_id', confidence: 'explicit', prompt: 'derived_claude', applied: true });
+  assert.deepEqual({ source: byModel['message-key'].sessionSource, type: byModel['message-key'].affinityKeyType, confidence: byModel['message-key'].affinityConfidence, prompt: byModel['message-key'].upstreamPromptCacheKeySource, applied: byModel['message-key'].upstreamPromptCacheKeyApplied },
+    { source: 'message_hmac', type: 'message_hmac', confidence: 'fallback', prompt: 'none', applied: false });
+  assert.equal(byModel['session-key'].upstreamPromptCacheKeySource, 'caller_session_id');
+  assert.equal(byModel['cache-hit'].cacheHit, true);
+  assert.equal(byModel['cache-miss'].cacheHit, false);
+  assert.equal(byModel['cache-unknown'].cacheHit, null);
+  const serialized = JSON.stringify(page);
+  for (const forbidden of [rawCodexKey, rawClaudeSession, callerSession, derivedClaudeKey, 'child-session']) assert.equal(serialized.includes(forbidden), false, `ordinary logs leaked ${forbidden}`);
+  assert.equal(fs.readFileSync(path.join(running.dir, 'metadata.json'), 'utf8').includes(rawClaudeSession), false);
+  const stats = await (await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();
+  assert.ok(stats.recent24h.global.explicitAffinityRequests >= 6); assert.ok(stats.recent24h.global.fallbackAffinityRequests >= 1); assert.equal(stats.routingCoverage.complete, false);
+});
+
+test('provider cooldown skips repeated failures and admits only one half-open probe', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString() || '{}'), provider = body.provider?.only?.[0];
+      seen.push({ model: body.model, provider, at: Date.now() });
+      const reply = () => {
+        if (provider === 'first') {
+          const status = body.model === 'parameter' ? 418 : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: { message: body.model === 'parameter' ? 'invalid parameter' : 'provider failed', status } }));
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }));
+      };
+      if (provider === 'first' && (body.model === 'cool' || body.model === 'stale')) return setTimeout(reply, 60);
+      reply();
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const route = (providerCooldownMs) => ({ upstreams: ['first','second'], exclude: [], pinMode: 'strict', sort: null, maxRetries: null, providerCooldownMs });
+  const running = await startSwitcher({
+    port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 0,
+    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }], knownModels: ['cool','parameter','disabled','stale'],
+    perModel: { cool: route(80), parameter: route(80), disabled: route(0), stale: route(80) }, accountErrorRules: {},
+  });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+
+  const request = (model) => rawJson(port, '/v1/chat/completions', { model, messages: [] });
+  assert.equal((await request('cool')).status, 200);
+  assert.deepEqual(seen.filter((entry) => entry.model === 'cool').map((entry) => entry.provider), ['first','second']);
+  seen.length = 0;
+  assert.equal((await request('cool')).status, 200);
+  assert.deepEqual(seen.map((entry) => entry.provider), ['second'], 'a cooling provider must be skipped on the next request');
+
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  seen.length = 0;
+  const [one, two] = await Promise.all([request('cool'), request('cool')]);
+  assert.equal(one.status, 200); assert.equal(two.status, 200);
+  assert.equal(seen.filter((entry) => entry.provider === 'first').length, 1, 'only one request may own the half-open provider probe');
+  assert.ok(seen.filter((entry) => entry.provider === 'second').length >= 2);
+
+  seen.length = 0;
+  assert.equal((await request('parameter')).status, 200); assert.equal((await request('parameter')).status, 200);
+  assert.deepEqual(seen.filter((entry) => entry.model === 'parameter').map((entry) => entry.provider), ['first','second','first','second'], 'ordinary parameter errors must not open the circuit');
+  seen.length = 0;
+  assert.equal((await request('disabled')).status, 200); assert.equal((await request('disabled')).status, 200);
+  assert.deepEqual(seen.filter((entry) => entry.model === 'disabled').map((entry) => entry.provider), ['first','second','first','second'], 'providerCooldownMs=0 must preserve legacy attempts');
+
+  seen.length = 0;
+  const staleRequest = request('stale');
+  await waitUntil(() => seen.some((entry) => entry.model === 'stale' && entry.provider === 'first'));
+  assert.equal((await rawJson(port, '/api/config', { scope: 'global', perModel: { stale: route(80) } })).status, 200);
+  assert.equal((await staleRequest).status, 200);
+  seen.length = 0;
+  assert.equal((await request('stale')).status, 200);
+  assert.equal(seen[0].provider, 'first', 'a completion from the replaced route generation must not recreate cooldown state');
+
+  let logs;
+  for (let i = 0; i < 50; i++) {
+    logs = await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestedModel=cool&limit=20`)).json();
+    if ((logs.items || []).length >= 4) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const actions = logs.items.flatMap((item) => item.attempts || []).map((attempt) => attempt.providerCircuitAction).filter(Boolean);
+  assert.ok(actions.includes('cooldown')); assert.ok(actions.includes('half-open-failed'));
+  const stats = await (await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();
+  assert.ok(stats.recent24h.global.providerFallbackRequests >= 1); assert.ok(stats.recent24h.global.providerCircuitCooldownRequests >= 1); assert.ok(stats.recent24h.global.providerHalfOpenRequests >= 1);
+});
+
 test('HRW routing is order-independent and only remaps sessions owned by a removed account', async () => {
   const mock = http.createServer((req, res) => {
     req.resume();
@@ -725,7 +887,7 @@ test('legacy migration and cooldown state survive restart', async (t) => {
   const beforeRestart = JSON.parse(fs.readFileSync(metadataPath));
   assert.equal(fs.statSync(metadataPath).mode & 0o777, 0o600, 'new metadata containing the routing secret must be owner-only');
   assert.ok(beforeRestart.routingSecret);
-  assert.equal(beforeRestart.statistics.version, 2);
+  assert.equal(beforeRestart.statistics.version, 3);
   assert.ok(Number.isSafeInteger(beforeRestart.statistics.recentCoverage.modelTrackingStartedMinute));
   assert.equal(beforeRestart.statistics.minuteBuckets.at(-1).models['cooldown-model'].requests, 1);
   assert.ok(beforeRestart.accountStates[migrated.accounts[0].id].cooldownUntil > Date.now());
@@ -744,7 +906,7 @@ test('legacy migration and cooldown state survive restart', async (t) => {
   assert.deepEqual(seen, ['Bearer legacy-b']);
   const afterMeta = JSON.parse(fs.readFileSync(path.join(running.dir, 'metadata.json')));
   assert.equal(afterMeta.routingSecret, beforeRestart.routingSecret);
-  assert.equal(afterMeta.statistics.version, 2);
+  assert.equal(afterMeta.statistics.version, 3);
   assert.deepEqual(afterMeta.statistics.migration, beforeRestart.statistics.migration, 'legacy stats migration must be idempotent across restart');
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(running.dir, 'config.json'))).accounts.map((a) => a.id), migrated.accounts.map((a) => a.id));
 });
@@ -794,7 +956,7 @@ test('new scheduling modes, account fields, model aliases and independent logs',
   await new Promise(r=>setTimeout(r,20));const redactedErrors=await(await fetch(`http://127.0.0.1:${switchPort}/api/logs/errors?requestedModel=leak`)).json();assert.equal(JSON.stringify(redactedErrors).includes('message-secret-value'),false);assert.equal(JSON.stringify(redactedErrors).includes('header-secret-value'),false);
   // Ordinary full-list save must round-trip a combined bulk/drawer/scheduling draft.
   const draftAccounts=accounts.map((a,i)=>({...a,maxConcurrent:i===0?100000:0,
-    ...(i===0?{note:'pending drawer note',proxyUrl:'http://127.0.0.1:1/',perModel:{'cline-pass/target':{upstream:'Mock',upstreams:['Mock'],exclude:[],pinMode:'preferred',sort:null,maxRetries:null}}}:{})}));
+    ...(i===0?{note:'pending drawer note',proxyUrl:'http://127.0.0.1:1/',perModel:{'cline-pass/target':{upstream:'Mock',upstreams:['Mock'],exclude:[],pinMode:'preferred',sort:null,maxRetries:null,providerCooldownMs:1234}}}:{})}));
   const pipeline={quotaPool:false,excludeUnhealthy:true,healthSort:true,sticky:false,order:['healthSort','excludeUnhealthy','quotaPool','sticky'],cachePoolSize:0};
   const rules={429:{action:'ignore'}};
   assert.equal((await rawJson(switchPort,'/api/accounts',{accounts:draftAccounts,mode:'sticky',active:1,concurrencyWaitMs:987,accountErrorRules:rules,accountPipeline:pipeline})).status,200);
@@ -941,7 +1103,7 @@ test('corrupt versioned statistics fail startup without overwriting metadata', a
 test('future statistics versions fail startup without overwriting metadata', async () => {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-future-statistics-')),holder=http.createServer(),port=await listen(holder);await close(holder);
   fs.writeFileSync(path.join(dir,'config.json'),JSON.stringify({port,accounts:[{id:'a',name:'A',key:'key',enabled:true,perModel:{}}],accountMode:'single',activeAccount:0,accountErrorRules:{},perModel:{},knownModels:['test']}));
-  const metadataPath=path.join(dir,'metadata.json'),bytes=Buffer.from(JSON.stringify({models:{},history:[],routingSecret:'secret',accountStates:{},statistics:{version:3}}));fs.writeFileSync(metadataPath,bytes);
+  const metadataPath=path.join(dir,'metadata.json'),bytes=Buffer.from(JSON.stringify({models:{},history:[],routingSecret:'secret',accountStates:{},statistics:{version:4}}));fs.writeFileSync(metadataPath,bytes);
   const child=spawn(process.execPath,['server.js'],{cwd:path.resolve('.'),env:{...process.env,DATA_DIR:dir,BIND_HOST:'127.0.0.1'},stdio:['ignore','pipe','pipe']});let output='';child.stderr.on('data',chunk=>{output+=chunk;});child.stdout.on('data',chunk=>{output+=chunk;});
   const code=await new Promise(resolve=>child.once('exit',resolve));assert.notEqual(code,0);assert.match(output,/unsupported statistics version/);assert.deepEqual(fs.readFileSync(metadataPath),bytes);fs.rmSync(dir,{recursive:true,force:true});
 });
@@ -1347,7 +1509,7 @@ test('the 50,000 account-minute union cap evicts an aggregate/health cell atomic
   fs.writeFileSync(path.join(dir,'metadata.json'),JSON.stringify({models:{},history:[],accountStates:{},accountQuotas:{},routingSecret:'cell-cap-secret',statistics}));
   let running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'single',activeAccount:50000,concurrencyWaitMs:0,accounts,knownModels:['m'],perModel:{},accountErrorRules:{}},dir);t.after(async()=>{if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
   assert.equal((await rawJson(port,'/v1/chat/completions',{model:'m',messages:[]})).status,200);const persisted=JSON.parse(fs.readFileSync(path.join(dir,'metadata.json'))),bucket=persisted.statistics.minuteBuckets[0];
-  assert.equal(persisted.statistics.version,2,'valid v1 statistics migrate before the new request is committed');
+  assert.equal(persisted.statistics.version,3,'valid v1 statistics migrate before the new request is committed');
   const cells=new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health)]);assert.equal(cells.size,50000);assert.equal(bucket.accounts.a0,undefined);assert.equal(bucket.health.a0,undefined);assert.ok(bucket.accounts.a50000);assert.ok(bucket.health.a50000);assert.equal(persisted.statistics.recentCoverage.droppedAccountMinuteCells,1);assert.equal(persisted.statistics.recentCoverage.accountIncompleteAt.a0,minute);
 });
 

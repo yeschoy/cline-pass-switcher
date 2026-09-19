@@ -61,6 +61,9 @@ A request record may contain only:
 {
   ts, requestId, requestedModel, resolvedModel, stream,
   strategy, sessionSource,
+  affinityKeyType, affinityConfidence,
+  upstreamPromptCacheKeySource, upstreamPromptCacheKeyApplied,
+  providerOrderOverridesSticky, cacheHit,
   preferredAccountId, preferredAccountName,
   accountId, accountName, selectionReason, overflow, switched,
   pipelineSteps, selectedQuotaPool, selectedHealthLayer, capacityFallback,
@@ -73,7 +76,7 @@ A request record may contain only:
 
 `result` is exactly `success`, `client_cancelled`, or `failed`. `status` remains the final request status; client cancellation is `499`, has `errorCategory: null`, and suppresses all error-log attempt projection even when abort plumbing produced an internal transport trace. Older JSONL rows without `result` remain readable and are never migrated.
 
-`attempts` is a projection of provider/status/timing/account/action facts. It is not the raw upstream object. Pipeline fields are server-owned bounded values: `pipelineSteps` contains at most eight of `health-filtered`, `health-filter-fallback`, and `quota-all-unknown`; `selectedQuotaPool` is `ordinary`, `hot`, `warm`, `unknown`, or `reserve`; `selectedHealthLayer` is `ordinary`, `available-or-insufficient`, `degraded`, or `unhealthy`; `capacityFallback` is boolean; `cachePoolSize` is the configured bounded integer; `cachePoolTier` is `active`, `standby`, or null; and `cachePoolFallback` is boolean. Selection reasons may additionally be `cache-pool-active`, `cache-pool-active-overflow`, or `cache-pool-standby-overflow`. Raw candidate lists, health buckets, quota payloads, percentages, identities, credentials, proxy data, and messages remain forbidden.
+`attempts` is a projection of provider/status/timing/account/action facts, including optional `providerCircuitAction` limited to `cooldown`, `half-open-success`, or `half-open-failed`. It is not the raw upstream object. Affinity fields are bounded server enums/booleans only: `affinityKeyType` names the winning kind, `affinityConfidence` is `explicit`/`fallback`/`none`, `upstreamPromptCacheKeySource` is caller/derived/none/invalid, and `upstreamPromptCacheKeyApplied` means a valid field was sent, not that a remote router used it. `cacheHit` is true only for explicit cached tokens above zero, false only for explicit zero, and null when unknown. Pipeline fields are server-owned bounded values: `pipelineSteps` contains at most eight of `health-filtered`, `health-filter-fallback`, and `quota-all-unknown`; `selectedQuotaPool` is `ordinary`, `hot`, `warm`, `unknown`, or `reserve`; `selectedHealthLayer` is `ordinary`, `available-or-insufficient`, `degraded`, or `unhealthy`; `capacityFallback` is boolean; `cachePoolSize` is the configured bounded integer; `cachePoolTier` is `active`, `standby`, or null; and `cachePoolFallback` is boolean. Selection reasons may additionally be `cache-pool-active`, `cache-pool-active-overflow`, or `cache-pool-standby-overflow`. Raw candidate lists, health buckets, quota payloads, percentages, identities, credentials, proxy data, and messages remain forbidden.
 
 An error record may contain only:
 
@@ -100,7 +103,7 @@ Never persist:
 - raw session/thread/conversation value or HMAC fingerprint;
 - message text, reasoning/content, or upstream response body.
 
-Only `sessionSource` and applied safe Header names may be recorded.
+Only bounded identity-source/type/confidence enums, upstream-key source/applied booleans, cache-hit tri-state, provider circuit actions, and applied safe Header names may be recorded. The actual caller/derived key and every raw/HMAC identity remain forbidden, including truncated/hash-prefix correlation tags.
 
 #### Query and cursor
 
@@ -151,6 +154,7 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 `test/integration.test.js` must assert:
 
 - request response ID equals the logged request ID;
+- caller/derived/message-fallback affinity produces the exact bounded source/type/confidence/applied facts, final explicit usage produces true/false/null cache hit, and no raw caller key, derived key, session or fingerprint occurs in JSONL/API/UI;
 - requested/resolved models, strategy, selection reason, overflow and account path are present where applicable;
 - one request with multiple failures paginates every error exactly once;
 - unknown/invalid filters return `400`;
@@ -159,7 +163,7 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 - SSE, account replacement, proxy failure, capacity failure, and normal JSON responses finalize no more than one request record;
 - a downstream close after observed `[DONE]` records one `200 / success`, while pre-DONE streaming and non-streaming cancellations each record one `499 / client_cancelled`, no error attempt, and no error/usage/health effect;
 - request `result` filtering returns only explicit new records, while historical rows without `result` remain readable and unmodified;
-- pipeline diagnostics accept only the documented enum/boolean projection and contain no quota percentages, raw health data, or secrets;
+- pipeline diagnostics and provider circuit actions accept only the documented enum/boolean projection and contain no quota percentages, raw health data, or secrets;
 - simulated log/metadata write failures do not alter the already-determined chat status or body.
 
 Run `node --check lib/jsonl-log-store.js`, `node --test test/jsonl-log-store.test.js`, `npm test`, and `git diff --check` after changes.

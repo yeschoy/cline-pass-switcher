@@ -16,6 +16,7 @@ The safety property is two-level routing: select and lease an account first, the
 
 ```js
 extractSessionIdentity(req, body)
+prepareChatAffinity(body, identity)
 forwardHeadersFor(req, body)
 acquireAccountLease(identity, { excludeIds = new Set(), allowOverflow = true })
 strategyRank(mode, accounts)
@@ -42,6 +43,8 @@ buildPipelineGroups(accounts)
 acquirePipelineAccountLease(identity, options)
 normalizeFailureForRules(errorValue, sensitiveValues)
 accountActionFor({ normalizedStatus, failureText }, sensitiveValues)
+planProviderAttempts(modelId, route, account)
+settleProviderCircuit(modelId, route, account, attempt, outcome)
 ```
 
 Chat endpoints:
@@ -64,7 +67,9 @@ POST /api/accounts/recover
 POST /api/accounts/proxy-test
 GET  /api/models?accountId=<account id>
 POST /api/config
-POST /api/test
+POST /api/probe                 // { model, accountId? }
+POST /api/validate-upstreams   // { model, accountId? }
+POST /api/test                  // temporary complete route overrides; no persistence
 GET  /api/model-aliases
 POST /api/model-aliases
 GET/DELETE /api/logs/requests
@@ -95,7 +100,9 @@ Runtime environment keys are `DATA_DIR`, `CLINE_PASS_KEY`, `PROXY_KEY`, `PUBLIC_
 - `ignore` or an unmatched failure continues the provider chain on the same account. `cooldown` and `ban` stop that account's chain. The matcher returns only status/action/cooldown facts; keywords, matched text and raw response bodies never enter account state/history/ordinary logs.
 - `handleChat()` permits one replacement account only when `cooldown` or `ban` occurs before `chain.started`. The replacement starts its own model route from the first provider. The two-iteration account loop forbids a third account. A post-start SSE content action may change future account state but never replays the current stream; client cancellation never evaluates an error action.
 
-Session identity values are validated, HMACed with `META.routingSecret`, and never logged or persisted. Trusted parent identifiers precede child identifiers. Codex checks parent thread metadata/header before `prompt_cache_key`, session, and thread values; Claude checks parent-agent information before session/agent values. Generic parent headers precede generic current-session fields. `X-Client-Request-Id` alone never establishes affinity. The fallback HMAC input contains only the first system/developer message and first user message (each capped at 4096 characters); if neither is extractable, selection falls back to round-robin.
+Session identity values are validated, HMACed with `META.routingSecret`, and never logged or persisted. The request-local identity also carries only bounded `keyType` and `confidence` enums. Trusted parent identifiers precede child identifiers. Codex checks parent thread metadata/header before `prompt_cache_key`, session, and thread values; Claude checks parent-agent information before session/agent values. Generic parent headers precede generic current-session fields. `X-Client-Request-Id` alone never establishes affinity. The fallback HMAC input contains only the first system/developer message and first user message (each capped at 4096 characters); if neither is extractable, selection falls back to round-robin.
+
+For Chat Completions, a valid caller `prompt_cache_key` or `session_id` is preserved byte-for-byte. When an explicit Codex/Claude identity reached the Switcher but neither body field exists, `prepareChatAffinity()` injects a domain-separated 64-hex `prompt_cache_key` derived from the local fingerprint. A `message_hmac` fallback is never promoted into an explicit upstream key. The derived value is reused across account/provider attempts but never enters ordinary logs, metadata, responses or management projections. `preferred` routes that emit `provider.order` are diagnosed as overriding OpenRouter sticky routing; this is a bounded fact, not proof that a remote provider used the key.
 
 #### Account-level model routing
 
@@ -110,10 +117,10 @@ resolveModelConfig(account, modelId)
 Presence is tested with `hasOwnProperty`; even `{}` is a complete account override. There is no field merge with the global route. A normalized route has exactly:
 
 ```js
-{ upstream, upstreams, exclude, pinMode, sort, maxRetries }
+{ upstream, upstreams, exclude, pinMode, sort, maxRetries, providerCooldownMs }
 ```
 
-`maxRetries: null` runs all built provider attempts; an integer `n` permits the first attempt plus at most `n` additional outer attempts.
+`maxRetries: null` runs all built provider attempts; an integer `n` permits the first attempt plus at most `n` additional outer attempts. `providerCooldownMs` is an integer 0-300000; 0 preserves the legacy sequence. When enabled, only pre-output provider transport/server/rate-limit/unavailable failures cool an `(accountId, resolvedModel, provider)` runtime entry. Account auth/quota/proxy, parameter 4xx, cancellation and post-start failures do not. Expiry admits one half-open owner; success clears state and an allowed failure renews the bounded cooldown. This state is process-local, contains no session/credential/body, and is cleared on account identity changes and route replacement.
 
 A successful model probe builds its known provider set from the observed `finalProvider`, strict provider slugs harvested from either string or structured error envelopes, documented fallbacks and direct-pipeline endpoint details. Discovery state is distinct from `upstreamStatus`: observing a provider prevents a false zero count but never claims that provider passed pin validation.
 
@@ -132,7 +139,7 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 #### Account proxy and model alias boundary
 
 - Empty `proxyUrl` means native direct transport. `http:`/`https:` use `HttpsProxyAgent`; `socks5:`/`socks5h:` use `SocksProxyAgent`. The pinned agent versions preserve Node >=18.
-- The account proxy applies to account-bound Cline chat/probe/validation/test and quota-upstream traffic. Public catalog/document fetching and ordinary management APIs remain direct.
+- The account proxy applies to account-bound Cline chat/probe/validation/test and quota-upstream traffic. Probe and validation accept an optional account ID, lease that account once, and keep probe+harvest or the whole validation batch on it; unknown/unavailable/busy accounts return 400/409/429. Public catalog/document fetching and ordinary management APIs remain direct.
 - A configured proxy failure is a proxy/network attempt failure and never retries the same request without an agent.
 - `requestedModel` is preserved for diagnostics. `resolvedModel = modelAliases[requestedModel] || requestedModel` replaces outbound `body.model` and owns global/account `perModel` lookup. Aliases are not chained.
 - `/v1/models` exposes the de-duplicated union of original visible models and aliases so old clients remain compatible.
@@ -162,7 +169,7 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - Management, probe, model-catalog, and quota traffic never enters chat statistics or health.
 - Health records at most one terminal result per account segment: success `0`, auth `10`, rate-limit `7`, network/proxy/timeout `6`, server 5xx `4`, and other terminal errors `5` penalty units. Ordinary parameter 4xx and client disconnects produce no health result.
 - The 24-hour score is `100 - penaltyUnits / (10 * results) * 100`. Fewer than five results or incomplete recent coverage is `insufficient`; otherwise scores are `available >= 80`, `degraded >= 50`, or `unhealthy < 50`. Ban, cooldown, disablement, and missing coverage remain explicit states.
-- `GET /api/statistics` is authenticated and returns projected global/account lifetime and 1,440-minute aggregates, plus per-resolved-model rolling aggregates with model tracking/cell-loss coverage, health, quota, and a separately labelled legacy migration baseline. `GET /api/accounts` embeds a stable-ID account statistics summary for the main table while retaining the legacy name-keyed `stats` projection only for old clients. Neither endpoint returns credentials, raw events, messages, sessions, or raw quota responses.
+- `GET /api/statistics` is authenticated and returns projected global/account lifetime and 1,440-minute aggregates, plus per-resolved-model rolling aggregates with model tracking/cell-loss coverage, health, quota, and a separately labelled legacy migration baseline. Fixed aggregates also count explicit/fallback affinity, provider fallback, circuit cooldown and half-open requests; `routingCoverage` labels the migration/start minute so pre-tracking history is not fabricated as zero. They never store identity values or high-cardinality provider/session keys. `GET /api/accounts` embeds a stable-ID account statistics summary for the main table while retaining the legacy name-keyed `stats` projection only for old clients. Neither endpoint returns credentials, raw events, messages, sessions, or raw quota responses.
 
 #### Quota refresh and account pipeline
 
@@ -240,11 +247,12 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 `test/integration.test.js` is the required black-box boundary suite. Changes in this scenario must assert:
 
 - repeated session, parent/child identities, and stable opening messages select the same account; request-id-only requests use round-robin;
+- caller prompt/session keys are preserved; explicit Codex/Claude header/metadata identities derive one stable upstream key across retries/account replacement; message fallback derives none; ordinary logs contain only safe source/confidence/applied/cache-hit facts;
 - HRW rank is independent of account input order, and removing one account remaps only sessions that ranked that account first;
-- provider attempts have identical Authorization and occur in configured order; `maxRetries` caps the attempt count;
+- provider attempts have identical Authorization and occur in configured order; `maxRetries` caps the attempt count; `providerCooldownMs: 0` is sequence-equivalent, while enabled cooldown skips repeated allowed failures, admits one half-open probe and ignores parameter/auth/proxy/cancel/post-start outcomes;
 - cooldown/ban can switch from A to B, a second removal action cannot select C, and banned accounts leave the candidate set;
 - ordered content rules prove first-match/range/ignore/status-fallback behavior for nested HTTP-200 errors, non-stream, pre-stream SSE, post-start SSE and provider retry; current messages/keys/Header values are absent from metadata and ordinary logs;
-- account override reports `configSource: "account"`; `action: "inherit"` restores `"inherited"`;
+- account override reports `configSource: "account"`; `action: "inherit"` restores `"inherited"`; account-scoped probe/validation keeps one account/proxy and never promotes account auth/proxy/quota failures into global provider health;
 - real allowed and safe account Headers arrive, prohibited Headers do not, downstream Authorization is replaced, and no synthetic User-Agent appears;
 - HTTP, HTTPS, SOCKS5, and SOCKS5H proxies create real local tunnels; bad proxy tests prove no direct fallback and no credential leakage;
 - old three modes plus least-connections, weighted proportions, priority full-tier fallback/cooldown/recovery behave deterministically and all `activeCount` values return to zero;

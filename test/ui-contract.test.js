@@ -12,6 +12,20 @@ test('console exposes seven bounded presets and accessible account drawer/log/al
   assert.match(html, /api\/logs/); assert.match(html, /api\/model-aliases/); assert.match(html, /width:min\(100%,1800px\)/);
 });
 
+test('provider setup preview and cooldown controls preserve explicit confirmation boundaries', () => {
+  assert.match(html, /id="upstreamSetupModal"[^>]+class="modal"/);
+  assert.match(html, /id="upstreamSetupStatus" aria-live="polite"/);
+  assert.match(html, /缓存优先（strict）/); assert.match(html, /可用性优先（preferred）/); assert.match(html, /自动 sticky/);
+  assert.match(html, /onclick="setupUpstreams/); assert.match(html, /function upstreamSetupRoute/);
+  assert.match(html, /function testUpstreamSetup/); assert.match(html, /function applyUpstreamSetup/); assert.match(html, /function closeUpstreamSetup/);
+  const setup = html.slice(html.indexOf('let UPSTREAM_SETUP'), html.indexOf('async function runTest'));
+  assert.match(setup, /accountId=\$\('#routeScope'\)\.value\|\|''/);
+  assert.match(setup, /accountId:accountId\|\|undefined/);
+  assert.match(setup, /await saveModelCfg\(model,route\)/);
+  assert.match(setup, /closeUpstreamSetup\(\)/);
+  assert.match(html, /Provider 冷却\(ms\)/); assert.match(html, /providerCooldownMs/);
+});
+
 test('account drawer key visibility is explicit, masked on every open, and excluded from dirty state', () => {
   assert.match(html, /<label for="drawerKey">API Key<\/label><input id="drawerKey" type="password">/);
   assert.match(html, /<input id="drawerShowKey" type="checkbox"[^>]+> 显示 API Key<\/label>/);
@@ -64,6 +78,11 @@ test('request and error sections share one log view and reset the selected type 
   assert.match(loadLogs, /params\.set\('result',\$\('#logResult'\)\.value\)/);
   assert.match(loadLogs, /x\.result\|\|legacyResult/);
   assert.match(loadLogs, /legacy_failed/);
+  assert.match(html, /亲和键\/上游键\/缓存/);
+  assert.match(loadLogs, /affinityLogLabel\(x\)/);
+  assert.match(loadLogs, /cacheHitLogLabel\(x\.cacheHit\)/);
+  assert.match(html, /function affinityLogLabel/);
+  assert.match(html, /function cacheHitLogLabel/);
   assert.match(loadLogs, /api\(`\/api\/logs\/\$\{type\}\?\$\{params\}`\)/);
   assert.match(loadLogs, /if\(queryId!==LOG_QUERY_ID\|\|type!==\$\('#logType'\)\.value\)return/);
   const clearLogs = html.slice(html.indexOf('async function clearLogs'), html.indexOf('function accMsg'));
@@ -113,6 +132,7 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   const modelRenderer=html.slice(html.indexOf('function modelCacheMetric'),html.indexOf('function renderCatalog'));
   assert.match(modelRenderer,/cacheTokenRatio/);assert.match(modelRenderer,/cacheInputKnownRequests/);assert.doesNotMatch(modelRenderer,/cacheHitRequestRate/);
   assert.match(html, /cacheTokenRatio/); assert.match(html, /cacheHitRequestRate/);
+  assert.match(html, /function affinityMetrics/); assert.match(html, /explicitAffinityRequests/); assert.match(html, /providerCircuitCooldownRequests/); assert.match(html, /providerHalfOpenRequests/);
   assert.match(html, /coverage!==undefined&&Number\(coverage\)===0\)\?'无数据'/);
   assert.match(html, /value===null\|\|value===undefined/);
   const statistics = html.slice(html.indexOf('function statisticValue'), html.indexOf('async function switchSection'));
