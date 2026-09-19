@@ -466,3 +466,25 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 19: 部署单渠道健康重试到生产
+<!-- trellis-session: v=2 fp=234e502cf5ed729b -->
+
+**Date**: 2026-09-20
+**Task**: 部署单渠道健康重试到生产
+**Branch**: `main`
+
+### Summary
+
+从 origin/main@9ecc84d 构建 immutable release，完成生产副本迁移预演、备份、no-build 切换、即时/90秒/独立门禁与回滚证据；生产 exact image 健康，配置未变化，78 条 provider health 正常规范化。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `88c08a5` | docs(task): record provider health production deployment |
+
+### Status
+
+[OK] **Completed**
