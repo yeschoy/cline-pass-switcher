@@ -361,3 +361,26 @@ Directly deployed committed quota forecast UI to production as release 20260916-
 ### Next Steps
 
 - 如需继续当前 400，另建任务在 NewAPI Responses→Chat 转换边界定位具体 tools[].type 并修复
+
+
+## Session 15: Strengthen upstream session affinity
+<!-- trellis-session: v=2 fp=2a65c74af388ffac -->
+
+**Date**: 2026-09-19
+**Task**: Strengthen upstream session affinity
+**Branch**: `feat/upstream-session-affinity`
+
+### Summary
+
+Implemented Codex/Claude Chat affinity key propagation, safe cache-hit diagnostics, account-scoped provider setup, bounded provider cooldown/half-open, routing statistics v3, docs/specs, and isolated-worktree verification (162 tests passed; browser blocked by missing agent-browser).
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `88ee54b` | feat: strengthen upstream affinity routing |
+| `ae78e01` | docs(task): record upstream affinity implementation |
+
+### Status
+
+[OK] **Completed**
