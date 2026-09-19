@@ -1,0 +1,10 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Load backend pre-development and quality gates."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Review account routing, Provider attempts, health, statistics and pipeline contracts."}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Review config/metadata migration, validation and atomic persistence."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Review bounded failure, cancellation and stream behavior."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Review ordinary diagnostic projection and secret exclusions."}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Load frontend pre-development and quality gates."}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Review complete account drafts, APIs and UI state ownership."}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Review accessible safe console behavior and UI tests."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Trace config, API, runtime, statistics, logs and UI end to end."}
+{"file": ".trellis/tasks/09-20-scoped-error-rules-dynamic-routing/research/current-contract-gap-analysis.md", "reason": "Use the verified current-contract and gap analysis."}

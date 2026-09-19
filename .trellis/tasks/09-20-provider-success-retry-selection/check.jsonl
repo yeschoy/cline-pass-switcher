@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Singleton Provider planning, retries and stream lifecycle."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Retry classification, cancellation and no-replay boundaries."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Safe attempt-path and strategy diagnostics."}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Route configuration and provider projection ownership."}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Provider route UI wording and safety."}
+{"file": ".trellis/tasks/09-20-scoped-error-rules-dynamic-routing/research/current-contract-gap-analysis.md", "reason": "Use verified current singleton routing and remaining gaps."}

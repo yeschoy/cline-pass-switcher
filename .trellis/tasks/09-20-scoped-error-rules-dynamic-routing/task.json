@@ -1,0 +1,30 @@
+{
+  "id": "scoped-error-rules-dynamic-routing",
+  "name": "scoped-error-rules-dynamic-routing",
+  "title": "双维度错误规则与动态路由策略",
+  "description": "设计并实现账号与渠道模型双维度错误规则、动态扩容热池，以及严格钉住和网关智能选的单上游重试语义。",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "tanggod",
+  "assignee": "tanggod",
+  "createdAt": "2026-09-20",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "09-20-scoped-error-rules-success-rate",
+    "09-20-dynamic-cache-pool-growth",
+    "09-20-provider-success-retry-selection"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

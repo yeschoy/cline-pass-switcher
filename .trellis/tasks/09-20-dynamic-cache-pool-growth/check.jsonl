@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Cache-pool membership, capacity wait, lease and quota contracts."}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Pipeline config and target metadata persistence."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Safe capacity and pool diagnostics."}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Pipeline/raw/preset draft round-trip."}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Cache-pool UI and accessibility contracts."}
+{"file": ".trellis/tasks/09-20-scoped-error-rules-dynamic-routing/research/current-contract-gap-analysis.md", "reason": "Use verified fixed-pool behavior and gaps."}

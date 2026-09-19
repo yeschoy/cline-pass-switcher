@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Account/provider rule, state, health and lifecycle contract."}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Config/statistics metadata migration and validation contract."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Safe rule matching and cancellation contract."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Bounded rule diagnostics and secret exclusions."}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Unified rule draft and complete account-save owner."}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Accessible rule/health UI and production-script tests."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Trace canonical rules and health projections across layers."}
+{"file": ".trellis/tasks/09-20-scoped-error-rules-dynamic-routing/research/current-contract-gap-analysis.md", "reason": "Use verified legacy owners and gaps."}
