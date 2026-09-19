@@ -1,0 +1,116 @@
+{
+  "status": "rolled_back_before_account_configuration",
+  "sourceCommit": "cbdee55f1b78fdc41a69bfa9773ff73798b63057",
+  "release": "20260917-084457-cbdee55-cache-pool",
+  "archiveSha256": "cf11f46027c8ef87d44f166bf5d526b220e9c25508781b26a436ae5457b2ac65",
+  "target": "ubuntu@167.114.158.4:49555",
+  "remoteVerificationPath": "/opt/cline-pass-switcher/verification/deploy-20260917-084457-cbdee55-cache-pool",
+  "sourceGate": {
+    "finalTests": "146/146 passed",
+    "initialTestRun": "144/146 passed; both failing timing/boundary tests passed three focused reruns and the final full rerun",
+    "archiveAllowlist": true,
+    "sourceHashesMatch": true
+  },
+  "t0": {
+    "at": "2026-09-17T08:44:00.707000Z",
+    "requests": 2275,
+    "cacheKnownRequests": 2245,
+    "cacheHitRequests": 1376,
+    "cacheHitRequestRate": 0.6129175946547885,
+    "cacheTokenRatio": 0.8599264655177968,
+    "errors": 14,
+    "failureRate": 0.006153846153846154,
+    "requestLogP95Ms": 26706.25,
+    "overflow": 0,
+    "capacityFallback": 0,
+    "switched": 0,
+    "publicIngress": "dns_unavailable_preexisting"
+  },
+  "t0Selection": [
+    {
+      "account": "account#eb683cec24",
+      "maxPercentUsed": 16,
+      "healthScore": 99.9040767386091,
+      "cacheKnownRequests": 416,
+      "cacheHitRequestRate": 0.6634615384615384,
+      "selectionScore": 50.34615384615384
+    },
+    {
+      "account": "account#ad131bd944",
+      "maxPercentUsed": 14,
+      "healthScore": 99.82808022922636,
+      "cacheKnownRequests": 348,
+      "cacheHitRequestRate": 0.6350574712643678,
+      "selectionScore": 49.50574712643679
+    }
+  ],
+  "candidate": {
+    "directBuildImageId": "sha256:f20f6e318f784ac5ee9ee14f2bdb6701835cbb1f91d36383b7a5d02e72cfc4ca",
+    "composeBuildImageId": "sha256:e53c4e5b1980f75a72a199ae56e14dc10331fae710db497501b16c724854d39d",
+    "migrationBeforeConfigSha256": "698b889a12b2ef6463a57d78b20ac2dc266799c75f47035dd4f2040bb51d6354",
+    "migrationPredictedConfigSha256": "c8f4f8c347538dd699da229d6a91da4717bab8254d7fe912e89912fddd504615",
+    "migrationSemanticDiff": [
+      {
+        "path": "accountPipeline.cachePoolSize",
+        "kind": "added",
+        "new": 0
+      }
+    ]
+  },
+  "failure": {
+    "gate": "candidate_image_id",
+    "reason": "docker compose up --build produced an image ID different from the directly built image used for copied-data migration rehearsal",
+    "occurredBeforeAccountConfigurationPost": true,
+    "accountConfigurationPostCount": 0,
+    "deploymentJsonUpdated": false,
+    "delayedGateStarted": false
+  },
+  "rollback": {
+    "completedAt": "2026-09-17T08:57:46.878787Z",
+    "status": "restored_and_postchecked",
+    "composeSha256": "b9bb50760aef8ae6c0b4578b937e631024d33127ea63a23181d8c3298f6de0b6",
+    "configSha256": "698b889a12b2ef6463a57d78b20ac2dc266799c75f47035dd4f2040bb51d6354",
+    "deploymentSha256": "d5673978fa3ae261899bf6d1a53991aaefc2c161595ec1a10c6d15602b26202e",
+    "image": "cline-pass-switcher:20260916-174357-529d642f4b8e-quota-forecast",
+    "currentImageId": "sha256:af7dc2e2ac40edf5b4939e0449e84a4ef077ce8d8a133024252c2333145a1fcd",
+    "preSwitchContainerImageId": "sha256:5de69aa31ec50b20668c9270cff88606a661cb42512ff91e728b57132b3e8ef1",
+    "preSwitchImageIdStillInspectable": false,
+    "container": "running/healthy, restart=0, OOM=false",
+    "apis": "meta/models/accounts/statistics/request-log/detailed-settings passed",
+    "internalAlias": "passed",
+    "oldReleaseSourceHashes": "passed",
+    "liveScheduling": {
+      "mode": "sticky",
+      "concurrencyWaitMs": 2000,
+      "cachePoolSizePresent": false,
+      "priorities": [100]
+    }
+  },
+  "remoteMutations": [
+    "created and retained /tmp/20260917-084457-cbdee55-cache-pool.tar",
+    "created and retained immutable release directory and candidate images",
+    "created private verification, migration-copy and backup artifacts",
+    "created then removed only the network-none migration container",
+    "temporarily replaced compose.yml and recreated cline-pass-console with the candidate",
+    "restored exact original config.json, compose.yml and deployment.json bytes and recreated cline-pass-console from the old release tag",
+    "created and removed /tmp/cps-meta-check inside new-api during the pre-switch alias check; no NewAPI configuration changed"
+  ],
+  "retained": {
+    "failedRelease": true,
+    "candidateImage": true,
+    "uploadArchive": true,
+    "buildCache": true,
+    "logs": true,
+    "backups": true,
+    "oldRelease": true,
+    "explicitPruneIssued": false
+  },
+  "policyActivatedAt": null,
+  "verificationAt": null,
+  "scheduledVerificationCreated": false,
+  "residualRisks": [
+    "The cache-pool policy was not activated and no 24-hour validation window exists.",
+    "Rollback restored the old tag and exact old source/config/compose/deployment bytes, but the pre-switch running image ID is no longer inspectable; exact image-ID equality cannot be claimed.",
+    "A corrected retry must build and rehearse the candidate through the same Compose build path before any switch, and must use a new immutable release name."
+  ]
+}

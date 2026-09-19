@@ -1,0 +1,10 @@
+{
+  "changedFields": [
+    "services.cline-pass-console.image",
+    "services.cline-pass-console.build.context"
+  ],
+  "createdAt": "2026-09-17T08:57:03.723186Z",
+  "newRelease": "20260917-084457-cbdee55-cache-pool",
+  "oldRelease": "20260916-174357-529d642f4b8e-quota-forecast",
+  "onlyApprovedFields": true
+}

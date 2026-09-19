@@ -1,0 +1,14 @@
+{
+  "createdAt": "2026-09-17T09:31:46.280659Z",
+  "hashes": {
+    "compose.yml": "b9bb50760aef8ae6c0b4578b937e631024d33127ea63a23181d8c3298f6de0b6",
+    "config.json": "698b889a12b2ef6463a57d78b20ac2dc266799c75f47035dd4f2040bb51d6354",
+    "deployment.json": "d5673978fa3ae261899bf6d1a53991aaefc2c161595ec1a10c6d15602b26202e",
+    "metadata.json": "3f358e767ee84f4a5d0a5a7fc8915c355dedab2c190b782362eecb06729703a8"
+  },
+  "oldImage": "cline-pass-switcher:20260916-174357-529d642f4b8e-quota-forecast",
+  "oldImageId": "sha256:af7dc2e2ac40edf5b4939e0449e84a4ef077ce8d8a133024252c2333145a1fcd",
+  "oldImageIdInspectable": true,
+  "rebuildForbidden": true,
+  "rollbackCommand": "docker compose -f compose.yml up -d --no-build"
+}

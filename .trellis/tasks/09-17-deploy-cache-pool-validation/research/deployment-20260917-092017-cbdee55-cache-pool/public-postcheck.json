@@ -1,0 +1,9 @@
+{
+  "checkedAt": "2026-09-17T09:42:18.932672Z",
+  "classification": "dns_unavailable_preexisting",
+  "host": "clinepass.yeschoy.com",
+  "independentA": [],
+  "independentResolver": "1.1.1.1",
+  "localAddresses": [],
+  "localDns": "unavailable"
+}

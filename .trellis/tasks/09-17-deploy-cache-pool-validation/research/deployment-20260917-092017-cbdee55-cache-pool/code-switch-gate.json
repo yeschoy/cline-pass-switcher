@@ -1,0 +1,23 @@
+{
+  "checkedAt": "2026-09-17T09:32:29.022311Z",
+  "composeSha256": "4428a6f5541e08b679e879abda745f54987c7a9e155d01388e4a503ed94c16c9",
+  "configSha256": "c8f4f8c347538dd699da229d6a91da4717bab8254d7fe912e89912fddd504615",
+  "container": {
+    "health": "healthy",
+    "oomKilled": false,
+    "restartCount": 0,
+    "status": "running"
+  },
+  "deploymentStillOriginal": true,
+  "fatalIndicators": [],
+  "image": "cline-pass-switcher:20260917-092017-cbdee55-cache-pool",
+  "imageId": "sha256:b0833b3491f4c7dbfa2c7e83ed5ebdebc84d7f97280960e53cbd475a65e852d2",
+  "meta": "passed",
+  "predictedMigrationSha256Matched": true,
+  "release": "20260917-092017-cbdee55-cache-pool",
+  "sameAsComposeBuildAndMigrationImage": true,
+  "sourceCommit": "cbdee55f1b78fdc41a69bfa9773ff73798b63057",
+  "sourceHashesMatched": true,
+  "switchCommand": "docker compose -f compose.yml up -d --no-build",
+  "switchedAt": "2026-09-17T09:31:46.282442Z"
+}

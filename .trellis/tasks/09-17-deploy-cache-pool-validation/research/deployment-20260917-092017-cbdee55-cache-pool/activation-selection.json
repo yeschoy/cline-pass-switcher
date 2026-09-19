@@ -1,0 +1,240 @@
+{
+  "candidates": [
+    {
+      "account": "account#e97a8704d3",
+      "health": {
+        "results": 330,
+        "score": 99.63636363636364,
+        "status": "available"
+      },
+      "preferredCohort": true,
+      "qualified": true,
+      "quota": {
+        "maxPercentUsed": 33,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.6158536585365854,
+        "cacheHitRequests": 202,
+        "cacheKnownRequests": 328
+      },
+      "selectionScore": 28.585365853658537
+    },
+    {
+      "account": "account#eb683cec24",
+      "health": {
+        "results": 411,
+        "score": 99.90267639902676,
+        "status": "available"
+      },
+      "preferredCohort": true,
+      "qualified": true,
+      "quota": {
+        "maxPercentUsed": 16,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.6560975609756098,
+        "cacheHitRequests": 269,
+        "cacheKnownRequests": 410
+      },
+      "selectionScore": 49.609756097560975
+    },
+    {
+      "account": "account#63b741d37f",
+      "health": {
+        "results": 0,
+        "score": null,
+        "status": "insufficient"
+      },
+      "preferredCohort": false,
+      "qualified": true,
+      "quota": {
+        "maxPercentUsed": 92,
+        "pool": "warm",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": null,
+        "cacheHitRequests": 0,
+        "cacheKnownRequests": 0
+      },
+      "selectionScore": null
+    },
+    {
+      "account": "account#5c8762b116",
+      "health": {
+        "results": 430,
+        "score": 99.44186046511628,
+        "status": "available"
+      },
+      "preferredCohort": true,
+      "qualified": true,
+      "quota": {
+        "maxPercentUsed": 39,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.6430260047281324,
+        "cacheHitRequests": 272,
+        "cacheKnownRequests": 423
+      },
+      "selectionScore": 25.30260047281324
+    },
+    {
+      "account": "account#8e2f87f25b",
+      "health": {
+        "results": 355,
+        "score": 99.88732394366197,
+        "status": "available"
+      },
+      "preferredCohort": true,
+      "qualified": true,
+      "quota": {
+        "maxPercentUsed": 24,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.6581920903954802,
+        "cacheHitRequests": 233,
+        "cacheKnownRequests": 354
+      },
+      "selectionScore": 41.81920903954803
+    },
+    {
+      "account": "account#3efe425de6",
+      "health": {
+        "results": 469,
+        "score": 100,
+        "status": "available"
+      },
+      "preferredCohort": true,
+      "qualified": true,
+      "quota": {
+        "maxPercentUsed": 19,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.6631130063965884,
+        "cacheHitRequests": 311,
+        "cacheKnownRequests": 469
+      },
+      "selectionScore": 47.31130063965884
+    },
+    {
+      "account": "account#213fe539cd",
+      "health": {
+        "results": 0,
+        "score": null,
+        "status": "disabled"
+      },
+      "preferredCohort": false,
+      "qualified": false,
+      "quota": {
+        "maxPercentUsed": 1,
+        "pool": "unknown",
+        "status": "unknown"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": null,
+        "cacheHitRequests": 0,
+        "cacheKnownRequests": 0
+      },
+      "selectionScore": null
+    },
+    {
+      "account": "account#ad131bd944",
+      "health": {
+        "results": 355,
+        "score": 99.83098591549296,
+        "status": "available"
+      },
+      "preferredCohort": true,
+      "qualified": true,
+      "quota": {
+        "maxPercentUsed": 14,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.615819209039548,
+        "cacheHitRequests": 218,
+        "cacheKnownRequests": 354
+      },
+      "selectionScore": 47.5819209039548
+    },
+    {
+      "account": "account#c73d65006e",
+      "health": {
+        "results": 46,
+        "score": 99.1304347826087,
+        "status": "disabled"
+      },
+      "preferredCohort": false,
+      "qualified": false,
+      "quota": {
+        "maxPercentUsed": 6,
+        "pool": "unknown",
+        "status": "unknown"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.2,
+        "cacheHitRequests": 9,
+        "cacheKnownRequests": 45
+      },
+      "selectionScore": null
+    }
+  ],
+  "cohort": "available-health-with-at-least-100-cache-samples",
+  "formula": "cacheHitRequestRate*100-maxPercentUsed",
+  "selected": [
+    {
+      "account": "account#eb683cec24",
+      "health": {
+        "results": 411,
+        "score": 99.90267639902676,
+        "status": "available"
+      },
+      "preferredCohort": true,
+      "qualified": true,
+      "quota": {
+        "maxPercentUsed": 16,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.6560975609756098,
+        "cacheHitRequests": 269,
+        "cacheKnownRequests": 410
+      },
+      "selectionScore": 49.609756097560975
+    },
+    {
+      "account": "account#ad131bd944",
+      "health": {
+        "results": 355,
+        "score": 99.83098591549296,
+        "status": "available"
+      },
+      "preferredCohort": true,
+      "qualified": true,
+      "quota": {
+        "maxPercentUsed": 14,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.615819209039548,
+        "cacheHitRequests": 218,
+        "cacheKnownRequests": 354
+      },
+      "selectionScore": 47.5819209039548
+    }
+  ],
+  "selectedAt": "2026-09-17T09:36:42.228635Z"
+}

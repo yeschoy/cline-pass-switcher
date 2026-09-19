@@ -1,0 +1,67 @@
+{
+  "archiveSha256": "cf11f46027c8ef87d44f166bf5d526b220e9c25508781b26a436ae5457b2ac65",
+  "completedAt": "2026-09-17T09:38:12.730686Z",
+  "composeSha256": "4428a6f5541e08b679e879abda745f54987c7a9e155d01388e4a503ed94c16c9",
+  "configDiff": [
+    {
+      "kind": "added",
+      "new": 2,
+      "old": null,
+      "path": "accountPipeline.cachePoolSize"
+    },
+    {
+      "account": "account#eb683cec24",
+      "kind": "changed",
+      "new": 1,
+      "old": 100,
+      "path": "accounts[1].priority"
+    },
+    {
+      "account": "account#ad131bd944",
+      "kind": "changed",
+      "new": 2,
+      "old": 100,
+      "path": "accounts[7].priority"
+    },
+    {
+      "kind": "changed",
+      "new": 5000,
+      "old": 2000,
+      "path": "concurrencyWaitMs"
+    }
+  ],
+  "configSha256": "808ac0a541d99efdb79b23dd38ca72f1d49b7706072c8850cd3b82a66ddba1fe",
+  "delayed90sGates": "passed",
+  "deploymentSha256": "251af647f6636905acf8b735f6a3d5a02105cc51f5e8c1a629f4ca979dcdbd80",
+  "formalWindow": {
+    "from": "2026-09-17T11:36:42.243000Z",
+    "to": "2026-09-18T11:36:42.243000Z"
+  },
+  "image": "cline-pass-switcher:20260917-092017-cbdee55-cache-pool",
+  "imageId": "sha256:b0833b3491f4c7dbfa2c7e83ed5ebdebc84d7f97280960e53cbd475a65e852d2",
+  "immediateGates": "passed",
+  "knownSecretMatchesInSafeEvidence": 0,
+  "policyActivatedAt": "2026-09-17T09:36:42.243000Z",
+  "postCount": 1,
+  "previousImage": "cline-pass-switcher:20260916-174357-529d642f4b8e-quota-forecast",
+  "previousImageId": "sha256:af7dc2e2ac40edf5b4939e0449e84a4ef077ce8d8a133024252c2333145a1fcd",
+  "publicIngress": "dns_unavailable_preexisting",
+  "rebuildDuringSwitchOrRollback": false,
+  "release": "20260917-092017-cbdee55-cache-pool",
+  "rollbackCommand": "docker compose -f compose.yml up -d --no-build",
+  "rollbackExactOldImageAvailable": true,
+  "rollbackReady": true,
+  "scheduledVerificationCreated": false,
+  "selectedAliases": [
+    "account#eb683cec24",
+    "account#ad131bd944"
+  ],
+  "sourceCommit": "cbdee55f1b78fdc41a69bfa9773ff73798b63057",
+  "status": "success",
+  "switchCommand": "docker compose -f compose.yml up -d --no-build",
+  "verificationAt": "2026-09-18T11:36:42.243000Z",
+  "warmupWindow": {
+    "from": "2026-09-17T09:36:42.243000Z",
+    "to": "2026-09-17T11:36:42.243000Z"
+  }
+}

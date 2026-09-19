@@ -1,0 +1,10 @@
+{
+  "createdAt": "2026-09-17T08:57:03.710672Z",
+  "files": {
+    "compose.yml": "b9bb50760aef8ae6c0b4578b937e631024d33127ea63a23181d8c3298f6de0b6",
+    "config.json": "698b889a12b2ef6463a57d78b20ac2dc266799c75f47035dd4f2040bb51d6354",
+    "deployment.json": "d5673978fa3ae261899bf6d1a53991aaefc2c161595ec1a10c6d15602b26202e",
+    "metadata.json": "4cbe82b72e7deaa2daf7bdc6d2fa4cf45be62de90d646abe4013034635344b9f"
+  },
+  "rollbackReady": true
+}

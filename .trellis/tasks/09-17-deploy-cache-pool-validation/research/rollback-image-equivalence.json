@@ -1,0 +1,10 @@
+{
+  "checkedAt": "2026-09-17T09:02:29Z",
+  "beforeImageId": "sha256:5de69aa31ec50b20668c9270cff88606a661cb42512ff91e728b57132b3e8ef1",
+  "currentImageId": "sha256:af7dc2e2ac40edf5b4939e0449e84a4ef077ce8d8a133024252c2333145a1fcd",
+  "beforeImageInspectableAfterRollback": false,
+  "equivalenceComparisonAvailable": false,
+  "explicitPruneIssued": false,
+  "currentOldReleaseSourceHashesMatch": true,
+  "note": "The pre-switch container image ID was no longer inspectable after compose recreated the container. Rollback restored the exact prior compose/config/deployment bytes and old release tag, rebuilt from the retained old release, and passed health/API/internal gates, but exact image-ID equality cannot be claimed."
+}

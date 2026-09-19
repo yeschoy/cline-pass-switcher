@@ -1,0 +1,17 @@
+{
+  "approved": true,
+  "buildContext": "./releases/20260917-092017-cbdee55-cache-pool",
+  "candidatePath": "/opt/cline-pass-switcher/candidate-20260917-092017-cbdee55-cache-pool.yml",
+  "candidateSha256": "4428a6f5541e08b679e879abda745f54987c7a9e155d01388e4a503ed94c16c9",
+  "image": "cline-pass-switcher:20260917-092017-cbdee55-cache-pool",
+  "semanticDiff": [
+    {
+      "kind": "changed",
+      "path": "services.cline-pass-console.build.context"
+    },
+    {
+      "kind": "changed",
+      "path": "services.cline-pass-console.image"
+    }
+  ]
+}

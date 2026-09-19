@@ -1,0 +1,7 @@
+{"file":".trellis/spec/backend/deployment-guidelines.md","reason":"Independently verify source pinning, allowlist, backups, switch gates, evidence and rollback readiness."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Verify live config migration and final semantic diff contain only approved fields."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verify active/standby roles, quota refresh ownership and API/runtime behavior after switch."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Verify reports and remote evidence expose no secrets or forbidden diagnostic data."}
+{"file":".trellis/tasks/archive/2026-09/09-17-deploy-quota-forecast-panel/research/deployment-20260916.md","reason":"Compare the rollout against the last proven production deployment flow."}
+{"file":".trellis/tasks/archive/2026-09/09-17-deploy-quota-forecast-panel/research/independent-check-20260916.md","reason":"Use prior independent-gate structure and distinguish the known public DNS limitation."}
+{"file":".trellis/tasks/09-17-deploy-cache-pool-validation/research/current-production-preflight.json","reason":"Recompute and challenge the latest sanitized preflight baseline."}

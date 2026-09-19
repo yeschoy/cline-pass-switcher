@@ -1,0 +1,26 @@
+{
+  "archiveAllowlist": true,
+  "archiveSha256": "cf11f46027c8ef87d44f166bf5d526b220e9c25508781b26a436ae5457b2ac65",
+  "image": "cline-pass-switcher:20260917-084457-cbdee55-cache-pool",
+  "imageId": "sha256:f20f6e318f784ac5ee9ee14f2bdb6701835cbb1f91d36383b7a5d02e72cfc4ca",
+  "installedAt": "2026-09-17T08:48:18.435344Z",
+  "liveContainerSwitched": false,
+  "migration": {
+    "beforeConfigSha256": "698b889a12b2ef6463a57d78b20ac2dc266799c75f47035dd4f2040bb51d6354",
+    "onlyExpectedDiff": true,
+    "predictedConfigSha256": "c8f4f8c347538dd699da229d6a91da4717bab8254d7fe912e89912fddd504615"
+  },
+  "proceduralRetries": [
+    {
+      "impact": "none; read-only key-name correction",
+      "stage": "T0 projection"
+    },
+    {
+      "impact": "none on live state; private copied-data ownership correction",
+      "stage": "copied-data migration verification"
+    }
+  ],
+  "release": "20260917-084457-cbdee55-cache-pool",
+  "sourceCommit": "cbdee55f1b78fdc41a69bfa9773ff73798b63057",
+  "sourceHashesMatch": true
+}

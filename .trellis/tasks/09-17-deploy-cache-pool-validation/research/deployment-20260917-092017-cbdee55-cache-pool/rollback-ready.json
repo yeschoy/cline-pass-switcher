@@ -1,0 +1,13 @@
+{
+  "backups": [
+    "compose.yml",
+    "deployment.json",
+    "config.json",
+    "metadata.json"
+  ],
+  "oldImage": "cline-pass-switcher:20260916-174357-529d642f4b8e-quota-forecast",
+  "oldImageId": "sha256:af7dc2e2ac40edf5b4939e0449e84a4ef077ce8d8a133024252c2333145a1fcd",
+  "oldImageIdInspectable": true,
+  "readyAt": "2026-09-17T09:31:46.282285Z",
+  "switchAndRollbackNoBuild": true
+}

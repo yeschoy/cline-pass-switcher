@@ -1,0 +1,9 @@
+{"file":".trellis/spec/backend/deployment-guidelines.md","reason":"Canonical production target, committed archive, backup, health gates and rollback contract."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"cachePoolSize migration, atomic config persistence and old/new schema safety."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Cache pool roles, quota ownership, capacity behavior and management API invariants to verify after deployment."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Safe cache-pool diagnostics and no-secret production evidence boundary."}
+{"file":".trellis/tasks/archive/2026-09/09-17-improve-cache-hit-scheduling/verification.md","reason":"Committed feature test and real-browser evidence that qualifies the release source."}
+{"file":".trellis/tasks/archive/2026-09/09-17-improve-cache-hit-scheduling/research/current-cache-baseline.md","reason":"Original cache baseline, root-cause limits and rollout guardrails."}
+{"file":".trellis/tasks/archive/2026-09/09-17-deploy-quota-forecast-panel/research/deployment-20260916.md","reason":"Last successful deployment procedure, current release layout and retained rollback conventions."}
+{"file":".trellis/tasks/archive/2026-09/09-17-deploy-quota-forecast-panel/research/independent-check-20260916.md","reason":"Independent evidence expectations and known pre-existing public DNS condition."}
+{"file":".trellis/tasks/09-17-deploy-cache-pool-validation/research/current-production-preflight.json","reason":"Latest sanitized production container, config, account, cache, latency and error baseline."}

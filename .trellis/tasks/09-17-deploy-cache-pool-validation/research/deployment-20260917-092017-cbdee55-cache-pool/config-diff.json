@@ -1,0 +1,52 @@
+{
+  "appliedAt": "2026-09-17T09:36:42.243000Z",
+  "cachePoolSize": 2,
+  "concurrencyWaitMs": 5000,
+  "configAfterSha256": "808ac0a541d99efdb79b23dd38ca72f1d49b7706072c8850cd3b82a66ddba1fe",
+  "configBeforeSha256": "698b889a12b2ef6463a57d78b20ac2dc266799c75f47035dd4f2040bb51d6354",
+  "formalWindow": {
+    "from": "2026-09-17T11:36:42.243000Z",
+    "to": "2026-09-18T11:36:42.243000Z"
+  },
+  "migrationConfigSha256": "c8f4f8c347538dd699da229d6a91da4717bab8254d7fe912e89912fddd504615",
+  "mode": "sticky",
+  "onlyApprovedFields": true,
+  "postCount": 1,
+  "selected": [
+    "account#eb683cec24",
+    "account#ad131bd944"
+  ],
+  "semanticDiff": [
+    {
+      "kind": "added",
+      "new": 2,
+      "old": null,
+      "path": "accountPipeline.cachePoolSize"
+    },
+    {
+      "account": "account#eb683cec24",
+      "kind": "changed",
+      "new": 1,
+      "old": 100,
+      "path": "accounts[1].priority"
+    },
+    {
+      "account": "account#ad131bd944",
+      "kind": "changed",
+      "new": 2,
+      "old": 100,
+      "path": "accounts[7].priority"
+    },
+    {
+      "kind": "changed",
+      "new": 5000,
+      "old": 2000,
+      "path": "concurrencyWaitMs"
+    }
+  ],
+  "verificationAt": "2026-09-18T11:36:42.243000Z",
+  "warmup": {
+    "from": "2026-09-17T09:36:42.243000Z",
+    "to": "2026-09-17T11:36:42.243000Z"
+  }
+}

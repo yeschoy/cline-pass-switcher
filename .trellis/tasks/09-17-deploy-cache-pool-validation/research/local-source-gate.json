@@ -1,0 +1,41 @@
+{
+  "archive": {
+    "allowlistValid": true,
+    "localPath": "/tmp/cline-cache-pool-deploy.g9avcl/source.tar",
+    "sha256": "cf11f46027c8ef87d44f166bf5d526b220e9c25508781b26a436ae5457b2ac65",
+    "sizeBytes": 378880
+  },
+  "capturedAt": "2026-09-17T08:39:32Z",
+  "checks": {
+    "gitDiffCheck": "pass",
+    "identityGitignored": true,
+    "identityMode": "600",
+    "identityRegular": true,
+    "jsonlSyntax": "pass",
+    "serverSyntax": "pass"
+  },
+  "sourceCommit": "cbdee55f1b78fdc41a69bfa9773ff73798b63057",
+  "sourceHashes": {
+    "lib/detailed-log-capture.js": "cec4581fc4cadf198f68f55a7766b1bac9bfb5e758d8d4cae06546abd7ba13ad",
+    "lib/detailed-log-store.js": "18c123b35f2d465c4d977d96f726b35fc23092be029bffa38bf90a34e9f56254",
+    "lib/jsonl-log-store.js": "6471348de5fa4b43c56eb950e5903e749a939d930299fef6c3e1ae6e896861f8",
+    "public/index.html": "8bac00406459e941b0d366789cf99946c2398e76582d3ddffd442ba4d6c46834",
+    "server.js": "11742c8d33c94f211914277b904d3dc1c2344aaeca13ea3fb9245d76bd26412d"
+  },
+  "sourceIsHead": true,
+  "tests": {
+    "failed": 0,
+    "focusedRetries": {
+      "accountMinuteCap": 3,
+      "allPassed": true,
+      "quotaAdmission": 3
+    },
+    "fullRerun": "pass",
+    "initialRun": {
+      "failed": 2,
+      "passed": 144
+    },
+    "passed": 146,
+    "total": 146
+  }
+}

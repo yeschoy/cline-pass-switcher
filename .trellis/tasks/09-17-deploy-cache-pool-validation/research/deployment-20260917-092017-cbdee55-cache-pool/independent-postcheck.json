@@ -1,0 +1,124 @@
+{
+  "apiStatuses": {
+    "accounts": 200,
+    "detailedSettings": 200,
+    "meta": 200,
+    "models": 200,
+    "requestLogs": 200,
+    "statistics": 200
+  },
+  "boundedLogScan": {
+    "indicators": [],
+    "maxLines": 500
+  },
+  "checkedAt": "2026-09-17T09:39:37.997663Z",
+  "checks": {
+    "activeHardState": true,
+    "api:accounts": true,
+    "api:detailedSettings": true,
+    "api:meta": true,
+    "api:models": true,
+    "api:requestLogs": true,
+    "api:statistics": true,
+    "backupModes": true,
+    "boundedLogs": true,
+    "composeTarget": true,
+    "container": true,
+    "deployment": true,
+    "evidenceJson": true,
+    "firstFailureImagePreserved": true,
+    "firstFailurePreserved": true,
+    "hashes": true,
+    "internalAlias": true,
+    "newImage": true,
+    "oldImage": true,
+    "publicPrecondition": true,
+    "roles": true,
+    "semanticDiff": true,
+    "sourceHashes": true
+  },
+  "container": {
+    "health": "healthy",
+    "image": "cline-pass-switcher:20260917-092017-cbdee55-cache-pool",
+    "imageId": "sha256:b0833b3491f4c7dbfa2c7e83ed5ebdebc84d7f97280960e53cbd475a65e852d2",
+    "oomKilled": false,
+    "restartCount": 0,
+    "status": "running"
+  },
+  "failed": [],
+  "firstFailedReleasePreserved": true,
+  "hashes": {
+    "compose": "4428a6f5541e08b679e879abda745f54987c7a9e155d01388e4a503ed94c16c9",
+    "config": "808ac0a541d99efdb79b23dd38ca72f1d49b7706072c8850cd3b82a66ddba1fe",
+    "deployment": "251af647f6636905acf8b735f6a3d5a02105cc51f5e8c1a629f4ca979dcdbd80",
+    "metadata": "68e313b3a6a0595ce335961e011f132fe98279e6ee9b3b0ee13a2b679058a004"
+  },
+  "publicIngress": {
+    "httpStatus": null,
+    "precondition": "dns_unavailable_preexisting",
+    "remoteDns": "unavailable"
+  },
+  "roles": [
+    {
+      "account": "account#e97a8704d3",
+      "role": "standby"
+    },
+    {
+      "account": "account#eb683cec24",
+      "role": "active"
+    },
+    {
+      "account": "account#63b741d37f",
+      "role": "standby"
+    },
+    {
+      "account": "account#5c8762b116",
+      "role": "standby"
+    },
+    {
+      "account": "account#8e2f87f25b",
+      "role": "standby"
+    },
+    {
+      "account": "account#3efe425de6",
+      "role": "standby"
+    },
+    {
+      "account": "account#213fe539cd",
+      "role": null
+    },
+    {
+      "account": "account#ad131bd944",
+      "role": "active"
+    },
+    {
+      "account": "account#c73d65006e",
+      "role": null
+    }
+  ],
+  "rollback": {
+    "exactIdAvailable": true,
+    "noBuildProcedureReady": true,
+    "oldImage": "cline-pass-switcher:20260916-174357-529d642f4b8e-quota-forecast",
+    "oldImageId": "sha256:af7dc2e2ac40edf5b4939e0449e84a4ef077ce8d8a133024252c2333145a1fcd"
+  },
+  "scope": "independent read-only post-deployment verification",
+  "semanticDiff": [
+    {
+      "kind": "added",
+      "path": "accountPipeline.cachePoolSize"
+    },
+    {
+      "kind": "changed",
+      "path": "accounts[1].priority"
+    },
+    {
+      "kind": "changed",
+      "path": "accounts[7].priority"
+    },
+    {
+      "kind": "changed",
+      "path": "concurrencyWaitMs"
+    }
+  ]
+}

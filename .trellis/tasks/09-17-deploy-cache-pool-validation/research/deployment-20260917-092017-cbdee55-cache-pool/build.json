@@ -1,0 +1,9 @@
+{
+  "archiveSha256": "cf11f46027c8ef87d44f166bf5d526b220e9c25508781b26a436ae5457b2ac65",
+  "builtAt": "2026-09-17T09:29:02.302092Z",
+  "candidateComposePath": "/opt/cline-pass-switcher/candidate-20260917-092017-cbdee55-cache-pool.yml",
+  "image": "cline-pass-switcher:20260917-092017-cbdee55-cache-pool",
+  "imageId": "sha256:b0833b3491f4c7dbfa2c7e83ed5ebdebc84d7f97280960e53cbd475a65e852d2",
+  "method": "docker compose -f candidate build",
+  "sourceCommit": "cbdee55f1b78fdc41a69bfa9773ff73798b63057"
+}

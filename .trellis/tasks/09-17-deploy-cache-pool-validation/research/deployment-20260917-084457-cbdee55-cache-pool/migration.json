@@ -1,0 +1,15 @@
+{
+  "checkedAt": "2026-09-17T08:48:18.413459Z",
+  "configAfterSha256": "c8f4f8c347538dd699da229d6a91da4717bab8254d7fe912e89912fddd504615",
+  "configBeforeSha256": "698b889a12b2ef6463a57d78b20ac2dc266799c75f47035dd4f2040bb51d6354",
+  "network": "none",
+  "onlyExpectedMigration": true,
+  "proceduralRetry": "host verifier initially could not read root-owned atomic replacement; private copy ownership corrected only",
+  "semanticDiff": [
+    {
+      "kind": "added",
+      "new": 0,
+      "path": "accountPipeline.cachePoolSize"
+    }
+  ]
+}

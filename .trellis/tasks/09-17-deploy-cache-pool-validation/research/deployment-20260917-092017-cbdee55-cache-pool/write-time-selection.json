@@ -1,0 +1,241 @@
+{
+  "candidates": [
+    {
+      "account": "account#e97a8704d3",
+      "health": {
+        "results": 330,
+        "score": 99.63636363636364,
+        "status": "available"
+      },
+      "preferredCohort": true,
+      "qualified": true,
+      "quota": {
+        "maxPercentUsed": 33,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.6158536585365854,
+        "cacheHitRequests": 202,
+        "cacheKnownRequests": 328
+      },
+      "selectionScore": 28.585365853658537
+    },
+    {
+      "account": "account#eb683cec24",
+      "health": {
+        "results": 414,
+        "score": 99.90338164251207,
+        "status": "available"
+      },
+      "preferredCohort": true,
+      "qualified": true,
+      "quota": {
+        "maxPercentUsed": 16,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.6561743341404358,
+        "cacheHitRequests": 271,
+        "cacheKnownRequests": 413
+      },
+      "selectionScore": 49.617433414043575
+    },
+    {
+      "account": "account#63b741d37f",
+      "health": {
+        "results": 0,
+        "score": null,
+        "status": "insufficient"
+      },
+      "preferredCohort": false,
+      "qualified": true,
+      "quota": {
+        "maxPercentUsed": 92,
+        "pool": "warm",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": null,
+        "cacheHitRequests": 0,
+        "cacheKnownRequests": 0
+      },
+      "selectionScore": null
+    },
+    {
+      "account": "account#5c8762b116",
+      "health": {
+        "results": 423,
+        "score": 99.43262411347517,
+        "status": "available"
+      },
+      "preferredCohort": true,
+      "qualified": true,
+      "quota": {
+        "maxPercentUsed": 38,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.6370192307692307,
+        "cacheHitRequests": 265,
+        "cacheKnownRequests": 416
+      },
+      "selectionScore": 25.701923076923073
+    },
+    {
+      "account": "account#8e2f87f25b",
+      "health": {
+        "results": 355,
+        "score": 99.88732394366197,
+        "status": "available"
+      },
+      "preferredCohort": true,
+      "qualified": true,
+      "quota": {
+        "maxPercentUsed": 24,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.6610169491525424,
+        "cacheHitRequests": 234,
+        "cacheKnownRequests": 354
+      },
+      "selectionScore": 42.10169491525424
+    },
+    {
+      "account": "account#3efe425de6",
+      "health": {
+        "results": 467,
+        "score": 100,
+        "status": "available"
+      },
+      "preferredCohort": true,
+      "qualified": true,
+      "quota": {
+        "maxPercentUsed": 19,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.6680942184154176,
+        "cacheHitRequests": 312,
+        "cacheKnownRequests": 467
+      },
+      "selectionScore": 47.80942184154176
+    },
+    {
+      "account": "account#213fe539cd",
+      "health": {
+        "results": 0,
+        "score": null,
+        "status": "disabled"
+      },
+      "preferredCohort": false,
+      "qualified": false,
+      "quota": {
+        "maxPercentUsed": 1,
+        "pool": "unknown",
+        "status": "unknown"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": null,
+        "cacheHitRequests": 0,
+        "cacheKnownRequests": 0
+      },
+      "selectionScore": null
+    },
+    {
+      "account": "account#ad131bd944",
+      "health": {
+        "results": 355,
+        "score": 99.83098591549296,
+        "status": "available"
+      },
+      "preferredCohort": true,
+      "qualified": true,
+      "quota": {
+        "maxPercentUsed": 14,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.6186440677966102,
+        "cacheHitRequests": 219,
+        "cacheKnownRequests": 354
+      },
+      "selectionScore": 47.86440677966102
+    },
+    {
+      "account": "account#c73d65006e",
+      "health": {
+        "results": 47,
+        "score": 99.14893617021276,
+        "status": "disabled"
+      },
+      "preferredCohort": false,
+      "qualified": false,
+      "quota": {
+        "maxPercentUsed": 6,
+        "pool": "unknown",
+        "status": "unknown"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.1956521739130435,
+        "cacheHitRequests": 9,
+        "cacheKnownRequests": 46
+      },
+      "selectionScore": null
+    }
+  ],
+  "cohort": "available-health-with-at-least-100-cache-samples",
+  "configSha256": "c8f4f8c347538dd699da229d6a91da4717bab8254d7fe912e89912fddd504615",
+  "formula": "cacheHitRequestRate*100-maxPercentUsed",
+  "selected": [
+    {
+      "account": "account#eb683cec24",
+      "health": {
+        "results": 414,
+        "score": 99.90338164251207,
+        "status": "available"
+      },
+      "preferredCohort": true,
+      "qualified": true,
+      "quota": {
+        "maxPercentUsed": 16,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.6561743341404358,
+        "cacheHitRequests": 271,
+        "cacheKnownRequests": 413
+      },
+      "selectionScore": 49.617433414043575
+    },
+    {
+      "account": "account#ad131bd944",
+      "health": {
+        "results": 355,
+        "score": 99.83098591549296,
+        "status": "available"
+      },
+      "preferredCohort": true,
+      "qualified": true,
+      "quota": {
+        "maxPercentUsed": 14,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.6186440677966102,
+        "cacheHitRequests": 219,
+        "cacheKnownRequests": 354
+      },
+      "selectionScore": 47.86440677966102
+    }
+  ],
+  "selectedAt": "2026-09-17T09:33:24.215172Z"
+}

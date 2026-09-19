@@ -1,0 +1,456 @@
+{
+  "accounts": [
+    {
+      "account": "account#e97a8704d3",
+      "enabled": true,
+      "health": {
+        "results": 360,
+        "score": 99.5,
+        "status": "available"
+      },
+      "keyConfigured": true,
+      "maxConcurrent": 0,
+      "priority": 100,
+      "quota": {
+        "ageSeconds": 113.0,
+        "errorCategory": null,
+        "maxPercentUsed": 32,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheFieldCoverage": 1.0,
+        "cacheHitRequestRate": 0.6498599439775911,
+        "cacheHitRequests": 232,
+        "cacheInputCachedTokens": 54077495,
+        "cacheInputKnownRequests": 357,
+        "cacheInputTokens": 58128320,
+        "cacheKnownRequests": 357,
+        "cacheTokenRatio": 0.9303123675344479,
+        "cachedTokens": 54077495,
+        "errors": 3,
+        "inputKnownRequests": 357,
+        "inputTokens": 58128320,
+        "outputKnownRequests": 357,
+        "outputTokens": 253193,
+        "requests": 361,
+        "totalKnownRequests": 357,
+        "totalTokens": 58381513,
+        "usageCoverage": 0.9889196675900277,
+        "usageRequests": 357
+      }
+    },
+    {
+      "account": "account#eb683cec24",
+      "enabled": true,
+      "health": {
+        "results": 450,
+        "score": 99.28888888888889,
+        "status": "available"
+      },
+      "keyConfigured": true,
+      "maxConcurrent": 0,
+      "priority": 100,
+      "quota": {
+        "ageSeconds": 113.0,
+        "errorCategory": null,
+        "maxPercentUsed": 14,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheFieldCoverage": 1.0,
+        "cacheHitRequestRate": 0.6809954751131222,
+        "cacheHitRequests": 301,
+        "cacheInputCachedTokens": 36568989,
+        "cacheInputKnownRequests": 442,
+        "cacheInputTokens": 39352293,
+        "cacheKnownRequests": 442,
+        "cacheTokenRatio": 0.9292721265314832,
+        "cachedTokens": 36568989,
+        "errors": 8,
+        "inputKnownRequests": 442,
+        "inputTokens": 39352293,
+        "outputKnownRequests": 442,
+        "outputTokens": 268645,
+        "requests": 450,
+        "totalKnownRequests": 442,
+        "totalTokens": 39620938,
+        "usageCoverage": 0.9822222222222222,
+        "usageRequests": 442
+      }
+    },
+    {
+      "account": "account#63b741d37f",
+      "enabled": true,
+      "health": {
+        "results": 0,
+        "score": null,
+        "status": "insufficient"
+      },
+      "keyConfigured": true,
+      "maxConcurrent": 0,
+      "priority": 100,
+      "quota": {
+        "ageSeconds": 218.2,
+        "errorCategory": null,
+        "maxPercentUsed": 92,
+        "pool": "warm",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheFieldCoverage": null,
+        "cacheHitRequestRate": null,
+        "cacheHitRequests": 0,
+        "cacheInputCachedTokens": 0,
+        "cacheInputKnownRequests": 0,
+        "cacheInputTokens": 0,
+        "cacheKnownRequests": 0,
+        "cacheTokenRatio": null,
+        "cachedTokens": 0,
+        "errors": 0,
+        "inputKnownRequests": 0,
+        "inputTokens": 0,
+        "outputKnownRequests": 0,
+        "outputTokens": 0,
+        "requests": 0,
+        "totalKnownRequests": 0,
+        "totalTokens": 0,
+        "usageCoverage": null,
+        "usageRequests": 0
+      }
+    },
+    {
+      "account": "account#5c8762b116",
+      "enabled": true,
+      "health": {
+        "results": 451,
+        "score": 99.37915742793791,
+        "status": "available"
+      },
+      "keyConfigured": true,
+      "maxConcurrent": 0,
+      "priority": 100,
+      "quota": {
+        "ageSeconds": 245.4,
+        "errorCategory": null,
+        "maxPercentUsed": 34,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheFieldCoverage": 1.0,
+        "cacheHitRequestRate": 0.6711711711711712,
+        "cacheHitRequests": 298,
+        "cacheInputCachedTokens": 47377995,
+        "cacheInputKnownRequests": 444,
+        "cacheInputTokens": 51572294,
+        "cacheKnownRequests": 444,
+        "cacheTokenRatio": 0.9186714672804743,
+        "cachedTokens": 47377995,
+        "errors": 7,
+        "inputKnownRequests": 444,
+        "inputTokens": 51572294,
+        "outputKnownRequests": 444,
+        "outputTokens": 278892,
+        "requests": 501,
+        "totalKnownRequests": 444,
+        "totalTokens": 51851186,
+        "usageCoverage": 0.8862275449101796,
+        "usageRequests": 444
+      }
+    },
+    {
+      "account": "account#8e2f87f25b",
+      "enabled": true,
+      "health": {
+        "results": 326,
+        "score": 98.03680981595092,
+        "status": "available"
+      },
+      "keyConfigured": true,
+      "maxConcurrent": 0,
+      "priority": 100,
+      "quota": {
+        "ageSeconds": 218.2,
+        "errorCategory": null,
+        "maxPercentUsed": 22,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheFieldCoverage": 1.0,
+        "cacheHitRequestRate": 0.6290322580645161,
+        "cacheHitRequests": 195,
+        "cacheInputCachedTokens": 11702225,
+        "cacheInputKnownRequests": 310,
+        "cacheInputTokens": 14862031,
+        "cacheKnownRequests": 310,
+        "cacheTokenRatio": 0.7873907005038544,
+        "cachedTokens": 11702225,
+        "errors": 16,
+        "inputKnownRequests": 310,
+        "inputTokens": 14862031,
+        "outputKnownRequests": 310,
+        "outputTokens": 183241,
+        "requests": 327,
+        "totalKnownRequests": 310,
+        "totalTokens": 15045272,
+        "usageCoverage": 0.9480122324159022,
+        "usageRequests": 310
+      }
+    },
+    {
+      "account": "account#3efe425de6",
+      "enabled": true,
+      "health": {
+        "results": 404,
+        "score": 100.0,
+        "status": "available"
+      },
+      "keyConfigured": true,
+      "maxConcurrent": 0,
+      "priority": 100,
+      "quota": {
+        "ageSeconds": 22.9,
+        "errorCategory": null,
+        "maxPercentUsed": 13,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheFieldCoverage": 1.0,
+        "cacheHitRequestRate": 0.6658415841584159,
+        "cacheHitRequests": 269,
+        "cacheInputCachedTokens": 31714820,
+        "cacheInputKnownRequests": 404,
+        "cacheInputTokens": 34936430,
+        "cacheKnownRequests": 404,
+        "cacheTokenRatio": 0.9077865139626459,
+        "cachedTokens": 31714820,
+        "errors": 0,
+        "inputKnownRequests": 404,
+        "inputTokens": 34936430,
+        "outputKnownRequests": 404,
+        "outputTokens": 284369,
+        "requests": 442,
+        "totalKnownRequests": 404,
+        "totalTokens": 35220799,
+        "usageCoverage": 0.9140271493212669,
+        "usageRequests": 404
+      }
+    },
+    {
+      "account": "account#213fe539cd",
+      "enabled": false,
+      "health": {
+        "results": 0,
+        "score": null,
+        "status": "insufficient"
+      },
+      "keyConfigured": true,
+      "maxConcurrent": 0,
+      "priority": 100,
+      "quota": {
+        "ageSeconds": 42709.0,
+        "errorCategory": null,
+        "maxPercentUsed": 1,
+        "pool": "unknown",
+        "status": "unknown"
+      },
+      "recent24h": {
+        "cacheFieldCoverage": null,
+        "cacheHitRequestRate": null,
+        "cacheHitRequests": 0,
+        "cacheInputCachedTokens": 0,
+        "cacheInputKnownRequests": 0,
+        "cacheInputTokens": 0,
+        "cacheKnownRequests": 0,
+        "cacheTokenRatio": null,
+        "cachedTokens": 0,
+        "errors": 0,
+        "inputKnownRequests": 0,
+        "inputTokens": 0,
+        "outputKnownRequests": 0,
+        "outputTokens": 0,
+        "requests": 0,
+        "totalKnownRequests": 0,
+        "totalTokens": 0,
+        "usageCoverage": null,
+        "usageRequests": 0
+      }
+    },
+    {
+      "account": "account#ad131bd944",
+      "enabled": true,
+      "health": {
+        "results": 381,
+        "score": 98.9501312335958,
+        "status": "available"
+      },
+      "keyConfigured": true,
+      "maxConcurrent": 0,
+      "priority": 100,
+      "quota": {
+        "ageSeconds": 245.3,
+        "errorCategory": null,
+        "maxPercentUsed": 12,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheFieldCoverage": 1.0,
+        "cacheHitRequestRate": 0.6102150537634409,
+        "cacheHitRequests": 227,
+        "cacheInputCachedTokens": 24919971,
+        "cacheInputKnownRequests": 372,
+        "cacheInputTokens": 32609025,
+        "cacheKnownRequests": 372,
+        "cacheTokenRatio": 0.7642047255322721,
+        "cachedTokens": 24919971,
+        "errors": 9,
+        "inputKnownRequests": 372,
+        "inputTokens": 32609025,
+        "outputKnownRequests": 372,
+        "outputTokens": 331562,
+        "requests": 384,
+        "totalKnownRequests": 372,
+        "totalTokens": 32940587,
+        "usageCoverage": 0.96875,
+        "usageRequests": 372
+      }
+    },
+    {
+      "account": "account#c73d65006e",
+      "enabled": false,
+      "health": {
+        "results": 110,
+        "score": 95.27272727272727,
+        "status": "available"
+      },
+      "keyConfigured": true,
+      "maxConcurrent": 0,
+      "priority": 100,
+      "quota": {
+        "ageSeconds": 42728.1,
+        "errorCategory": null,
+        "maxPercentUsed": 6,
+        "pool": "unknown",
+        "status": "unknown"
+      },
+      "recent24h": {
+        "cacheFieldCoverage": 1.0,
+        "cacheHitRequestRate": 0.24742268041237114,
+        "cacheHitRequests": 24,
+        "cacheInputCachedTokens": 3659685,
+        "cacheInputKnownRequests": 97,
+        "cacheInputTokens": 4969137,
+        "cacheKnownRequests": 97,
+        "cacheTokenRatio": 0.7364830150587517,
+        "cachedTokens": 3659685,
+        "errors": 13,
+        "inputKnownRequests": 97,
+        "inputTokens": 4969137,
+        "outputKnownRequests": 97,
+        "outputTokens": 70988,
+        "requests": 110,
+        "totalKnownRequests": 97,
+        "totalTokens": 5040125,
+        "usageCoverage": 0.8818181818181818,
+        "usageRequests": 97
+      }
+    }
+  ],
+  "capturedAt": 1789619249889,
+  "config": {
+    "accountCount": 9,
+    "accountPipeline": {
+      "excludeUnhealthy": true,
+      "healthSort": true,
+      "order": [
+        "excludeUnhealthy",
+        "quotaPool",
+        "healthSort",
+        "sticky"
+      ],
+      "quotaPool": true,
+      "sticky": true
+    },
+    "concurrencyWaitMs": 2000,
+    "enabledCount": 7,
+    "mode": "sticky"
+  },
+  "container": {
+    "health": "healthy",
+    "id": "884878fd25e400ba9e926233d7cba426fab8037695f6e6499a34b701a1cc7807",
+    "image": "cline-pass-switcher:20260916-174357-529d642f4b8e-quota-forecast",
+    "imageId": "sha256:5de69aa31ec50b20668c9270cff88606a661cb42512ff91e728b57132b3e8ef1",
+    "oomKilled": false,
+    "restartCount": 0,
+    "startedAt": "2026-09-16T17:50:51.792135018Z",
+    "status": "running"
+  },
+  "hashes": {
+    "compose": "b9bb50760aef8ae6c0b4578b937e631024d33127ea63a23181d8c3298f6de0b6",
+    "config": "698b889a12b2ef6463a57d78b20ac2dc266799c75f47035dd4f2040bb51d6354",
+    "deployment": "d5673978fa3ae261899bf6d1a53991aaefc2c161595ec1a10c6d15602b26202e",
+    "metadata": "3e5e417a404800cbbffb555f78e6a1155ab7988f30535af0dcf55d2f02cd3e06"
+  },
+  "host": {
+    "diskAvailableKiB": 410625192
+  },
+  "requestLogs": {
+    "capacityFallback": 0,
+    "durationMs": {
+      "max": 235498,
+      "p50": 5155,
+      "p95": 29311.39999999998
+    },
+    "invalidLines": 0,
+    "overflow": 0,
+    "records": 2577,
+    "results": {
+      "client_cancelled": 94,
+      "failed": 56,
+      "success": 2427
+    },
+    "sessionSource": {
+      "message_hmac": 2577
+    },
+    "status": {
+      "200": 2427,
+      "499": 94,
+      "500": 49,
+      "502": 7
+    },
+    "switched": 0
+  },
+  "scope": "read-only sanitized production preflight; no names, IDs, keys, proxy URLs, header values, sessions, or bodies",
+  "statistics": {
+    "coverage": {
+      "accountIncompleteAt": {},
+      "droppedAccountMinuteCells": 0
+    },
+    "recent24h": {
+      "cacheFieldCoverage": 1.0,
+      "cacheHitRequestRate": 0.6372629843363561,
+      "cacheHitRequests": 1546,
+      "cacheInputCachedTokens": 210021180,
+      "cacheInputKnownRequests": 2426,
+      "cacheInputTokens": 236429530,
+      "cacheKnownRequests": 2426,
+      "cacheTokenRatio": 0.8883035042196294,
+      "cachedTokens": 210021180,
+      "errors": 56,
+      "inputKnownRequests": 2426,
+      "inputTokens": 236429530,
+      "outputKnownRequests": 2426,
+      "outputTokens": 1670890,
+      "requests": 2575,
+      "totalKnownRequests": 2426,
+      "totalTokens": 238100420,
+      "usageCoverage": 0.9421359223300971,
+      "usageRequests": 2426
+    }
+  }
+}

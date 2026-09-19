@@ -1,0 +1,453 @@
+{
+  "accounts": [
+    {
+      "account": "account#e97a8704d3",
+      "enabled": true,
+      "health": {
+        "results": 339,
+        "score": 99.64601769911505,
+        "status": "available"
+      },
+      "keyConfigured": true,
+      "maxConcurrent": 0,
+      "preferredCohort": true,
+      "priority": 100,
+      "qualified": true,
+      "quota": {
+        "errorCategory": null,
+        "fetchedAt": 1789634343335,
+        "maxPercentUsed": 33,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.629080118694362,
+        "cacheHitRequests": 212,
+        "cacheKnownRequests": 337,
+        "cacheTokenRatio": 0.9308645852726278,
+        "cachedTokens": 53960187,
+        "errors": 2,
+        "inputTokens": 57967816,
+        "requests": 339,
+        "usageRequests": 337
+      },
+      "selectionScore": 29.908011869436194
+    },
+    {
+      "account": "account#eb683cec24",
+      "enabled": true,
+      "health": {
+        "results": 417,
+        "score": 99.9040767386091,
+        "status": "available"
+      },
+      "keyConfigured": true,
+      "maxConcurrent": 0,
+      "preferredCohort": true,
+      "priority": 100,
+      "qualified": true,
+      "quota": {
+        "errorCategory": null,
+        "fetchedAt": 1789634343315,
+        "maxPercentUsed": 16,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.6634615384615384,
+        "cacheHitRequests": 276,
+        "cacheKnownRequests": 416,
+        "cacheTokenRatio": 0.906873166148811,
+        "cachedTokens": 36343703,
+        "errors": 1,
+        "inputTokens": 40075839,
+        "requests": 420,
+        "usageRequests": 416
+      },
+      "selectionScore": 50.34615384615384
+    },
+    {
+      "account": "account#63b741d37f",
+      "enabled": true,
+      "health": {
+        "results": 0,
+        "score": null,
+        "status": "insufficient"
+      },
+      "keyConfigured": true,
+      "maxConcurrent": 0,
+      "preferredCohort": false,
+      "priority": 100,
+      "qualified": true,
+      "quota": {
+        "errorCategory": null,
+        "fetchedAt": 1789634544595,
+        "maxPercentUsed": 92,
+        "pool": "warm",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": null,
+        "cacheHitRequests": 0,
+        "cacheKnownRequests": 0,
+        "cacheTokenRatio": null,
+        "cachedTokens": 0,
+        "errors": 0,
+        "inputTokens": 0,
+        "requests": 0,
+        "usageRequests": 0
+      },
+      "selectionScore": null
+    },
+    {
+      "account": "account#5c8762b116",
+      "enabled": true,
+      "health": {
+        "results": 416,
+        "score": 99.61538461538461,
+        "status": "available"
+      },
+      "keyConfigured": true,
+      "maxConcurrent": 0,
+      "preferredCohort": true,
+      "priority": 100,
+      "qualified": true,
+      "quota": {
+        "errorCategory": null,
+        "fetchedAt": 1789634544621,
+        "maxPercentUsed": 38,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.6374695863746959,
+        "cacheHitRequests": 262,
+        "cacheKnownRequests": 411,
+        "cacheTokenRatio": 0.8692533178253693,
+        "cachedTokens": 36430849,
+        "errors": 4,
+        "inputTokens": 41910509,
+        "requests": 418,
+        "usageRequests": 411
+      },
+      "selectionScore": 25.74695863746959
+    },
+    {
+      "account": "account#8e2f87f25b",
+      "enabled": true,
+      "health": {
+        "results": 340,
+        "score": 99.41176470588235,
+        "status": "available"
+      },
+      "keyConfigured": true,
+      "maxConcurrent": 0,
+      "preferredCohort": true,
+      "priority": 100,
+      "qualified": true,
+      "quota": {
+        "errorCategory": null,
+        "fetchedAt": 1789634493466,
+        "maxPercentUsed": 24,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.6179104477611941,
+        "cacheHitRequests": 207,
+        "cacheKnownRequests": 335,
+        "cacheTokenRatio": 0.7515190180087684,
+        "cachedTokens": 11657312,
+        "errors": 5,
+        "inputTokens": 15511666,
+        "requests": 342,
+        "usageRequests": 335
+      },
+      "selectionScore": 37.791044776119406
+    },
+    {
+      "account": "account#3efe425de6",
+      "enabled": true,
+      "health": {
+        "results": 331,
+        "score": 100,
+        "status": "available"
+      },
+      "keyConfigured": true,
+      "maxConcurrent": 0,
+      "preferredCohort": true,
+      "priority": 100,
+      "qualified": true,
+      "quota": {
+        "errorCategory": null,
+        "fetchedAt": 1789634493438,
+        "maxPercentUsed": 17,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.540785498489426,
+        "cacheHitRequests": 179,
+        "cacheKnownRequests": 331,
+        "cacheTokenRatio": 0.7684653255380155,
+        "cachedTokens": 22861971,
+        "errors": 0,
+        "inputTokens": 29750166,
+        "requests": 337,
+        "usageRequests": 331
+      },
+      "selectionScore": 37.0785498489426
+    },
+    {
+      "account": "account#213fe539cd",
+      "enabled": false,
+      "health": {
+        "results": 0,
+        "score": null,
+        "status": "disabled"
+      },
+      "keyConfigured": true,
+      "maxConcurrent": 0,
+      "preferredCohort": false,
+      "priority": 100,
+      "qualified": false,
+      "quota": {
+        "errorCategory": null,
+        "fetchedAt": 1789576540881,
+        "maxPercentUsed": 1,
+        "pool": "unknown",
+        "status": "unknown"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": null,
+        "cacheHitRequests": 0,
+        "cacheKnownRequests": 0,
+        "cacheTokenRatio": null,
+        "cachedTokens": 0,
+        "errors": 0,
+        "inputTokens": 0,
+        "requests": 0,
+        "usageRequests": 0
+      },
+      "selectionScore": null
+    },
+    {
+      "account": "account#ad131bd944",
+      "enabled": true,
+      "health": {
+        "results": 349,
+        "score": 99.82808022922636,
+        "status": "available"
+      },
+      "keyConfigured": true,
+      "maxConcurrent": 0,
+      "preferredCohort": true,
+      "priority": 100,
+      "qualified": true,
+      "quota": {
+        "errorCategory": null,
+        "fetchedAt": 1789634509527,
+        "maxPercentUsed": 14,
+        "pool": "hot",
+        "status": "fresh"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.6350574712643678,
+        "cacheHitRequests": 221,
+        "cacheKnownRequests": 348,
+        "cacheTokenRatio": 0.7942721033765315,
+        "cachedTokens": 21606893,
+        "errors": 1,
+        "inputTokens": 27203389,
+        "requests": 351,
+        "usageRequests": 348
+      },
+      "selectionScore": 49.50574712643679
+    },
+    {
+      "account": "account#c73d65006e",
+      "enabled": false,
+      "health": {
+        "results": 68,
+        "score": 99.41176470588235,
+        "status": "disabled"
+      },
+      "keyConfigured": true,
+      "maxConcurrent": 0,
+      "preferredCohort": false,
+      "priority": 100,
+      "qualified": false,
+      "quota": {
+        "errorCategory": null,
+        "fetchedAt": 1789576521776,
+        "maxPercentUsed": 6,
+        "pool": "unknown",
+        "status": "unknown"
+      },
+      "recent24h": {
+        "cacheHitRequestRate": 0.2835820895522388,
+        "cacheHitRequests": 19,
+        "cacheKnownRequests": 67,
+        "cacheTokenRatio": 0.8136704431639636,
+        "cachedTokens": 3445363,
+        "errors": 1,
+        "inputTokens": 4234347,
+        "requests": 68,
+        "usageRequests": 67
+      },
+      "selectionScore": null
+    }
+  ],
+  "capturedAt": 1789634640707,
+  "capturedAtIso": "2026-09-17T08:44:00.707000Z",
+  "compose": {
+    "buildContext": "/opt/cline-pass-switcher/releases/20260916-174357-529d642f4b8e-quota-forecast",
+    "containerName": "cline-pass-console",
+    "image": "cline-pass-switcher:20260916-174357-529d642f4b8e-quota-forecast",
+    "service": "cline-pass-console"
+  },
+  "config": {
+    "accountCount": 9,
+    "accountPipeline": {
+      "excludeUnhealthy": true,
+      "healthSort": true,
+      "order": [
+        "excludeUnhealthy",
+        "quotaPool",
+        "healthSort",
+        "sticky"
+      ],
+      "quotaPool": true,
+      "sticky": true
+    },
+    "active": 0,
+    "concurrencyWaitMs": 2000,
+    "enabledCount": 7,
+    "mode": "sticky"
+  },
+  "container": {
+    "health": "healthy",
+    "image": "cline-pass-switcher:20260916-174357-529d642f4b8e-quota-forecast",
+    "imageId": "sha256:5de69aa31ec50b20668c9270cff88606a661cb42512ff91e728b57132b3e8ef1",
+    "oomKilled": false,
+    "restartCount": 0,
+    "startedAt": "2026-09-16T17:50:51.792135018Z",
+    "status": "running"
+  },
+  "deployment": {
+    "previousRelease": "20260916-050450-b1f2170ef4a8",
+    "release": "20260916-174357-529d642f4b8e-quota-forecast",
+    "sourceCommit": "529d642f4b8ececd0a5b2975addbd8ed74488090"
+  },
+  "hashes": {
+    "compose": "b9bb50760aef8ae6c0b4578b937e631024d33127ea63a23181d8c3298f6de0b6",
+    "config": "698b889a12b2ef6463a57d78b20ac2dc266799c75f47035dd4f2040bb51d6354",
+    "deployment": "d5673978fa3ae261899bf6d1a53991aaefc2c161595ec1a10c6d15602b26202e",
+    "metadata": "43545f5583dc5e25d1d1ac9ab5c50c9bc8514c3cf57f88f5be4fa4500c820609"
+  },
+  "host": {
+    "diskAvailableKiB": 400868844,
+    "python": "3.14.4"
+  },
+  "internalAlias": {
+    "status": "ok"
+  },
+  "meta": {
+    "authRequired": true,
+    "configured": true,
+    "status": 200
+  },
+  "publicIngress": {
+    "classification": "dns_unavailable_preexisting",
+    "httpStatus": null,
+    "remoteDns": "unavailable"
+  },
+  "requestLogs": {
+    "cachePoolFallback": 0,
+    "cachePoolTier": {},
+    "capacityFallback": 0,
+    "durationMs": {
+      "max": 235498,
+      "p50": 5068.5,
+      "p95": 26706.25,
+      "samples": 2276
+    },
+    "invalidLines": 0,
+    "overflow": 0,
+    "records": 2276,
+    "results": {
+      "client_cancelled": 15,
+      "failed": 14,
+      "success": 2247
+    },
+    "sessionSource": {
+      "message_hmac": 2276
+    },
+    "status": {
+      "200": 2247,
+      "499": 15,
+      "500": 9,
+      "502": 5
+    },
+    "switched": 0
+  },
+  "scope": "final read-only T0 preflight; secrets, raw IDs/names, proxy/header values, messages and sessions excluded",
+  "selection": {
+    "cohort": "available-health-with-at-least-100-cache-samples",
+    "formula": "cacheHitRequestRate*100-maxPercentUsed",
+    "selected": [
+      {
+        "account": "account#eb683cec24",
+        "cacheHitRequestRate": 0.6634615384615384,
+        "cacheKnownRequests": 416,
+        "healthScore": 99.9040767386091,
+        "healthStatus": "available",
+        "maxPercentUsed": 16,
+        "selectionScore": 50.34615384615384
+      },
+      {
+        "account": "account#ad131bd944",
+        "cacheHitRequestRate": 0.6350574712643678,
+        "cacheKnownRequests": 348,
+        "healthScore": 99.82808022922636,
+        "healthStatus": "available",
+        "maxPercentUsed": 14,
+        "selectionScore": 49.50574712643679
+      }
+    ]
+  },
+  "statistics": {
+    "coverage": null,
+    "recent24h": {
+      "cacheHitRequestRate": 0.6129175946547885,
+      "cacheHitRequests": 1376,
+      "cacheInputCachedTokens": 186306278,
+      "cacheInputKnownRequests": 2245,
+      "cacheInputTokens": 216653732,
+      "cacheKnownRequests": 2245,
+      "cacheTokenRatio": 0.8599264655177968,
+      "cachedTokens": 186306278,
+      "errors": 14,
+      "inputKnownRequests": 2245,
+      "inputTokens": 216653732,
+      "lastErrorAt": 1789618143889,
+      "lastUsedAt": 1789634631998,
+      "outputKnownRequests": 2245,
+      "outputTokens": 1499172,
+      "overflowFields": [],
+      "requests": 2275,
+      "totalKnownRequests": 2245,
+      "totalTokens": 218152904,
+      "usageRequests": 2245
+    },
+    "window": {
+      "from": 1789548300000,
+      "kind": "last-1440-minutes",
+      "to": 1789634640707
+    }
+  },
+  "window": {
+    "from": 1789548240707,
+    "to": 1789634640707
+  }
+}
