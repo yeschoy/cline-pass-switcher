@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/deployment-guidelines.md", "reason": "Verify main-only deployment contract and no emergency ambiguity"}
+{"file": ".trellis/tasks/09-20-merge-main-push/research/verification.md", "reason": "Fast-forward and full main gate evidence"}
