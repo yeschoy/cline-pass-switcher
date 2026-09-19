@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "2e971ea9",
+  "name": "cline-pass-cache-pool-26h-verification",
+  "cwd": "/Users/lyh_god/GolandProjects/cline-pass-switcher",
+  "trigger": {
+    "kind": "once",
+    "at": "2026-09-18T11:36:42.243Z"
+  },
+  "target": {
+    "workflowScript": "return runs.run('verify-cache-pool',{agent:'trellis-research',task:'Active task: .trellis/tasks/09-17-deploy-cache-pool-validation\\nYou are already the trellis-research sub-agent. Perform the approved T+26h production verification directly and do not spawn another sub-agent. This run is strictly read-only for production: no POST/DELETE, no config/Compose/container/image/deployment changes, no restart, no cleanup, and no NewAPI/CPA mutation. Use canonical SSH target and repository-local identity without reading or printing the key. Verify exact formal window [2026-09-17T11:36:42.243Z, 2026-09-18T11:36:42.243Z). Recompute cache-known sample count/hits/request hit rate, cache token ratio and coverage, final failure rate, request-log P95, cachePoolFallback/standby overflow rate, active/standby request distribution, current exact image/container health/restart/OOM, final config strategy/roles, and both active accounts quota/health using only report-local aliases. Compare against T0: hit 63.4300%, token ratio 85.9063%, failure rate 0.4990%, P95 26318.7 ms. Success requires >=1000 cache-known samples, hit >=70%, token ratio drop <=3 percentage points, failure-rate rise <=1 point, P95 degradation <=20%, standby overflow <1%, and active accounts not reserve or persistently unhealthy. Preserve unknown/missing data honestly. Save a secret-free JSON evidence file and markdown report under .trellis/tasks/09-17-deploy-cache-pool-validation/research/ with validation-20260918 names. Do not touch untitled.md or .trellis/tasks/09-17-investigate-empty-content-errors/. Report pass/fail per gate and recommend rollback only; never execute rollback. Do not commit or archive the task.',output:'.trellis/tasks/09-17-deploy-cache-pool-validation/research/scheduled-verification-agent.md'})",
+    "args": {}
+  },
+  "overlap": "skip",
+  "catchUp": "latest",
+  "paused": false,
+  "createdAt": "2026-09-17T10:59:52.829Z",
+  "updatedAt": "2026-09-18T11:51:08.941Z",
+  "lastRunId": "1ea3241f"
+}

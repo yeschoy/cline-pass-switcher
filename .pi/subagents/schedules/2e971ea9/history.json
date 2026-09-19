@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "runs": [
+    {
+      "schemaVersion": 1,
+      "id": "1ea3241f",
+      "scheduleId": "2e971ea9",
+      "plannedAt": "2026-09-18T11:36:42.243Z",
+      "dueReason": "timer",
+      "state": "completed",
+      "startedAt": "2026-09-18T11:36:42.420Z",
+      "asyncId": "d09684c1-274f-4661-a983-fdacf808740e",
+      "asyncDir": "/var/folders/h7/1s08hdn51x778k3dtg4ytt140000gn/T/pi-subagents-uid-501/async-subagent-runs/d09684c1-274f-4661-a983-fdacf808740e",
+      "completedAt": "2026-09-18T11:51:08.941Z"
+    }
+  ]
+}
