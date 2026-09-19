@@ -52,6 +52,7 @@ Use this fail-open form only where the feature contract explicitly says diagnost
 
 - Preserve upstream HTTP status separately from normalized client status.
 - Classify timeout, proxy, network, authentication, rate-limit, server, schema, and client-cancellation outcomes explicitly.
+- Account content rules run only after a failure has a normalized status and bounded normalized error text. Redact configured secrets and the current request's message values before case-insensitive literal matching; first content match wins, then exact status fallback. Never persist the keyword, matched fragment or raw response body.
 - Distinguish local empty-input validation from an upstream `empty response content` failure. The latter means the request reached the model path but no visible completion was produced; for reasoning/tool-continuation requests, inspect the caller's `max_tokens` first (values such as 16 can be exhausted before content appears). Preserve the upstream status/error instead of relabeling it as a Switcher input error, and do not silently raise the token limit or replay the request because that changes cost and latency semantics.
 - A configured proxy failure never falls back to direct transport.
 - Client cancellation aborts upstream work, stops replay/failover after output starts, releases leases once, and does not create health penalties or error attempts.
@@ -73,6 +74,7 @@ Bound every error-prone input and diagnostic operation: request bodies, detail b
 - Updating runtime configuration before its atomic write succeeds.
 - Swallowing a cleanup failure while claiming clear succeeded.
 - Retrying through direct transport after a configured proxy fails.
+- Matching account rules against successful model output, raw unbounded bodies, or pre-redaction diagnostics.
 
 ## Required Tests
 
@@ -84,6 +86,7 @@ Use temporary `DATA_DIR` and local endpoints. Relevant changes must assert:
 - write/rename/read/cleanup failures preserve prior durable state and expose no raw error;
 - proxy/network/timeout/upstream statuses remain correctly classified and redacted;
 - client/stream cancellation releases resources exactly once and does not mutate health/backoff incorrectly;
-- logging enabled/disabled returns byte-equivalent model traffic despite capture/storage failures.
+- logging enabled/disabled returns byte-equivalent model traffic despite capture/storage failures;
+- content-rule ignore/range/order/fallback and non-stream/pre-stream/post-start/cancellation behavior preserve existing retry/replay boundaries and leak no matched sensitive text.
 
 Run focused tests, then `npm test`, syntax checks, and `git diff --check`.

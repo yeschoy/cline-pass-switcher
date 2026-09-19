@@ -104,9 +104,11 @@ The modal focuses the textarea on open and returns focus to its opener after app
 
 The four pipeline rows are native draggable elements with visible handles, current position numbers, independent enablement checkboxes, and native up/down button equivalents. Mouse drop and keyboard-operable buttons call the same DOM reorder owner, update first/last disabled states, and announce the draft-only result through `aria-live`. Disabled steps remain orderable and retain their positions; reordering never sends a request.
 
-The seven scheduling presets produce an editable draft and a current-to-next preview. They may change only `accountMode`, `concurrencyWaitMs`, `maxConcurrent`, `weight`, `priority`, `cachePoolSize`, and status-specific `accountErrorRules`. The cache-hit preset sets sticky mode, size 2 and a 5000 ms wait while exposing existing priorities for review. Presets never mutate names, Keys, enablement, proxy, Header maps, model routes, or the four pipeline toggles.
+The seven scheduling presets produce an editable draft and a current-to-next preview. They may change only `accountMode`, `concurrencyWaitMs`, `maxConcurrent`, `weight`, `priority`, `cachePoolSize`, and status-specific `accountErrorRules`. The cache-hit preset sets sticky mode, size 2 and a 5000 ms wait while exposing existing priorities for review. Presets never mutate names, Keys, enablement, proxy, Header maps, model routes, ordered content rules or the four pipeline toggles.
 
-The separate five error-rule presets are `standard`, `fast`, `conservative`, `observe`, and `clear`. They parse the live JSON textarea at preview time and show preserve/add/modify/delete groups. Merge preserves custom statuses; replace may delete them; clear forces replace. Built-in 4xx entries are limited to `429`.
+The error-rule panel owns one `ERROR_RULE_DRAFT` and renders native status/content rows. Operators can add/edit/delete status rules and add/edit/delete/reorder content rules with labelled status range, action and cooldown controls; invalid changes are announced without mutating the draft. Its advanced JSON is a `<details>` editor snapshot with explicit apply/refresh, wrapped text and an independent generation. Invalid text stays editable; any visual/reload generation change makes the snapshot stale and prevents silent overwrite.
+
+The separate five error-rule presets are `standard`, `fast`, `conservative`, `observe`, and `clear`. They read only the current unified draft's status rules and show preserve/add/modify/delete groups. Merge preserves custom statuses; replace may delete them; clear forces status replacement. Ordered content rules remain unchanged and the preview says so. Built-in 4xx entries are limited to `429`.
 
 Cancel discards the relevant draft. Confirm submits through the ordinary complete account save, so the server applies the same validation as manual edits. No persistent “selected preset” state exists. Pipeline controls submit `quotaPool`, `excludeUnhealthy`, `healthSort`, and `sticky` plus `order`, which is read from the four existing DOM nodes as an exact permutation, and `cachePoolSize` from its labelled bounded number input. Empty, fractional, nonnumeric, or out-of-range pool-size drafts block visual save and preset preview without coercion or a request. Authenticated account rows may display only the safe runtime `cachePoolRole` labels active/standby; that field is never submitted as static account configuration.
 
@@ -158,8 +160,9 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 | Proxy test on unsaved account | explain that the account must be saved first |
 | Scheduling or error-rule preset is cancelled | no account, rule, pipeline, or global field changes |
 | Cache-pool size is empty, fractional, nonnumeric, or out of range | Block visual save/preset preview without coercing to zero or sending a request |
-| Error-rule textarea is invalid during preview | show an error; do not open/apply a stale preset draft |
-| Rule preset merge/replace/clear is confirmed | submit the live computed draft through the normal complete API |
+| Visual rule edit is invalid or duplicate | Announce the error and keep the unified draft unchanged |
+| Advanced rule JSON is invalid or stale | Preserve the text; reject apply without mutating the current draft or sending a request |
+| Rule preset merge/replace/clear is confirmed | Submit the live computed status draft plus unchanged ordered content rules through the normal complete API |
 | Scheduling preset is confirmed | submit a complete account snapshot without changing pipeline flags |
 | Statistics request resolves after section change | ignore it by generation/visibility check |
 | Quota refresh resolves after navigation/pagehide or a newer visit starts | Ignore stale success/catch/finally; do not mutate the hidden/new visit or its button |
@@ -200,7 +203,7 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 `test/ui-contract.test.js` provides static executable checks for:
 
 - 1800px responsive container, table wrappers, and account-name width;
-- seven bounded scheduling presets plus five live-draft error-rule presets, cache-pool input/role/help contracts, merge/replace/clear diffs, cancel behavior, and forbidden-field absence;
+- seven bounded scheduling presets plus five unified-draft error-rule presets, native status/content rows, ordered keyboard buttons, generation-checked advanced JSON, cache-pool input/role/help contracts, merge/replace/clear diffs, cancel behavior, and forbidden-field absence;
 - labelled modal/drawer semantics, Escape handling, focus return, dirty confirmation, and `aria-live` feedback;
 - account snapshot preservation for new hidden fields, all four pipeline booleans, the four-step order, and `cachePoolSize`;
 - five mutually exclusive top sections with one statistics panel, one shared ordinary-log DOM, one independent details panel, explicit active state, and no anchor/scroll shortcut;

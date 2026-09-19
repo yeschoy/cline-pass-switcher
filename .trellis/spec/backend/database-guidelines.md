@@ -24,6 +24,7 @@ normalizeProxyUrl(value, { strict = false })
 validateAndNormalizeHeaders(value, { strict = false })
 normalizeModelAliases(value)
 normalizeAccountPipeline(value, { strict = false })
+normalizeAccountContentErrorRules(value, { strict = false })
 validateStatistics(statistics)
 normalizeStatistics()
 normalizeAccountQuotas()
@@ -73,6 +74,12 @@ metadata.json   DATA_DIR/metadata.json
     [httpStatus]: { action: "ignore" | "ban" } |
                   { action: "cooldown", cooldownMs }
   },
+  accountContentErrorRules: [{
+    contains,
+    statusMin?, statusMax?,
+    action: "ignore" | "ban" | "cooldown",
+    cooldownMs?
+  }],
   accountPipeline: {
     quotaPool: boolean,
     excludeUnhealthy: boolean,
@@ -105,7 +112,8 @@ Startup normalization preserves legacy behavior while making the schema explicit
 - normalize `modelAliases` only to known `cline-pass/*` targets without alias/original-name collisions;
 - normalize legacy `upstream` into `upstreams` while retaining `upstream` as the first-item compatibility mirror;
 - normalize global and account routes with the same functions;
-- default an invalid/missing wait to 2000 ms and normalize error rules;
+- default an invalid/missing wait to 2000 ms and normalize status rules;
+- normalize `accountContentErrorRules` as one ordered array (maximum 100 entries / 64 KiB): each entry has a trimmed 1–500 character control-free `contains`, optional paired integer `statusMin/statusMax` in 100–599, and the same exact action/cooldown shape as status rules; an invalid persisted array is disabled as a whole with a bounded warning;
 - clamp `activeAccount` to the persisted account list;
 - normalize a missing/invalid pipeline order to `excludeUnhealthy`, `quotaPool`, `healthSort`, `sticky`, while always persisting all four unique step IDs;
 - normalize a missing/invalid `accountPipeline.cachePoolSize` to `0`; strict management saves accept only integer values from 0 through 100000, while an older client that omits only this field preserves the current server value.
@@ -214,6 +222,7 @@ Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/
 | Model alias is invalid, duplicated, collides with an original ID, or targets an unknown/non-Cline model | `400`; no write |
 | Route has over 20 upstreams, over 50 exclusions, invalid slug/mode/sort, or `maxRetries` outside 0-20 | `400`; no write |
 | Error rule status outside 100-599, unknown action, or non-positive cooldown | `400`; no write |
+| Content rules are non-array/over 100/over 64 KiB, have blank/over-500/control text, one-sided/invalid status range, unknown field/action, or invalid cooldown | `400`; no write; an older client omitting the entire field preserves the current server array |
 | `accountPipeline` lacks any of the four booleans, has unknown fields, has `cachePoolSize` outside integer 0-100000, or has an explicit `order` that is not an exact four-step permutation | `400`; no write; an older client may omit `order` and/or `cachePoolSize`, preserving the current server values |
 | Valid statistics v1 | validate completely, migrate to v2 by adding empty per-minute model maps and a current tracking-start minute, then atomically persist without changing global/account facts |
 | Existing statistics version is missing/unknown or its structure exceeds account/model bounds | startup fails; original metadata bytes remain |
@@ -234,7 +243,7 @@ Startup normalization is permissive for legacy files; management APIs validate s
 - **Good:** an account route and global route both pass through `normalizeRouteConfig()`, so their persisted shapes stay identical.
 - **Good:** a known counter overflow persists as `null` plus one matching `overflowFields` entry, and the statistics API renders it as unknown.
 - **Good:** changing an account key invalidates its quota generation/state while retaining that stable ID's local usage history.
-- **Base:** `accountErrorRules: {}`, all-false `accountPipeline` with `cachePoolSize: 0`, and `maxConcurrent: 0` preserve legacy no-action/routing/unlimited behavior.
+- **Base:** `accountErrorRules: {}`, `accountContentErrorRules: []`, all-false `accountPipeline` with `cachePoolSize: 0`, and `maxConcurrent: 0` preserve legacy no-action/routing/unlimited behavior.
 - **Base:** a missing metadata file creates a routing secret and owner-only metadata on first migration save.
 - **Bad:** catching JSON parse failure and saving defaults; this destroys operator configuration.
 - **Bad:** using account name or key as the state-map key; renaming or credential rotation would orphan state.
@@ -259,7 +268,7 @@ Persistence changes must use a temporary `DATA_DIR` and assert:
 - key/proxy rotation clears stale quota, disable retains last-good display data without allowing stale publication, and pruning removes deleted-account statistics/quota state without deleting global history;
 - pruning retains 1,440 minute buckets, independently caps account/model cells, and marks only the dropped account/model coverage incomplete;
 - account removal deletes its `accountStates` entry;
-- invalid management payloads return `400` and leave the previous on-disk JSON unchanged;
+- invalid status/content-rule shapes, counts, UTF-8 byte limits, status ranges and cooldowns return `400` and leave previous bytes unchanged; old-client omission preserves content rules, while valid ordered rules survive restart;
 - detailed settings default/type/unknown-field/restart tests and injected atomic-write failure preserve previous config bytes/runtime mode; independent detail retention/recovery never changes ordinary logs or metadata.
 
 The current integration suite directly covers malformed config preservation, legacy migration, metadata mode, routing-secret/cooldown restart, and session-value exclusion. Add focused assertions before relying on account-state cleanup or unchanged-file behavior after every validation branch.

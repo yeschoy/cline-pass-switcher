@@ -44,13 +44,13 @@
 
 ## Acceptance Criteria
 
-- [ ] 旧 `accountErrorRules` round-trip 和运行行为完全兼容；旧客户端保存不清空内容规则。
-- [ ] 内容规则首条匹配、状态范围、ignore 终止和状态规则回退均有黑盒测试。
-- [ ] 嵌套错误诊断可匹配；Key、代理/Header、消息和原始响应体不进入配置外的持久诊断或 UI。
-- [ ] 非流式、首包前 SSE、首包后 SSE、provider retry、账号替换和取消行为可执行验证。
-- [ ] 日常规则可完全通过可视化表格编辑；高级 JSON 往返无损且 stale/invalid 不覆盖新草稿。
-- [ ] 预设、完整账号保存和所有其他账号草稿字段保持完整。
-- [ ] UI/VM、integration、完整项目门禁和真实浏览器键盘/焦点/窄屏检查通过。
+- [x] 旧 `accountErrorRules` round-trip 和运行行为完全兼容；旧客户端保存不清空内容规则。
+- [x] 内容规则首条匹配、状态范围、ignore 终止和状态规则回退均有黑盒测试。
+- [x] 嵌套错误诊断可匹配；Key、代理/Header、消息和原始响应体不进入配置外的持久诊断或 UI。
+- [x] 非流式、首包前 SSE、首包后 SSE、provider retry、账号替换和取消行为可执行验证。
+- [x] 日常规则可完全通过可视化表格编辑；高级 JSON 往返无损且 stale/invalid 不覆盖新草稿。
+- [x] 预设、完整账号保存和所有其他账号草稿字段保持完整。
+- [ ] UI/VM、integration 和完整项目门禁已通过；真实浏览器键盘/焦点/窄屏检查因 browser binary/Accessibility 基础设施阻塞而未验证，见 `research/verification.md`。
 
 ## Out of Scope
 

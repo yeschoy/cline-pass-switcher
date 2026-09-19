@@ -82,13 +82,16 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   assert.match(errorPresets, /observe:\{429:\{action:'ignore'\},500:\{action:'ignore'\}/);
   const schedulingPresets = html.slice(html.indexOf('const PRESETS='), html.indexOf('function previewPreset'));
   assert.doesNotMatch(schedulingPresets, /401|403/);
-  assert.match(html, /function previewErrorPreset\(\).*JSON\.parse\(\$\('#accountErrorRules'\)\.value/);
+  assert.match(html, /id="errorRuleBody"/);assert.match(html,/id="errorRuleFeedback" aria-live="polite"/);assert.match(html,/onclick="addStatusErrorRule\(\)"/);assert.match(html,/onclick="addContentErrorRule\(\)"/);
+  assert.match(html, /function previewErrorPreset\(\).*cloneRuleDraft\(\)/);
   assert.match(html, /const next=replace\?\{\.\.\.preset\}:\{\.\.\.current,\.\.\.preset\}/);
   assert.match(html, /const groups=\{保留:\[\],新增:\[\],修改:\[\],删除:\[\]\}/);
   for (const branch of ['groups.新增.push','groups.删除.push','groups.保留.push','groups.修改.push']) assert.match(html, new RegExp(branch.replace('.', '\\.')));
   assert.match(html, /name==='clear'\|\|\$\('#errorPresetReplace'\)\.checked/);
   assert.match(html, /function closeErrorPreset\(\).*PENDING_ERROR_PRESET=null/);
-  assert.match(html, /applyErrorPreset\(\).*JSON\.stringify\(next,null,2\);await saveAccounts\(\)/);
+  assert.match(html, /applyErrorPreset\(\).*commitErrorRuleDraft\(next/);
+  assert.match(html,/onclick="moveContentErrorRule\(\$\{index\},-1,this\)"/);assert.match(html,/data-content-rule-index/);assert.match(html,/focusTarget\.focus\(\)/);
+  assert.match(html,/<details id="advancedErrorRules"[^>]+ontoggle="if\(this.open\)openAdvancedErrorRules\(\)"/);assert.match(html,/id="advancedErrorRulesJson"[^>]+oninput="markAdvancedErrorRulesDirty\(\)"/);assert.match(html,/function openAdvancedErrorRules\(\).*advancedErrorRulesJson'\)\.focus\(\)/);assert.match(html,/function applyAdvancedErrorRules\(\)/);assert.match(html,/snapshot.generation!==ERROR_RULE_GENERATION/);
   for (const id of ['pipelineExcludeUnhealthy','pipelineQuotaPool','pipelineHealthSort','pipelineSticky']) assert.match(html, new RegExp(`id="${id}"`));
   assert.match(html,/可排序账号调度流水线/); assert.equal((html.match(/class="pipeline-step" draggable="true"/g)||[]).length,4);
   assert.equal((html.match(/class="ghost pipeline-move-up"/g)||[]).length,4); assert.equal((html.match(/class="ghost pipeline-move-down"/g)||[]).length,4);
@@ -99,6 +102,7 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   assert.match(html,/const target=button\.disabled\?opposite:button/,'boundary moves transfer focus to the enabled opposite-direction button');
   const collect = html.slice(html.indexOf('function collectAccounts'), html.indexOf('async function saveAccounts'));
   for (const field of ['id:a.id','name:a.name',"note:a.note||''","key:a.key||''",'enabled:a.enabled!==false','maxConcurrent:','weight:','priority:',"proxyUrl:a.proxyUrl||''","headers:a.headers||{}","perModel:a.perModel||{}"] ) assert.ok(collect.includes(field), `full account snapshot must preserve ${field}`);
+  assert.match(collect,/accountErrorRules:rules.statusRules/);assert.match(collect,/accountContentErrorRules:rules.contentRules/);
   assert.match(collect, /accountPipeline:\{quotaPool:[^}]+excludeUnhealthy:[^}]+healthSort:[^}]+sticky:[^}]+order:pipelineOrder\(\),cachePoolSize:/);
   assert.match(html,/id="cachePoolSize" type="number" min="0" max="100000" step="1"/);assert.match(html,/0 = 关闭/);assert.match(html,/仅在 sticky 模式或启用会话粘性步骤时生效/);
   assert.match(html,/cachePoolRole==='active'/);assert.match(html,/缓存活跃/);assert.match(html,/缓存备用/);

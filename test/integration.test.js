@@ -139,7 +139,7 @@ test('API compatibility, message pass-through and request outcomes are explicit'
   });
   const upstreamPort = await listen(mock);
   const switchPort = await new Promise(async (resolve) => { const server = http.createServer(); const port = await listen(server); await close(server); resolve(port); });
-  const config = { port: switchPort, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, maxConcurrent: 1, perModel: {} }], knownModels: ['valid-image', 'valid-tool', 'valid-function-call', 'done-close', 'stream-cancel', 'nonstream-cancel'], perModel: {}, accountErrorRules: { '502': { action: 'ban' } } };
+  const config = { port: switchPort, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, maxConcurrent: 1, perModel: {} }], knownModels: ['valid-image', 'valid-tool', 'valid-function-call', 'done-close', 'stream-cancel', 'nonstream-cancel'], perModel: {}, accountErrorRules: { '502': { action: 'ban' } }, accountContentErrorRules: [{ contains: 'upstream fetch failed', action: 'ban' }] };
   const running = await startSwitcher(config);
   t.after(async () => { await stop(running.child); await close(mock); fs.rmSync(running.dir, { recursive: true, force: true }); });
 
@@ -543,6 +543,53 @@ test('account routing, header boundary, failover, state and streaming', async (t
 
   assert.equal((await rawJson(switchPort, '/api/accounts', { accounts: [], mode: 'sticky', active: 0, concurrencyWaitMs: 20, accountErrorRules: [] })).status, 400);
   assert.equal((await rawJson(switchPort, '/api/accounts', { accounts: [{ ...accounts[0], id: 'changed-id' }], mode: 'single', active: 0, concurrencyWaitMs: 20, accountErrorRules: {} })).status, 400);
+});
+
+test('content error rules are strict, ordered, redacted and preserve nonstream/stream retry boundaries', async (t) => {
+  const seen=[];
+  const upstream=http.createServer((req,res)=>{const chunks=[];req.on('data',chunk=>chunks.push(chunk));req.on('end',()=>{
+    const body=JSON.parse(Buffer.concat(chunks).toString()||'{}'),auth=req.headers.authorization,only=body.provider?.only?.[0]||body.providerOptions?.gateway?.only?.[0],message=body.messages?.[0]?.content||'';seen.push({model:body.model,auth,only});
+    const ok=()=>{if(body.stream){res.writeHead(200,{'Content-Type':'text/event-stream'});return res.end('data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n');}res.writeHead(200,{'Content-Type':'application/json'});return res.end('{"choices":[{"message":{"content":"OK"}}]}');};
+    if(auth==='Bearer key-b')return ok();
+    if(body.model==='content-ignore'){res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify({data:{error:{message:`content-first ${message}`,code:'E_CONTENT',status:429,echo:req.headers['x-safe-account']}}}));}
+    if(body.model==='content-switch'){res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:`quota exhausted ${message}`,code:'E_QUOTA',status:429,echo:req.headers['x-safe-account']}}));}
+    if(body.model==='pre-stream'&&body.stream){res.writeHead(200,{'Content-Type':'text/event-stream'});return res.end('data: {"error":{"message":"pre stream quota","code":"E_PRE","status":429}}\n\n');}
+    if(body.model==='post-stream'&&body.stream){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write('data: {"choices":[{"delta":{"content":"started"}}]}\n\n');return setTimeout(()=>res.end('data: {"error":{"message":"late stream quota","code":"E_LATE","status":429}}\n\ndata: [DONE]\n\n'),5);}
+    if(body.model==='retry-content'&&only==='first'){res.writeHead(500,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:'supplier retry content',code:'E_RETRY',status:500}}));}
+    return ok();
+  });});
+  const upstreamPort=await listen(upstream),port=await unusedPort(),accounts=[{id:'a',name:'A',key:'key-a',enabled:true,headers:{'X-Safe-Account':'header-secret-value'},perModel:{}},{id:'b',name:'B',key:'key-b',enabled:true,perModel:{}}];
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'single',activeAccount:0,accounts,knownModels:['content-ignore','content-switch','pre-stream','post-stream','retry-content'],perModel:{'retry-content':{upstreams:['first','second'],pinMode:'strict'}},accountErrorRules:{429:{action:'ban'},500:{action:'ban'}},accountContentErrorRules:[{contains:'content-first',action:'ignore'},{contains:'content-first',action:'ban'}]},null,{NODE_ENV:'test'});
+  t.after(async()=>{await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  const view=()=>fetch(`http://127.0.0.1:${port}/api/accounts`).then(response=>response.json());
+  const save=async({statusRules,contentRules,includeContent=true})=>{const current=await view(),body={accounts:current.accounts,mode:'single',active:0,concurrencyWaitMs:0,accountErrorRules:statusRules};if(includeContent)body.accountContentErrorRules=contentRules;return rawJson(port,'/api/accounts',body);};
+
+  seen.length=0;let response=await rawJson(port,'/v1/chat/completions',{model:'content-ignore',messages:[{role:'user',content:'message-secret-value'}]});assert.equal(response.status,429);assert.deepEqual(seen.map(row=>row.auth),['Bearer key-a'],'first matching content ignore blocks status ban and account replacement');assert.equal((await view()).accounts[0].state,null);
+
+  let rules=[{contains:'quota exhausted',statusMin:500,statusMax:599,action:'ban'},{contains:'quota exhausted',statusMin:429,statusMax:429,action:'cooldown',cooldownMs:60000}];assert.equal((await save({statusRules:{429:{action:'ban'}},contentRules:rules})).status,200);
+  seen.length=0;response=await rawJson(port,'/v1/chat/completions',{model:'content-switch',messages:[{role:'user',content:'message-secret-value'}]});assert.equal(response.status,200);assert.deepEqual(seen.map(row=>row.auth),['Bearer key-a','Bearer key-b']);let state=(await view()).accounts[0].state;assert.equal(state.banned,false);assert.ok(state.cooldownUntil>Date.now());
+  let persisted=fs.readFileSync(path.join(running.dir,'metadata.json'),'utf8');for(const secret of ['message-secret-value','header-secret-value','key-a'])assert.equal(persisted.includes(secret),false);
+  await new Promise(resolve=>setTimeout(resolve,20));const contentLogs=JSON.stringify(await(await fetch(`http://127.0.0.1:${port}/api/logs/errors?requestedModel=content-switch`)).json());for(const secret of ['message-secret-value','header-secret-value','key-a'])assert.equal(contentLogs.includes(secret),false);
+  await rawJson(port,'/api/accounts/recover',{id:'a'});
+
+  rules=[{contains:'pre stream quota',action:'ban'}];assert.equal((await save({statusRules:{},contentRules:rules})).status,200);seen.length=0;response=await rawJson(port,'/v1/chat/completions',{model:'pre-stream',stream:true,messages:[]});assert.equal(response.status,200);assert.deepEqual(seen.map(row=>row.auth),['Bearer key-a','Bearer key-b'],'pre-stream content action may replace once');await rawJson(port,'/api/accounts/recover',{id:'a'});
+
+  rules=[{contains:'late stream quota',action:'ban'}];assert.equal((await save({statusRules:{},contentRules:rules})).status,200);seen.length=0;response=await rawJson(port,'/v1/chat/completions',{model:'post-stream',stream:true,messages:[]});assert.equal(response.status,200);assert.equal(seen.length,1,'post-start content action never replays');state=(await view()).accounts[0].state;assert.equal(state.banned,true);await rawJson(port,'/api/accounts/recover',{id:'a'});
+
+  rules=[{contains:'supplier retry content',action:'ignore'}];assert.equal((await save({statusRules:{500:{action:'ban'}},contentRules:rules})).status,200);seen.length=0;response=await rawJson(port,'/v1/chat/completions',{model:'retry-content',messages:[]});assert.equal(response.status,200);assert.deepEqual(seen.map(row=>row.only),['first','second']);assert.equal(new Set(seen.map(row=>row.auth)).size,1);assert.equal((await view()).accounts[0].state,null);
+
+  const preserved=structuredClone((await view()).accountContentErrorRules);assert.equal((await save({statusRules:{},includeContent:false})).status,200);assert.deepEqual((await view()).accountContentErrorRules,preserved,'old clients omitting content rules preserve the server value');
+  const configPath=path.join(running.dir,'config.json'),bytes=fs.readFileSync(configPath),base=await view();
+  const invalid=[null,{},[{contains:'',action:'ignore'}],[{contains:'x'.repeat(501),action:'ignore'}],Array.from({length:101},()=>({contains:'x',action:'ignore'})),Array.from({length:50},(_,index)=>({contains:`${index}-${'界'.repeat(500)}`,action:'ignore'})),[{contains:'x',statusMin:400,action:'ignore'}],[{contains:'x',statusMin:500,statusMax:400,action:'ignore'}],[{contains:'x',action:'ignore',extra:true}],[{contains:'x',action:'cooldown'}]];
+  for(const accountContentErrorRules of invalid){const result=await rawJson(port,'/api/accounts',{accounts:base.accounts,mode:'single',active:0,concurrencyWaitMs:0,accountErrorRules:{},accountContentErrorRules});assert.equal(result.status,400,JSON.stringify(accountContentErrorRules));assert.deepEqual(fs.readFileSync(configPath),bytes);}
+});
+
+test('invalid persisted content rules normalize to the disabled default without affecting accounts', async (t) => {
+  const port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-content-rule-migration-'));
+  const config={port,accounts:[{id:'a',name:'A',key:'key-a',enabled:true,perModel:{}}],accountMode:'single',activeAccount:0,knownModels:['m'],perModel:{},accountErrorRules:{429:{action:'ignore'}},accountContentErrorRules:{invalid:true}};fs.writeFileSync(path.join(dir,'config.json'),JSON.stringify(config));
+  const running=await startSwitcher(null,dir);t.after(async()=>{await stop(running.child);fs.rmSync(dir,{recursive:true,force:true});});
+  const view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json(),persisted=JSON.parse(fs.readFileSync(path.join(dir,'config.json')));
+  assert.deepEqual(view.accountContentErrorRules,[]);assert.deepEqual(persisted.accountContentErrorRules,[]);assert.equal(view.accounts[0].id,'a');assert.deepEqual(view.accountErrorRules,{429:{action:'ignore'}});
 });
 
 test('HRW routing is order-independent and only remaps sessions owned by a removed account', async () => {
@@ -1468,7 +1515,7 @@ test('quota force-cache bypass belongs only to live manual page owners', async (
   const accounts=['a','b','c'].map(id=>({id,name:id,key:`key-${id}`,enabled:true,perModel:{}}));
   const cached={snapshot:{limits:{five_hour:{percentUsed:1},weekly:{percentUsed:2},monthly:{percentUsed:3}},fetchedAt},lastAttemptAt:fetchedAt,lastSuccessAt:fetchedAt,errorCategory:null};
   fs.writeFileSync(path.join(dir,'metadata.json'),JSON.stringify({models:{},history:[],accountStates:{},routingSecret:'quota-force-owner-secret',stats:{},accountQuotas:{c:cached}}));
-  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts,accountMode:'single',activeAccount:0,knownModels:['m'],perModel:{},accountErrorRules:{},accountPipeline:{quotaPool:true,excludeUnhealthy:false,healthSort:false,sticky:false}},dir,{NODE_ENV:'test',CLINE_PASS_TEST_QUOTA_TIMEOUT_MS:'1000',CLINE_PASS_TEST_QUOTA_SUCCESS_MS:'1000'});
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts,accountMode:'single',activeAccount:0,knownModels:['m'],perModel:{},accountErrorRules:{},accountPipeline:{quotaPool:true,excludeUnhealthy:false,healthSort:false,sticky:false}},dir,{NODE_ENV:'test',CLINE_PASS_TEST_QUOTA_TIMEOUT_MS:'1000',CLINE_PASS_TEST_QUOTA_SUCCESS_MS:'5000'});
   t.after(async()=>{await stop(running.child);for(const row of rows)row.res.destroy();await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
   const request=(force,controller)=>fetch(`http://127.0.0.1:${port}/api/statistics/quota-refresh`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force}),signal:controller?.signal}).then(async response=>({status:response.status,json:await response.json()}));
   await waitUntil(()=>active===2);assert.deepEqual(new Set(rows.map(row=>row.auth)),new Set(['Bearer key-a','Bearer key-b']));

@@ -15,8 +15,8 @@ function harness() {
   context.handler = async () => page('row');
   context.call = (...args) => { calls.push(args); return context.handler(...args); };
   run('api=(...args)=>call(...args)');
-  run("ACCS={accounts:[{id:'draft',name:'Draft',key:'not submitted',maxConcurrent:9}],active:0};BULK_SELECTION.add(ACCS.accounts[0]);RAW_SCHEDULING={text:'unapplied raw draft'};$('#accMode').value='sticky';$('#accountErrorRules').value='invalid pending JSON';");
-  const drafts = () => run("JSON.stringify([ACCS,[...BULK_SELECTION],RAW_SCHEDULING,$('#accMode').value,$('#accountErrorRules').value])");
+  run("ACCS={accounts:[{id:'draft',name:'Draft',key:'not submitted',maxConcurrent:9}],active:0};BULK_SELECTION.add(ACCS.accounts[0]);RAW_SCHEDULING={text:'unapplied raw draft'};$('#accMode').value='sticky';ERROR_RULE_DRAFT={statusRules:{'418':{action:'ban'}},contentRules:[{contains:'pending',action:'ignore'}]};ERROR_RULE_GENERATION=1;ADVANCED_ERROR_RULES={generation:1,text:'{}',dirty:true};$('#advancedErrorRulesJson').value='invalid pending JSON';");
+  const drafts = () => run("JSON.stringify([ACCS,[...BULK_SELECTION],RAW_SCHEDULING,$('#accMode').value,ERROR_RULE_DRAFT,$('#advancedErrorRulesJson').value])");
   return { context, run, el, calls, copies, drafts };
 }
 

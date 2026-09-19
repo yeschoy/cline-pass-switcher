@@ -38,6 +38,7 @@ const DEFAULT_CONFIG = {
   activeAccount: 0,        // single 模式下使用的账号下标
   concurrencyWaitMs: 2000,
   accountErrorRules: {},   // "429": { action: 'cooldown', cooldownMs: 1800000 } | { action: 'ban' } | { action: 'ignore' }
+  accountContentErrorRules: [], // ordered failure-text contains rules with optional normalized status range
   accountPipeline: {
     quotaPool: false,
     excludeUnhealthy: false,
@@ -171,6 +172,29 @@ function normalizeAccountErrorRules(rules = {}) {
       if (!cooldownMs) continue;
       out[status] = { action, cooldownMs };
     } else out[status] = { action };
+  }
+  return out;
+}
+const MAX_CONTENT_ERROR_RULES = 100;
+const MAX_CONTENT_RULE_TEXT = 500;
+const MAX_CONTENT_RULE_BYTES = 64 * 1024;
+function normalizeAccountContentErrorRules(value = [], { strict = false } = {}) {
+  const fail = (message) => { if (strict) throw new Error(message); console.warn('[配置] 已禁用非法账号内容错误规则'); return []; };
+  if (!Array.isArray(value) || value.length > MAX_CONTENT_ERROR_RULES) return fail(`accountContentErrorRules must be an array with at most ${MAX_CONTENT_ERROR_RULES} entries`);
+  let bytes; try { bytes = Buffer.byteLength(JSON.stringify(value)); } catch { return fail('accountContentErrorRules must be JSON serializable'); }
+  if (bytes > MAX_CONTENT_RULE_BYTES) return fail('accountContentErrorRules exceed 64 KiB');
+  const out = [];
+  for (const [index, rule] of value.entries()) {
+    if (!isPlainObject(rule)) return fail(`invalid accountContentErrorRules entry ${index}`);
+    const contains = typeof rule.contains === 'string' ? rule.contains.trim() : '';
+    const action = ['ignore','cooldown','ban'].includes(rule.action) ? rule.action : null;
+    const hasMin = Object.hasOwn(rule,'statusMin'), hasMax = Object.hasOwn(rule,'statusMax');
+    if (!contains || contains.length > MAX_CONTENT_RULE_TEXT || /[\x00-\x1f\x7f]/.test(contains) || !action || hasMin !== hasMax) return fail(`invalid accountContentErrorRules entry ${index}`);
+    if (hasMin && (!Number.isSafeInteger(rule.statusMin) || !Number.isSafeInteger(rule.statusMax) || rule.statusMin < 100 || rule.statusMax > 599 || rule.statusMin > rule.statusMax)) return fail(`invalid accountContentErrorRules status range ${index}`);
+    if (action === 'cooldown' && (!Number.isSafeInteger(rule.cooldownMs) || rule.cooldownMs < 1 || rule.cooldownMs > 30 * 24 * 3600e3)) return fail(`invalid accountContentErrorRules cooldownMs ${index}`);
+    const allowed = ['contains','action',...(hasMin?['statusMin','statusMax']:[]),...(action==='cooldown'?['cooldownMs']:[])];
+    if (Object.keys(rule).length !== allowed.length || Object.keys(rule).some((key) => !allowed.includes(key))) return fail(`unknown accountContentErrorRules field ${index}`);
+    out.push({ contains, ...(hasMin ? { statusMin: rule.statusMin, statusMax: rule.statusMax } : {}), action, ...(action === 'cooldown' ? { cooldownMs: rule.cooldownMs } : {}) });
   }
   return out;
 }
@@ -416,6 +440,8 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   if (JSON.stringify(pm) !== JSON.stringify(config.perModel || {})) { config.perModel = pm; dirty = true; }
   const rules = normalizeAccountErrorRules(config.accountErrorRules || {});
   if (JSON.stringify(rules) !== JSON.stringify(config.accountErrorRules || {})) { config.accountErrorRules = rules; dirty = true; }
+  const contentRules = normalizeAccountContentErrorRules(config.accountContentErrorRules === undefined ? [] : config.accountContentErrorRules);
+  if (JSON.stringify(contentRules) !== JSON.stringify(config.accountContentErrorRules)) { config.accountContentErrorRules = contentRules; dirty = true; }
   const pipeline = normalizeAccountPipeline(config.accountPipeline);
   if (JSON.stringify(pipeline) !== JSON.stringify(config.accountPipeline)) { config.accountPipeline = pipeline; dirty = true; }
   const old = Array.isArray(config.accounts) ? config.accounts : [];
@@ -1909,15 +1935,36 @@ function applyMaxRetries(attempts, cfg) {
   if (cfg?.maxRetries === null || cfg?.maxRetries === undefined) return attempts;
   return attempts.slice(0, Math.max(1, Math.min(attempts.length, Number(cfg.maxRetries) + 1)));
 }
-function accountActionFor(result) {
-  const status = String(result?.normalizedStatus || result?.status || '');
-  const rule = config.accountErrorRules?.[status];
-  return rule ? { statusCode: Number(status), ...rule } : null;
+const MAX_RULE_FAILURE_TEXT = 16 * 1024;
+let contentRuleCacheSource = null, contentRuleCache = [];
+function compiledContentRules() {
+  if (contentRuleCacheSource !== config.accountContentErrorRules) {
+    contentRuleCacheSource = config.accountContentErrorRules;
+    contentRuleCache = (config.accountContentErrorRules || []).map((rule) => ({ ...rule, needle: rule.contains.toLowerCase() }));
+  }
+  return contentRuleCache;
 }
-function persistAccountAction(account, action, reason) {
+function normalizeFailureForRules(value, sensitiveValues = []) {
+  return safeReason(errText(value), sensitiveValues).replace(/[\r\n\t]+/g, ' ').slice(0, MAX_RULE_FAILURE_TEXT);
+}
+function projectedAccountAction(statusCode, rule) {
+  return { statusCode, action: rule.action, ...(rule.action === 'cooldown' ? { cooldownMs: rule.cooldownMs } : {}) };
+}
+function accountActionFor(result, sensitiveValues = []) {
+  const statusCode = Number(result?.normalizedStatus || result?.status);
+  if (!Number.isInteger(statusCode) || statusCode < 400 || statusCode > 599) return null;
+  const failureText = normalizeFailureForRules(result?.failureText ?? result?.out?.error?.message ?? result?.body?.error?.message ?? result?.error ?? result?.netError ?? '', sensitiveValues).toLowerCase();
+  if (failureText) for (const rule of compiledContentRules()) {
+    if (rule.statusMin !== undefined && (statusCode < rule.statusMin || statusCode > rule.statusMax)) continue;
+    if (failureText.includes(rule.needle)) return projectedAccountAction(statusCode, rule);
+  }
+  const rule = config.accountErrorRules?.[String(statusCode)];
+  return rule ? projectedAccountAction(statusCode, rule) : null;
+}
+function persistAccountAction(account, action, reason, sensitiveValues = []) {
   if (!account?.id || !action || action.action === 'ignore') return;
   const now = Date.now();
-  const state = { banned: false, cooldownUntil: 0, statusCode: action.statusCode, reason: safeReason(reason), updatedAt: now };
+  const state = { banned: false, cooldownUntil: 0, statusCode: action.statusCode, reason: safeReason(reason, sensitiveValues), updatedAt: now };
   if (action.action === 'cooldown') state.cooldownUntil = now + Math.max(1, Number(action.cooldownMs) || 1);
   if (action.action === 'ban') state.banned = true;
   META.accountStates ||= {};
@@ -1946,7 +1993,7 @@ async function attemptOnce(modelId, body, attempt, account, forwardedHeaders, si
 }
 
 // 顺序故障转移：依次执行候选，普通错误不换账号。cooldown/ban 由 handleChat 负责最多换号一次。
-async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream = false, attemptTimeoutMs = 120000 } = {}) {
+async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream = false, attemptTimeoutMs = 120000, sensitiveValues = [] } = {}) {
   const attempts = applyMaxRetries(buildAttempts(modelId, cfg), cfg);
   const trace = [];
   const t0 = Date.now();
@@ -2009,14 +2056,14 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
             trace.push({ upstream: attempt.upstream, status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, terminalOrigin: up.status >= 400 ? 'upstream_http' : 'upstream_envelope', ms, note: msg, account: account.name, accountId: account.id });
             if (attempt.upstream) learnUpstreamStatus(modelId, attempt.upstream, msg);
             if (!attempt.upstream && (attempt.excludeList || []).length) learnAvailableProviders(modelId, msg);
-            last = { status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing, acc: account, netError: null, accountAction: clientClosed ? null : accountActionFor(un) };
+            last = { status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing, acc: account, netError: null, accountAction: clientClosed ? null : accountActionFor(un, sensitiveValues) };
             trace[trace.length - 1].action = last.accountAction?.action || null;
             if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'ban') break;
             continue;
           }
           if (!up) {
             trace.push({ upstream: attempt.upstream, status: 502, upstreamStatus: 0, normalizedStatus: 502, terminalOrigin: /timeout/i.test(netError || '') ? 'timeout' : account.proxyUrl ? 'proxy' : 'network', ms, note: netError || 'no response', account: account.name, accountId: account.id });
-            last = { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${netError || 'no response'}`, type: 'upstream_error' } }, routing: {}, acc: account, netError: netError || 'no response', accountAction: clientClosed ? null : accountActionFor({ normalizedStatus: 502 }) };
+            last = { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${netError || 'no response'}`, type: 'upstream_error' } }, routing: {}, acc: account, netError: netError || 'no response', accountAction: clientClosed ? null : accountActionFor({ normalizedStatus: 502, failureText: netError || 'no response' }, sensitiveValues) };
             trace[trace.length - 1].action = last.accountAction?.action || null;
             if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'ban') break;
             continue;
@@ -2031,7 +2078,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
         trace.push({ upstream: attempt.upstream, status: r.status, upstreamStatus: r.upstreamStatus, normalizedStatus: r.normalizedStatus, terminalOrigin: r.terminalOrigin, ms, note, account: account.name, accountId: account.id });
         if (r.status !== 200 && attempt.upstream) learnUpstreamStatus(modelId, attempt.upstream, errText(r.out?.error?.message));
         if (r.status !== 200 && !attempt.upstream && (attempt.excludeList || []).length) learnAvailableProviders(modelId, r.netError || note);
-        last = { ...r, accountAction: clientClosed ? null : accountActionFor(r) };
+        last = { ...r, accountAction: clientClosed ? null : accountActionFor(r, sensitiveValues) };
         trace[trace.length - 1].action = last.accountAction?.action || null;
         if (r.status === 200) break;
         if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'ban') break;
@@ -2090,7 +2137,7 @@ async function handleChat(req, res) {
     cfg = resolveModelConfig(account, modelId);
     targets = applyMaxRetries(buildAttempts(modelId, cfg), cfg).map((a) => a.upstream).filter(Boolean);
     try {
-      chain = await runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream: isStream });
+      chain = await runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream: isStream, sensitiveValues });
     } catch (e) {
       lease.release();
       throw e;
@@ -2098,7 +2145,7 @@ async function handleChat(req, res) {
     const action = chain.accountAction;
     if (action) {
       const reason = chain.out?.error?.message || chain.netError || `upstream status ${chain.normalizedStatus || chain.status}`;
-      if (action.action !== 'ignore') persistAccountAction(account, action, reason);
+      if (action.action !== 'ignore') persistAccountAction(account, action, reason, sensitiveValues);
       accountActions.push({ account: account.name, action: action.action, statusCode: action.statusCode });
     }
     if (action && (action.action === 'cooldown' || action.action === 'ban') && !chain.started && accountAttempt === 0) {
@@ -2143,8 +2190,8 @@ async function handleChat(req, res) {
       const normalizedStatus = result === 'failed' ? (observed.error ? observed.normalizedStatus : 502) : result === 'client_cancelled' ? 499 : 200;
       const streamError = result === 'failed' ? (observed.error || safeReason(error)) : null;
       if (observed.error) {
-        const action = accountActionFor({ normalizedStatus: observed.normalizedStatus });
-        if (action) { if (action.action !== 'ignore') persistAccountAction(acc, action, streamError); accountActions.push({ account: acc.name, action: action.action, statusCode: action.statusCode }); }
+        const action = accountActionFor({ normalizedStatus: observed.normalizedStatus, failureText: streamError }, sensitiveValues);
+        if (action) { if (action.action !== 'ignore') persistAccountAction(acc, action, streamError, sensitiveValues); accountActions.push({ account: acc.name, action: action.action, statusCode: action.statusCode }); }
         const providerAttempt = chain.trace.at(-1);
         if (providerAttempt) { providerAttempt.action = action?.action || null; providerAttempt.normalizedStatus = observed.normalizedStatus; providerAttempt.status = observed.normalizedStatus; providerAttempt.terminalOrigin = 'upstream_envelope'; providerAttempt.note = 'stream error after response started'; }
       } else if (transportFailed) {
@@ -2409,7 +2456,7 @@ async function dispatch(req, res) {
       return sendJSON(res, 200, {
         accounts: config.accounts.map((a) => { const recent = projectAggregate(aggregateRange(a.id).aggregate),lifetime=META.statistics.lifetime.accounts[a.id]; return { ...a, state: getAccountState(a.id), activeCount: activeCounts.get(a.id) || 0, health: healthProjection(a), quota: quotaProjection(a.id), cachePoolRole: cacheRoles.get(a.id) ?? null, statistics: { recent24h: recent, lifetimeRequests: lifetime ? lifetime.requests : 0, lifetimeErrors: lifetime ? lifetime.errors : 0 } }; }),
         mode: config.accountMode, active: config.activeAccount, concurrencyWaitMs: config.concurrencyWaitMs,
-        accountErrorRules: config.accountErrorRules, accountPipeline: config.accountPipeline,
+        accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline,
         stats: Object.fromEntries(config.accounts.map((a) => [a.name, { requests: META.statistics.lifetime.accounts[a.id]?.requests ?? 0 }])),
       });
     }
@@ -2421,8 +2468,9 @@ async function dispatch(req, res) {
       if (!Number.isInteger(wait) || wait < 0 || wait > 30000) return sendJSON(res, 400, { error: { message: 'concurrencyWaitMs must be an integer from 0 to 30000' } });
       const ruleError = validateAccountErrorRulesInput(body.accountErrorRules || {});
       if (ruleError) return sendJSON(res, 400, { error: { message: ruleError } });
-      let requestedPipeline = config.accountPipeline;
+      let requestedContentRules = config.accountContentErrorRules, requestedPipeline = config.accountPipeline;
       try {
+        if (body.accountContentErrorRules !== undefined) requestedContentRules = normalizeAccountContentErrorRules(body.accountContentErrorRules, { strict: true });
         if (body.accountPipeline !== undefined) requestedPipeline = normalizeAccountPipeline(body.accountPipeline, { strict: true, fallbackOrder: config.accountPipeline.order, fallbackCachePoolSize: configuredCachePoolSize() });
       } catch (e) { return sendJSON(res, 400, { error: { message: e.message } }); }
       if (!Number.isInteger(Number(body.active ?? 0)) || Number(body.active ?? 0) < 0 || Number(body.active ?? 0) >= body.accounts.length) return sendJSON(res, 400, { error: { message: 'active account index is out of range' } });
@@ -2452,7 +2500,7 @@ async function dispatch(req, res) {
       const requestedActive = requestedActiveId ? accs.findIndex((a) => a.id === requestedActiveId) : -1;
       const quotaRoutingWasEnabled = quotaRoutingEnabled();
       config.accounts = accs; config.accountMode = body.mode; config.activeAccount = requestedActive >= 0 ? requestedActive : Math.min(Math.max(0, Number(body.active) || 0), accs.length - 1);
-      config.concurrencyWaitMs = wait; config.accountErrorRules = normalizeAccountErrorRules(body.accountErrorRules || {}); config.accountPipeline = requestedPipeline;
+      config.concurrencyWaitMs = wait; config.accountErrorRules = normalizeAccountErrorRules(body.accountErrorRules || {}); config.accountContentErrorRules = requestedContentRules; config.accountPipeline = requestedPipeline;
       for (const [id, previous] of previousById) {
         const current = accs.find((a) => a.id === id);
         if (!current) invalidateQuotaAccount(id, { clearSnapshot: true, deleted: true });

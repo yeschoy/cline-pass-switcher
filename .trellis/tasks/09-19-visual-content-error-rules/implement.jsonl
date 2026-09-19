@@ -5,3 +5,4 @@
 {"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "原生控件、焦点、响应式和安全渲染"}
 {"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "配置到运行匹配/UI 的跨层复核"}
 {"file": ".trellis/tasks/09-18-account-metrics-content-error-rules/research/code-performance-findings.md", "reason": "现有规则能力与 UI 证据"}
+{"file": ".trellis/tasks/09-19-visual-content-error-rules/research/verification.md", "reason": "自动化覆盖与浏览器基础设施阻塞证据"}

@@ -40,6 +40,8 @@ cancelQuotaPageToken(token)
 scheduleQuotaRefresh()
 buildPipelineGroups(accounts)
 acquirePipelineAccountLease(identity, options)
+normalizeFailureForRules(errorValue, sensitiveValues)
+accountActionFor({ normalizedStatus, failureText }, sensitiveValues)
 ```
 
 Chat endpoints:
@@ -89,8 +91,9 @@ Runtime environment keys are `DATA_DIR`, `CLINE_PASS_KEY`, `PROXY_KEY`, `PUBLIC_
 - The three new modes wait only when every statically available account is full, and recompute candidates after capacity notifications.
 - Selection returns stable diagnostic facts (`strategy`, preferred/selected account, enumerated reason, overflow, session source). These facts may be logged, but the session value/fingerprint may not.
 - `runChatChain()` receives one explicit `account`; every provider attempt in that invocation uses that account's Authorization.
-- `ignore` or an unmatched status continues the provider chain on the same account. `cooldown` and `ban` stop that account's chain.
-- `handleChat()` permits one replacement account only when `cooldown` or `ban` occurs before `chain.started`. The replacement starts its own model route from the first provider. The two-iteration account loop forbids a third account.
+- For a normalized failure, ordered `accountContentErrorRules` inspect one bounded, flattened string after configured credentials/Header/proxy values and current request message values are redacted. Matching is case-insensitive literal contains with an optional inclusive normalized-status range; no regex/JSONPath/success-output scan is allowed. The first matching content rule is final, including `ignore`; only when none matches does exact `accountErrorRules[status]` apply.
+- `ignore` or an unmatched failure continues the provider chain on the same account. `cooldown` and `ban` stop that account's chain. The matcher returns only status/action/cooldown facts; keywords, matched text and raw response bodies never enter account state/history/ordinary logs.
+- `handleChat()` permits one replacement account only when `cooldown` or `ban` occurs before `chain.started`. The replacement starts its own model route from the first provider. The two-iteration account loop forbids a third account. A post-start SSE content action may change future account state but never replays the current stream; client cancellation never evaluates an error action.
 
 Session identity values are validated, HMACed with `META.routingSecret`, and never logged or persisted. Trusted parent identifiers precede child identifiers. Codex checks parent thread metadata/header before `prompt_cache_key`, session, and thread values; Claude checks parent-agent information before session/agent values. Generic parent headers precede generic current-session fields. `X-Client-Request-Id` alone never establishes affinity. The fallback HMAC input contains only the first system/developer message and first user message (each capped at 4096 characters); if neither is extractable, selection falls back to round-robin.
 
@@ -193,9 +196,9 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 | Log filter is unknown or has an invalid integer/boolean | `400` |
 | Session identity is over 512 characters or invalid | ignore it and continue identity fallback |
 | Upstream has an HTTP 4xx/5xx status | preserve it as `upstreamStatus` and normally as `normalizedStatus` |
-| HTTP 200 error envelope has a recognized status/message | normalize before applying `accountErrorRules`; otherwise `502` |
+| HTTP 200 error envelope has a recognized status/message | normalize before ordered content-rule matching and status fallback; otherwise `502` |
 | Error output/history contains a configured key, Bearer token, or request message | replace with `[REDACTED]`; retain the complete structured error reason without substring-corrupting short-message redaction |
-| `/api/accounts` mode/wait/rules/id/name/key/capacity/route is invalid | `400`; do not save |
+| `/api/accounts` mode/wait/status rules/content rules/id/name/key/capacity/route is invalid | `400`; do not save; omission of `accountContentErrorRules` preserves the current array |
 | `/api/accounts.accountPipeline` is missing on an older client | preserve the current server value |
 | An older client sends all four pipeline booleans but omits `order` and/or `cachePoolSize` | preserve the current server order and/or size |
 | `/api/accounts.accountPipeline` is non-object, incomplete, has unknown keys/non-booleans, has `cachePoolSize` outside integer 0-100000, or has a non-permutation `order` | `400`; do not save |
@@ -240,6 +243,7 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - HRW rank is independent of account input order, and removing one account remaps only sessions that ranked that account first;
 - provider attempts have identical Authorization and occur in configured order; `maxRetries` caps the attempt count;
 - cooldown/ban can switch from A to B, a second removal action cannot select C, and banned accounts leave the candidate set;
+- ordered content rules prove first-match/range/ignore/status-fallback behavior for nested HTTP-200 errors, non-stream, pre-stream SSE, post-start SSE and provider retry; current messages/keys/Header values are absent from metadata and ordinary logs;
 - account override reports `configSource: "account"`; `action: "inherit"` restores `"inherited"`;
 - real allowed and safe account Headers arrive, prohibited Headers do not, downstream Authorization is replaced, and no synthetic User-Agent appears;
 - HTTP, HTTPS, SOCKS5, and SOCKS5H proxies create real local tunnels; bad proxy tests prove no direct fallback and no credential leakage;
