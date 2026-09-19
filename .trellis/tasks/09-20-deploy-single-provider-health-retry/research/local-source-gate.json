@@ -1,0 +1,17 @@
+{
+  "archiveMemberCount": 14,
+  "archiveSha256": "20a7303a2b0cffd5542f7b7cfb2fde9eac0a040b369855d3db4b51836b8cd748",
+  "branch": "main",
+  "capturedAt": "2026-09-19T19:32:42.561352+00:00",
+  "commit": "9ecc84dc8ea6cd59422b7935a97e4af701d8d242",
+  "originMain": "9ecc84dc8ea6cd59422b7935a97e4af701d8d242",
+  "release": "20260919-193220-9ecc84d-provider-health",
+  "serverSha256": "45fb7f125b40c2f1666f4540400836f7d4d01b6209ecb98baaa9163d591f3c47",
+  "syntax": true,
+  "tempDir": "/tmp/cline-pass-deploy-20260919-193220-9ecc84d-provider-health",
+  "tests": {
+    "failed": 0,
+    "passed": 166
+  },
+  "uiSha256": "73b69da9bbef1f6e05e5eb5259a87c9f020e79ac504d4aba755368c11c17b445"
+}

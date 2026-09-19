@@ -1,0 +1,46 @@
+{
+  "apis": {
+    "accounts": 200,
+    "detailedSettings": 200,
+    "errorLogs": 200,
+    "meta": 200,
+    "models": 200,
+    "requestLogs": 200,
+    "statistics": 200
+  },
+  "capturedAt": "2026-09-19T19:44:29.818031+00:00",
+  "checks": {
+    "apis": true,
+    "configHash": true,
+    "fatalLogs": true,
+    "healthy": true,
+    "image": true,
+    "internalAlias": true,
+    "oomFalse": true,
+    "providerHealthNormalized": true,
+    "restartZero": true,
+    "running": true,
+    "serverHash": true,
+    "uiHash": true
+  },
+  "configSha256": "486fdfb79bb56fa2fe2f0be43c98c2ae3d91106662c73c3a40e6ea393d696a49",
+  "container": {
+    "health": "healthy",
+    "imageId": "sha256:52664183bc13d52828051a066b1de549500ebabdb394ae71492225f16f75154f",
+    "oomKilled": false,
+    "restartCount": 0
+  },
+  "fatalLogIndicators": 0,
+  "internalAlias": {
+    "ok": true,
+    "probeTool": "wget"
+  },
+  "label": "delayed-90s",
+  "normalizedProviderHealthRows": 78,
+  "providerHealthRows": 78,
+  "public": {
+    "dns": [],
+    "status": null
+  },
+  "release": "20260919-193220-9ecc84d-provider-health"
+}

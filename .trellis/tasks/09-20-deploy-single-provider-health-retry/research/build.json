@@ -1,0 +1,17 @@
+{
+  "archiveSha256": "20a7303a2b0cffd5542f7b7cfb2fde9eac0a040b369855d3db4b51836b8cd748",
+  "capturedAt": "2026-09-19T19:34:08.168737+00:00",
+  "composeDiffLines": [
+    4,
+    6
+  ],
+  "imageId": "sha256:52664183bc13d52828051a066b1de549500ebabdb394ae71492225f16f75154f",
+  "release": "20260919-193220-9ecc84d-provider-health",
+  "releaseModes": {
+    "directories": "0755",
+    "files": "0644"
+  },
+  "runtimeReadable": true,
+  "serverSha256": "45fb7f125b40c2f1666f4540400836f7d4d01b6209ecb98baaa9163d591f3c47",
+  "uiSha256": "73b69da9bbef1f6e05e5eb5259a87c9f020e79ac504d4aba755368c11c17b445"
+}

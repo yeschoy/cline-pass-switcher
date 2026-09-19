@@ -1,0 +1,8 @@
+{"file":".trellis/spec/backend/deployment-guidelines.md","reason":"Canonical production target, immutable release, backup, switch, rollback, and gate contract."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Owns config/metadata normalization and provider-health persistence migration boundaries."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Defines singleton provider routing, 429 classification, affinity, SSE, and management API gates."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Defines ordinary/detailed log readiness, recovery, and secret-free evidence boundaries."}
+{"file":".trellis/tasks/archive/2026-09/09-20-deploy-upstream-affinity/research/deployment-report.md","reason":"Most recent proven immutable deployment and rollback procedure for this production host."}
+{"file":".trellis/tasks/archive/2026-09/09-20-deploy-upstream-affinity/research/deployment-attempts.md","reason":"Known host/shell/rehearsal pitfalls to avoid during this release."}
+{"file":".trellis/tasks/09-20-deploy-single-provider-health-retry/research/current-production-preflight.json","reason":"Current read-only production baseline for source, migration, switch, and rollback comparisons."}
+{"file":".trellis/tasks/09-20-deploy-single-provider-health-retry/research/deployment-attempts.md","reason":"Current release pre-mutation retries and helper-runtime compatibility evidence."}

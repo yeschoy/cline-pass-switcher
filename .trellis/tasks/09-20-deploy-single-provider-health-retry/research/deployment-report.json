@@ -1,0 +1,77 @@
+{
+  "apis": {
+    "accounts": 200,
+    "detailedSettings": 200,
+    "errorLogs": 200,
+    "meta": 200,
+    "models": 200,
+    "requestLogs": 200,
+    "statistics": 200
+  },
+  "archiveSha256": "20a7303a2b0cffd5542f7b7cfb2fde9eac0a040b369855d3db4b51836b8cd748",
+  "capturedAt": "2026-09-19T19:45:42.210804+00:00",
+  "commit": "9ecc84dc8ea6cd59422b7935a97e4af701d8d242",
+  "configSha256": "486fdfb79bb56fa2fe2f0be43c98c2ae3d91106662c73c3a40e6ea393d696a49",
+  "delayedChecks": {
+    "apis": true,
+    "configHash": true,
+    "fatalLogs": true,
+    "healthy": true,
+    "image": true,
+    "internalAlias": true,
+    "oomFalse": true,
+    "providerHealthNormalized": true,
+    "restartZero": true,
+    "running": true,
+    "serverHash": true,
+    "uiHash": true
+  },
+  "deploymentSha256": "9d73a277763b26e4f2e6e986dfa900207f8eb153af19f60947b8dba7b74ff480",
+  "imageId": "sha256:52664183bc13d52828051a066b1de549500ebabdb394ae71492225f16f75154f",
+  "immediateChecks": {
+    "apis": true,
+    "configHash": true,
+    "fatalLogs": true,
+    "healthy": true,
+    "image": true,
+    "internalAlias": true,
+    "invalidQuota": true,
+    "oomFalse": true,
+    "providerHealthNormalized": true,
+    "restartZero": true,
+    "running": true,
+    "serverHash": true,
+    "uiHash": true,
+    "uiMarkers": true
+  },
+  "independentChecks": {
+    "apis": true,
+    "configHash": true,
+    "fatalLogs": true,
+    "healthy": true,
+    "image": true,
+    "internalAlias": true,
+    "oomFalse": true,
+    "providerHealthNormalized": true,
+    "restartZero": true,
+    "running": true,
+    "serverHash": true,
+    "uiHash": true
+  },
+  "internalAlias": {
+    "ok": true,
+    "probeTool": "wget"
+  },
+  "previousImageId": "sha256:5a26c0c0fd6f78b0c19fc72d840f00cfcb87e990e74d1e32646843ff56577935",
+  "previousRelease": "20260919-172057-3ccb929-upstream-affinity",
+  "providerHealthRows": 78,
+  "publicDnsPreexistingUnavailable": true,
+  "realModelRequests": false,
+  "release": "20260919-193220-9ecc84d-provider-health",
+  "rollbackReady": true,
+  "sourceHashes": {
+    "public/index.html": "73b69da9bbef1f6e05e5eb5259a87c9f020e79ac504d4aba755368c11c17b445",
+    "server.js": "45fb7f125b40c2f1666f4540400836f7d4d01b6209ecb98baaa9163d591f3c47"
+  },
+  "status": "deployed"
+}

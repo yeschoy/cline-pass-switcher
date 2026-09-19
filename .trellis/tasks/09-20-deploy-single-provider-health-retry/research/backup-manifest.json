@@ -1,0 +1,24 @@
+{
+  "atomicHelperScratchPassed": true,
+  "backupHashes": {
+    "compose": "d153bb6277fe671214f4c3a8ffa79ea7a11bbb0c8accd4e3decd220f1408e022",
+    "config": "486fdfb79bb56fa2fe2f0be43c98c2ae3d91106662c73c3a40e6ea393d696a49",
+    "deployment": "7e3b1fc054c954a592d3a8eed002ffe200f94099c359c78528b288d6b784b5af",
+    "logs": "fa031fbb914901ac2b8e3469fb272ccd52d6e0b7d676b4a7771845ee61ee6b8c",
+    "metadata": "ffbd478f739da5123965c297a301cf03ba8c210b966cd134fd2c04071f764b7d"
+  },
+  "candidateImageId": "sha256:52664183bc13d52828051a066b1de549500ebabdb394ae71492225f16f75154f",
+  "capturedAt": "2026-09-19T19:40:00.647150+00:00",
+  "crossedLiveMutationBoundary": false,
+  "liveHashes": {
+    "compose": "d153bb6277fe671214f4c3a8ffa79ea7a11bbb0c8accd4e3decd220f1408e022",
+    "config": "486fdfb79bb56fa2fe2f0be43c98c2ae3d91106662c73c3a40e6ea393d696a49",
+    "deployment": "7e3b1fc054c954a592d3a8eed002ffe200f94099c359c78528b288d6b784b5af",
+    "logs": "fa031fbb914901ac2b8e3469fb272ccd52d6e0b7d676b4a7771845ee61ee6b8c",
+    "metadata": "ffbd478f739da5123965c297a301cf03ba8c210b966cd134fd2c04071f764b7d"
+  },
+  "oldImageId": "sha256:5a26c0c0fd6f78b0c19fc72d840f00cfcb87e990e74d1e32646843ff56577935",
+  "oldImageInspectable": true,
+  "predictedConfigSha256": "486fdfb79bb56fa2fe2f0be43c98c2ae3d91106662c73c3a40e6ea393d696a49",
+  "release": "20260919-193220-9ecc84d-provider-health"
+}

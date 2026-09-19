@@ -1,0 +1,7 @@
+{"file":".trellis/spec/backend/deployment-guidelines.md","reason":"Verify every production mutation and rollback gate against the canonical contract."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Verify copied-data migration is exact, bounded, and idempotent."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verify deployed source preserves singleton provider, affinity, content-rule, SSE, and account boundaries."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Verify log readiness and deployment evidence contain no secrets or raw business data."}
+{"file":".trellis/tasks/archive/2026-09/09-20-deploy-upstream-affinity/research/deployment-report.md","reason":"Compare current candidate gates with the last successful production release."}
+{"file":".trellis/tasks/09-20-deploy-single-provider-health-retry/research/current-production-preflight.json","reason":"Verify post-switch state against the exact current production baseline."}
+{"file":".trellis/tasks/09-20-deploy-single-provider-health-retry/research/deployment-attempts.md","reason":"Verify every retry stayed before the mutation boundary or has explicit recovery evidence."}

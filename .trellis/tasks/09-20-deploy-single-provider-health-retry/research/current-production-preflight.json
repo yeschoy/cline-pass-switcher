@@ -1,0 +1,147 @@
+{
+  "apis": {
+    "accounts": {
+      "itemCount": null,
+      "status": 200,
+      "topKeys": [
+        "accountContentErrorRules",
+        "accountErrorRules",
+        "accountPipeline",
+        "accounts",
+        "active",
+        "concurrencyWaitMs",
+        "mode",
+        "stats"
+      ]
+    },
+    "detailedSettings": {
+      "itemCount": null,
+      "status": 200,
+      "topKeys": [
+        "authRequired",
+        "detailedLogging",
+        "health",
+        "maxAgeMs",
+        "maxBodyBytes",
+        "maxTotalBytes"
+      ]
+    },
+    "errorLogs": {
+      "itemCount": 0,
+      "status": 200,
+      "topKeys": [
+        "items",
+        "nextCursor"
+      ]
+    },
+    "meta": {
+      "itemCount": null,
+      "status": 200,
+      "topKeys": [
+        "authRequired",
+        "configured",
+        "proxyBase"
+      ]
+    },
+    "models": {
+      "itemCount": null,
+      "status": 200,
+      "topKeys": [
+        "accountId",
+        "catalog",
+        "catalogCount",
+        "officialFetch",
+        "proxyBase",
+        "subscription"
+      ]
+    },
+    "requestLogs": {
+      "itemCount": 1,
+      "status": 200,
+      "topKeys": [
+        "items",
+        "nextCursor"
+      ]
+    },
+    "statistics": {
+      "itemCount": null,
+      "status": 200,
+      "topKeys": [
+        "accounts",
+        "generatedAt",
+        "lifetime",
+        "migration",
+        "models",
+        "recent24h",
+        "routingCoverage",
+        "window"
+      ]
+    }
+  },
+  "capturedAt": "2026-09-19T19:27:45.391888+00:00",
+  "configuration": {
+    "accountCount": 10,
+    "accountRouteCount": 0,
+    "cachePoolSize": 5,
+    "contentRuleCount": 0,
+    "enabledCount": 8,
+    "globalRouteCount": 16,
+    "mode": "sticky",
+    "providerCooldownNonZero": 0,
+    "statusRuleCount": 5,
+    "waitMs": 2000
+  },
+  "container": {
+    "health": "healthy",
+    "imageId": "sha256:5a26c0c0fd6f78b0c19fc72d840f00cfcb87e990e74d1e32646843ff56577935",
+    "imageRef": "cline-pass-switcher:20260919-172057-3ccb929-upstream-affinity",
+    "oomKilled": false,
+    "restartCount": 0,
+    "running": true,
+    "startedAt": "2026-09-19T17:43:07.475030881Z",
+    "status": "running"
+  },
+  "deployment": {
+    "commit": "3ccb92984eca4b282e158027bf571b7ffab06bb0",
+    "imageId": "sha256:5a26c0c0fd6f78b0c19fc72d840f00cfcb87e990e74d1e32646843ff56577935",
+    "previousRelease": "20260919-110817-b2d676d-stats-logs-rules",
+    "release": "20260919-172057-3ccb929-upstream-affinity"
+  },
+  "disk": {
+    "availableKiB": 417116700
+  },
+  "hashes": {
+    "compose": "d153bb6277fe671214f4c3a8ffa79ea7a11bbb0c8accd4e3decd220f1408e022",
+    "config": "486fdfb79bb56fa2fe2f0be43c98c2ae3d91106662c73c3a40e6ea393d696a49",
+    "deployment": "7e3b1fc054c954a592d3a8eed002ffe200f94099c359c78528b288d6b784b5af",
+    "metadata": "83292b81f57ea27d09a82a505cf32760750a4d7555e30620c6d061bb3b2895bb"
+  },
+  "internalAlias": {
+    "alias": "cline-pass-switcher",
+    "containerPresent": true,
+    "network": "ai-internal",
+    "ok": true,
+    "probeTool": "wget",
+    "responseHadConfiguredField": true
+  },
+  "metadata": {
+    "minuteBuckets": 655,
+    "providerHealthRows": 78,
+    "providerHealthStatuses": {
+      "bad": 2,
+      "limited": 7,
+      "ok": 67,
+      "unknown": 2
+    },
+    "statisticsVersion": 3
+  },
+  "ordinaryLogs": {
+    "fileCount": 1,
+    "totalBytes": 129833
+  },
+  "public": {
+    "dns": [],
+    "errorCategory": "gaierror",
+    "status": null
+  }
+}
