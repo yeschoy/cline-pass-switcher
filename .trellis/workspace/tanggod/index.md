@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 16
+- **Total Sessions**: 17
 - **Last Active**: 2026-09-20
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~423 | Active |
+| `journal-1.md` | ~445 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 17 | 2026-09-20 | Deploy upstream affinity release | `e9ea6f4` | `feat/quota-forecast-panel` |
 | 16 | 2026-09-20 | Merge upstream affinity into quota branch | `ca3becd`, `01109cb` | `integration/upstream-affinity-into-quota` |
 | 14 | 2026-09-19 | 增强统计、日志与错误规则体验 | `61e5067`, `d0dbc74`, `74913e0`, `939b62e` | `feat/quota-forecast-panel` |
 | 13 | 2026-09-18 | 评估 Switcher Responses 适配 | - | `feat/quota-forecast-panel` |

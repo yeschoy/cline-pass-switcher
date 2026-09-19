@@ -421,3 +421,25 @@ Merged feat/upstream-session-affinity into feat/quota-forecast-panel in an isola
 ### Status
 
 [OK] **Completed**
+
+
+## Session 17: Deploy upstream affinity release
+<!-- trellis-session: v=2 fp=0223e57d1993cc35 -->
+
+**Date**: 2026-09-20
+**Task**: Deploy upstream affinity release
+**Branch**: `feat/quota-forecast-panel`
+
+### Summary
+
+Deployed committed HEAD 3ccb929 as immutable release 20260919-172057-3ccb929-upstream-affinity. Rehearsed exact config route defaults and statistics v2-to-v3 migration, switched with no-build, passed immediate/90s/independent gates, retained rollback backups, and committed sanitized evidence.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e9ea6f4` | ops: deploy upstream affinity release |
+
+### Status
+
+[OK] **Completed**
