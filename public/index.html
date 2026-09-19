@@ -156,7 +156,7 @@
     <div class="card">
       <div class="toolbar"><h2 id="logTitle" style="margin:0">最终请求结果（每个请求一条）</h2><span id="logSectionStatus" class="badge green" aria-live="polite">当前板块：请求日志</span><input id="logType" type="hidden" value="requests"><input id="logFrom" type="datetime-local" title="开始时间"><input id="logTo" type="datetime-local" title="结束时间"><input id="logRequestId" placeholder="请求 ID"><input id="logModel" placeholder="模型"><input id="logAccount" placeholder="账号"><input id="logStatus" placeholder="状态码"><select id="logResult"><option value="">结果：全部</option><option value="success">成功</option><option value="client_cancelled">客户端取消</option><option value="failed">失败</option></select><input id="logProvider" placeholder="供应商"><input id="logStrategy" placeholder="策略/错误类别"><select id="logStream"><option value="">流式：全部</option><option value="true">流式</option><option value="false">非流式</option></select><select id="logOverflow"><option value="">容量：全部</option><option value="true">容量溢出</option><option value="false">未溢出</option></select><select id="logSwitched"><option value="">换号：全部</option><option value="true">已换号</option><option value="false">未换号</option></select><button class="ghost" onclick="loadLogs()">筛选</button><button class="ghost" onclick="clearLogs()">清空当前日志</button></div>
       <p id="logDescription" class="dim">展示最终请求结果，每个请求一条；旧记录可能缺少 result，界面仅按历史状态显示 legacy_failed，不迁移或改写历史 JSONL。</p>
-      <div class="table-wrap"><table style="min-width:1000px"><thead><tr><th>时间</th><th>请求 ID</th><th>请求/实际模型</th><th>账号</th><th>策略/原因</th><th>状态 / 结果</th><th>供应商路径</th><th>详情</th></tr></thead><tbody id="logBody"><tr><td colspan="8" class="empty">暂无记录</td></tr></tbody></table></div>
+      <div class="table-wrap"><table style="min-width:1220px"><thead><tr><th>时间</th><th>请求 ID</th><th>请求/实际模型</th><th>账号</th><th>策略/原因</th><th>状态 / 结果</th><th>供应商路径</th><th>亲和键/上游键/缓存</th><th>详情</th></tr></thead><tbody id="logBody"><tr><td colspan="9" class="empty">暂无记录</td></tr></tbody></table></div>
       <button id="logNext" class="ghost" onclick="loadLogs(true)" style="margin-top:10px">下一页</button>
     </div>
   </section>
@@ -342,6 +342,7 @@
 </div>
 <div id="presetModal" class="modal"><div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="presetTitle"><h2 id="presetTitle">预设变更预览</h2><div id="presetDiff" style="white-space:pre-wrap;margin:14px 0"></div><div id="presetAdjust"></div><button onclick="applyPreset()">确认并保存</button> <button class="ghost" onclick="closePreset()">取消</button></div></div>
 <div id="errorPresetModal" class="modal"><div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="errorPresetTitle"><h2 id="errorPresetTitle">错误规则预设变更预览</h2><div id="errorPresetDiff" style="white-space:pre-wrap;margin:14px 0"></div><button onclick="applyErrorPreset()">确认并通过账号配置保存</button> <button class="ghost" onclick="closeErrorPreset()">取消</button></div></div>
+<div id="upstreamSetupModal" class="modal"><div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="upstreamSetupTitle"><h2 id="upstreamSetupTitle">上游一键配置预览</h2><label for="upstreamSetupStrategy" class="dim">策略</label><select id="upstreamSetupStrategy" onchange="renderUpstreamSetupProposal()"><option value="cache">缓存优先（strict）</option><option value="available">可用性优先（preferred）</option><option value="automatic">自动 sticky</option></select><pre id="upstreamSetupDiff" style="white-space:pre-wrap;margin:14px 0"></pre><div id="upstreamSetupStatus" aria-live="polite" class="dim" style="margin-bottom:12px"></div><button type="button" onclick="testUpstreamSetup()">测试建议</button> <button type="button" onclick="applyUpstreamSetup()">确认保存</button> <button type="button" class="ghost" onclick="closeUpstreamSetup()">取消</button></div></div>
 <script>
 let DATA = null;
 let AUTH_KEY = localStorage.getItem('cps_key') || '';
@@ -493,12 +494,14 @@ function render() {
           <option value="tps" ${sort === 'tps' ? 'selected' : ''}>最高吞吐</option>
         </select>
         <div style="margin-top:4px"><label class="dim">重试 <input type="number" min="0" max="20" value="${s.config.maxRetries ?? ''}" placeholder="全部" onchange="saveCfg(${jsArg(s.id)},'maxRetries',this.value)"></label></div>
+        <div style="margin-top:4px"><label class="dim" title="0=关闭；仅首包前确定性 Provider 故障触发，账号鉴权/代理/取消/首包后失败不触发">Provider 冷却(ms) <input type="number" min="0" max="300000" step="1" value="${Number(s.config.providerCooldownMs)||0}" onchange="saveCfg(${jsArg(s.id)},'providerCooldownMs',this.value)"></label></div>
         ${DATA.accountId ? `<div style="margin-top:4px"><span class="badge ${s.configSource === 'account' ? 'green' : 'orange'}">${s.configSource === 'account' ? '账号专属' : '继承全局'}</span> <button class="ghost mini" onclick="${s.configSource === 'account' ? `inheritCfg(${jsArg(s.id)})` : `copyGlobalCfg(${jsArg(s.id)})`}">${s.configSource === 'account' ? '恢复继承' : '复制全局'}</button></div>` : ''}
       </td>
       <td><div class="row-actions">
         <button class="ghost" onclick="probe(${jsArg(s.id)}, this)">探测</button>
         <button class="ghost" onclick="test(${jsArg(s.id)}, this)">测试</button>
         <button class="ghost" onclick="validate(${jsArg(s.id)}, this)" title="把每个上游渠道各钉一次最小请求，标出可用/限流/不可钉">校验</button>
+        <button class="ghost" onclick="setupUpstreams(${jsArg(s.id)}, this)" title="探测、校验并预览缓存优先/可用性优先/自动 sticky 配置">一键配置</button>
       </div></td>
     </tr>`;
   }).join('');
@@ -591,7 +594,7 @@ function secMsg(msg, isErr) {
 
 async function probe(id, btn) {
   btn.disabled = true; btn.textContent = '探测中…'; status('正在探测 ' + id);
-  const r = await api('/api/probe', { model: id });
+  const r = await api('/api/probe', { model: id, accountId: $('#routeScope').value || undefined });
   btn.disabled = false; btn.textContent = '探测';
   status(r.ok ? `${id} 探测完成：上游 ${r.upstreams?.length ?? 0} 个，命中 ${r.lastProvider}` : `探测失败：${r.error}`);
   await loadAll();
@@ -601,7 +604,7 @@ async function probeAll() {
   const btn = $('#probeAllBtn'); btn.disabled = true;
   for (const s of DATA.subscription) {
     btn.textContent = `探测中 ${s.id}`;
-    await api('/api/probe', { model: s.id });
+    await api('/api/probe', { model: s.id, accountId: $('#routeScope').value || undefined });
   }
   btn.disabled = false; btn.textContent = '批量探测订阅模型';
   await loadAll();
@@ -648,13 +651,56 @@ async function validate(id, btn) {
   btn.disabled = true; btn.textContent = '校验中…';
   status(`正在校验 ${id} 的全部上游渠道（约需 1 分钟）…`);
   try {
-    const r = await api('/api/validate-upstreams', { model: id });
+    const r = await api('/api/validate-upstreams', { model: id, accountId: $('#routeScope').value || undefined });
     status(`校验完成：✔可用 ${r.summary.ok} · ⏳限流 ${r.summary.limited} · ✘不可钉 ${r.summary.bad} · 🔑key错 ${r.summary.auth} · 未判定 ${r.summary.unknown}（下拉框已标注并排序）`);
   } catch (e) {
     status('校验失败');
   }
   btn.disabled = false; btn.textContent = '校验';
   await loadAll();
+}
+
+let UPSTREAM_SETUP = null;
+function upstreamSetupRoute(strategy){
+  if(!UPSTREAM_SETUP)return null;
+  const entries=Object.entries(UPSTREAM_SETUP.results||{}),ok=entries.filter(([,fact])=>fact.status==='ok').sort((a,b)=>(Number(a[1].ms)||0)-(Number(b[1].ms)||0)).map(([name])=>name),limited=entries.filter(([,fact])=>fact.status==='limited').map(([name])=>name),bad=entries.filter(([,fact])=>fact.status==='bad').map(([name])=>name),preferred=[...ok,...limited];
+  if(strategy==='automatic')return {upstreams:[],exclude:bad,pinMode:'preferred',sort:null};
+  if(strategy==='available')return {upstreams:preferred,exclude:bad,pinMode:'preferred',sort:preferred.length>1?'ttft':null};
+  return {upstreams:preferred,exclude:bad,pinMode:'strict',sort:null};
+}
+function renderUpstreamSetupProposal(){
+  if(!UPSTREAM_SETUP)return;
+  const strategy=$('#upstreamSetupStrategy').value,route=upstreamSetupRoute(strategy),facts=Object.entries(UPSTREAM_SETUP.results||{}).map(([name,fact])=>`${name}: ${fact.accountFault?`账号故障 ${fact.accountFault}`:fact.status} · ${Number(fact.ms)||0}ms`);
+  $('#upstreamSetupDiff').textContent=`模型：${UPSTREAM_SETUP.model}\n账号作用域：${UPSTREAM_SETUP.accountId||'按调度策略'}\n策略：${strategy==='cache'?'缓存优先 strict':strategy==='available'?'可用性优先 preferred':'自动 sticky'}\n优先序列：${route.upstreams.join(' → ')||'自动'}\n排除：${route.exclude.join(', ')||'无'}\n排序：${route.sort||'无'}\n\n校验结果：\n${facts.join('\n')||'无已知渠道'}`;
+  $('#upstreamSetupStatus').textContent=route.upstreams.length||strategy==='automatic'?'预览完成，尚未保存。':'没有已验证可用/限流渠道；请检查账号故障或重新探测。';
+}
+async function setupUpstreams(id,btn){
+  btn.disabled=true;const original=btn.textContent;btn.textContent='配置中…';const accountId=$('#routeScope').value||'';status(`正在为 ${id} 探测并校验上游…`);
+  try{
+    const probeResult=await api('/api/probe',{model:id,accountId:accountId||undefined});
+    if(!probeResult.ok)throw Error(probeResult.error?.message||probeResult.error||'探测失败');
+    const validation=await api('/api/validate-upstreams',{model:id,accountId:accountId||undefined});
+    if(!validation.ok)throw Error(validation.error?.message||'校验失败');
+    UPSTREAM_SETUP={model:id,accountId,results:validation.results||{}};
+    $('#upstreamSetupStrategy').value='cache';renderUpstreamSetupProposal();$('#upstreamSetupModal').style.display='flex';$('#upstreamSetupStrategy').focus();
+    status(`${id} 一键配置预览已生成，尚未保存`);
+  }catch(error){status(`一键配置失败：${error.message||'未知错误'}`);}
+  finally{btn.disabled=false;btn.textContent=original;}
+}
+function closeUpstreamSetup(){UPSTREAM_SETUP=null;$('#upstreamSetupModal').style.display='none';$('#upstreamSetupStatus').textContent='';}
+async function testUpstreamSetup(){
+  if(!UPSTREAM_SETUP)return;const statusEl=$('#upstreamSetupStatus');
+  if(($('#routeScope').value||'')!==UPSTREAM_SETUP.accountId){statusEl.textContent='账号作用域已变化，请关闭后重新生成预览。';return;}
+  const route=upstreamSetupRoute($('#upstreamSetupStrategy').value);statusEl.textContent='正在测试建议配置…';
+  const result=await api('/api/test',{model:UPSTREAM_SETUP.model,accountId:UPSTREAM_SETUP.accountId||undefined,...route});
+  statusEl.textContent=result.ok?`测试成功：实际命中 ${result.actual||'未知'}，${Number(result.ms)||0}ms`:`测试失败：${result.error||'上游错误'}`;
+}
+async function applyUpstreamSetup(){
+  if(!UPSTREAM_SETUP)return;const statusEl=$('#upstreamSetupStatus');
+  if(($('#routeScope').value||'')!==UPSTREAM_SETUP.accountId){statusEl.textContent='账号作用域已变化，请关闭后重新生成预览。';return;}
+  const model=UPSTREAM_SETUP.model,route=upstreamSetupRoute($('#upstreamSetupStrategy').value);
+  if($('#upstreamSetupStrategy').value!=='automatic'&&!route.upstreams.length){statusEl.textContent='没有可保存的已验证候选。';return;}
+  if(await saveModelCfg(model,route))closeUpstreamSetup();else statusEl.textContent='保存失败，已重新加载服务器状态；请重新生成预览。';
 }
 
 async function runTest() {
@@ -699,7 +745,7 @@ function showTest(r, model, target) {
 // —— perModel 配置保存：POST 完整字段（upstreams + exclude 一起），UI 由调用方乐观更新 ——
 async function saveModelCfg(id, patch) {
   const s = DATA.subscription.find((x) => x.id === id);
-  if (!s) return;
+  if (!s) return false;
   const cfg = s.config;
   const full = {
     upstreams: patch.upstreams !== undefined ? patch.upstreams : (cfg.upstreams || []),
@@ -707,22 +753,26 @@ async function saveModelCfg(id, patch) {
     pinMode: patch.pinMode !== undefined ? patch.pinMode : (cfg.pinMode || 'strict'),
     sort: patch.sort !== undefined ? patch.sort : (cfg.sort || null),
     maxRetries: patch.maxRetries !== undefined ? patch.maxRetries : (cfg.maxRetries ?? null),
+    providerCooldownMs: patch.providerCooldownMs !== undefined ? patch.providerCooldownMs : (Number(cfg.providerCooldownMs)||0),
   };
   try {
     const accountId = $('#routeScope').value || '';
     const r = await api('/api/config', { scope: accountId ? 'account' : 'global', accountId, perModel: { [id]: full } });
     if (r.ok) {
-      cfg.upstreams = full.upstreams; cfg.exclude = full.exclude; cfg.pinMode = full.pinMode; cfg.sort = full.sort; cfg.maxRetries = full.maxRetries;
+      cfg.upstreams = full.upstreams; cfg.exclude = full.exclude; cfg.pinMode = full.pinMode; cfg.sort = full.sort; cfg.maxRetries = full.maxRetries; cfg.providerCooldownMs = full.providerCooldownMs;
       s.configSource = accountId ? 'account' : 'global';
       const account = accountId && ACCS?.accounts?.find((a) => a.id === accountId);
       if (account) (account.perModel ||= {})[id] = { ...full, upstream: full.upstreams[0] || null };
       status(`${id} 配置已保存`);
+      return true;
     } else {
       status(`${id} 保存失败：${r.error?.message || '未知错误'}`);
       await loadAll();
+      return false;
     }
   } catch {
     await loadAll();
+    return false;
   }
 }
 
@@ -732,6 +782,7 @@ async function saveCfg(id, field, value) {
   if (field === 'pinMode') patch.pinMode = value || 'strict';
   else if (field === 'sort') patch.sort = value || null;
   else if (field === 'maxRetries') patch.maxRetries = value === '' ? null : Number(value);
+  else if (field === 'providerCooldownMs') patch.providerCooldownMs = Number(value);
   await saveModelCfg(id, patch);
 }
 
@@ -1049,8 +1100,9 @@ function statisticsQuotaForecast(data){const accounts=Array.isArray(data?.accoun
 function renderStatisticsQuotaForecast(data){const forecast=statisticsQuotaForecast(data),targets=[['statisticsQuotaCurrent','current'],['statisticsQuota2h','twoHours'],['statisticsQuota8h','eightHours'],['statisticsQuota24h','twentyFourHours']];for(const [id,key] of targets){const total=forecast.totals[key];$('#'+id).textContent=forecast.included===0?'无可用数据':`可用 ${total.toFixed(1)} / ${forecast.maximum.toFixed(1)} 账号额度点（${(total/forecast.maximum*100).toFixed(1)}%）`;}$('#statisticsQuotaForecastMeta').textContent=`纳入 ${forecast.included} 个账号 · 排除 ${forecast.excluded} 个账号 · 重置时间不完整 ${forecast.incompleteResets} 个账号${forecast.incompleteResets?' · 未来值为保守预测下限':''}`;return forecast;}
 function quotaState(a,generatedAt){const q=a.quota||{},refresh=q.refresh||{},known=['five_hour','weekly','monthly'].filter(type=>typeof q.limits?.[type]?.percentUsed==='number'&&Number.isFinite(q.limits[type].percentUsed)&&q.limits[type].percentUsed>=0&&q.limits[type].percentUsed<=100).length,hasSnapshot=known>0&&Number.isSafeInteger(q.fetchedAt)&&q.fetchedAt>0,stale=hasSnapshot&&(q.lastSuccessAt!==q.fetchedAt||!Number.isSafeInteger(q.lastAttemptAt)||q.lastAttemptAt>q.lastSuccessAt||q.fetchedAt>generatedAt||generatedAt-q.fetchedAt>STATISTICS_STALE_MS),errorLabel=({auth:'认证',rate_limit:'限流',server:'上游服务',http:'HTTP',proxy:'代理',network:'网络',timeout:'超时',json:'JSON',schema:'数据格式'})[q.errorCategory]||'其他';const parts=[];if(refresh.reason==='unconfigured')parts.push('未配置');else{if(refresh.reason==='disabled')parts.push(hasSnapshot?'已禁用 · 上次额度':'已禁用 · 未知');else if(!hasSnapshot)parts.push('未知 · 尚未获取');if(hasSnapshot){let diagnostic=false;if(q.errorCategory){parts.push(`刷新失败（${escapeHtml(errorLabel)}） · 显示上次成功额度`);diagnostic=true;}if(stale){parts.push('过期 · 上次快照');diagnostic=true;}if(known<3){parts.push('部分可用');diagnostic=true;}if(!diagnostic&&refresh.reason!=='disabled')parts.push('额度快照可用');}else if(q.errorCategory)parts.push(`刷新失败（${escapeHtml(errorLabel)}） · 尚无成功额度`);}if(refresh.state==='queued')parts.push('等待刷新');else if(refresh.state==='fetching')parts.push('刷新中');else if(refresh.eligible&&refresh.nextAttemptAt&&refresh.nextAttemptAt<=generatedAt)parts.push('待刷新');if(q.lastSuccessAt)parts.push(`上次成功 ${escapeHtml(new Date(q.lastSuccessAt).toLocaleString())}`);if(q.lastAttemptAt&&q.lastAttemptAt!==q.lastSuccessAt)parts.push(`上次尝试 ${escapeHtml(new Date(q.lastAttemptAt).toLocaleString())}`);parts.push(`额度路由池 ${escapeHtml(a.quota.pool)}（${escapeHtml(q.status||'unknown')}）`);return parts.join('<br>');}
 function cacheMetrics(x){return `缓存 ${statisticValue(x.cachedTokens,x.cacheKnownRequests)} · Token 占比 ${statisticPercent(x.cacheTokenRatio)}（${statisticValue(x.cacheInputCachedTokens)}/${statisticValue(x.cacheInputTokens)}） · 命中请求率 ${statisticPercent(x.cacheHitRequestRate)}（${statisticValue(x.cacheHitRequests)}/${statisticValue(x.cacheKnownRequests)}）`;}
-function statisticsRange(label,x){return `<div><b>${label}</b><br>请求/错误 ${statisticValue(x.requests)} / ${statisticValue(x.errors)}<br>input ${statisticValue(x.inputTokens,x.inputKnownRequests)} · output ${statisticValue(x.outputTokens,x.outputKnownRequests)} · total ${statisticValue(x.totalTokens,x.totalKnownRequests)}<br>${cacheMetrics(x)}</div>`;}
-async function loadStatistics(visitId=STATISTICS_VISIT_ID,announce=true){const queryId=++STATISTICS_QUERY_ID;if(announce&&!$('#statisticsPanel').hidden)$('#statisticsStatus').textContent='加载统计中…';try{const data=await api('/api/statistics');if(queryId!==STATISTICS_QUERY_ID||visitId!==STATISTICS_VISIT_ID||$('#statisticsPanel').hidden)return null;const l=data.lifetime.global,r=data.recent24h.global;$('#statisticsSummary').innerHTML=statisticsRange('累计',l)+statisticsRange('最近 24 小时',r);renderStatisticsQuotaForecast(data);$('#statisticsBody').innerHTML=(data.accounts||[]).map(a=>`<tr><td>${escapeHtml(a.name)}<br><span class="mono dim">${escapeHtml(a.id)}</span></td><td>${escapeHtml(a.health.status)}</td><td>${statisticValue(a.lifetime.requests)} / ${statisticValue(a.lifetime.errors)}</td><td>${statisticValue(a.recent24h.requests)} / ${statisticValue(a.recent24h.errors)}</td><td>累计 ${statisticValue(a.lifetime.inputTokens,a.lifetime.inputKnownRequests)} · ${statisticValue(a.lifetime.outputTokens,a.lifetime.outputKnownRequests)} · ${statisticValue(a.lifetime.totalTokens,a.lifetime.totalKnownRequests)}<br>24h ${statisticValue(a.recent24h.inputTokens,a.recent24h.inputKnownRequests)} · ${statisticValue(a.recent24h.outputTokens,a.recent24h.outputKnownRequests)} · ${statisticValue(a.recent24h.totalTokens,a.recent24h.totalKnownRequests)}</td><td>累计 ${cacheMetrics(a.lifetime)}<br>24h ${cacheMetrics(a.recent24h)}</td><td>${Number(a.health.results)||0} / ${a.health.score===null?'无数据':Number(a.health.score).toFixed(1)}</td><td>${quotaLimit(a.quota,'five_hour','5 小时')}<br>${quotaLimit(a.quota,'weekly','每周')}<br>${quotaLimit(a.quota,'monthly','每月')}</td><td>${quotaState(a,data.generatedAt)}</td></tr>`).join('')||'<tr><td colspan="9" class="empty">暂无账号统计</td></tr>';$('#statisticsLegacy').textContent=`旧版请求基线（可能含控制台测试，不计入精确聊天总量）：${Number(data.migration?.legacyRequests)||0}`;$('#statisticsStatus').textContent=`生成于 ${new Date(data.generatedAt).toLocaleString()}`;return data;}catch{if(queryId===STATISTICS_QUERY_ID&&visitId===STATISTICS_VISIT_ID&&!$('#statisticsPanel').hidden)$('#statisticsStatus').textContent='统计加载失败；已显示的数据未改变';return null;}}
+function affinityMetrics(x,coverage){const note=coverage?.complete===false?`（统计积累中${coverage.from?`，自 ${escapeHtml(new Date(coverage.from).toLocaleString())}`:''}）`:'';return `亲和 显式/回退 ${statisticValue(x.explicitAffinityRequests)}/${statisticValue(x.fallbackAffinityRequests)} · Provider 回退 ${statisticValue(x.providerFallbackRequests)} · 冷却 ${statisticValue(x.providerCircuitCooldownRequests)} · Half-open ${statisticValue(x.providerHalfOpenRequests)}${note}`;}
+function statisticsRange(label,x,routingCoverage){return `<div><b>${label}</b><br>请求/错误 ${statisticValue(x.requests)} / ${statisticValue(x.errors)}<br>input ${statisticValue(x.inputTokens,x.inputKnownRequests)} · output ${statisticValue(x.outputTokens,x.outputKnownRequests)} · total ${statisticValue(x.totalTokens,x.totalKnownRequests)}<br>${cacheMetrics(x)}<br>${affinityMetrics(x,routingCoverage)}</div>`;}
+async function loadStatistics(visitId=STATISTICS_VISIT_ID,announce=true){const queryId=++STATISTICS_QUERY_ID;if(announce&&!$('#statisticsPanel').hidden)$('#statisticsStatus').textContent='加载统计中…';try{const data=await api('/api/statistics');if(queryId!==STATISTICS_QUERY_ID||visitId!==STATISTICS_VISIT_ID||$('#statisticsPanel').hidden)return null;const l=data.lifetime.global,r=data.recent24h.global;$('#statisticsSummary').innerHTML=statisticsRange('累计',l,data.routingCoverage)+statisticsRange('最近 24 小时',r,data.routingCoverage);renderStatisticsQuotaForecast(data);$('#statisticsBody').innerHTML=(data.accounts||[]).map(a=>`<tr><td>${escapeHtml(a.name)}<br><span class="mono dim">${escapeHtml(a.id)}</span></td><td>${escapeHtml(a.health.status)}</td><td>${statisticValue(a.lifetime.requests)} / ${statisticValue(a.lifetime.errors)}</td><td>${statisticValue(a.recent24h.requests)} / ${statisticValue(a.recent24h.errors)}</td><td>累计 ${statisticValue(a.lifetime.inputTokens,a.lifetime.inputKnownRequests)} · ${statisticValue(a.lifetime.outputTokens,a.lifetime.outputKnownRequests)} · ${statisticValue(a.lifetime.totalTokens,a.lifetime.totalKnownRequests)}<br>24h ${statisticValue(a.recent24h.inputTokens,a.recent24h.inputKnownRequests)} · ${statisticValue(a.recent24h.outputTokens,a.recent24h.outputKnownRequests)} · ${statisticValue(a.recent24h.totalTokens,a.recent24h.totalKnownRequests)}</td><td>累计 ${cacheMetrics(a.lifetime)}<br>24h ${cacheMetrics(a.recent24h)}</td><td>${Number(a.health.results)||0} / ${a.health.score===null?'无数据':Number(a.health.score).toFixed(1)}</td><td>${quotaLimit(a.quota,'five_hour','5 小时')}<br>${quotaLimit(a.quota,'weekly','每周')}<br>${quotaLimit(a.quota,'monthly','每月')}</td><td>${quotaState(a,data.generatedAt)}</td></tr>`).join('')||'<tr><td colspan="9" class="empty">暂无账号统计</td></tr>';$('#statisticsLegacy').textContent=`旧版请求基线（可能含控制台测试，不计入精确聊天总量）：${Number(data.migration?.legacyRequests)||0}`;$('#statisticsStatus').textContent=`生成于 ${new Date(data.generatedAt).toLocaleString()}`;return data;}catch{if(queryId===STATISTICS_QUERY_ID&&visitId===STATISTICS_VISIT_ID&&!$('#statisticsPanel').hidden)$('#statisticsStatus').textContent='统计加载失败；已显示的数据未改变';return null;}}
 function quotaRefreshSummary(data){return `额度刷新完成：更新 ${Number(data.refreshed)||0} · 缓存 ${Number(data.cached)||0} · 延后 ${Number(data.deferred)||0} · 跳过 ${Number(data.skipped)||0} · 失败 ${Number(data.failed)||0} · 取消 ${Number(data.cancelled)||0}`;}
 async function refreshStatisticsQuota(force=false,visitId=STATISTICS_VISIT_ID){if($('#statisticsPanel').hidden||visitId!==STATISTICS_VISIT_ID)return null;if(STATISTICS_REFRESH_PROMISE&&STATISTICS_REFRESH_VISIT===visitId)return STATISTICS_REFRESH_PROMISE;const controller=new AbortController(),button=$('#statisticsRefresh');STATISTICS_REFRESH_CONTROLLER=controller;STATISTICS_REFRESH_VISIT=visitId;button.disabled=true;button.textContent='额度刷新中…';$('#statisticsStatus').textContent='额度刷新中…';const promise=(async()=>{try{const data=await api('/api/statistics/quota-refresh',{force},undefined,false,{signal:controller.signal});if(data.error)throw Error('额度刷新失败');if(visitId!==STATISTICS_VISIT_ID||controller!==STATISTICS_REFRESH_CONTROLLER||$('#statisticsPanel').hidden)return null;await loadStatistics(visitId,false);if(visitId===STATISTICS_VISIT_ID&&controller===STATISTICS_REFRESH_CONTROLLER&&!$('#statisticsPanel').hidden)$('#statisticsStatus').textContent=quotaRefreshSummary(data);return data;}catch(e){if(e?.name!=='AbortError'&&visitId===STATISTICS_VISIT_ID&&controller===STATISTICS_REFRESH_CONTROLLER&&!$('#statisticsPanel').hidden)$('#statisticsStatus').textContent='额度刷新失败；保留上次额度与时间';return null;}finally{if(visitId===STATISTICS_VISIT_ID&&controller===STATISTICS_REFRESH_CONTROLLER){STATISTICS_REFRESH_CONTROLLER=null;STATISTICS_REFRESH_PROMISE=null;button.disabled=false;button.textContent='↻ 手动刷新额度与统计';}}})();STATISTICS_REFRESH_PROMISE=promise;return promise;}
 function armStatisticsTimer(visitId){clearTimeout(STATISTICS_TIMER);STATISTICS_TIMER=setTimeout(async()=>{if(visitId!==STATISTICS_VISIT_ID||$('#statisticsPanel').hidden)return;await refreshStatisticsQuota(false,visitId);if(visitId===STATISTICS_VISIT_ID&&!$('#statisticsPanel').hidden)armStatisticsTimer(visitId);},STATISTICS_REFRESH_MS);}
@@ -1122,6 +1174,14 @@ async function clearDetails(){
   try{await detailJSON('/api/logs/details',null,'DELETE');if(nav===DETAIL_NAV_ID&&detailVisible())await loadDetails();}
   catch(error){if(nav===DETAIL_NAV_ID&&detailVisible())$('#detailsStatus').textContent=error.message;}
 }
+function affinityLogLabel(x){
+  const keyLabels={parent_session:'父会话',parent_thread:'父线程',parent_conversation:'父对话',parent_agent:'父 Agent',prompt_cache_key:'Codex prompt_cache_key',session_id:'会话 ID',thread_id:'线程 ID',conversation_id:'对话 ID',agent_id:'Agent ID',message_hmac:'消息 HMAC 回退',none:'无'};
+  const confidenceLabels={explicit:'显式',fallback:'回退',none:'无'};
+  const upstreamLabels={caller_prompt_cache_key:'caller prompt_cache_key',caller_session_id:'caller session_id',caller_invalid:'caller 字段非法',derived_codex:'派生 Codex key',derived_claude:'派生 Claude key',none:'未提供'};
+  const key=keyLabels[x?.affinityKeyType]||'未知',confidence=confidenceLabels[x?.affinityConfidence]||'未知',upstream=upstreamLabels[x?.upstreamPromptCacheKeySource]||'未知';
+  return `亲和 ${key}（${confidence}） · 上游 ${upstream}${x?.upstreamPromptCacheKeyApplied?'（已提供）':''}${x?.providerOrderOverridesSticky?' · provider.order 覆盖 sticky':''}`;
+}
+function cacheHitLogLabel(value){return value===true?'缓存命中':value===false?'缓存明确未命中':'缓存未知';}
 async function loadLogs(next=false){
   if(!$('#logBody'))return; const type=$('#logType').value; if(!next)LOG_CURSOR=null; const queryId=++LOG_QUERY_ID;
   const params=new URLSearchParams({limit:'50'}); if(LOG_CURSOR)params.set('cursor',LOG_CURSOR);
@@ -1135,7 +1195,7 @@ async function loadLogs(next=false){
   if(type==='requests'&&$('#logSwitched').value)params.set('switched',$('#logSwitched').value);
   const r=await api(`/api/logs/${type}?${params}`),items=r.items||[];
   if(queryId!==LOG_QUERY_ID||type!==$('#logType').value)return;
-  $('#logBody').innerHTML=items.map(x=>{const legacyResult=Number(x.status)>=200&&Number(x.status)<400?'success':'legacy_failed';const status=type==='requests'?`${x.status??'—'} / ${x.result||legacyResult}`:`${x.status??'—'} / ${x.upstreamStatus??'—'}`;return `<tr><td>${escapeHtml(new Date(x.ts).toLocaleString())}</td><td class="mono">${escapeHtml(x.requestId)}</td><td class="mono">${escapeHtml(x.requestedModel||'—')}<br><span class="dim">${escapeHtml(x.resolvedModel||'—')}</span></td><td>${escapeHtml(x.accountName||'—')}</td><td>${escapeHtml(x.strategy||x.category||'—')}<br><span class="dim">${escapeHtml(x.selectionReason||x.accountAction||'')}</span></td><td>${escapeHtml(status)}</td><td>${escapeHtml((x.targetProviders||x.providerPath||[]).join(' → ')||x.actualProvider||x.targetProvider||'—')}</td><td><details><summary>展开</summary><pre>${escapeHtml(JSON.stringify(x,null,2))}</pre></details></td></tr>`;}).join('')||'<tr><td colspan="8" class="empty">暂无记录</td></tr>';
+  $('#logBody').innerHTML=items.map(x=>{const legacyResult=Number(x.status)>=200&&Number(x.status)<400?'success':'legacy_failed';const status=type==='requests'?`${x.status??'—'} / ${x.result||legacyResult}`:`${x.status??'—'} / ${x.upstreamStatus??'—'}`;const affinity=type==='requests'?`${affinityLogLabel(x)} · ${cacheHitLogLabel(x.cacheHit)}`:'—';return `<tr><td>${escapeHtml(new Date(x.ts).toLocaleString())}</td><td class="mono">${escapeHtml(x.requestId)}</td><td class="mono">${escapeHtml(x.requestedModel||'—')}<br><span class="dim">${escapeHtml(x.resolvedModel||'—')}</span></td><td>${escapeHtml(x.accountName||'—')}</td><td>${escapeHtml(x.strategy||x.category||'—')}<br><span class="dim">${escapeHtml(x.selectionReason||x.accountAction||'')}</span></td><td>${escapeHtml(status)}</td><td>${escapeHtml((x.targetProviders||x.providerPath||[]).join(' → ')||x.actualProvider||x.targetProvider||'—')}</td><td>${escapeHtml(affinity)}</td><td><details><summary>展开</summary><pre>${escapeHtml(JSON.stringify(x,null,2))}</pre></details></td></tr>`;}).join('')||'<tr><td colspan="9" class="empty">暂无记录</td></tr>';
   LOG_CURSOR=r.nextCursor;$('#logNext').disabled=!LOG_CURSOR;
 }
 async function clearLogs(){const type=$('#logType').value,title=type==='errors'?'错误日志':'请求日志';if(!confirm(`确认清空${title}？此操作不可撤销。`))return;await api('/api/logs/'+type,null,'DELETE');if($('#logPanel').hidden||type!==$('#logType').value)return;await loadLogs();}

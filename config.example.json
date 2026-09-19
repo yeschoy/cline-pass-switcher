@@ -35,7 +35,8 @@
       "quotaPool",
       "healthSort",
       "sticky"
-    ]
+    ],
+    "cachePoolSize": 0
   },
   "modelAliases": {
     "glm-5.3-flash": "cline-pass/glm-5.3-flash"
@@ -56,5 +57,15 @@
     "cline-pass/kimi-k2.7-code",
     "cline-pass/qwen3.7-max"
   ],
-  "perModel": {}
+  "perModel": {
+    "cline-pass/glm-5.3-flash": {
+      "upstream": null,
+      "upstreams": [],
+      "exclude": [],
+      "pinMode": "strict",
+      "sort": null,
+      "maxRetries": null,
+      "providerCooldownMs": 0
+    }
+  }
 }

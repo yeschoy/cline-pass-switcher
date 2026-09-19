@@ -121,6 +121,9 @@ function normalizeRouteConfig(c = {}) {
   const maxRetries = raw.maxRetries === null || raw.maxRetries === undefined || raw.maxRetries === ''
     ? null
     : Math.min(20, Math.max(0, Math.floor(Number(raw.maxRetries) || 0)));
+  const providerCooldownMs = Number.isInteger(Number(raw.providerCooldownMs))
+    ? Math.min(300000, Math.max(0, Number(raw.providerCooldownMs)))
+    : 0;
   return {
     upstream: upstreams[0] || null,
     upstreams,
@@ -128,6 +131,7 @@ function normalizeRouteConfig(c = {}) {
     pinMode: raw.pinMode === 'preferred' ? 'preferred' : 'strict',
     sort: ROUTE_SORTS.has(raw.sort) ? raw.sort : null,
     maxRetries,
+    providerCooldownMs,
   };
 }
 function normalizePerModelMap(map = {}) {
@@ -154,6 +158,7 @@ function validatePerModelInput(map) {
     if (c.pinMode !== undefined && !['strict', 'preferred'].includes(c.pinMode)) return `invalid pinMode for ${model}`;
     if (c.sort !== undefined && c.sort !== null && c.sort !== '' && !ROUTE_SORTS.has(c.sort)) return `invalid sort for ${model}`;
     if (c.maxRetries !== undefined && c.maxRetries !== null && (!Number.isInteger(Number(c.maxRetries)) || Number(c.maxRetries) < 0 || Number(c.maxRetries) > 20)) return `invalid maxRetries for ${model}`;
+    if (c.providerCooldownMs !== undefined && (!Number.isInteger(Number(c.providerCooldownMs)) || Number(c.providerCooldownMs) < 0 || Number(c.providerCooldownMs) > 300000)) return `invalid providerCooldownMs for ${model}`;
   }
   return null;
 }
@@ -276,16 +281,18 @@ function normalizeAccountPipeline(value, { strict = false, fallbackOrder = PIPEL
   else out.cachePoolSize = 0;
   return out;
 }
-const AGG_FIELDS = ['requests','errors','usageRequests','inputKnownRequests','inputTokens','outputKnownRequests','outputTokens','totalKnownRequests','totalTokens','cacheKnownRequests','cacheHitRequests','cachedTokens','cacheInputKnownRequests','cacheInputTokens','cacheInputCachedTokens'];
+const LEGACY_AGG_FIELDS = ['requests','errors','usageRequests','inputKnownRequests','inputTokens','outputKnownRequests','outputTokens','totalKnownRequests','totalTokens','cacheKnownRequests','cacheHitRequests','cachedTokens','cacheInputKnownRequests','cacheInputTokens','cacheInputCachedTokens'];
+const ROUTING_AGG_FIELDS = ['explicitAffinityRequests','fallbackAffinityRequests','providerFallbackRequests','providerCircuitCooldownRequests','providerHalfOpenRequests'];
+const AGG_FIELDS = [...LEGACY_AGG_FIELDS, ...ROUTING_AGG_FIELDS];
 const HEALTH_FIELDS = ['results','penaltyUnits','errors','auth','rateLimit','networkProxy','server','other'];
 function emptyAggregate() { return Object.fromEntries([...AGG_FIELDS.map((key) => [key, 0]), ['lastUsedAt', 0], ['lastErrorAt', 0], ['overflowFields', []]]); }
 function emptyHealth() { return Object.fromEntries(HEALTH_FIELDS.map((key) => [key, 0])); }
 function isPlainObject(value) { return !!value && typeof value === 'object' && !Array.isArray(value); }
-function validateAggregate(value, label) {
-  if (!isPlainObject(value) || Object.keys(value).some((key) => ![...AGG_FIELDS,'lastUsedAt','lastErrorAt','overflowFields'].includes(key))) throw new Error(`invalid statistics ${label}`);
+function validateAggregate(value, label, fields = AGG_FIELDS) {
+  if (!isPlainObject(value) || Object.keys(value).some((key) => ![...fields,'lastUsedAt','lastErrorAt','overflowFields'].includes(key))) throw new Error(`invalid statistics ${label}`);
   const overflow = value.overflowFields;
-  if (!Array.isArray(overflow) || overflow.some((key) => !AGG_FIELDS.includes(key)) || new Set(overflow).size !== overflow.length) throw new Error(`invalid statistics ${label}.overflowFields`);
-  for (const key of AGG_FIELDS) {
+  if (!Array.isArray(overflow) || overflow.some((key) => !fields.includes(key)) || new Set(overflow).size !== overflow.length) throw new Error(`invalid statistics ${label}.overflowFields`);
+  for (const key of fields) {
     const overflowed = overflow.includes(key);
     if ((overflowed && value[key] !== null) || (!overflowed && (!Number.isSafeInteger(value[key]) || value[key] < 0))) throw new Error(`invalid statistics ${label}.${key}`);
   }
@@ -295,7 +302,7 @@ function validateHealth(value, label) {
   if (!isPlainObject(value) || Object.keys(value).some((key) => !HEALTH_FIELDS.includes(key))) throw new Error(`invalid statistics ${label}`);
   for (const key of HEALTH_FIELDS) if (!Number.isSafeInteger(value[key]) || value[key] < 0) throw new Error(`invalid statistics ${label}.${key}`);
 }
-const STATISTICS_VERSION = 2;
+const STATISTICS_VERSION = 3;
 const MAX_ACCOUNT_MINUTE_CELLS = 50000;
 const MAX_MODEL_MINUTE_CELLS = process.env.NODE_ENV === 'test' ? Math.max(1, Number(process.env.CLINE_PASS_TEST_MODEL_CELL_LIMIT) || 50000) : 50000;
 const FORBIDDEN_STATISTIC_KEYS = new Set(['__proto__','prototype','constructor']);
@@ -305,29 +312,31 @@ function aggregateCell(map, key) {
   return map[key];
 }
 function createStatistics(now = Date.now()) {
-  return { version: STATISTICS_VERSION, lifetime: { global: emptyAggregate(), accounts: {} }, minuteBuckets: [], recentCoverage: { droppedAccountMinuteCells: 0, accountIncompleteAt: {}, modelTrackingStartedMinute: Math.floor(now / 60000), droppedModelMinuteCells: 0, modelIncompleteAt: {} }, migration: { legacyStatsMigratedAt: now, legacyRequests: 0, accountLegacyRequests: {}, ambiguousNames: 0, unmappedNames: 0 } };
+  const minute = Math.floor(now / 60000);
+  return { version: STATISTICS_VERSION, lifetime: { global: emptyAggregate(), accounts: {} }, minuteBuckets: [], recentCoverage: { droppedAccountMinuteCells: 0, accountIncompleteAt: {}, modelTrackingStartedMinute: minute, droppedModelMinuteCells: 0, modelIncompleteAt: {}, routingTrackingStartedMinute: minute }, migration: { legacyStatsMigratedAt: now, legacyRequests: 0, accountLegacyRequests: {}, ambiguousNames: 0, unmappedNames: 0 } };
 }
 function validateStatistics(stats) {
-  if (!isPlainObject(stats) || ![1,STATISTICS_VERSION].includes(stats.version)) throw new Error(stats?.version > STATISTICS_VERSION ? 'unsupported statistics version' : 'invalid statistics version');
-  const version2 = stats.version === STATISTICS_VERSION;
-  const coverageKeys = version2 ? ['droppedAccountMinuteCells','accountIncompleteAt','modelTrackingStartedMinute','droppedModelMinuteCells','modelIncompleteAt'] : ['droppedAccountMinuteCells','accountIncompleteAt'];
+  if (!isPlainObject(stats) || ![1,2,STATISTICS_VERSION].includes(stats.version)) throw new Error(stats?.version > STATISTICS_VERSION ? 'unsupported statistics version' : 'invalid statistics version');
+  const hasModels = stats.version >= 2, hasRouting = stats.version >= 3, aggregateFields = hasRouting ? AGG_FIELDS : LEGACY_AGG_FIELDS;
+  const coverageKeys = hasRouting ? ['droppedAccountMinuteCells','accountIncompleteAt','modelTrackingStartedMinute','droppedModelMinuteCells','modelIncompleteAt','routingTrackingStartedMinute'] : hasModels ? ['droppedAccountMinuteCells','accountIncompleteAt','modelTrackingStartedMinute','droppedModelMinuteCells','modelIncompleteAt'] : ['droppedAccountMinuteCells','accountIncompleteAt'];
   if (Object.keys(stats).some((key) => !['version','lifetime','minuteBuckets','recentCoverage','migration'].includes(key)) || !isPlainObject(stats.lifetime) || Object.keys(stats.lifetime).some((key) => !['global','accounts'].includes(key)) || !isPlainObject(stats.lifetime.accounts) || !Array.isArray(stats.minuteBuckets) || stats.minuteBuckets.length > 1440 || !isPlainObject(stats.recentCoverage) || Object.keys(stats.recentCoverage).length !== coverageKeys.length || coverageKeys.some((key) => !Object.hasOwn(stats.recentCoverage,key)) || !Number.isSafeInteger(stats.recentCoverage.droppedAccountMinuteCells) || stats.recentCoverage.droppedAccountMinuteCells < 0 || !isPlainObject(stats.recentCoverage.accountIncompleteAt) || !isPlainObject(stats.migration)) throw new Error('invalid statistics structure');
   for (const [id, minute] of Object.entries(stats.recentCoverage.accountIncompleteAt)) if (!/^[A-Za-z0-9_-]{1,100}$/.test(id) || !Number.isSafeInteger(minute) || minute < 0) throw new Error('invalid statistics coverage');
-  if (version2 && (!Number.isSafeInteger(stats.recentCoverage.modelTrackingStartedMinute) || stats.recentCoverage.modelTrackingStartedMinute < 0 || !Number.isSafeInteger(stats.recentCoverage.droppedModelMinuteCells) || stats.recentCoverage.droppedModelMinuteCells < 0 || !isPlainObject(stats.recentCoverage.modelIncompleteAt))) throw new Error('invalid statistics model coverage');
-  if (version2) for (const [id, minute] of Object.entries(stats.recentCoverage.modelIncompleteAt)) if (!validStatisticModelId(id) || !Number.isSafeInteger(minute) || minute < 0) throw new Error('invalid statistics model coverage');
+  if (hasModels && (!Number.isSafeInteger(stats.recentCoverage.modelTrackingStartedMinute) || stats.recentCoverage.modelTrackingStartedMinute < 0 || !Number.isSafeInteger(stats.recentCoverage.droppedModelMinuteCells) || stats.recentCoverage.droppedModelMinuteCells < 0 || !isPlainObject(stats.recentCoverage.modelIncompleteAt))) throw new Error('invalid statistics model coverage');
+  if (hasModels) for (const [id, minute] of Object.entries(stats.recentCoverage.modelIncompleteAt)) if (!validStatisticModelId(id) || !Number.isSafeInteger(minute) || minute < 0) throw new Error('invalid statistics model coverage');
+  if (hasRouting && (!Number.isSafeInteger(stats.recentCoverage.routingTrackingStartedMinute) || stats.recentCoverage.routingTrackingStartedMinute < 0)) throw new Error('invalid statistics routing coverage');
   if (Object.keys(stats.migration).some((key) => !['legacyStatsMigratedAt','legacyRequests','accountLegacyRequests','ambiguousNames','unmappedNames'].includes(key)) || !Number.isSafeInteger(stats.migration.legacyStatsMigratedAt) || stats.migration.legacyStatsMigratedAt < 0 || !Number.isSafeInteger(stats.migration.legacyRequests) || stats.migration.legacyRequests < 0 || !isPlainObject(stats.migration.accountLegacyRequests) || !Number.isSafeInteger(stats.migration.ambiguousNames) || stats.migration.ambiguousNames < 0 || !Number.isSafeInteger(stats.migration.unmappedNames) || stats.migration.unmappedNames < 0) throw new Error('invalid statistics migration');
   for (const [id, requests] of Object.entries(stats.migration.accountLegacyRequests)) if (!/^[A-Za-z0-9_-]{1,100}$/.test(id) || !Number.isSafeInteger(requests) || requests < 0) throw new Error('invalid statistics legacy account');
-  validateAggregate(stats.lifetime.global, 'lifetime.global');
-  for (const [id, aggregate] of Object.entries(stats.lifetime.accounts)) { if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new Error('invalid statistics account id'); validateAggregate(aggregate, `lifetime.accounts.${id}`); }
+  validateAggregate(stats.lifetime.global, 'lifetime.global', aggregateFields);
+  for (const [id, aggregate] of Object.entries(stats.lifetime.accounts)) { if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new Error('invalid statistics account id'); validateAggregate(aggregate, `lifetime.accounts.${id}`, aggregateFields); }
   let previous = -1, accountCells = 0, modelCells = 0;
   for (const bucket of stats.minuteBuckets) {
-    const bucketKeys = version2 ? ['minute','global','accounts','health','models'] : ['minute','global','accounts','health'];
-    if (!isPlainObject(bucket) || Object.keys(bucket).length !== bucketKeys.length || bucketKeys.some((key) => !Object.hasOwn(bucket,key)) || !Number.isSafeInteger(bucket.minute) || bucket.minute < 0 || bucket.minute <= previous || !isPlainObject(bucket.global) || !isPlainObject(bucket.accounts) || !isPlainObject(bucket.health) || (version2 && !isPlainObject(bucket.models))) throw new Error('invalid statistics minute bucket');
-    previous = bucket.minute; validateAggregate(bucket.global, `bucket.${bucket.minute}.global`);
+    const bucketKeys = hasModels ? ['minute','global','accounts','health','models'] : ['minute','global','accounts','health'];
+    if (!isPlainObject(bucket) || Object.keys(bucket).length !== bucketKeys.length || bucketKeys.some((key) => !Object.hasOwn(bucket,key)) || !Number.isSafeInteger(bucket.minute) || bucket.minute < 0 || bucket.minute <= previous || !isPlainObject(bucket.global) || !isPlainObject(bucket.accounts) || !isPlainObject(bucket.health) || (hasModels && !isPlainObject(bucket.models))) throw new Error('invalid statistics minute bucket');
+    previous = bucket.minute; validateAggregate(bucket.global, `bucket.${bucket.minute}.global`, aggregateFields);
     const ids = new Set([...Object.keys(bucket.accounts), ...Object.keys(bucket.health)]); accountCells += ids.size;
-    for (const [id, aggregate] of Object.entries(bucket.accounts)) { if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new Error('invalid statistics account id'); validateAggregate(aggregate, `bucket.${bucket.minute}.accounts.${id}`); }
+    for (const [id, aggregate] of Object.entries(bucket.accounts)) { if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new Error('invalid statistics account id'); validateAggregate(aggregate, `bucket.${bucket.minute}.accounts.${id}`, aggregateFields); }
     for (const [id, health] of Object.entries(bucket.health)) { if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new Error('invalid statistics account id'); validateHealth(health, `bucket.${bucket.minute}.health.${id}`); }
-    if (version2) for (const [id, aggregate] of Object.entries(bucket.models)) { if (!validStatisticModelId(id)) throw new Error('invalid statistics model id'); modelCells++; validateAggregate(aggregate, `bucket.${bucket.minute}.models.${id}`); }
+    if (hasModels) for (const [id, aggregate] of Object.entries(bucket.models)) { if (!validStatisticModelId(id)) throw new Error('invalid statistics model id'); modelCells++; validateAggregate(aggregate, `bucket.${bucket.minute}.models.${id}`, aggregateFields); }
   }
   if (accountCells > MAX_ACCOUNT_MINUTE_CELLS) throw new Error('statistics account-minute cell limit exceeded');
   if (modelCells > MAX_MODEL_MINUTE_CELLS) throw new Error('statistics model-minute cell limit exceeded');
@@ -335,13 +344,27 @@ function validateStatistics(stats) {
 function normalizeStatistics() {
   if (META.statistics !== undefined) {
     validateStatistics(META.statistics);
+    let dirty = false;
     if (META.statistics.version === 1) {
       const minute = Math.floor(Date.now() / 60000);
-      META.statistics = { ...META.statistics, version: STATISTICS_VERSION, minuteBuckets: META.statistics.minuteBuckets.map((bucket) => ({ ...bucket, models: {} })), recentCoverage: { ...META.statistics.recentCoverage, modelTrackingStartedMinute: minute, droppedModelMinuteCells: 0, modelIncompleteAt: {} } };
-      validateStatistics(META.statistics);
-      return true;
+      META.statistics = { ...META.statistics, version: 2, minuteBuckets: META.statistics.minuteBuckets.map((bucket) => ({ ...bucket, models: {} })), recentCoverage: { ...META.statistics.recentCoverage, modelTrackingStartedMinute: minute, droppedModelMinuteCells: 0, modelIncompleteAt: {} } };
+      dirty = true;
     }
-    return false;
+    if (META.statistics.version === 2) {
+      const upgrade = (aggregate) => { for (const field of ROUTING_AGG_FIELDS) aggregate[field] = 0; };
+      upgrade(META.statistics.lifetime.global);
+      for (const aggregate of Object.values(META.statistics.lifetime.accounts)) upgrade(aggregate);
+      for (const bucket of META.statistics.minuteBuckets) {
+        upgrade(bucket.global);
+        for (const aggregate of Object.values(bucket.accounts)) upgrade(aggregate);
+        for (const aggregate of Object.values(bucket.models)) upgrade(aggregate);
+      }
+      META.statistics.recentCoverage.routingTrackingStartedMinute = Math.floor(Date.now() / 60000);
+      META.statistics.version = STATISTICS_VERSION;
+      dirty = true;
+    }
+    validateStatistics(META.statistics);
+    return dirty;
   }
   const stats = createStatistics();
   const names = new Map(); for (const account of config.accounts || []) { const ids = names.get(account.name) || []; ids.push(account.id); names.set(account.name, ids); }
@@ -462,6 +485,10 @@ if (!isConfigured()) {
 let RR_COUNTER = 0;
 const strategyCounters = new Map();
 const activeCounts = new Map();
+const providerCircuitStates = new Map();
+const providerCircuitAccountGenerations = new Map();
+const providerCircuitRouteGenerations = new Map();
+const PROVIDER_CIRCUIT_LIMIT = 50000;
 const waiters = new Set();
 function notifyCapacityWaiters() { for (const resolve of [...waiters]) resolve(); }
 function getAccountState(id) { return (META.accountStates ||= {})[id] || null; }
@@ -813,6 +840,18 @@ function pickAccount() {
   if (config.accountMode === 'roundrobin' && list.length > 1) return rrRank(list)[0];
   return singlePreferred(list);
 }
+async function acquireManagementAccount(accountId, source) {
+  const requested = accountId === undefined || accountId === null || accountId === '' ? null : String(accountId);
+  if (requested !== null) {
+    const account = config.accounts.find((candidate) => candidate.id === requested);
+    if (!account) return { status: 400, error: 'unknown accountId' };
+    if (!enabledAccounts().some((candidate) => candidate.id === account.id)) return { status: 409, error: 'selected account is unavailable' };
+    const lease = tryLease(account);
+    return lease ? { lease } : { status: 429, error: 'selected account is busy', retryAfter: retryAfterSeconds(config.concurrencyWaitMs) };
+  }
+  const selected = await acquireAccountLease({ source, keyType: 'none', confidence: 'none', fingerprint: hmacHex(`management\0${source}`) });
+  return selected.lease ? { lease: selected.lease } : { status: enabledAccounts().length ? 429 : 503, error: selected.error, retryAfter: selected.retryAfter };
+}
 const chatHeaders = (key) => ({
   'Content-Type': 'application/json',
   Authorization: `Bearer ${key}`,
@@ -944,8 +983,7 @@ function providersFromError(value, depth = 0) {
   if (start >= 0) try { return providersFromError(JSON.parse(value.slice(start)), depth + 1); } catch {}
   return null;
 }
-async function harvestAvailableProviders(modelId, pipeline) {
-  const acc = pickAccount();
+async function harvestAvailableProviders(modelId, pipeline, acc) {
   const base = { model: modelId, messages: [{ role: 'user', content: 'hi' }], max_tokens: 16 };
   const body = pipeline === 'planner'
     ? { ...base, providerOptions: { gateway: { only: ['__probe__'] } } }
@@ -959,8 +997,7 @@ function parseTier0(plan) {
   return [...new Set([m[1], ...m[2].split(/,\s*|\s+and\s+/).map((s) => s.trim()).filter(Boolean)])];
 }
 
-async function probeModel(modelId) {
-  const acc = pickAccount();
+async function probeModel(modelId, acc) {
   const t0 = Date.now();
   const body = { model: modelId, messages: [{ role: 'user', content: 'Reply with the word OK' }], max_tokens: 256 };
   const { json } = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, {
@@ -972,7 +1009,7 @@ async function probeModel(modelId) {
   }
   const r = parseRouting(json);
   let harvest = null;
-  if (r.pipeline) harvest = await harvestAvailableProviders(modelId, r.pipeline);
+  if (r.pipeline) harvest = await harvestAvailableProviders(modelId, r.pipeline, acc);
   let endpoints = [];
   let orSlug = null;
   if (r.pipeline !== 'planner' && r.canonicalSlug) {
@@ -1010,6 +1047,16 @@ async function probeModel(modelId) {
   return { ok: true, ms, ...META.models[modelId] };
 }
 
+const UPSTREAM_STATUS_TTL_MS = 24 * 60 * 60 * 1000;
+function projectModelMeta(meta, now = Date.now()) {
+  if (!meta || typeof meta !== 'object') return meta || null;
+  const upstreamStatus = {};
+  for (const [provider, fact] of Object.entries(meta.upstreamStatus || {})) {
+    const fresh = Number.isSafeInteger(fact?.checkedAt) && fact.checkedAt <= now && now - fact.checkedAt <= UPSTREAM_STATUS_TTL_MS;
+    upstreamStatus[provider] = { status: fresh ? fact.status : 'unknown', ms: Number(fact?.ms) || 0, checkedAt: fact?.checkedAt || null, stale: !fresh };
+  }
+  return { ...meta, upstreamStatus };
+}
 // 上游渠道可用性分类：渠道被单独钉住时的真实状态
 function classifyUpstreamError(msg) {
   const m = String(msg || '');
@@ -1023,7 +1070,7 @@ function classifyUpstreamError(msg) {
 function learnUpstreamStatus(modelId, upstream, errMsg) {
   if (!upstream || !errMsg) return;
   const st = classifyUpstreamError(errMsg);
-  if (st === 'unknown') return;
+  if (st === 'unknown' || st === 'auth') return;
   const meta = (META.models[modelId] ||= {});
   meta.upstreamStatus = { ...(meta.upstreamStatus || {}), [upstream]: { status: st, note: String(errMsg).slice(0, 160), checkedAt: Date.now() } };
 }
@@ -1042,11 +1089,10 @@ function learnAvailableProviders(modelId, errMsg) {
 }
 
 // 批量校验：把模型的每个上游渠道用最小请求各钉一次，标记真实可用性
-async function validateUpstreams(modelId) {
+async function validateUpstreams(modelId, acc) {
   const meta = META.models[modelId] || {};
   const list = meta.upstreams || [];
   const pipeline = meta.pipeline;
-  const acc = pickAccount();
   const results = {};
   const batch = 5;
   for (let i = 0; i < list.length; i += batch) {
@@ -1056,22 +1102,26 @@ async function validateUpstreams(modelId) {
       const body = pipeline === 'planner'
         ? { ...base, providerOptions: { gateway: { only: [slug] } } }
         : { ...base, provider: { only: [slug] } };
-      const { json } = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, {
-        headers: chatHeaders(acc.key), body: JSON.stringify(body),
-      }, 60000, acc).catch(() => ({ json: { error: 'network error' } }));
-      let status = 'unknown';
-      let note = '';
+      let response;
+      try {
+        response = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, { headers: chatHeaders(acc.key), body: JSON.stringify(body) }, 60000, acc);
+      } catch (error) {
+        results[slug] = { status: 'unknown', accountFault: acc.proxyUrl ? 'proxy' : 'network', ms: Date.now() - t0, note: safeReason(error.message) };
+        return;
+      }
+      const { status: httpStatus, json } = response;
+      let status = 'unknown', accountFault = null, note = '';
       if (json?.error && !json?.data) {
         const msg = typeof json.error === 'string' ? json.error : JSON.stringify(json.error);
-        status = classifyUpstreamError(msg);
-        note = safeReason(msg);
-      } else if (json?.data?.choices || json?.choices) {
-        status = 'ok';
-      }
-      results[slug] = { status, ms: Date.now() - t0, note };
+        status = classifyUpstreamError(msg); note = safeReason(msg);
+        if (httpStatus === 401 || status === 'auth') { accountFault = 'auth'; status = 'unknown'; }
+        else if (/quota\s*(?:exceeded|exhausted)|subscription\s*(?:limit|expired)/i.test(msg)) { accountFault = 'quota'; status = 'unknown'; }
+      } else if (json?.data?.choices || json?.choices) status = 'ok';
+      results[slug] = { status, ...(accountFault ? { accountFault } : {}), ms: Date.now() - t0, note };
     }));
   }
-  META.models[modelId] = { ...meta, upstreamStatus: { ...(meta.upstreamStatus || {}), ...results }, validatedAt: Date.now() };
+  const shareable = Object.fromEntries(Object.entries(results).filter(([, fact]) => !fact.accountFault && ['ok','limited','bad'].includes(fact.status)).map(([provider, fact]) => [provider, { status: fact.status, ms: fact.ms, note: fact.note, checkedAt: Date.now() }]));
+  META.models[modelId] = { ...meta, upstreamStatus: { ...(meta.upstreamStatus || {}), ...shareable }, validatedAt: Date.now() };
   saveMeta();
   return results;
 }
@@ -1152,6 +1202,13 @@ function addUsage(aggregate, usage) {
   if (usage.cacheFieldPresent && usage.cachedTokens !== null) { addCounter(aggregate, 'cacheKnownRequests'); addCounter(aggregate, 'cachedTokens', usage.cachedTokens); if (usage.cachedTokens > 0) addCounter(aggregate, 'cacheHitRequests'); }
   if (usage.cacheInputPairPresent) { addCounter(aggregate, 'cacheInputKnownRequests'); addCounter(aggregate, 'cacheInputTokens', usage.inputTokens); addCounter(aggregate, 'cacheInputCachedTokens', usage.cachedTokens); }
 }
+function addRoutingSignals(aggregate, affinityConfidence, trace = []) {
+  if (affinityConfidence === 'explicit') addCounter(aggregate, 'explicitAffinityRequests');
+  else if (affinityConfidence === 'fallback') addCounter(aggregate, 'fallbackAffinityRequests');
+  if (trace.length > 1) addCounter(aggregate, 'providerFallbackRequests');
+  if (trace.some((attempt) => attempt.providerCircuitAction === 'cooldown')) addCounter(aggregate, 'providerCircuitCooldownRequests');
+  if (trace.some((attempt) => attempt.providerCircuitAction === 'half-open-success' || attempt.providerCircuitAction === 'half-open-failed')) addCounter(aggregate, 'providerHalfOpenRequests');
+}
 function mergeAggregate(target, delta) {
   for (const key of AGG_FIELDS) if (delta[key] !== null) addCounter(target, key, delta[key]); else { target[key] = null; if (!target.overflowFields.includes(key)) target.overflowFields.push(key); }
   target.lastUsedAt = Math.max(target.lastUsedAt, delta.lastUsedAt); target.lastErrorAt = Math.max(target.lastErrorAt, delta.lastErrorAt);
@@ -1193,20 +1250,22 @@ function pruneStatistics(now = Date.now()) {
     }
   }
 }
-function commitStatistics({ ts = Date.now(), modelId = null, globalError = false, usage = null, segments = [], clientDisconnect = false }) {
+function commitStatistics({ ts = Date.now(), modelId = null, globalError = false, usage = null, segments = [], clientDisconnect = false, affinityConfidence = 'none' }) {
   const stats = META.statistics; pruneStatistics(ts);
   const minute = Math.floor(ts / 60000);
   let bucket = stats.minuteBuckets.at(-1);
   if (!bucket || bucket.minute !== minute) { bucket = { minute, global: emptyAggregate(), accounts: {}, health: {}, models: {} }; stats.minuteBuckets.push(bucket); }
   const globalDelta = emptyAggregate(); addCounter(globalDelta, 'requests'); globalDelta.lastUsedAt = ts;
   if (globalError) { addCounter(globalDelta, 'errors'); globalDelta.lastErrorAt = ts; }
-  addUsage(globalDelta, usage); mergeAggregate(stats.lifetime.global, globalDelta); mergeAggregate(bucket.global, globalDelta);
+  const globalTrace = segments.flatMap((segment) => segment.trace || []);
+  addUsage(globalDelta, usage); addRoutingSignals(globalDelta, affinityConfidence, globalTrace); mergeAggregate(stats.lifetime.global, globalDelta); mergeAggregate(bucket.global, globalDelta);
   if (validStatisticModelId(modelId)) mergeAggregate(aggregateCell(bucket.models, modelId), globalDelta);
   const currentIds = new Set(config.accounts.map((account) => account.id));
   for (const segment of new Map(segments.filter((s) => currentIds.has(s.accountId)).map((s) => [s.accountId,s])).values()) {
     const delta = emptyAggregate(); addCounter(delta, 'requests'); delta.lastUsedAt = ts;
     if (segment.error) { addCounter(delta, 'errors'); delta.lastErrorAt = ts; }
     if (segment.usage) addUsage(delta, segment.usage);
+    addRoutingSignals(delta, affinityConfidence, segment.trace || []);
     const lifetime = aggregateCell(stats.lifetime.accounts, segment.accountId); mergeAggregate(lifetime, delta);
     const recent = aggregateCell(bucket.accounts, segment.accountId); mergeAggregate(recent, delta);
     const result = classifyHealth(segment.trace, { success: segment.success, clientDisconnect });
@@ -1233,6 +1292,10 @@ function modelCoverage(modelId, now = Date.now()) {
   const fromMinute = Math.max(min, coverage.modelTrackingStartedMinute, incompleteAt === null ? min : incompleteAt + 1);
   return { complete: coverage.modelTrackingStartedMinute <= min && incompleteAt === null, from: fromMinute * 60000 };
 }
+function routingCoverage(now = Date.now()) {
+  const min = Math.floor(now / 60000) - 1439, start = META.statistics.recentCoverage.routingTrackingStartedMinute;
+  return { complete: start <= min, from: Math.max(min, start) * 60000 };
+}
 function statisticsModelIds() {
   const ids = new Set([...(config.knownModels || []), ...Object.keys(config.perModel || {})]);
   for (const account of config.accounts || []) for (const id of Object.keys(account.perModel || {})) ids.add(id);
@@ -1249,6 +1312,9 @@ function healthProjection(account, now = Date.now()) {
   if (account.enabled === false) status = 'disabled'; else if (state?.banned) status = 'banned'; else if (state?.cooldownUntil > now) status = 'cooling'; else if (incomplete || health.results < 5) { status = 'insufficient'; score = null; } else if (score >= 80) status = 'available'; else if (score >= 50) status = 'degraded'; else status = 'unhealthy';
   return { status, score, results: health.results, penaltyUnits: health.penaltyUnits, coverageComplete: !incomplete };
 }
+const AFFINITY_KEY_TYPES = new Set(['parent_session','parent_thread','parent_conversation','parent_agent','prompt_cache_key','session_id','thread_id','conversation_id','agent_id','message_hmac','none']);
+const AFFINITY_CONFIDENCE = new Set(['explicit','fallback','none']);
+const UPSTREAM_PROMPT_KEY_SOURCES = new Set(['caller_prompt_cache_key','caller_session_id','caller_invalid','derived_codex','derived_claude','none']);
 function record(modelId, info, detail = detailContext.getStore()) {
   const ts = Date.now();
   META.models[modelId] = { ...(META.models[modelId] || {}), provider: info.provider, canonical: info.canonical, lastMs: info.ms };
@@ -1258,13 +1324,20 @@ function record(modelId, info, detail = detailContext.getStore()) {
   const request = {
     ts, requestId: info.requestId || crypto.randomUUID(), requestedModel: info.requestedModel || modelId,
     resolvedModel: info.resolvedModel || modelId, stream: !!info.stream, strategy: info.strategy || config.accountMode,
-    sessionSource: info.sessionSource || null, preferredAccountId: info.preferredAccountId || null,
+    sessionSource: info.sessionSource || null,
+    affinityKeyType: AFFINITY_KEY_TYPES.has(info.affinityKeyType) ? info.affinityKeyType : 'none',
+    affinityConfidence: AFFINITY_CONFIDENCE.has(info.affinityConfidence) ? info.affinityConfidence : 'none',
+    upstreamPromptCacheKeySource: UPSTREAM_PROMPT_KEY_SOURCES.has(info.upstreamPromptCacheKeySource) ? info.upstreamPromptCacheKeySource : 'none',
+    upstreamPromptCacheKeyApplied: info.upstreamPromptCacheKeyApplied === true,
+    providerOrderOverridesSticky: info.providerOrderOverridesSticky === true,
+    cacheHit: typeof info.cacheHit === 'boolean' ? info.cacheHit : null,
+    preferredAccountId: info.preferredAccountId || null,
     preferredAccountName: info.preferredAccountName || null, accountId: info.accountId || null, accountName: info.account || null,
     selectionReason: info.selectionReason || null, overflow: !!info.overflow,
     pipelineSteps: Array.isArray(info.pipeline?.diagnostics) ? info.pipeline.diagnostics.slice(0, 8) : [], selectedQuotaPool: info.pipeline?.selectedQuota || null, selectedHealthLayer: info.pipeline?.selectedHealth || null, capacityFallback: !!info.pipeline?.capacityFallback,
     cachePoolSize: Number.isInteger(info.pipeline?.cachePoolSize) ? info.pipeline.cachePoolSize : configuredCachePoolSize(), cachePoolTier: ['active','standby'].includes(info.pipeline?.cachePoolTier) ? info.pipeline.cachePoolTier : null, cachePoolFallback: info.pipeline?.cachePoolFallback === true,
     targetProviders: Array.isArray(info.targets) ? info.targets : [], actualProvider: info.provider || null,
-    attempts: Array.isArray(info.trace) ? info.trace.map((t) => ({ provider: t.upstream || 'auto', status: t.status, upstreamStatus: t.upstreamStatus, ms: t.ms, account: t.account, action: t.action || null })) : [],
+    attempts: Array.isArray(info.trace) ? info.trace.map((t) => ({ provider: t.upstream || 'auto', status: t.status, upstreamStatus: t.upstreamStatus, ms: t.ms, account: t.account, action: t.action || null, providerCircuitAction: ['cooldown','half-open-success','half-open-failed'].includes(t.providerCircuitAction) ? t.providerCircuitAction : null })) : [],
     status: result === 'client_cancelled' ? 499 : result === 'success' ? 200 : (info.normalizedStatus || 502), result, upstreamStatus: info.upstreamStatus ?? null,
     durationMs: Number(info.ms) || 0, accountActions: info.accountActions || [], switched: (info.accountPath || []).length > 1, appliedHeaderNames: info.appliedHeaderNames || [],
     errorCategory: result === 'failed' && info.error ? (info.proxyError ? 'proxy' : 'upstream') : null,
@@ -1317,32 +1390,34 @@ function validIdentityValue(v) {
   const s = safeHeaderValue(v);
   return s && s.length <= 512 ? s : null;
 }
-function firstBodyValue(body, paths) {
-  for (const path of paths) {
+function firstBodyIdentity(body, paths) {
+  for (const [path, keyType] of paths) {
     let cur = body;
     for (const part of path.split('.')) cur = cur && typeof cur === 'object' ? cur[part] : undefined;
-    const v = validIdentityValue(cur);
-    if (v) return v;
+    const value = validIdentityValue(cur);
+    if (value) return { value, keyType };
   }
   return null;
 }
-function userIdSessionValue(v, parent = false) {
+function userIdSessionIdentity(v, parent = false) {
   const s = validIdentityValue(v);
   if (!s) return null;
   if (s.trim().startsWith('{')) {
     const j = safeJsonParse(s);
     if (j && typeof j === 'object') {
-      const keys = parent ? ['parent_session_id','parent_agent_id','parent_thread_id','parent_conversation_id'] : ['session_id','agent_id','thread_id','conversation_id','claude_session_id'];
-      for (const k of keys) { const vv = validIdentityValue(j[k]); if (vv) return vv; }
+      const keys = parent
+        ? [['parent_session_id','parent_session'],['parent_agent_id','parent_agent'],['parent_thread_id','parent_thread'],['parent_conversation_id','parent_conversation']]
+        : [['session_id','session_id'],['claude_session_id','session_id'],['agent_id','agent_id'],['thread_id','thread_id'],['conversation_id','conversation_id']];
+      for (const [key, keyType] of keys) { const value = validIdentityValue(j[key]); if (value) return { value, keyType }; }
     }
   }
-  if (!parent && /^claude[-_:]/i.test(s)) return s;
+  if (!parent && /^claude[-_:]/i.test(s)) return { value: s, keyType: 'session_id' };
   return null;
 }
-function hmacIdentity(source, value) {
+function hmacIdentity(source, value, keyType = 'session_id', confidence = 'explicit') {
   // Equal trusted parent/current identifiers must route together even when one
   // side is carried by a protocol-specific header and the other by a generic one.
-  return { source, fingerprint: hmacHex(`session\0${value}`) };
+  return { source, keyType, confidence, fingerprint: hmacHex(`session\0${value}`) };
 }
 function detectClientProtocol(req, body = {}) {
   if (body.prompt_cache_key || reqHeader(req, 'X-Codex-Turn-Metadata') || reqHeader(req, 'Originator') || reqHeader(req, 'X-Codex-Parent-Thread-Id')) return 'codex';
@@ -1350,9 +1425,9 @@ function detectClientProtocol(req, body = {}) {
   return 'generic';
 }
 function firstIdentity(candidates) {
-  for (const [source, value] of candidates) {
+  for (const [source, value, keyType] of candidates) {
     const valid = validIdentityValue(value);
-    if (valid) return hmacIdentity(source, valid);
+    if (valid) return hmacIdentity(source, valid, keyType);
   }
   return null;
 }
@@ -1362,26 +1437,31 @@ function extractSessionIdentity(req, body) {
   let identity = null;
   if (protocol === 'codex') {
     identity = firstIdentity([
-      ['codex_parent', reqHeader(req, 'X-Codex-Parent-Thread-Id')],
-      ['codex_parent', turnMeta.parent_thread_id || turnMeta.parent_session_id || turnMeta.parent_conversation_id],
-      ['codex_body', body?.prompt_cache_key],
-      ['codex_header', reqHeader(req, 'Session-Id') || reqHeader(req, 'Session_id')],
-      ['codex_header', reqHeader(req, 'Thread-Id') || reqHeader(req, 'Thread_id')],
-      ['codex_metadata', turnMeta.thread_id || turnMeta.session_id || turnMeta.conversation_id],
+      ['codex_parent', reqHeader(req, 'X-Codex-Parent-Thread-Id'), 'parent_thread'],
+      ['codex_parent', turnMeta.parent_thread_id || turnMeta.parent_session_id || turnMeta.parent_conversation_id, 'parent_session'],
+      ['codex_body', body?.prompt_cache_key, 'prompt_cache_key'],
+      ['codex_header', reqHeader(req, 'Session-Id') || reqHeader(req, 'Session_id'), 'session_id'],
+      ['codex_header', reqHeader(req, 'Thread-Id') || reqHeader(req, 'Thread_id'), 'thread_id'],
+      ['codex_metadata', turnMeta.session_id || turnMeta.thread_id || turnMeta.conversation_id, 'session_id'],
     ]);
   } else if (protocol === 'claude') {
+    const parentMetadata = userIdSessionIdentity(body?.metadata?.user_id, true);
+    const currentMetadata = userIdSessionIdentity(body?.metadata?.user_id, false);
     identity = firstIdentity([
-      ['claude_parent', reqHeader(req, 'X-Claude-Code-Parent-Agent-Id')],
-      ['claude_parent', userIdSessionValue(body?.metadata?.user_id, true)],
-      ['claude_header', reqHeader(req, 'X-Claude-Code-Session-Id')],
-      ['claude_header', reqHeader(req, 'X-Claude-Code-Agent-Id')],
-      ['claude_metadata', userIdSessionValue(body?.metadata?.user_id, false)],
+      ['claude_parent', reqHeader(req, 'X-Claude-Code-Parent-Agent-Id'), 'parent_agent'],
+      ['claude_parent', parentMetadata?.value, parentMetadata?.keyType],
+      ['claude_header', reqHeader(req, 'X-Claude-Code-Session-Id'), 'session_id'],
+      ['claude_header', reqHeader(req, 'X-Claude-Code-Agent-Id'), 'agent_id'],
+      ['claude_metadata', currentMetadata?.value, currentMetadata?.keyType],
     ]);
   }
+  const genericBody = firstBodyIdentity(body, [['session_id','session_id'],['conversation_id','conversation_id'],['thread_id','thread_id'],['metadata.session_id','session_id'],['metadata.conversation_id','conversation_id'],['metadata.thread_id','thread_id']]);
   identity ||= firstIdentity([
-    ['generic_parent', reqHeader(req, 'X-Parent-Session-ID') || reqHeader(req, 'X-Parent-Session-Affinity')],
-    ['generic_body', firstBodyValue(body, ['session_id','conversation_id','thread_id','metadata.session_id','metadata.conversation_id','metadata.thread_id'])],
-    ['generic_header', reqHeader(req, 'Session-Id') || reqHeader(req, 'Session_id') || reqHeader(req, 'Thread-Id') || reqHeader(req, 'Thread_id') || reqHeader(req, 'X-Http-Session-Id') || reqHeader(req, 'X-Session-ID') || reqHeader(req, 'X-Session-Affinity') || reqHeader(req, 'X-Slot-Session-Id') || reqHeader(req, 'X-Conversation-Id') || reqHeader(req, 'X-Thread-Id')],
+    ['generic_parent', reqHeader(req, 'X-Parent-Session-ID') || reqHeader(req, 'X-Parent-Session-Affinity'), 'parent_session'],
+    ['generic_body', genericBody?.value, genericBody?.keyType],
+    ['generic_header', reqHeader(req, 'Session-Id') || reqHeader(req, 'Session_id') || reqHeader(req, 'X-Http-Session-Id') || reqHeader(req, 'X-Session-ID') || reqHeader(req, 'X-Session-Affinity') || reqHeader(req, 'X-Slot-Session-Id'), 'session_id'],
+    ['generic_header', reqHeader(req, 'Thread-Id') || reqHeader(req, 'Thread_id') || reqHeader(req, 'X-Thread-Id'), 'thread_id'],
+    ['generic_header', reqHeader(req, 'X-Conversation-Id'), 'conversation_id'],
   ]);
   if (identity) return identity;
   const msgs = Array.isArray(body?.messages) ? body.messages : [];
@@ -1392,10 +1472,27 @@ function extractSessionIdentity(req, body) {
     const userContent = user ? stableMsgContent(user.content) : '';
     if (sysContent || userContent) {
       const stable = JSON.stringify([sysContent ? ['s', sysContent] : null, userContent ? ['u', userContent] : null]);
-      return hmacIdentity('message_hmac', stable);
+      return hmacIdentity('message_hmac', stable, 'message_hmac', 'fallback');
     }
   }
-  return { source: 'roundrobin', fingerprint: null };
+  return { source: 'roundrobin', keyType: 'none', confidence: 'none', fingerprint: null };
+}
+function prepareChatAffinity(body, identity) {
+  const own = (key) => Object.prototype.hasOwnProperty.call(body, key);
+  if (own('prompt_cache_key')) {
+    const valid = validIdentityValue(body.prompt_cache_key);
+    return { body, source: valid ? 'caller_prompt_cache_key' : 'caller_invalid', usable: !!valid };
+  }
+  if (own('session_id')) {
+    const valid = validIdentityValue(body.session_id);
+    return { body, source: valid ? 'caller_session_id' : 'caller_invalid', usable: !!valid };
+  }
+  const protocol = String(identity?.source || '').split('_', 1)[0];
+  if (identity?.confidence === 'explicit' && identity.fingerprint && (protocol === 'codex' || protocol === 'claude')) {
+    const promptCacheKey = hmacHex(`upstream-prompt-cache\0${identity.fingerprint}`);
+    return { body: { ...body, prompt_cache_key: promptCacheKey }, source: protocol === 'codex' ? 'derived_codex' : 'derived_claude', usable: true };
+  }
+  return { body, source: 'none', usable: false };
 }
 function stableMsgContent(c) {
   if (typeof c === 'string') return c.slice(0, 4096);
@@ -1886,6 +1983,79 @@ function buildAttempts(modelId, cfg) {
   }
   return [{ ...base, upstream: null, orderRest: [], excludeList: exclude }];
 }
+function providerCircuitKey(accountId, modelId, provider) { return `${accountId}\0${modelId}\0${provider}`; }
+function providerCircuitRouteKey(accountId, modelId) { return `${accountId}\0${modelId}`; }
+function clearProviderCircuitForAccount(accountId) {
+  const prefix = `${accountId}\0`;
+  providerCircuitAccountGenerations.set(accountId, (providerCircuitAccountGenerations.get(accountId) || 0) + 1);
+  for (const key of providerCircuitStates.keys()) if (key.startsWith(prefix)) providerCircuitStates.delete(key);
+  for (const key of providerCircuitRouteGenerations.keys()) if (key.startsWith(prefix)) providerCircuitRouteGenerations.delete(key);
+}
+function clearProviderCircuitForRoute(accountId, modelId) {
+  const prefix = `${accountId}\0${modelId}\0`, routeKey = providerCircuitRouteKey(accountId, modelId);
+  providerCircuitRouteGenerations.set(routeKey, (providerCircuitRouteGenerations.get(routeKey) || 0) + 1);
+  for (const key of providerCircuitStates.keys()) if (key.startsWith(prefix)) providerCircuitStates.delete(key);
+}
+function ensureProviderCircuitCapacity(now = Date.now()) {
+  if (providerCircuitStates.size < PROVIDER_CIRCUIT_LIMIT) return true;
+  for (const [key, state] of providerCircuitStates) if (!state.halfOpen && state.cooldownUntil + 300000 < now) providerCircuitStates.delete(key);
+  while (providerCircuitStates.size >= PROVIDER_CIRCUIT_LIMIT) {
+    const removable = [...providerCircuitStates].find(([, state]) => !state.halfOpen);
+    if (!removable) return false;
+    providerCircuitStates.delete(removable[0]);
+  }
+  return true;
+}
+function planProviderAttempts(modelId, cfg, account) {
+  const attempts = applyMaxRetries(buildAttempts(modelId, cfg), cfg);
+  const cooldownMs = Number(cfg?.providerCooldownMs) || 0;
+  if (cooldownMs <= 0) return { attempts, retryAfter: null };
+  const now = Date.now(), ready = [], blocked = [], accountGeneration = providerCircuitAccountGenerations.get(account.id) || 0, routeKey = providerCircuitRouteKey(account.id, modelId), routeGeneration = providerCircuitRouteGenerations.get(routeKey) || 0;
+  for (const attempt of attempts) {
+    if (!attempt.upstream) { ready.push(attempt); continue; }
+    const key = providerCircuitKey(account.id, modelId, attempt.upstream), circuitAttempt = { ...attempt, circuitKey: key, circuitAccountGeneration: accountGeneration, circuitRouteGeneration: routeGeneration }, state = providerCircuitStates.get(key);
+    if (!state) { ready.push(circuitAttempt); continue; }
+    if (state.cooldownUntil > now) { blocked.push(state); continue; }
+    if (state.halfOpen) { blocked.push(state); continue; }
+    ready.push({ ...circuitAttempt, circuitHalfOpen: true });
+  }
+  if (ready.length) return { attempts: ready, retryAfter: null };
+  const earliest = Math.min(...blocked.map((state) => state.cooldownUntil > now ? state.cooldownUntil : now + 1000));
+  return { attempts: [], retryAfter: retryAfterSeconds(Math.max(1000, earliest - now)) };
+}
+function providerCircuitFailure(outcome, account) {
+  const status = Number(outcome?.normalizedStatus || outcome?.status || 0), message = String(outcome?.netError || outcome?.out?.error?.message || '');
+  if (/abort|cancel/i.test(message) || status === 401 || /unauthorized|re-authenticate|invalid\s*api/i.test(message)) return null;
+  if (outcome?.terminalOrigin === 'proxy' || (account?.proxyUrl && outcome?.upstreamStatus === 0)) return null;
+  if (status === 429) return 'rate_limit';
+  if (status >= 500 || outcome?.terminalOrigin === 'network' || outcome?.terminalOrigin === 'timeout') return outcome?.terminalOrigin || 'server';
+  if (/no allowed providers|no available providers|not found|unsupported|unavailable/i.test(message)) return 'unavailable';
+  return null;
+}
+function settleProviderCircuit(modelId, cfg, account, attempt, outcome) {
+  if (!attempt?.upstream || !(Number(cfg?.providerCooldownMs) > 0)) return null;
+  const routeKey = providerCircuitRouteKey(account.id, modelId);
+  if (attempt.circuitAccountGeneration !== (providerCircuitAccountGenerations.get(account.id) || 0) || attempt.circuitRouteGeneration !== (providerCircuitRouteGenerations.get(routeKey) || 0)) return null;
+  const key = attempt.circuitKey || providerCircuitKey(account.id, modelId, attempt.upstream), state = providerCircuitStates.get(key);
+  if (Number(outcome?.status) === 200) {
+    if (state) providerCircuitStates.delete(key);
+    return attempt.circuitHalfOpen ? 'half-open-success' : null;
+  }
+  const failureClass = providerCircuitFailure(outcome, account);
+  if (!failureClass) {
+    if (attempt.circuitHalfOpen && state) providerCircuitStates.delete(key);
+    return null;
+  }
+  if (!state && !ensureProviderCircuitCapacity()) return null;
+  const next = state || { consecutiveFailures: 0 };
+  next.cooldownUntil = Date.now() + Number(cfg.providerCooldownMs);
+  next.failureClass = failureClass;
+  next.consecutiveFailures = Math.min(1000, (next.consecutiveFailures || 0) + 1);
+  next.halfOpen = false;
+  next.updatedAt = Date.now();
+  providerCircuitStates.set(key, next);
+  return attempt.circuitHalfOpen ? 'half-open-failed' : 'cooldown';
+}
 
 function redactSecrets(value) {
   let s = String(value ?? '');
@@ -1947,9 +2117,10 @@ async function attemptOnce(modelId, body, attempt, account, forwardedHeaders, si
 
 // 顺序故障转移：依次执行候选，普通错误不换账号。cooldown/ban 由 handleChat 负责最多换号一次。
 async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream = false, attemptTimeoutMs = 120000 } = {}) {
-  const attempts = applyMaxRetries(buildAttempts(modelId, cfg), cfg);
-  const trace = [];
   const t0 = Date.now();
+  const planned = planProviderAttempts(modelId, cfg, account), attempts = planned.attempts;
+  const trace = [];
+  if (!attempts.length) return { status: 503, upstreamStatus: 0, normalizedStatus: 503, out: { error: { message: 'all configured providers are cooling down', type: 'upstream_error' } }, routing: {}, acc: account, trace, t0, retryAfter: planned.retryAfter || 1, netError: null, clientDisconnected: false };
   let last = null;
   let activeReq = null;
   let keepCloseHook = false;
@@ -1961,6 +2132,11 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
   try {
     for (const attempt of attempts) {
       if (clientClosed) break;
+      if (attempt.circuitHalfOpen) {
+        const state = providerCircuitStates.get(attempt.circuitKey);
+        if (!state || state.halfOpen) continue;
+        state.halfOpen = true; state.updatedAt = Date.now();
+      }
       const t1 = Date.now();
       const ctrl = new AbortController();
       activeReq = ctrl;
@@ -2009,20 +2185,22 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
             trace.push({ upstream: attempt.upstream, status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, terminalOrigin: up.status >= 400 ? 'upstream_http' : 'upstream_envelope', ms, note: msg, account: account.name, accountId: account.id });
             if (attempt.upstream) learnUpstreamStatus(modelId, attempt.upstream, msg);
             if (!attempt.upstream && (attempt.excludeList || []).length) learnAvailableProviders(modelId, msg);
-            last = { status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing, acc: account, netError: null, accountAction: clientClosed ? null : accountActionFor(un) };
+            last = { status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing, acc: account, netError: null, terminalOrigin: up.status >= 400 ? 'upstream_http' : 'upstream_envelope', accountAction: clientClosed ? null : accountActionFor(un) };
             trace[trace.length - 1].action = last.accountAction?.action || null;
+            trace[trace.length - 1].providerCircuitAction = settleProviderCircuit(modelId, cfg, account, attempt, last);
             if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'ban') break;
             continue;
           }
           if (!up) {
             trace.push({ upstream: attempt.upstream, status: 502, upstreamStatus: 0, normalizedStatus: 502, terminalOrigin: /timeout/i.test(netError || '') ? 'timeout' : account.proxyUrl ? 'proxy' : 'network', ms, note: netError || 'no response', account: account.name, accountId: account.id });
-            last = { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${netError || 'no response'}`, type: 'upstream_error' } }, routing: {}, acc: account, netError: netError || 'no response', accountAction: clientClosed ? null : accountActionFor({ normalizedStatus: 502 }) };
+            last = { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${netError || 'no response'}`, type: 'upstream_error' } }, routing: {}, acc: account, netError: netError || 'no response', terminalOrigin: /timeout/i.test(netError || '') ? 'timeout' : account.proxyUrl ? 'proxy' : 'network', accountAction: clientClosed ? null : accountActionFor({ normalizedStatus: 502 }) };
             trace[trace.length - 1].action = last.accountAction?.action || null;
+            trace[trace.length - 1].providerCircuitAction = settleProviderCircuit(modelId, cfg, account, attempt, last);
             if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'ban') break;
             continue;
           }
           keepCloseHook = true;
-          trace.push({ upstream: attempt.upstream, status: 200, upstreamStatus: 200, normalizedStatus: 200, terminalOrigin: 'success', ms, note: 'stream', account: account.name, accountId: account.id });
+          trace.push({ upstream: attempt.upstream, status: 200, upstreamStatus: 200, normalizedStatus: 200, terminalOrigin: 'success', ms, note: 'stream', account: account.name, accountId: account.id, providerCircuitAction: settleProviderCircuit(modelId, cfg, account, attempt, { status: 200 }) });
           return { status: 200, streamUp: up, streamHead: firstChunk, acc: account, trace, t0, started: true, cleanupClientClose };
         }
         const r = await attemptOnce(modelId, body, attempt, account, forwardedHeaders, ctrl.signal);
@@ -2033,6 +2211,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
         if (r.status !== 200 && !attempt.upstream && (attempt.excludeList || []).length) learnAvailableProviders(modelId, r.netError || note);
         last = { ...r, accountAction: clientClosed ? null : accountActionFor(r) };
         trace[trace.length - 1].action = last.accountAction?.action || null;
+        trace[trace.length - 1].providerCircuitAction = settleProviderCircuit(modelId, cfg, account, attempt, r);
         if (r.status === 200) break;
         if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'ban') break;
       } finally { clearTimeout(timer); }
@@ -2040,6 +2219,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
   } finally {
     if (!keepCloseHook) cleanupClientClose();
   }
+  if (!last && !clientClosed) return { status: 503, upstreamStatus: 0, normalizedStatus: 503, out: { error: { message: 'provider half-open probe is already in progress', type: 'upstream_error' } }, routing: {}, acc: account, trace, t0, retryAfter: 1, netError: null, clientDisconnected: false };
   return { ...last, status: last?.status ?? 502, trace, t0, netError: last?.netError || null, clientDisconnected: clientClosed };
 }
 
@@ -2047,6 +2227,9 @@ function statisticsSegments(trace, finalAccountId, usage, clientDisconnect = fal
   const grouped = new Map();
   for (const attempt of trace || []) { const list = grouped.get(attempt.accountId) || []; list.push(attempt); grouped.set(attempt.accountId, list); }
   return [...grouped.entries()].map(([accountId, attempts]) => { const success = !clientDisconnect && attempts.at(-1)?.status === 200; return { accountId, trace: attempts, success, error: !clientDisconnect && !success, usage: success && accountId === finalAccountId ? usage : null }; });
+}
+function cacheHitOf(usage) {
+  return usage?.cacheFieldPresent === true && usage.cachedTokens !== null ? usage.cachedTokens > 0 : null;
 }
 async function handleChat(req, res) {
   const detail = detailContext.getStore();
@@ -2061,20 +2244,33 @@ async function handleChat(req, res) {
   if (!requestedModel || requestedModel.length > 300) return sendJSON(res, 400, { error: { message: 'valid model is required' } });
   const sensitiveValues = sensitiveMessageValues(body);
   let statisticsFinalized = false;
-  const finalizeStatistics = (facts) => { if (statisticsFinalized) return; statisticsFinalized = true; try { commitStatistics({ ...facts, modelId }); } catch (error) { console.error(`[统计] 持久化失败：${safeReason(error.message)}`); } };
+  const finalizeStatistics = (facts) => { if (statisticsFinalized) return; statisticsFinalized = true; try { commitStatistics({ ...facts, modelId, affinityConfidence: identity?.confidence || 'none' }); } catch (error) { console.error(`[统计] 持久化失败：${safeReason(error.message)}`); } };
   const modelId = resolveModelAlias(requestedModel);
   const recordChat = (info) => record(modelId, info, detail);
   body = { ...body, model: modelId };
   const identity = extractSessionIdentity(req, body);
   const forwardedHeaders = forwardHeadersFor(req, body);
+  const affinity = prepareChatAffinity(body, identity);
+  body = affinity.body;
   const isStream = body.stream === true;
   const excluded = new Set();
   const accountPath = [];
+  let upstreamAffinitySent = false;
+  let providerOrderOverridesSticky = false;
+  const affinityFacts = (usage = null) => ({
+    sessionSource: identity.source,
+    affinityKeyType: identity.keyType,
+    affinityConfidence: identity.confidence,
+    upstreamPromptCacheKeySource: affinity.source,
+    upstreamPromptCacheKeyApplied: upstreamAffinitySent && affinity.usable,
+    providerOrderOverridesSticky,
+    cacheHit: cacheHitOf(usage),
+  });
   let selected = await acquireAccountLease(identity, { excludeIds: excluded });
   if (!selected.lease) {
     const status = enabledAccounts().length ? 429 : 503;
     finalizeStatistics({ globalError: true, segments: [] });
-    recordChat({ requestId, requestedModel, resolvedModel: modelId, stream: isStream, strategy: selected.strategy, sessionSource: identity.source, selectionReason: 'capacity-unavailable', normalizedStatus: status, upstreamStatus: null, error: selected.error, ms: 0 });
+    recordChat({ requestId, requestedModel, resolvedModel: modelId, stream: isStream, strategy: selected.strategy, ...affinityFacts(), selectionReason: 'capacity-unavailable', normalizedStatus: status, upstreamStatus: null, error: selected.error, ms: 0 });
     return sendBusy(res, selected.error, selected.retryAfter, status);
   }
   const initialSelection = { ...selected };
@@ -2089,7 +2285,9 @@ async function handleChat(req, res) {
     accountPath.push(account.name);
     cfg = resolveModelConfig(account, modelId);
     targets = applyMaxRetries(buildAttempts(modelId, cfg), cfg).map((a) => a.upstream).filter(Boolean);
+    if (cfg?.pinMode === 'preferred' && targets.length > 0) providerOrderOverridesSticky = true;
     try {
+      upstreamAffinitySent = true;
       chain = await runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream: isStream });
     } catch (e) {
       lease.release();
@@ -2152,7 +2350,7 @@ async function handleChat(req, res) {
       }
       const usage = result === 'success' ? observed.usage : null;
       finalizeStatistics({ globalError: result === 'failed', usage, clientDisconnect: clientCancelled, segments: statisticsSegments(chain.trace, acc.id, usage, clientCancelled) });
-      recordChat({ requestId, requestedModel, resolvedModel: modelId, provider: observed.provider, canonical: observed.canonical, ms: Date.now() - chain.t0, stream: true, result, normalizedStatus, error: streamError, account: acc.name, accountId: acc.id, attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, accountPath, accountActions, sessionSource: identity.source, strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, appliedHeaderNames: Object.keys(acc.headers || {}), proxyError: !!acc.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues });
+      recordChat({ requestId, requestedModel, resolvedModel: modelId, provider: observed.provider, canonical: observed.canonical, ms: Date.now() - chain.t0, stream: true, result, normalizedStatus, error: streamError, account: acc.name, accountId: acc.id, attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, accountPath, accountActions, ...affinityFacts(usage), strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, appliedHeaderNames: Object.keys(acc.headers || {}), proxyError: !!acc.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues });
     };
     const tap = new Transform({ transform(c, enc, cb) { observer.push(c); cb(null, c); }, flush(cb) { finalize(); cb(); } });
     onUpstreamError = (e) => { finalize(e.message, 'upstream'); if (!res.destroyed) res.destroy(e); };
@@ -2169,7 +2367,7 @@ async function handleChat(req, res) {
   if (!out) {
     const result = disconnected ? 'client_cancelled' : 'failed';
     finalizeStatistics({ globalError: !disconnected, clientDisconnect: disconnected, segments: statisticsSegments(chain.trace, null, null, disconnected) });
-    recordChat({ requestId, requestedModel, resolvedModel: modelId, stream: false, result, normalizedStatus: disconnected ? 499 : 502, error: disconnected ? null : 'no upstream response', trace: chain.trace, accountPath, accountActions, sessionSource: identity.source, strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, sensitiveValues });
+    recordChat({ requestId, requestedModel, resolvedModel: modelId, stream: false, result, normalizedStatus: disconnected ? 499 : 502, error: disconnected ? null : 'no upstream response', trace: chain.trace, accountPath, accountActions, ...affinityFacts(), strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, sensitiveValues });
     if (res.destroyed) return;
     return sendJSON(res, disconnected ? 499 : 502, { error: { message: disconnected ? 'client cancelled request' : 'no upstream response', type: disconnected ? 'client_cancelled' : 'upstream_error' } });
   }
@@ -2180,12 +2378,12 @@ async function handleChat(req, res) {
   recordChat({
     requestId, requestedModel, resolvedModel: modelId, provider: routing.finalProvider || null, canonical: routing.canonicalSlug || null, ms: Date.now() - chain.t0, stream: false, result: disconnected ? 'client_cancelled' : status === 200 ? 'success' : 'failed',
     attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, error: disconnected ? null : status !== 200 ? safeOut.error.message : null,
-    account: acc?.name || null, accountId: acc?.id || null, accountPath, accountActions, accountAction: chain.accountAction?.action || accountActions.at(-1)?.action || null, upstreamStatus: chain.upstreamStatus, normalizedStatus: chain.normalizedStatus, sessionSource: identity.source,
+    account: acc?.name || null, accountId: acc?.id || null, accountPath, accountActions, accountAction: chain.accountAction?.action || accountActions.at(-1)?.action || null, upstreamStatus: chain.upstreamStatus, normalizedStatus: chain.normalizedStatus, ...affinityFacts(usage),
     strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, appliedHeaderNames: Object.keys(acc?.headers || {}), proxyError: !!acc?.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues,
   });
   if (res.destroyed) return;
   res.writeHead(disconnected ? 499 : status, {
-    'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*',
+    'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', ...(chain.retryAfter ? { 'Retry-After': String(chain.retryAfter) } : {}),
     'X-Cline-Target-Upstream': targets.length ? targets.join('>') : 'auto', 'X-Cline-Actual-Upstream': routing.finalProvider || 'unknown',
     'X-Cline-Canonical-Model': routing.canonicalSlug || '', 'X-Cline-Attempts': String(chain.trace.length), 'X-Cline-Account': headerSafe(acc?.name || ''),
   });
@@ -2255,19 +2453,26 @@ async function dispatch(req, res) {
       const ids = [...new Set([...config.knownModels, ...Object.keys(config.perModel || {}), ...Object.keys(account?.perModel || {})])];
       const sub = ids.map((id) => {
         const own = !!account && Object.prototype.hasOwnProperty.call(account.perModel || {}, id);
-        return { id, config: own ? account.perModel[id] : (config.perModel[id] || {}), configSource: account ? (own ? 'account' : 'inherited') : 'global', meta: META.models[id] || null };
+        return { id, config: own ? account.perModel[id] : (config.perModel[id] || {}), configSource: account ? (own ? 'account' : 'inherited') : 'global', meta: projectModelMeta(META.models[id]) };
       });
       return sendJSON(res, 200, { subscription: sub, catalogCount: cat.length, catalog: cat, proxyBase: publicProxyBase(), officialFetch: META.officialModelsFetch || null, accountId: account?.id || null });
     }
     if (req.method === 'POST' && p === '/api/probe') {
-      const { model } = await readJsonBody(req);
+      const input = await readJsonBody(req);
+      const model = String(input?.model || '').trim();
       if (!model) return sendJSON(res, 400, { error: 'model required' });
-      const r = await probeModel(model);
-      return sendJSON(res, r.ok ? 200 : 502, r);
+      const selected = await acquireManagementAccount(input?.accountId, `probe\0${model}`);
+      if (!selected.lease) return selected.status === 429 || selected.status === 503
+        ? sendBusy(res, selected.error, selected.retryAfter, selected.status)
+        : sendJSON(res, selected.status, { error: { message: selected.error } });
+      let r;
+      try { r = await probeModel(model, selected.lease.account); }
+      finally { selected.lease.release(); }
+      return sendJSON(res, r.ok ? 200 : 502, { ...r, accountId: selected.lease.account.id });
     }
     if (req.method === 'POST' && p === '/api/test') {
       const input = await readJsonBody(req);
-      const { model: requestedModel, upstream, upstreams, exclude, accountId } = input;
+      const { model: requestedModel, upstream, upstreams, exclude, pinMode, sort, maxRetries, providerCooldownMs, accountId } = input;
       if (!requestedModel) return sendJSON(res, 400, { error: 'model required' });
       const model = resolveModelAlias(String(requestedModel));
       const forced = accountId ? config.accounts.find((a) => a.id === String(accountId)) : null;
@@ -2280,6 +2485,10 @@ async function dispatch(req, res) {
       if (upstreams !== undefined) cfg.upstreams = upstreams;
       else if (upstream !== undefined) cfg.upstreams = upstream ? [upstream] : [];
       if (exclude !== undefined) cfg.exclude = exclude;
+      if (pinMode !== undefined) cfg.pinMode = pinMode;
+      if (sort !== undefined) cfg.sort = sort;
+      if (maxRetries !== undefined) cfg.maxRetries = maxRetries;
+      if (providerCooldownMs !== undefined) cfg.providerCooldownMs = providerCooldownMs;
       const routeError = validatePerModelInput({ [model]: cfg });
       if (routeError) { selected.lease.release(); return sendJSON(res, 400, { error: { message: routeError } }); }
       const body = { model, messages: [{ role: 'user', content: 'Reply with the word OK' }], max_tokens: 256 };
@@ -2401,7 +2610,7 @@ async function dispatch(req, res) {
       const generatedAt = Date.now(), recentGlobal = aggregateRange().aggregate;
       const accounts = config.accounts.map((account) => { const recent = aggregateRange(account.id).aggregate; return { id: account.id, name: account.name, enabled: account.enabled !== false, lifetime: projectAggregate(META.statistics.lifetime.accounts[account.id] || emptyAggregate()), recent24h: projectAggregate(recent), health: healthProjection(account), quota: statisticsQuotaProjection(account, generatedAt) }; });
       const models = statisticsModelIds().map((id) => ({ id, recent24h: projectAggregate(aggregateModelRange(id, generatedAt)), coverage: modelCoverage(id, generatedAt) }));
-      return sendJSON(res, 200, { generatedAt, window: { kind: 'last-1440-minutes', from: (Math.floor(generatedAt/60000)-1439)*60000, to: generatedAt }, lifetime: { global: projectAggregate(META.statistics.lifetime.global) }, recent24h: { global: projectAggregate(recentGlobal) }, accounts, models, migration: META.statistics.migration });
+      return sendJSON(res, 200, { generatedAt, window: { kind: 'last-1440-minutes', from: (Math.floor(generatedAt/60000)-1439)*60000, to: generatedAt }, lifetime: { global: projectAggregate(META.statistics.lifetime.global) }, recent24h: { global: projectAggregate(recentGlobal) }, routingCoverage: routingCoverage(generatedAt), accounts, models, migration: META.statistics.migration });
     }
     if (req.method === 'GET' && p === '/api/accounts') {
       clearExpiredCooldowns();
@@ -2455,9 +2664,10 @@ async function dispatch(req, res) {
       config.concurrencyWaitMs = wait; config.accountErrorRules = normalizeAccountErrorRules(body.accountErrorRules || {}); config.accountPipeline = requestedPipeline;
       for (const [id, previous] of previousById) {
         const current = accs.find((a) => a.id === id);
-        if (!current) invalidateQuotaAccount(id, { clearSnapshot: true, deleted: true });
-        else if (current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) invalidateQuotaAccount(id, { clearSnapshot: true });
-        else if (previous.enabled !== false && current.enabled === false) invalidateQuotaAccount(id);
+        if (!current) { invalidateQuotaAccount(id, { clearSnapshot: true, deleted: true }); clearProviderCircuitForAccount(id); }
+        else if (current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) { invalidateQuotaAccount(id, { clearSnapshot: true }); clearProviderCircuitForAccount(id); }
+        else if (previous.enabled !== false && current.enabled === false) { invalidateQuotaAccount(id); clearProviderCircuitForAccount(id); }
+        else for (const model of new Set([...Object.keys(previous.perModel || {}), ...Object.keys(current.perModel || {})])) if (JSON.stringify(previous.perModel?.[model]) !== JSON.stringify(current.perModel?.[model])) clearProviderCircuitForRoute(id, model);
       }
       if (quotaRoutingWasEnabled !== quotaRoutingEnabled()) advanceQuotaRoutingEpoch();
       for (const id of Object.keys(META.accountStates || {})) if (!seen.has(id)) delete META.accountStates[id];
@@ -2517,12 +2727,19 @@ async function dispatch(req, res) {
       return sendJSON(res, 200, { ok: true, proxyKey: config.proxyKey, publicBaseUrl: config.publicBaseUrl, authRequired: !!PROXY_KEY, proxyBase: publicProxyBase(), exposeCatalog: !!config.exposeCatalog });
     }
     if (req.method === 'POST' && p === '/api/validate-upstreams') {
-      const { model } = await readJsonBody(req);
+      const input = await readJsonBody(req);
+      const model = String(input?.model || '').trim();
       if (!model) return sendJSON(res, 400, { error: { message: 'model required' } });
-      const results = await validateUpstreams(model);
-      const summary = { ok: 0, limited: 0, bad: 0, auth: 0, unknown: 0 };
-      for (const r of Object.values(results)) summary[r.status] = (summary[r.status] || 0) + 1;
-      return sendJSON(res, 200, { ok: true, summary, results, upstreams: META.models[model]?.upstreams || [] });
+      const selected = await acquireManagementAccount(input?.accountId, `validate\0${model}`);
+      if (!selected.lease) return selected.status === 429 || selected.status === 503
+        ? sendBusy(res, selected.error, selected.retryAfter, selected.status)
+        : sendJSON(res, selected.status, { error: { message: selected.error } });
+      let results;
+      try { results = await validateUpstreams(model, selected.lease.account); }
+      finally { selected.lease.release(); }
+      const summary = { ok: 0, limited: 0, bad: 0, auth: 0, unknown: 0, accountFaults: 0 };
+      for (const fact of Object.values(results)) { summary[fact.status] = (summary[fact.status] || 0) + 1; if (fact.accountFault) summary.accountFaults++; }
+      return sendJSON(res, 200, { ok: true, accountId: selected.lease.account.id, summary, results, upstreams: META.models[model]?.upstreams || [] });
     }
     if (req.method === 'POST' && p === '/api/fetch-official-models') {
       const r = await fetchOfficialModels();
@@ -2540,13 +2757,20 @@ async function dispatch(req, res) {
       if (body.action === 'inherit') {
         const model = String(body.model || '').trim();
         if (scope !== 'account' || !model || model.length > 300 || /[\x00-\x1f\x7f]/.test(model)) return sendJSON(res, 400, { error: { message: 'valid account scope and model are required for inherit' } });
-        delete target.perModel[model]; saveConfig();
+        delete target.perModel[model];
+        clearProviderCircuitForRoute(target.id, model);
+        saveConfig();
         return sendJSON(res, 200, { ok: true, source: 'inherited' });
       }
       if (body.perModel === undefined) return sendJSON(res, 400, { error: { message: 'perModel is required' } });
       const routeError = validatePerModelInput(body.perModel);
       if (routeError) return sendJSON(res, 400, { error: { message: routeError } });
-      for (const [m, c] of Object.entries(body.perModel)) target.perModel[String(m).trim()] = normalizeRouteConfig(c);
+      for (const [m, c] of Object.entries(body.perModel)) {
+        const model = String(m).trim();
+        target.perModel[model] = normalizeRouteConfig(c);
+        if (scope === 'account') clearProviderCircuitForRoute(target.id, model);
+        else for (const account of config.accounts) if (!Object.prototype.hasOwnProperty.call(account.perModel || {}, model)) clearProviderCircuitForRoute(account.id, model);
+      }
       saveConfig();
       return sendJSON(res, 200, { ok: true, scope });
     }

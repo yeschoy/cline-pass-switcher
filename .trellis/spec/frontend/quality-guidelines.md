@@ -34,6 +34,9 @@ stopStatisticsVisit()
 restoreStatisticsVisit()
 generateAliases()
 saveAliases()
+setupUpstreams(modelId, button)
+testUpstreamSetup()
+applyUpstreamSetup()
 switchSection(section)
 loadLogs(nextPage)
 clearLogs()
@@ -110,6 +113,12 @@ The separate five error-rule presets are `standard`, `fast`, `conservative`, `ob
 
 Cancel discards the relevant draft. Confirm submits through the ordinary complete account save, so the server applies the same validation as manual edits. No persistent “selected preset” state exists. Pipeline controls submit `quotaPool`, `excludeUnhealthy`, `healthSort`, and `sticky` plus `order`, which is read from the four existing DOM nodes as an exact permutation, and `cachePoolSize` from its labelled bounded number input. Empty, fractional, nonnumeric, or out-of-range pool-size drafts block visual save and preset preview without coercion or a request. Authenticated account rows may display only the safe runtime `cachePoolRole` labels active/standby; that field is never submitted as static account configuration.
 
+#### Provider setup preview
+
+Each model row exposes one native “one-click setup” button. It uses the current route-scope account, runs probe then validation, and opens a labelled modal with an announced status and a native strategy select for cache-first strict, availability-first preferred, or automatic sticky. Proposal text is assigned with `textContent`. Cancel is a no-op; testing sends a temporary route only; confirmation is the sole persistence edge and delegates to `saveModelCfg()`. A changed route scope invalidates the preview. Account auth/proxy/quota faults remain visibly distinct from provider verdicts and are never auto-excluded as global provider failures.
+
+The model route controls also expose bounded `providerCooldownMs` 0-300000. Zero is the explicit off/compatibility value. The complete route save must retain this field together with upstreams/exclude/pinMode/sort/maxRetries.
+
 #### Model aliases
 
 The alias editor uses one `alias = cline-pass/target` pair per line. Batch generation removes `cline-pass/` and applies the optional common prefix/suffix. Duplicate/malformed rows are rejected in the browser for feedback, and the complete object is still validated by the server.
@@ -130,7 +139,7 @@ The quota forecast appears between the statistics summary and account table as f
 
 Request and error sections share one bounded filter, table, cursor, and clear implementation. The request view is labelled “最终请求结果（每个请求一条）”; the error view is labelled “上游失败尝试（同一请求可能多条）” and explicitly warns that attempt count is not failed-request count. `switchSection()` selects the type, updates the visible title/status/description, invalidates pending log reads, and starts a first-page load. `loadLogs()` ignores a response whose query generation or selected type is stale. “Next” sends only the server-provided cursor. Changing a filter or type resets the cursor. Clear captures the selected type before awaiting deletion, requires explicit confirmation naming that type, and reloads only if the same log section is still visible.
 
-Request status renders `status / result` and offers the request-only `result` filter. Historical rows without `result` display `success` for 2xx/3xx or `legacy_failed` otherwise; this fallback does not rewrite or claim to correct historical JSONL. Error status continues to render attempt status/upstream status.
+Request status renders `status / result` and offers the request-only `result` filter. The request table directly labels the bounded affinity key kind/confidence, caller/derived upstream key source, whether a usable field was sent, provider-order override, and cache hit/miss/unknown. Provider circuit actions remain bounded attempt enums in details. Never render the actual caller/derived key or any fingerprint. Historical rows without `result` display `success` for 2xx/3xx or `legacy_failed` otherwise; this fallback does not rewrite or claim to correct historical JSONL. Error status continues to render attempt status/upstream status.
 
 Ordinary request/error views render only projected log fields. Never render raw request/response bodies, Header values, proxy URLs, account notes, or credential-like data in those views. The independently opt-in detailed panel below is the only approved sanitized-body/header display exception.
 
@@ -201,6 +210,7 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 
 - 1800px responsive container, table wrappers, and account-name width;
 - seven bounded scheduling presets plus five live-draft error-rule presets, cache-pool input/role/help contracts, merge/replace/clear diffs, cancel behavior, and forbidden-field absence;
+- account-scoped one-click provider setup modal/strategy/proposal/test/confirm/cancel boundaries, stale scope rejection, and bounded provider cooldown input;
 - labelled modal/drawer semantics, Escape handling, focus return, dirty confirmation, and `aria-live` feedback;
 - account snapshot preservation for new hidden fields, all four pipeline booleans, the four-step order, and `cachePoolSize`;
 - five mutually exclusive top sections with one statistics panel, one shared ordinary-log DOM, one independent details panel, explicit active state, and no anchor/scroll shortcut;
@@ -208,7 +218,7 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 - statistics entry/manual/timer coalescing, abort and pageshow restoration ownership; remaining/reset-only quota text plus disabled/partial/error/stale states; draft preservation and routing-independent refresh;
 - model-table Token ratio/sample/coverage and provider-discovery states, plus stable-ID account cache/health/failure summaries that never enter save payloads;
 - the labelled responsive four-card quota forecast, truthful account-point units/assumptions, `textContent` rendering, exact fixed-time calculations, eligibility/exclusion counts, reset boundaries, lower-bound fallback, invalid snapshot time, and no-data state;
-- log query invalidation, filters/pagination, captured-type clear controls, request-only result filtering, safe historical fallback, explicit final-request versus failed-attempt wording, and model-alias batch controls;
+- log query invalidation, filters/pagination, captured-type clear controls, request-only result filtering, safe historical fallback, bounded affinity/cache/circuit labels, explicit final-request versus failed-attempt wording, and model-alias batch controls;
 - independent detailed settings/privacy/retention/auth warnings, safe metadata/text and on-demand copy/clear controls; production VM tests must verify stale reads, cursor reset and no account-draft mutation.
 
 Manual browser review remains required for visual width, narrow-screen scrolling, focus order, keyboard-only drawer use, password masking, preview readability, and log/alias interaction. Static string tests must not be reported as visual browser automation.

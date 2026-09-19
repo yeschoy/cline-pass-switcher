@@ -22,6 +22,11 @@ renderAccounts()
 collectAccounts()
 saveAccounts()
 saveModelCfg(modelId, patch)
+setupUpstreams(modelId, button)
+renderUpstreamSetupProposal()
+testUpstreamSetup()
+applyUpstreamSetup()
+closeUpstreamSetup()
 changeRouteScope()
 copyGlobalCfg(modelId)
 inheritCfg(modelId)
@@ -91,6 +96,18 @@ POST /api/config
   <- { scope: "account", accountId, action: "inherit", model }
   -> { ok, source: "inherited" }
 
+POST /api/probe
+  <- { model, accountId? }
+  -> probe result + selected accountId
+
+POST /api/validate-upstreams
+  <- { model, accountId? }
+  -> { ok, accountId, summary, results, upstreams }
+
+POST /api/test
+  <- { model, accountId?, upstreams?, exclude?, pinMode?, sort?, maxRetries?, providerCooldownMs? }
+  -> temporary route test result; no route persistence
+
 POST /api/accounts/recover
   <- { id }
   -> { ok: true }
@@ -107,7 +124,7 @@ POST /api/model-aliases
   -> { ok, count }
 
 GET /api/logs/{requests|errors}?<filters>&limit=<1..200>&cursor=<opaque>
-  -> { items, nextCursor }
+  -> { items, nextCursor }; request items add bounded affinity/upstream-key/cache-hit/circuit facts, never key values
 
 DELETE /api/logs/{requests|errors}
   -> { ok: true }
@@ -135,11 +152,14 @@ The route scope selector is explicit:
   exclude,
   pinMode,
   sort,
-  maxRetries
+  maxRetries,
+  providerCooldownMs
 }
 ```
 
-Editing any inherited field creates an account-owned route. `copyGlobalCfg()` explicitly loads the global view and saves its complete route into the selected account. `inheritCfg()` deletes the account's own `perModel[model]`; it does not copy global fields into the account.
+Editing any inherited field creates an account-owned route. `copyGlobalCfg()` explicitly loads the global view and saves its complete route into the selected account. `inheritCfg()` deletes the account's own `perModel[model]`; it does not copy global fields into the account. `providerCooldownMs` is an integer 0-300000; 0 preserves legacy provider attempts.
+
+Probe/validation/setup use the explicit route-scope account ID when present. One setup operation keeps probe, harvest and validation on that account, builds three local proposals (cache-first strict, availability-first preferred, automatic sticky), and opens a preview. Cancel writes nothing; test sends only the proposal to `/api/test`; confirm alone calls the existing complete-route save and reloads accepted state. Changing route scope while the preview is open makes it stale and blocks test/save.
 
 #### Full account save
 
@@ -239,6 +259,8 @@ The top-level section is projected by `consolePanel.hidden`, `statisticsPanel.hi
 - Future +2h/+8h/+24h projections assume no new consumption. A window becomes 100% only when its canonical reset is strictly after `generatedAt` and at or before the target; otherwise its current remaining value is carried forward. Missing, invalid, already-past resets or invalid `generatedAt` make that account's future projection a conservative lower bound and are counted explicitly. Disabled/non-fresh/incomplete rows are excluded and counted, never coerced to zero or full capacity. The projection is not a Token, request, monetary, or provider absolute limit.
 - `loadStatistics()` renders the forecast only after its existing query/visit/visibility checks accept the snapshot. The forecast adds no request, timer, cursor, persistence, or generic store, and uses `textContent` for bounded numeric output.
 - Statistics navigation/refresh never calls `loadAll()` or mutates `ACCS`, `BULK_SELECTION`, raw JSON, live scheduling controls or detailed-log state. It does not enable quota routing or persist account/configuration changes.
+
+Request-log rows additionally render only bounded affinity type/confidence, caller/derived upstream-key source/applied state, provider-order override, provider-circuit attempt action and cache-hit true/false/unknown. Missing historical fields render unknown. Actual caller/derived keys, raw sessions and fingerprints never enter ordinary frontend state or markup.
 
 `LOG_CURSOR` belongs to the current log type plus filter set. Starting a new query or changing filters resets it; “next” sends the opaque server cursor unchanged. The request type alone owns the `result` filter and renders `status / result`; missing historical results derive only the display label `success` or `legacy_failed` without mutating storage. The shared description distinguishes one-row-per-final-request from potentially-many-upstream-attempts. `LOG_QUERY_ID` is a generation counter: every section switch and query invalidates earlier reads, and a response may render only when both its generation and captured type still match. Clearing logs captures the selected type before the asynchronous delete and reloads only when that same log section remains visible.
 

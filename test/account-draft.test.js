@@ -100,6 +100,24 @@ test('visual save and preset preview reject invalid cache pool drafts without co
   }
 });
 
+test('upstream setup proposals are deterministic, scope-guarded and save only after confirmation', async () => {
+  const h=harness();
+  h.run("UPSTREAM_SETUP={model:'model',accountId:'',results:{slow:{status:'ok',ms:20},fast:{status:'ok',ms:5},busy:{status:'limited',ms:1},broken:{status:'bad',ms:2},auth:{status:'unknown',accountFault:'auth',ms:1}}};");
+  const cache=JSON.parse(h.run("JSON.stringify(upstreamSetupRoute('cache'))"));
+  assert.deepEqual(cache,{upstreams:['fast','slow','busy'],exclude:['broken'],pinMode:'strict',sort:null});
+  const available=JSON.parse(h.run("JSON.stringify(upstreamSetupRoute('available'))"));
+  assert.deepEqual(available,{upstreams:['fast','slow','busy'],exclude:['broken'],pinMode:'preferred',sort:'ttft'});
+  const automatic=JSON.parse(h.run("JSON.stringify(upstreamSetupRoute('automatic'))"));
+  assert.deepEqual(automatic,{upstreams:[],exclude:['broken'],pinMode:'preferred',sort:null});
+  h.context.saved=[];h.run("saveModelCfg=async(model,route)=>{saved.push({model,route});return true;};$('#upstreamSetupStrategy').value='cache';");
+  await h.run('applyUpstreamSetup()');
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(saved)')),[{model:'model',route:cache}]);
+  assert.equal(h.run('UPSTREAM_SETUP'),null);assert.equal(h.el('#upstreamSetupModal').style.display,'none');
+
+  h.run("UPSTREAM_SETUP={model:'model',accountId:'id0',results:{fast:{status:'ok',ms:1}}};$('#routeScope').value='id1';$('#upstreamSetupStrategy').value='cache';");
+  await h.run('applyUpstreamSetup()');assert.equal(JSON.parse(h.run('JSON.stringify(saved)')).length,1);assert.match(h.el('#upstreamSetupStatus').textContent,/作用域已变化/);
+});
+
 test('real loadAll hydration resets controls, order and old selection on reload', async () => {
   const h = harness(); h.run("selectAllAccounts(true); movePipelineStep('sticky',-1)");
   const hydrated=fixture(); hydrated.accountPipeline.cachePoolSize=3; hydrated.accountPipeline.order=['sticky','healthSort','quotaPool','excludeUnhealthy'];
