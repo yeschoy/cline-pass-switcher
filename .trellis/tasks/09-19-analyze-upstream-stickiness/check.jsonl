@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify Chat routing, failover and cancellation contracts"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify no session/prompt key or fingerprint leakage"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Verify config/metadata validation and persistence safety"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Verify rendering, accessibility and browser behavior"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Verify complete Chat-to-log-to-UI data flow"}
+{"file": ".trellis/tasks/09-19-analyze-upstream-stickiness/research/session-key-contract.md", "reason": "Verify client field priority and safe log semantics"}
+{"file": ".trellis/tasks/09-19-analyze-upstream-stickiness/research/verification.md", "reason": "Final automated gate evidence and browser blocker"}
