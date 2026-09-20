@@ -1,0 +1,7 @@
+{"file":".trellis/spec/backend/deployment-guidelines.md","reason":"Canonical production target, immutable release, copied-data rehearsal, no-build switch and rollback contract."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Canonical errorRules, three-step pipeline, statistics v4 and dynamic-state migration boundaries."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Account/provider lifecycle, management API, success-rate and cancellation verification gates."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Ordinary/detailed log recovery, fail-open behavior and secret-free evidence rules."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Production UI/source markers and safe management-console projection requirements."}
+{"file":".trellis/tasks/archive/2026-09/09-20-deploy-single-provider-health-retry/research/deployment-report.md","reason":"Latest proven deployment sequence, host constraints and successful gate evidence."}
+{"file":".trellis/tasks/archive/2026-09/09-20-deploy-single-provider-health-retry/research/deployment-attempts.md","reason":"Known helper/runtime/rehearsal pitfalls that must remain before the mutation boundary."}

@@ -1,0 +1,7 @@
+{"file":".trellis/spec/backend/deployment-guidelines.md","reason":"Verify source, preflight, candidate, backup, switch, rollback and endpoint gates."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Verify copied-data migration is exact, truthful and idempotent."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verify account/provider/state/statistics lifecycle and management projections."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Verify logs recover and evidence contains no secrets or raw business data."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Verify deployed UI/source exposes the intended controls safely."}
+{"file":".trellis/tasks/archive/2026-09/09-20-deploy-single-provider-health-retry/research/deployment-report.md","reason":"Compare the candidate and post-switch gates with the latest successful production deployment."}
+{"file":".trellis/tasks/archive/2026-09/09-20-deploy-single-provider-health-retry/research/deployment-attempts.md","reason":"Verify retries remain pre-mutation or have explicit recovery evidence."}
