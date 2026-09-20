@@ -76,9 +76,9 @@ A request record may contain only:
 
 `result` is exactly `success`, `client_cancelled`, or `failed`. `status` remains the final request status; client cancellation is `499`, has `errorCategory: null`, and suppresses all error-log attempt projection even when abort plumbing produced an internal transport trace. Older JSONL rows without `result` remain readable and are never migrated.
 
-`attempts` is a projection of provider/status/timing/account/action facts, including optional `providerCircuitAction` limited to `cooldown`, `half-open-success`, or `half-open-failed`. Each attempt may additionally contain only bounded classification facts: `errorScope`, `scopeEvidence`, `failureClass`, `healthAction`, `retryAfterMs`, normalized `responseContentType`, and `responseBytes`. These fields describe switcher-visible HTTP attempts; target lists and gateway-internal behavior are never promoted into an actual provider path.
+`attempts` is a projection of provider/status/timing/account/action facts. Canonical rule diagnostics are limited to validated `ruleId`, `ruleScope`, `ruleAction`, and `matchedBy` condition-kind enums; they never contain needles, Header values, matched body text, or response bodies. Optional circuit/classification/media/byte facts remain bounded. These fields describe switcher-visible HTTP attempts; target lists and gateway-internal behavior are never promoted into an actual provider path.
 
-Affinity fields are bounded server enums/booleans only: `affinityKeyType` names the winning kind, `affinityConfidence` is `explicit`/`fallback`/`none`, `upstreamPromptCacheKeySource` is caller/derived/none/invalid, and `upstreamPromptCacheKeyApplied` means a valid field was sent, not that a remote router used it. `cacheHit` is true only for explicit cached tokens above zero, false only for explicit zero, and null when unknown. Pipeline fields are server-owned bounded values: `pipelineSteps` contains at most eight of `health-filtered`, `health-filter-fallback`, and `quota-all-unknown`; `selectedQuotaPool` is `ordinary`, `hot`, `warm`, `unknown`, or `reserve`; `selectedHealthLayer` is `ordinary`, `available-or-insufficient`, `degraded`, or `unhealthy`; `capacityFallback` is boolean; `cachePoolSize` is the configured bounded integer; `cachePoolTier` is `active`, `standby`, or null; and `cachePoolFallback` is boolean. Selection reasons may additionally be `cache-pool-active`, `cache-pool-active-overflow`, or `cache-pool-standby-overflow`. `errorCategory` distinguishes bounded request outcomes such as `capacity`, `routing`, `proxy`, and `upstream`; in particular a local capacity 429 has no upstream attempt and must never be labelled as an upstream 429. Raw candidate lists, health buckets, quota payloads, percentages, identities, credentials, proxy data, and messages remain forbidden.
+Affinity fields are bounded server enums/booleans only: `affinityKeyType` names the winning kind, `affinityConfidence` is `explicit`/`fallback`/`none`, `upstreamPromptCacheKeySource` is caller/derived/none/invalid, and `upstreamPromptCacheKeyApplied` means a valid field was sent, not that a remote router used it. `cacheHit` is true only for explicit cached tokens above zero, false only for explicit zero, and null when unknown. Pipeline fields are server-owned bounded values: `pipelineSteps` contains at most eight `quota-all-unknown` facts; `selectedQuotaPool` is `ordinary`, `hot`, `warm`, `unknown`, or `reserve`; `selectedHealthLayer` is `rated` or `unknown` when the success-rate step or cache-pool projection owns a health grouping, otherwise null; `capacityFallback` is boolean; `cachePoolSize` is the configured bounded integer; `cachePoolTier` is `active`, `standby`, or null; and `cachePoolFallback` is boolean. Selection reasons may additionally be `cache-pool-active`, `cache-pool-active-overflow`, or `cache-pool-standby-overflow`. `errorCategory` distinguishes bounded request outcomes such as `capacity`, `routing`, `proxy`, and `upstream`; in particular a local capacity 429 has no upstream attempt and must never be labelled as an upstream 429. Raw candidate lists, health buckets, quota payloads, percentages, identities, credentials, proxy data, and messages remain forbidden.
 
 An error record may contain only:
 
@@ -88,6 +88,7 @@ An error record may contain only:
   accountId, accountName, attemptIndex,
   targetProvider, providerPath,
   status, upstreamStatus, category, reason, accountAction,
+  ruleId, ruleScope, ruleAction, matchedBy,
   errorScope, scopeEvidence, failureClass, healthAction,
   retryAfterMs, responseContentType, responseBytes
 }
@@ -135,7 +136,7 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 | Upstream returns a long structured error | persist the complete redacted error field, including its final nested provider cause |
 | Upstream returns a non-JSON/invalid error body | persist a generic diagnostic plus normalized media type/byte count, never the raw response body |
 | Switcher local capacity 429 | request row has `errorCategory=capacity`, `upstreamStatus=null`, and no attempts |
-| Ambiguous HTML 429 | persist `errorScope=unknown`, bounded evidence/class/health action, and no account action or response body |
+| Ambiguous HTML 429 without a matching rule | persist `errorScope=unknown`, bounded evidence and default ignore, with no account action/body or implicit cooldown |
 | Pipeline diagnostics contain a non-owned/raw value | omit it; persist only the bounded enum/boolean projection |
 | Diagnostic JSONL or metadata persistence fails | report only a redacted service error; do not change the chat response |
 
@@ -170,7 +171,7 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 - a downstream close after observed `[DONE]` records one `200 / success`, while pre-DONE streaming and non-streaming cancellations each record one `499 / client_cancelled`, no error attempt, and no error/usage/health effect;
 - request `result` filtering returns only explicit new records, while historical rows without `result` remain readable and unmodified;
 - pipeline diagnostics, provider circuit actions, and provider health actions accept only the documented enum/boolean projection and contain no quota percentages, raw health data, or secrets;
-- unknown/provider/account 429 rows expose the correct bounded scope/evidence/health/account action, while raw HTML/JSON bodies and request content remain absent;
+- scoped-rule rows expose only bounded ID/scope/action/condition kinds; unknown/provider/account defaults expose correct attribution while needles, Header values, raw bodies and request content remain absent;
 - simulated log/metadata write failures do not alter the already-determined chat status or body.
 
 Run `node --check lib/jsonl-log-store.js`, `node --test test/jsonl-log-store.test.js`, `npm test`, and `git diff --check` after changes.

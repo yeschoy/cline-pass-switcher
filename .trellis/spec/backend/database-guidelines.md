@@ -24,7 +24,7 @@ normalizeProxyUrl(value, { strict = false })
 validateAndNormalizeHeaders(value, { strict = false })
 normalizeModelAliases(value)
 normalizeAccountPipeline(value, { strict = false })
-normalizeAccountContentErrorRules(value, { strict = false })
+normalizeErrorRules(value, { strict = false })
 validateStatistics(statistics)
 normalizeStatistics()
 normalizeAccountQuotas()
@@ -70,22 +70,21 @@ metadata.json   DATA_DIR/metadata.json
                "least-connections" | "weighted-roundrobin" | "priority-failover",
   activeAccount,
   concurrencyWaitMs,
-  accountErrorRules: {
-    [httpStatus]: { action: "ignore" | "ban" } |
-                  { action: "cooldown", cooldownMs }
-  },
-  accountContentErrorRules: [{
-    contains,
-    statusMin?, statusMax?,
-    action: "ignore" | "ban" | "cooldown",
-    cooldownMs?
+  errorRules: [{
+    id,
+    scope: "account" | "provider-model",
+    action: "ignore" | "degrade" | "cooldown" | "hard-quarantine",
+    providers?, models?,
+    when: { statuses?, body_contains?, header? },
+    reset? // cooldown only: explicit Header format + strict fallback/max duration
   }],
+  accountErrorRules: {},        // legacy compatibility projection only
+  accountContentErrorRules: [], // legacy compatibility projection only
   accountPipeline: {
     quotaPool: boolean,
-    excludeUnhealthy: boolean,
     healthSort: boolean,
     sticky: boolean,
-    order: ("excludeUnhealthy" | "quotaPool" | "healthSort" | "sticky")[],
+    order: ("quotaPool" | "healthSort" | "sticky")[],
     cachePoolSize: integer // 0-100000; 0 disables the cache-focused active pool
   },
   modelAliases: { [clientAlias]: "cline-pass/<known model>" },
@@ -113,10 +112,11 @@ Startup normalization preserves legacy behavior while making the schema explicit
 - normalize `modelAliases` only to known `cline-pass/*` targets without alias/original-name collisions;
 - normalize legacy `upstream` into `upstreams` while retaining `upstream` as the first-item compatibility mirror;
 - normalize global and account routes with the same functions; missing/invalid persisted `providerCooldownMs` becomes 0, while strict saves accept only integer 0-300000;
-- default an invalid/missing wait to 2000 ms and normalize status rules;
-- normalize `accountContentErrorRules` as one ordered array (maximum 100 entries / 64 KiB): each entry has a trimmed 1–500 character control-free `contains`, optional paired integer `statusMin/statusMax` in 100–599, and the same exact action/cooldown shape as status rules; an invalid persisted array is disabled as a whole with a bounded warning;
+- default an invalid/missing wait to 2000 ms;
+- treat `errorRules` as the only authoritative ordered array, capped at 100 entries / 64 KiB with strict stable IDs, scopes, actions, applicability, conditions, Header names and reset durations; persisted canonical invalidity fails startup without rewriting bytes;
+- when canonical rules are absent, migrate legacy content rules in original order before exact legacy status rules, map `ban` to account hard quarantine, persist canonical rules, and retain only lossless legacy API/config mirrors;
 - clamp `activeAccount` to the persisted account list;
-- normalize a missing/invalid pipeline order to `excludeUnhealthy`, `quotaPool`, `healthSort`, `sticky`, while always persisting all four unique step IDs;
+- normalize the pipeline to `quotaPool`, `healthSort`, `sticky`; recognized legacy four-step input folds `excludeUnhealthy:true` into health sorting and removes the duplicate step;
 - normalize a missing/invalid `accountPipeline.cachePoolSize` to `0`; strict management saves accept only integer values from 0 through 100000, while an older client that omits only this field preserves the current server value.
 
 #### Dynamic `metadata.json`
@@ -140,10 +140,11 @@ Startup normalization preserves legacy behavior while making the schema explicit
   },
   accountStates: {
     [accountId]: {
-      banned,
+      banned,             // compatibility mirror of hardQuarantined
+      hardQuarantined,
       cooldownUntil,
       statusCode,
-      reason,
+      reason, ruleId,
       updatedAt
     }
   },
@@ -154,14 +155,16 @@ Startup normalization preserves legacy behavior while making the schema explicit
   orModelsFetchedAt, orModelList,
   officialModelsFetch,
   statistics: {
-    version: 3,
+    version: 4,
     lifetime: { global: Aggregate, accounts: { [accountId]: Aggregate } },
     minuteBuckets: [{
       minute,
       global: Aggregate,
       accounts: { [accountId]: Aggregate },
-      health: { [accountId]: HealthDelta },
-      models: { [resolvedModelId]: Aggregate }
+      health: { [accountId]: LegacyHealthDelta }, // retained, no longer written
+      models: { [resolvedModelId]: Aggregate },
+      accountHealth: { [accountId]: SuccessDelta },
+      providerHealth: { [resolvedModelId]: { [provider]: SuccessDelta } }
     }],
     recentCoverage: {
       droppedAccountMinuteCells,
@@ -169,7 +172,12 @@ Startup normalization preserves legacy behavior while making the schema explicit
       modelTrackingStartedMinute,
       droppedModelMinuteCells,
       modelIncompleteAt: { [resolvedModelId]: minute },
-      routingTrackingStartedMinute
+      routingTrackingStartedMinute,
+      accountHealthTrackingStartedMinute,
+      accountHealthIncompleteAt: { [accountId]: minute },
+      droppedProviderHealthMinuteCells,
+      providerHealthTrackingStartedMinute,
+      providerHealthIncompleteAt: { [resolvedModelId]: { [provider]: minute } }
     },
     migration: {
       legacyStatsMigratedAt,
@@ -200,11 +208,11 @@ Startup normalization preserves legacy behavior while making the schema explicit
 
 `routingSecret` is generated once and persisted so HRW mapping survives restart. `accountStates` entries for removed accounts are deleted; the deterministic environment-account ID remains valid while `CLINE_PASS_KEY` is present. Expired, non-banned cooldown entries are deleted when candidates are read. Ban/cooldown state persists until expiry or `POST /api/accounts/recover` removes it.
 
-Provider health is durable runtime metadata keyed by model and provider, never by account. Legacy `upstreamStatus` entries are normalized additively: invalid/missing timestamps become zero, missing counters/cooldowns become zero, unsupported legacy statuses become `unknown`, and notes are bounded/redacted. Timestamps are non-negative safe integers and failure counts are bounded. Runtime attempt updates are persisted by the ordinary request finalizer rather than a synchronous write per attempt. A provider/account error must never copy credentials, raw response bodies, or request content into this map.
+Provider state is durable runtime metadata keyed by resolved model and Provider, never by account. Legacy `upstreamStatus` facts normalize additively; explicit `cooldownUntil`, `hardQuarantined`, safe `ruleId`/status/time facts are independent from success data. Hard quarantine survives success/restart and clears only by exact recovery or Provider identity cleanup. A rule action must never copy the rule needle, Header value, response body, credential, or request content into this map.
 
 `metadata.json` must not contain account keys, proxy credentials, custom Header values, account notes, raw session values, HMAC fingerprints, message text, or identity-source labels. Bounded identity-source labels such as `message_hmac` belong only to ordinary request-log projections. Reasons written to metadata are redacted and flattened; bounded model/provider health notes may be truncated, while complete redacted structured provider reasons belong to the separate error JSONL stream.
 
-`Aggregate` has fixed non-negative safe-integer counters for requests, errors, usage coverage, input/output/total tokens, cache coverage/tokens, explicit/fallback affinity, provider fallback, provider circuit cooldown and half-open requests. v3 records `routingTrackingStartedMinute`; migrated routing counters are explicitly scoped from that minute instead of pretending the historical zeros are complete. A counter that would overflow becomes `null` and its exact field name is added once to `overflowFields`; a `null` field without that marker, or a marker whose field is not `null`, is corrupt. Statistics retain at most 1,440 minute buckets, 50,000 union `(minute, accountId)` cells and an independent 50,000 `(minute, resolvedModelId)` cells. Dropped account/model cells mark only their owning recent coverage incomplete rather than inventing zeroes. Model aggregation starts at the v1→v2 migration minute, uses the post-alias resolved model ID, and has no fabricated lifetime baseline; until 1,440 minutes are covered, the API labels the rolling model window incomplete.
+`Aggregate` retains the existing request/usage/routing counters. `SuccessDelta` has only `successes`, `degrades`, and exact overflow markers. Statistics v4 retains at most 1,440 minute buckets, 50,000 union `(minute, accountId)` cells, 50,000 model aggregate cells, and an independent 50,000 `(minute, resolvedModelId, provider)` success cells. Account and Provider success tracking each have truthful migration starts and cell-loss coverage. v1/v2/v3 weighted health is retained as legacy bytes but is never converted into direct success samples or threshold labels. Any counter overflow becomes `null` with its exact marker.
 
 Legacy name-keyed `stats` is migration input only. It moves once into the separately labelled `migration` baseline and never fabricates exact chat, token, cache, recent-window, or health facts. Unknown newer statistics versions, malformed aggregates, unordered buckets, excess cells, invalid IDs, and malformed quota snapshots fail startup before any save.
 
@@ -240,12 +248,12 @@ Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/
 | Account Header map exceeds count/value/total limits or contains a forbidden credential/session/hop-by-hop name | `400`; no write |
 | Model alias is invalid, duplicated, collides with an original ID, or targets an unknown/non-Cline model | `400`; no write |
 | Route has over 20 upstreams, over 50 exclusions, invalid slug/mode/sort, `maxRetries` outside 0-20, or `providerCooldownMs` outside integer 0-300000 | `400`; no write |
-| Error rule status outside 100-599, unknown action, or non-positive cooldown | `400`; no write |
-| Content rules are non-array/over 100/over 64 KiB, have blank/over-500/control text, one-sided/invalid status range, unknown field/action, or invalid cooldown | `400`; no write; an older client omitting the entire field preserves the current server array |
-| `accountPipeline` lacks any of the four booleans, has unknown fields, has `cachePoolSize` outside integer 0-100000, or has an explicit `order` that is not an exact four-step permutation | `400`; no write; an older client may omit `order` and/or `cachePoolSize`, preserving the current server values |
+| Canonical rules are non-array/over 100/over 64 KiB, have invalid/duplicate IDs, unknown fields, empty/duplicate scopes, no active condition, invalid status/body/Header/applicability, or invalid reset format/duration | `400`; no write |
+| A POST omits `errorRules` and changes either legacy mirror | `409`; preserve canonical rules and file bytes; unchanged/missing mirrors are accepted |
+| Canonical `accountPipeline` lacks any of the three booleans, has unknown fields, invalid cache size, or non-permutation order | `400`; no write; complete recognized legacy four-step input is normalized, and older omission of order/size preserves current values |
 | Legacy provider health lacks new fields | normalize to bounded defaults while preserving safe status/note/timestamps |
 | Invalid provider-health timestamp/count/status | normalize to zero/unknown/bounded values; never copy raw payload data |
-| Valid statistics v1/v2 | validate the old exact field set, add v2 model maps/coverage when needed, add v3 routing counters as known zero from the migration point, then atomically persist without changing prior request/token/cache facts |
+| Valid statistics v1/v2/v3 | validate each old exact field set, migrate through model/routing versions, then add empty v4 account/provider success owners and independent tracking starts without converting legacy weighted health |
 | Existing statistics version is missing/unknown or its structure exceeds account/model bounds | startup fails; original metadata bytes remain |
 | Aggregate overflow marker and `null` field disagree | startup fails; original metadata bytes remain |
 | Quota percentage is outside 0-100, persisted reset time is not canonical millisecond UTC, or a state field is unknown | startup fails; original metadata bytes remain |
@@ -264,7 +272,7 @@ Startup normalization is permissive for legacy files; management APIs validate s
 - **Good:** an account route and global route both pass through `normalizeRouteConfig()`, so their persisted shapes stay identical.
 - **Good:** a known counter overflow persists as `null` plus one matching `overflowFields` entry, and the statistics API renders it as unknown.
 - **Good:** changing an account key invalidates its quota generation/state while retaining that stable ID's local usage history.
-- **Base:** `accountErrorRules: {}`, `accountContentErrorRules: []`, all-false `accountPipeline` with `cachePoolSize: 0`, and `maxConcurrent: 0` preserve legacy no-action/routing/unlimited behavior.
+- **Base:** `errorRules: []`, all-false canonical `accountPipeline` with `cachePoolSize: 0`, and `maxConcurrent: 0` preserve no-action/legacy-routing/unlimited behavior.
 - **Base:** a missing metadata file creates a routing secret and owner-only metadata on first migration save.
 - **Bad:** catching JSON parse failure and saving defaults; this destroys operator configuration.
 - **Bad:** using account name or key as the state-map key; renaming or credential rotation would orphan state.
@@ -290,7 +298,7 @@ Persistence changes must use a temporary `DATA_DIR` and assert:
 - key/proxy rotation clears stale quota, disable retains last-good display data without allowing stale publication, and pruning removes deleted-account statistics/quota state without deleting global history;
 - pruning retains 1,440 minute buckets, independently caps account/model cells, and marks only the dropped account/model coverage incomplete;
 - account removal deletes its `accountStates` entry;
-- invalid status/content-rule shapes, counts, UTF-8 byte limits, status ranges and cooldowns return `400` and leave previous bytes unchanged; old-client omission preserves content rules, while valid ordered rules survive restart;
+- invalid canonical rule IDs/scopes/actions/applicability/status/body/Header/reset shapes and limits return `400` and preserve bytes; legacy rules migrate in content-before-status order, unchanged old-client mirrors preserve canonical rules, conflicting mirrors return `409`, and valid canonical order survives restart;
 - detailed settings default/type/unknown-field/restart tests and injected atomic-write failure preserve previous config bytes/runtime mode; independent detail retention/recovery never changes ordinary logs or metadata.
 
 The current integration suite directly covers malformed config preservation, legacy migration, metadata mode, routing-secret/cooldown restart, and session-value exclusion. Add focused assertions before relying on account-state cleanup or unchanged-file behavior after every validation branch.

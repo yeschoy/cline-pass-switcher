@@ -37,9 +37,9 @@ saveDrawer()
 previewPreset()
 applyPreset()
 renderErrorRules()
-addStatusErrorRule()
-addContentErrorRule()
-moveContentErrorRule(index, direction, button)
+addErrorRule()
+updateErrorRule(index, field, value)
+moveErrorRule(index, direction, button)
 openAdvancedErrorRules()
 applyAdvancedErrorRules()
 refreshAdvancedErrorRules()
@@ -64,12 +64,12 @@ API signatures:
 ```text
 GET /api/accounts
   -> { accounts: [{ ..., health, statistics: { recent24h, lifetimeRequests, lifetimeErrors } }],
-       mode, active, concurrencyWaitMs, accountErrorRules,
-       accountContentErrorRules, accountPipeline, stats }
+       mode, active, concurrencyWaitMs, errorRules,
+       accountErrorRules, accountContentErrorRules, accountPipeline, stats }
 
 POST /api/accounts
-  <- { accounts, mode, active, concurrencyWaitMs, accountErrorRules,
-       accountContentErrorRules?, accountPipeline? }
+  <- { accounts, mode, active, concurrencyWaitMs, errorRules?,
+       accountErrorRules?, accountContentErrorRules?, accountPipeline? }
   -> { ok, accounts: <count>, mode, active }
 
 GET /api/statistics
@@ -187,11 +187,11 @@ Probe/validation/setup use the explicit route-scope account ID when present. One
 
 The active radio is an array index in the submitted list. The server resolves the selected account ID before filtering empty-key rows, so a blank row before the selected row must not shift the active account.
 
-`ACCS.accountPipeline` is a complete snapshot with `quotaPool`, `excludeUnhealthy`, `healthSort`, `sticky`, an exact four-step `order`, and integer `cachePoolSize` 0-100000. The ordered pipeline DOM and cache-pool number input are the live draft owners: `loadAll()` hydrates both, and `collectAccounts()` sends all four booleans, the order, and the size. Visual save and preset preview validate the raw size as a non-empty bounded integer before constructing a payload; they never coerce an empty/invalid draft to `0`. The server preserves its current value when an older client omits the whole field and preserves an omitted `order` or `cachePoolSize`; it rejects partial, unknown, non-boolean, non-integer, out-of-range, or non-permutation payloads.
+`ACCS.accountPipeline` is a complete canonical snapshot with `quotaPool`, `healthSort`, `sticky`, an exact three-step `order`, and integer `cachePoolSize` 0-100000. The ordered DOM and cache-pool input are live draft owners. The server also recognizes complete legacy four-step input, folds `excludeUnhealthy:true` into health sorting, and returns only canonical three-step state.
 
 #### Local account drafts and bulk concurrency
 
-`loadAll()` hydrates mode, wait, one `ERROR_RULE_DRAFT = { statusRules, contentRules }`, and pipeline controls from the server snapshot. `renderAccounts()` and `renderErrorRules()` only project existing drafts: search, add/delete, drawer apply, mode changes, bulk redraw and navigation must preserve the unified rule draft plus any temporarily invalid, unapplied advanced-JSON editor text. The active radio reads live mode without resetting `ACCS.active`.
+`loadAll()` hydrates mode, wait, one complete ordered `ERROR_RULE_DRAFT = errorRules`, and pipeline controls from the server snapshot. `renderAccounts()` and `renderErrorRules()` only project existing drafts: search, add/delete/reorder, drawer apply, mode changes, bulk redraw and navigation preserve the complete rule array plus temporarily invalid advanced-JSON text. The active radio reads live mode without resetting `ACCS.active`.
 
 `BULK_SELECTION` is a transient `Set` of account object references, not names or filtered indexes. `visibleAccountRows()` retains original indexes; `updateBulkSelection()` intersects selection with current visible objects and uses that same set for names/count and application. Search changes and reload clear selection; redraw prunes hidden/deleted objects; new rows begin unselected. Duplicate names and unsaved rows must never transfer selection to another object.
 
@@ -212,9 +212,9 @@ for (const account of updateBulkSelection()) account.maxConcurrent = value;
 
 #### Raw scheduling draft editor
 
-`openRawScheduling(button)`, `validateRawScheduling(value, names)`, `applyRawScheduling()`, and `closeRawScheduling(force=false)` reuse the live scheduling controls and the unified rule draft; `RAW_SCHEDULING` is only an editor snapshot, never a second account/rule store. The complete JSON has exactly `accountMode`, `concurrencyWaitMs`, `accountErrorRules`, `accountContentErrorRules`, `accountPipeline`, and `accountNames`; `accountPipeline` contains the four booleans, the same exact `order` shown by the visual controls, and integer `cachePoolSize` 0-100000. `accountMode` maps to the existing mode control; ordered names include all accounts, duplicates and unsaved rows regardless of search. Names are reference-only, not identities. Never project IDs, Keys, notes, proxies, Headers, account parameters, runtime state or `perModel` into this editor.
+`openRawScheduling(button)`, `validateRawScheduling(value, names)`, `applyRawScheduling()`, and `closeRawScheduling(force=false)` reuse the live scheduling controls and the unified rule draft; `RAW_SCHEDULING` is only an editor snapshot, never a second account/rule store. The complete JSON has exactly `accountMode`, `concurrencyWaitMs`, `errorRules`, `accountPipeline`, and `accountNames`; `accountPipeline` contains the three canonical booleans, the same exact order shown by visual controls, and integer `cachePoolSize` 0-100000. `accountMode` maps to the existing mode control; ordered names include all accounts, duplicates and unsaved rows regardless of search. Names are reference-only, not identities. Never project IDs, Keys, notes, proxies, Headers, account parameters, runtime state or `perModel` into this editor.
 
-Validation precedes every control write: six existing modes; integer wait 0–30000; exactly four boolean pipeline keys, integer cache-pool size 0–100000, plus an exact four-ID order permutation; object status rules keyed by 100–599; and an ordered content-rule array bounded to 100 entries/64 KiB with 1–500 control-free text, optional paired status range, exact action fields and safe cooldown. JSON numeric strings/null/booleans, unknown fields (including prototype-like keys), missing fields, one-sided ranges and changed reference names are rejected without coercion. The server remains authoritative for ordinary saves.
+Validation precedes every control write: six modes; integer wait 0–30000; exactly three boolean pipeline keys and order permutation; bounded cache size; and the complete canonical ordered rule schema (IDs, scopes, actions, applicability, statuses, body ANY, Header, and strict reset). Unknown/missing/duplicate fields, invalid JSON numeric types, prototype-like keys, unsafe text, and changed reference names are rejected without coercion.
 
 | Condition | Local result |
 |---|---|
@@ -251,11 +251,11 @@ Preset selection owns a temporary draft only. Confirm submits the complete ordin
 
 `ALIASES` owns the `/api/model-aliases` snapshot. Batch generation edits text locally; successful save reloads aliases and models. Alias targets are server-provided known `cline-pass/*` models.
 
-Error-rule presets are separate from the seven scheduling presets. The cache-hit preset drafts sticky mode, `cachePoolSize: 2`, a 5000 ms wait, and editable existing priorities without changing account identity, credentials, enablement, transport, Headers, routes, content rules or pipeline booleans. The five rule presets (`standard`, `fast`, `conservative`, `observe`, and `clear`) read `ERROR_RULE_DRAFT.statusRules` at preview time. Merge preserves custom status entries; replace computes deletions; clear is replace-only for status rules. The preview classifies preserve/add/modify/delete and states that content rules are unchanged; cancel is a no-op, and confirm passes the unified draft through the ordinary authenticated full-account save. Among 4xx statuses, built-in rule presets may define only `429`.
+Error-rule presets are separate from scheduling presets. The cache-hit preset preserves account identity, credentials, transport, Headers, routes, pipeline booleans, and custom rules while merging stable preset rule IDs. The five rule presets read the complete ordered rule draft; merge replaces matching IDs and preserves custom rules, replace computes deletions, clear is replace-only. Preview classifies preserve/add/modify/delete; cancel is a no-op, and confirm uses the ordinary authenticated full-account save.
 
 The top-level section is projected by `consolePanel.hidden`, `statisticsPanel.hidden`, `logPanel.hidden`, `detailsPanel.hidden`, and five navigation buttons' `aria-pressed` values. Console, statistics, request logs, error logs and detailed logs are mutually exclusive. Request and error navigation share one `logPanel`; `logType` remains the single selected-type owner, while the title and live status are projections of it.
 
-`STATISTICS_QUERY_ID` is independent of log state. `loadStatistics()` may render only when its captured query/visit generation still matches and `statisticsPanel` is visible. A coverage count of zero, `null` overflow, missing ratio, missing quota window, or insufficient health must render as unknown/no data rather than numeric zero. The model table displays only rolling cache Token ratio (`cacheInputCachedTokens / cacheInputTokens`) plus paired-usage sample count and incomplete-window label; it does not display request hit rate. The account main table reads only each account object's stable-ID summary and never submits runtime health/statistics through `collectAccounts()`. All account/provider text is escaped, and raw quota/provider payloads never become frontend state.
+`STATISTICS_QUERY_ID` is independent of log state. `loadStatistics()` may render only when its captured query/visit generation still matches and `statisticsPanel` is visible. A coverage count of zero, `null` overflow, missing ratio, missing quota window, or zero success samples must render as unknown/no data rather than numeric zero. The model table displays only rolling cache Token ratio (`cacheInputCachedTokens / cacheInputTokens`) plus paired-usage sample count and incomplete-window label; it does not display request hit rate. The account main table reads only each account object's stable-ID summary and never submits runtime health/statistics through `collectAccounts()`. All account/provider text is escaped, and raw quota/provider payloads never become frontend state.
 
 #### Statistics quota visit ownership
 
@@ -373,8 +373,8 @@ Cross-layer changes must assert:
 - posting `/api/accounts` with the full account snapshot preserves stable IDs, `perModel`, notes, proxy/Header fields, weight/priority, mode, active account, wait, and rules;
 - filtering/searching account rows or a blank-key row does not change which account is active;
 - scheduling preset preview/cancel/apply changes only allowed fields and round-trips through the normal save; the cache-hit preset drafts sticky/2/5000, exposes priorities, and cancellation changes nothing;
-- visual add/edit/delete/reorder and advanced JSON apply share one generation-controlled draft; invalid/stale text cannot overwrite it, and every preset previews status merge/replace/clear while preserving ordered content rules;
-- all four pipeline booleans, the four-step order, and `cachePoolSize` survive a full account save; older omission preserves server values while partial/unknown/non-boolean/out-of-range payloads fail without persistence;
+- visual add/edit/delete/reorder and advanced JSON apply share one generation-controlled canonical rule array; invalid/stale text cannot overwrite it, and presets preview stable-ID merge/replace/clear;
+- all three pipeline booleans, the three-step order, and `cachePoolSize` survive a full save; recognized legacy four-step input migrates deterministically while malformed values fail without persistence;
 - statistics generation invalidation prevents stale rendering, coverage-zero/null values remain unknown, per-model cache Token summaries join by resolved ID, account summaries stay stable-ID keyed, and all rendered server text is escaped;
 - statistics entry/manual/five-minute refresh coalesces per visit, aborts page ownership on leave, restores one visit on pageshow, and guards success/catch/finally from older visits;
 - remaining/reset-only quota rendering preserves known 0%/100%, omits redundant used text, and labels unconfigured, disabled, unknown, partial, failed and stale snapshots truthfully without changing drafts or quota routing;
@@ -412,7 +412,6 @@ const accounts = ACCS.accounts.map((a, i) => ({
 }));
 const accountPipeline = {
   quotaPool: pipelineQuotaPool.checked,
-  excludeUnhealthy: pipelineExcludeUnhealthy.checked,
   healthSort: pipelineHealthSort.checked,
   sticky: pipelineSticky.checked,
   order: pipelineOrder(),

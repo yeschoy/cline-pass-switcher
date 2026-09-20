@@ -45,8 +45,9 @@ cancelQuotaPageToken(token)
 scheduleQuotaRefresh()
 buildPipelineGroups(accounts)
 acquirePipelineAccountLease(identity, options)
+normalizeErrorRules(value, { strict = false })
 normalizeFailureForRules(errorValue, sensitiveValues)
-accountActionFor({ normalizedStatus, failureText }, sensitiveValues)
+matchErrorRule({ result, classification, modelId, provider, sensitiveValues })
 planProviderAttempts(modelId, route, account)
 settleProviderCircuit(modelId, route, account, attempt, outcome)
 ```
@@ -68,6 +69,7 @@ POST /api/accounts
 GET  /api/statistics
 POST /api/statistics/quota-refresh  // exact body: { force: boolean }
 POST /api/accounts/recover
+POST /api/providers/recover       // exact { model, provider }
 POST /api/accounts/proxy-test
 GET  /api/models?accountId=<account id>
 POST /api/config
@@ -100,9 +102,10 @@ Runtime environment keys are `DATA_DIR`, `CLINE_PASS_KEY`, `PROXY_KEY`, `PUBLIC_
 - The three new modes wait only when every statically available account is full, and recompute candidates after capacity notifications.
 - Selection returns stable diagnostic facts (`strategy`, preferred/selected account, enumerated reason, overflow, session source). These facts may be logged, but the session value/fingerprint may not.
 - `runChatChain()` receives one explicit `account`; every provider attempt in that invocation uses that account's Authorization.
-- For a normalized failure, ordered `accountContentErrorRules` inspect one bounded, flattened string after configured credentials/Header/proxy values and current request message values are redacted. Matching is case-insensitive literal contains with an optional inclusive normalized-status range; no regex/JSONPath/success-output scan is allowed. The first matching content rule is final, including `ignore`; this explicit operator rule may override the conservative 429 default. Only when no content rule matches does exact `accountErrorRules[status]` apply.
-- `ignore` or an unmatched non-429 failure continues the provider chain on the same account. For 429 status fallback, account rules are consulted only after conservative classification proves `scope=account`; provider/unknown 429 continues on the same Authorization. `cooldown` and `ban` stop that account's chain. The matcher/log projection returns only bounded status/action/scope/cooldown facts; keywords, matched text and raw response bodies never enter account state/history/ordinary logs.
-- `handleChat()` permits one replacement account only when `cooldown` or `ban` occurs before `chain.started`. The replacement starts its own health-planned provider route. The two-iteration account loop forbids a third account. A post-start SSE content/status action may change future account/provider state but never replays the current stream; client cancellation evaluates neither.
+- `errorRules` is the only matching source. Each ordered rule has a stable ID, canonical `account` or `provider-model` scope (`credential` is an input alias), `ignore`/`degrade`/`cooldown`/`hard-quarantine`, optional case-insensitive Provider/resolved-model scopes, and AND-composed status, body-contains ANY, and response-Header conditions. Matching uses bounded redacted failure text and request-local bounded Headers; first match is final, including `ignore`.
+- Cooldown reset uses an explicit response Header format (`retry-after`, `unix-seconds`, `unix-milliseconds`, or strict `d/h/m/s` duration), strict fallback and max durations, and never guesses units. Missing, invalid, or expired Header values use fallback and the result is capped by max.
+- Without an explicit match, clear account auth/quota/proxy failures produce account `degrade`; clear named Provider 429/5xx/network/timeout/unsupported failures produce provider-model `degrade`; parameter errors, ambiguous attribution, unattributed auto, and cancellation produce `ignore`. Defaults never create cooldown or quarantine. Retry classification remains independent from health action.
+- Account cooldown/hard-quarantine stops that account chain and permits at most one pre-stream replacement. Provider-model cooldown/hard-quarantine stops only that Provider attempt and remains on the leased account. Post-start actions affect future routing only; client cancellation evaluates neither rules nor health.
 
 Session identity values are validated, HMACed with `META.routingSecret`, and never logged or persisted. The request-local identity also carries only bounded `keyType` and `confidence` enums. Trusted parent identifiers precede child identifiers. Codex checks parent thread metadata/header before `prompt_cache_key`, session, and thread values; Claude checks parent-agent information before session/agent values. Generic parent headers precede generic current-session fields. `X-Client-Request-Id` alone never establishes affinity. The fallback HMAC input contains only the first system/developer message and first user message (each capped at 4096 characters); if neither is extractable, selection falls back to round-robin.
 
@@ -132,13 +135,12 @@ A successful model probe builds its known provider set from the observed `finalP
 
 - Configured `upstreams` are the authoritative provider order. Without a configured order, the stable discovered `META.models[modelId].upstreams` order is used.
 - Exclusions are applied before health routing. A known list that becomes empty after exclusion returns a safe no-provider error and never falls back to auto.
-- Providers with durable `cooldownUntil > now` are skipped. All other providers retain source order regardless of `ok`, `degraded`, or `unknown` labels. An expired cooldown returns to its original position; a positive per-account circuit admits at most one concurrent half-open owner.
-- If every durable provider state is cooling, exactly one provider fails open: smallest `cooldownUntil`, then source priority. If the optional per-account circuit still owns that provider's half-open probe, return bounded `503/Retry-After` rather than opening another. If no provider is known at all, exactly one `auto`/unattributed attempt is allowed.
+- Providers with durable hard quarantine or `cooldownUntil > now` are skipped. Other Providers retain source order in this child scope; success-rate Provider retry ordering is owned by the dependent Provider-selection task. An expired cooldown returns to eligibility, and a positive per-account circuit still admits at most one concurrent half-open owner.
+- If every named Provider is explicitly cooling or hard-quarantined, routing fails safely with bounded retry information rather than bypassing state. If no Provider is known at all, exactly one `auto`/unattributed attempt is allowed.
 - Every named attempt injects exactly one provider through `providerOptions.gateway.only` (planner), `provider.only` (direct), or the same singleton in both shapes for an unknown pipeline. `order` is removed even if supplied downstream. `preferred` remains a persisted UI/config mode but its fallback is switcher-managed outer retry.
 - A 429 is account-scoped only with a fresh complete 100%-used quota snapshot or explicit structured account/subscription/plan quota-exhaustion semantics. Routing/final-provider or structured provider fields make it provider-scoped. HTML and other ambiguous 429 responses are unknown.
-- Provider and unknown 429 update only the named model/provider health entry and continue the same account. Valid delta-seconds or HTTP-date `Retry-After` is clamped to 1 second-30 minutes; otherwise rate-limit cooldown starts at 60 seconds with bounded exponential backoff.
-- 5xx/network/timeout failures use 15-second bounded backoff capped at 2 minutes unless a positive `providerCooldownMs` supplies the short delay. Unsupported/unpinnable providers cool for one hour. Account proxy/auth/quota, request-parameter failures and client disconnects never penalize shared provider health. Success clears failures/cooldown immediately.
-- Provider health is keyed by `(modelId, provider)` and intentionally shared across accounts. An unattributed auto attempt never creates a named health entry.
+- Unmatched Provider failures no longer create implicit durable cooldowns. Explicit provider-model cooldown/hard-quarantine rules own durable state; the existing positive per-account `providerCooldownMs` circuit remains a separate process-local compatibility mechanism.
+- Provider-model state is keyed by `(resolvedModel, provider)` and shared across accounts. Hard quarantine survives restart and success and clears only through exact `POST /api/providers/recover` or identity cleanup. Unattributed auto never creates named state or success samples.
 
 #### Header and credential boundary
 
@@ -183,8 +185,8 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - Only explicit normalized upstream usage counts. `0` is known; a missing/invalid field is `null`; input, output, total, cache, or cache ratios are never inferred from another field. Model cache Token ratio is likewise computed only from explicit input/cache pairs.
 - Non-stream JSON reads its terminal usage object. Streaming retains only the last cumulative usage snapshot while incrementally observing SSE events. Each event is bounded to 64 KiB; an oversized event is discarded through its CRLF/LF boundary, then observation resumes for later events.
 - Management, probe, model-catalog, and quota traffic never enters chat statistics or health.
-- Health records at most one terminal result per account segment: success `0`, auth `10`, rate-limit `7`, network/proxy/timeout `6`, server 5xx `4`, and other terminal errors `5` penalty units. Ordinary parameter 4xx and client disconnects produce no health result.
-- The 24-hour score is `100 - penaltyUnits / (10 * results) * 100`. Fewer than five results or incomplete recent coverage is `insufficient`; otherwise scores are `available >= 80`, `degraded >= 50`, or `unhealthy < 50`. Ban, cooldown, disablement, and missing coverage remain explicit states.
+- Account health is request/account-deduplicated: any account-scope `degrade` wins for that account in the request; otherwise only an account that obtains final success receives one success. Provider-model health records each named real attempt as success or provider-model `degrade`. Ignore/cooldown/hard-quarantine, management traffic, auto attempts, and cancellation add no sample.
+- Both dimensions expose the rolling 24-hour direct rate `successes / (successes + degrades)`, counts, sample count, and coverage. One sample is sufficient; zero samples is `null`, never numeric zero. Disabled, cooling, and hard-quarantined are independent disposition fields; there are no available/degraded/unhealthy thresholds.
 - `GET /api/statistics` is authenticated and returns projected global/account lifetime and 1,440-minute aggregates, plus per-resolved-model rolling aggregates with model tracking/cell-loss coverage, health, quota, and a separately labelled legacy migration baseline. Fixed aggregates also count explicit/fallback affinity, provider fallback, circuit cooldown and half-open requests; `routingCoverage` labels the migration/start minute so pre-tracking history is not fabricated as zero. They never store identity values or high-cardinality provider/session keys. `GET /api/accounts` embeds a stable-ID account statistics summary for the main table while retaining the legacy name-keyed `stats` projection only for old clients. Neither endpoint returns credentials, raw events, messages, sessions, or raw quota responses.
 
 #### Quota refresh and account pipeline
@@ -196,8 +198,9 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - Page tokens and the routing scheduler are separate sources. Response/socket close withdraws only that page token; disabling quota routing advances a routing epoch and withdraws only routing ownership. A queued job is dropped and a running job aborted only after its final valid owner leaves. Source withdrawal/invalidation publishes neither success nor failure/backoff state.
 - Account generation is independent of routing epoch. Key/proxy replacement and deletion clear the old snapshot; disablement retains last-good display data. All three cancel old-generation work. Publication rechecks ID, enabled/key/proxy identity, generation and at least one live source, preventing disable/re-enable and key A→B→A resurrection.
 - Accepted quota rows are only `five_hour`, `weekly`, and `monthly`, each with finite `percentUsed` in 0-100 and an optional RFC3339 reset time. Upstream reset times may use 1–9 fractional digits with `Z` or a numeric offset; impossible Gregorian dates, missing timezones and over-precision are `schema` failures. Accepted values normalize to canonical millisecond UTC before persistence/projection. `statisticsQuotaProjection()` adds safe attempt/success times plus `refresh.{eligible,reason,state,nextAttemptAt}` without exposing credentials, owner tokens, controllers or raw responses. Reading retained/partial/error data never makes it fresh for routing.
-- `accountPipeline` has exactly four booleans, `order` (an exact permutation of `excludeUnhealthy`, `quotaPool`, `healthSort`, and `sticky`), and integer `cachePoolSize` 0-100000. With size 0 and all booleans false, `acquireAccountLease()` calls the unchanged legacy selector regardless of order. Enabled sortable steps retain their stable-refinement semantics: later stages cannot cross earlier groups, unhealthy all-candidate fallback is restricted to the earliest prior group, and quota-all-unknown is a no-op.
-- A positive cache pool is effective only in sticky account mode or with the explicit sticky step. A configured positive size outside those conditions is dormant: it does not enable pipeline selection or quota routing. An effective pool selects active accounts by `priority` ascending then stable account ID, excluding only explicit `unhealthy` health and `reserve` quota from active membership; available/insufficient/degraded and hot/warm/unknown do not reorder it. Normal identity HRW is restricted to active accounts. One full active may fall to another active immediately; only when at least one active exists and all active accounts are full does selection wait `concurrencyWaitMs`. If hard state leaves no active candidate, eligible standby fallback is immediate; otherwise standby is used only after the active-capacity wait. Cache-pool quota demand uses the existing routing epoch, per-account job and global two-slot pump; a mode/step change that deactivates the pool withdraws that routing owner and never performs routing-time network work.
+- Canonical `accountPipeline` has exactly three booleans, an exact permutation of `quotaPool`, `healthSort`, and `sticky`, and integer `cachePoolSize` 0-100000. Recognized legacy four-step input is accepted and normalized: `excludeUnhealthy:true` folds into `healthSort:true`, and the duplicate step is removed deterministically. With size 0 and all booleans false, legacy selection remains unchanged.
+- `healthSort` stably refines account groups by direct account success rate descending, known before unknown, preserving prior order on ties. It never filters accounts and never reads Provider-model success data. Cache-pool membership likewise ignores success-rate fluctuations.
+- A positive cache pool is effective only in sticky account mode or with the explicit sticky step. A configured positive size outside those conditions is dormant. Effective membership uses hard eligibility, quota reserve, priority, and stable account ID; success-rate changes never promote or evict members. Capacity wait/standby behavior and shared quota admission remain unchanged.
 
 ### 4. Validation & Error Matrix
 
@@ -219,38 +222,39 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 | Log filter is unknown or has an invalid integer/boolean | `400` |
 | Session identity is over 512 characters or invalid | ignore it and continue identity fallback |
 | Upstream has an HTTP 4xx/5xx status | preserve it as `upstreamStatus` and normally as `normalizedStatus` |
-| HTTP 200 error envelope has a recognized status/message | normalize and classify before ordered content-rule matching and conservative status fallback; otherwise `502` |
-| Ambiguous or non-JSON HTML 429 from Cline | `scope=unknown`; absent an explicit matching content rule, do not cool the account and continue the next named provider on the same Authorization |
+| HTTP 200 error envelope has a recognized status/message | normalize and classify before ordered canonical matching; otherwise `502` |
+| Ambiguous or non-JSON HTML 429 from Cline | `scope=unknown`; absent an explicit scoped rule, default ignore and no implicit durable cooldown |
 | Explicit account quota 429 with a configured removal action | stop that provider chain, do not penalize provider health, and replace the account at most once |
 | Every known provider is excluded | no upstream request; safe `503`; never auto-bypass exclusions |
 | Error output/history contains a configured key, Bearer token, or request message | replace with `[REDACTED]`; retain the complete structured error reason without substring-corrupting short-message redaction |
-| `/api/accounts` mode/wait/status rules/content rules/id/name/key/capacity/route is invalid | `400`; do not save; omission of `accountContentErrorRules` preserves the current array |
+| `/api/accounts` canonical rules or account/scheduling fields are invalid | `400`; do not save |
+| `errorRules` is omitted and submitted legacy mirrors differ from current compatibility projections | `409`; preserve canonical rules and bytes |
 | `/api/accounts.accountPipeline` is missing on an older client | preserve the current server value |
-| An older client sends all four pipeline booleans but omits `order` and/or `cachePoolSize` | preserve the current server order and/or size |
+| An older client sends complete legacy four-step booleans but omits `order` and/or `cachePoolSize` | fold legacy health filtering into health sorting and preserve omitted current order/size |
 | `/api/accounts.accountPipeline` is non-object, incomplete, has unknown keys/non-booleans, has `cachePoolSize` outside integer 0-100000, or has a non-permutation `order` | `400`; do not save |
 | Usage field is absent/invalid while another usage field is valid | keep the absent field unknown; count only explicit valid fields |
 | A streaming SSE event exceeds 64 KiB | discard that event only; resume at its CRLF/LF terminator and observe later usage |
 | A fixed statistics counter exceeds `Number.MAX_SAFE_INTEGER` | persist `null` plus the exact `overflowFields` marker; never wrap or clamp |
-| Health input is an ordinary 4xx or client disconnect | no result/penalty unit is recorded |
+| Rule/default outcome is ignore/cooldown/hard-quarantine, traffic is management/auto, or client disconnects | no success/degrade sample is recorded |
 | Quota body exceeds 256 KiB, times out, or its schema/time/percentage is invalid | Safe failure category/backoff; retain last-good diagnostics, make routing quota unknown, and persist no raw payload |
 | Quota reset time uses valid 1–9 digit fractional RFC3339 precision | Normalize to millisecond UTC; publish the accepted snapshot without changing refresh timing |
 | Quota completion belongs to an old key/proxy/account generation or has no live page/routing owner | Cancel/discard without mutating snapshot, attempt time, failure count or backoff |
 | Quota refresh body is missing/extra/nonboolean, is not an object, or has any query parameter | `400`; no quota owner/job/upstream call |
 | More than 16 statistics quota batches are active | `429` plus `Retry-After: 1`; no new job |
 | Manual, automatic, routing and save-triggered quota demands overlap | Join by account and keep actual unfinished upstream concurrency at or below two |
-| All four pipeline flags are false and `cachePoolSize` is 0 | use the legacy six-mode selection path without extra sorting/filtering |
+| All three canonical pipeline flags are false and `cachePoolSize` is 0 | use the legacy six-mode selection path without extra sorting/filtering |
 | `/api/config` scope/action/account/model/route is invalid | `400`; do not save |
 
 ### 5. Good / Base / Bad Cases
 
 - **Good:** sticky identity leases account A; provider `first` fails and `second` succeeds; both upstream requests use account A's Authorization.
 - **Good:** account A receives an explicit account-quota 429 matching configured `429 -> cooldown` before output; its state is persisted without penalizing the provider, its lease is released, and account B starts from B's own first health-planned provider. A second removal action returns an error without selecting account C.
-- **Good:** account A receives an HTML 429 from named provider `first`; the error remains unknown, `first` cools, and `second` is attempted with A's unchanged Authorization.
+- **Good:** account A receives an ambiguous HTML 429 from named Provider `first`; no rule matches, so it is ignored for durable state and a retry may continue under independent retry classification.
 - **Good:** an alias request logs both names, applies the resolved target's account route, and returns the internal request ID used by request/error logs.
 - **Good:** a SOCKS/HTTPS-proxied account reaches Cline through its Agent; a bad proxy produces no direct request.
 - **Good:** a streaming request receives fragmented events and one oversized event, then commits the final later cumulative usage exactly once.
-- **Good:** every account is unhealthy, so `excludeUnhealthy` deterministically retains only the best-score tie set instead of returning no account.
-- **Good:** a two-account cache pool keeps ordinary sessions on its priority/ID-stable active set; hot/warm and degraded changes do not remap it, reserve/unhealthy members are replaced, and a standby is used only after all active capacity waits expire.
+- **Good:** account success sorting puts known rates before unknown and higher rates first, while ties preserve prior order and no rate is filtered.
+- **Good:** a two-account cache pool keeps ordinary sessions on its priority/ID-stable active set; quota reserve and hard account state can replace members, while success-rate changes do not remap membership.
 - **Good:** an old quota request finishes after credential rotation; its generation mismatch prevents any state write.
 - **Good:** a delayed manual batch is accepted, another owner publishes a new-identity success, and the delayed batch returns `cached` without another upstream call.
 - **Good:** routing turns off while a page still owns a shared job; the page may publish the valid result, but routing remains disabled and strict freshness rules are unchanged.
@@ -290,7 +294,7 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - oversized clients receive prompt `413` before request end while request buffering remains bounded;
 - persisted history contains no account key or raw session value;
 - non-stream and fragmented/oversized streaming responses count only explicit usage, preserve known zero versus missing, and finalize global/account/resolved-model statistics once across provider retry, account replacement, success, failure and disconnect;
-- health penalty classes, minimum coverage, score thresholds, incomplete coverage, and one-result-per-account-segment behavior are deterministic;
+- account request-dedup and named Provider attempt samples, direct rates, zero/null, independent coverage/cell caps, overflow, migration starts, and 24-hour expiry are deterministic;
 - all-false size-zero pipeline output is equivalent to each legacy mode, while every stored order round-trips and representative quota/health/sticky permutations prove earlier-stage priority, implicit sticky compatibility, eligibility, capacity fallback and lease release;
 - cache-pool migration/old-client preservation, dormant non-sticky behavior, quota-owner withdrawal on mode/step changes, priority/ID membership, soft-state stability, hard-state replacement, immediate zero-active standby, same-identity HRW, active-only normal traffic, active capacity overflow, delayed standby overflow, 429 without standby, lease release and safe diagnostics are deterministic;
 - quota projection accepts and canonicalizes 1/3/6/9-digit RFC3339 reset times, rejects missing-zone/over-precision/impossible dates without replacing last-good data, never uses a stale generation, stays outside the chat path, and preserves strict 15-minute routing freshness;
