@@ -8,13 +8,13 @@ Node.js 本地/服务器代理 + 网页控制台，用于 [Cline Pass](https://c
 
 - 🔍 **上游枚举与校验** —— 列出订阅模型背后每一条上游渠道，并一键实测哪些「✔可用 / ⏳限流 / ✘不可钉」
 - 🎯 **精确钉住与一键配置上游** —— 严格钉住 / 优先+回退均由 switcher 外层执行；每个具名 HTTP attempt 只注入当前 provider 的单元素 `only`。可按账号执行探测→校验→预览→测试→确认，并支持 provider 内成本、首字、吞吐排序
-- 🧬 **健康感知的多上游故障转移** —— 严格保持人工顺序，只临时绕过仍在冷却的渠道；429、5xx、网络/超时按模型×provider 有界冷却，全部冷却时仅 fail-open 最早恢复者；完全无探测数据时允许一次 unattributed auto 兼容请求
+- 🧬 **双维度错误策略** —— 一套有序 `errorRules` 可分别作用于账号或模型×Provider，支持状态码、正文 ANY、响应 Header、Provider/model 范围及 ignore/degrade/cooldown/hard-quarantine；只有显式规则会冷却或硬隔离
 - 🚫 **上游排除** —— 勾「排除」的已知渠道不会进入 attempt 计划；已知渠道全部被排除时安全失败，不会用 auto 绕过排除
 - 👥 **账号池** —— 支持单账号、轮询、HRW 粘性、最少连接、加权轮询和优先级容灾；六种安全预设可先预览再应用
 - 🛡️ **账号高级设置** —— 备注、并发、权重、优先级、安全自定义 Header，以及 HTTP/HTTPS/SOCKS5/SOCKS5H 出站代理（故障绝不回退直连）
 - 🔗 **账号级模型路由** —— 每个账号可为模型整项覆盖全局上游顺序、模式、排除、排序、重试上限与 Provider 冷却；删除专属配置即可恢复继承
-- 📊 **可信统计与健康度** —— 独立统计板块展示累计/最近 24 小时请求、真实 usage Token、缓存 Token 双指标和账号健康；模型表另显示每模型 24 小时缓存 Token 占比与覆盖样本，缺失字段显示无数据
-- 🌡️ **可排序调度流水线** —— 可拖动排序健康过滤、Cline 额度热池、健康分层和会话粘性；越靠前优先级越高，全部关闭时六种账号模式保持原行为
+- 📊 **可信统计与成功率** —— 独立统计板块展示累计/最近 24 小时请求、真实 usage Token、缓存 Token 双指标，以及账号与模型×Provider 的直接成功率、样本和覆盖；无样本保持“无数据”
+- 🌡️ **可排序调度流水线** —— 可拖动排序 Cline 额度热池、账号成功率和会话粘性；成功率仅排序账号且不设置隐式淘汰阈值，全部关闭时六种账号模式保持原行为
 - 📋 **观测** —— 独立滚动请求/错误 JSONL 日志，支持筛选、分页和清空；记录安全的亲和键类型、上游 key 是否提供、缓存命中三态、调度原因与供应商路径，但绝不记录实际会话键
 - 🏷️ **模型别名** —— 批量把 `cline-pass/*` 生成客户端短别名，原始模型仍保留
 - 🔑 **代理密钥** —— 给下游客户端发一把独立密钥，可随时在页面轮换
@@ -102,9 +102,9 @@ location / {
 | `accountMode` | `single` / `roundrobin` / `sticky` / `least-connections` / `weighted-roundrobin` / `priority-failover` |
 | `activeAccount` | 单账号模式下使用的下标 |
 | `concurrencyWaitMs` | 容量等待时间，0～30000 ms，默认 2000 |
-| `accountErrorRules` | 精确归一化状态码处置，例如 `{"429":{"action":"cooldown","cooldownMs":1800000},"500":{"action":"ban"}}`；429 状态规则只有在明确账号额度/套餐证据下才执行，模糊或 provider 429 留在同账号切换渠道 |
-| `accountContentErrorRules` | 有序失败内容规则数组：`contains` 普通文本包含、可选 `statusMin/statusMax`、`action` 与冷却时间；最多 100 条/64 KiB。显式命中优先于状态规则，控制台提供可视化表格和统一高级 JSON 草稿 |
-| `accountPipeline` | 可选叠加层：`{ quotaPool, excludeUnhealthy, healthSort, sticky, order, cachePoolSize }`；`order` 是四步骤的精确排列；`cachePoolSize` 为 0～100000，0 关闭缓存活跃池 |
+| `errorRules` | 唯一权威的有序错误规则数组；每条含稳定 `id`、`account`/`provider-model` 维度、动作、可选 Provider/model 范围，以及 status/body/Header AND 条件。`cooldown.reset` 使用显式格式与严格 `d/h/m/s` fallback/max；最多 100 条/64 KiB |
+| `accountErrorRules` / `accountContentErrorRules` | 只读兼容镜像。旧配置启动时按“内容规则在前、状态规则在后”迁移；旧客户端不提交 `errorRules` 时只能原样回传镜像，试图修改会得到 409 |
+| `accountPipeline` | 可选叠加层：`{ quotaPool, healthSort, sticky, order, cachePoolSize }`；`order` 是三步骤的精确排列；旧 `excludeUnhealthy:true` 迁移为 `healthSort:true`，不再按阈值淘汰账号 |
 | `proxyKey` | 下游代理密钥；空 = 不鉴权 |
 | `publicBaseUrl` | 公网代理地址（控制台展示用） |
 | `detailedLogging` | 默认 `false`；详细日志独立开关，也可在“详细日志”页面即时保存 |
@@ -164,8 +164,8 @@ Cline Pass 订阅模型在 Cline 网关之后分成两条管道，钉住上游�
 
 | 卡片 | 功能 |
 |---|---|
-| 账号管理 | 六种调度模式、缓存活跃/备用池、24h 缓存 Token/健康/失败摘要、可排序流水线、状态/内容错误规则可视化表格与高级 JSON、快捷预设、名称/备注搜索、右侧设置抽屉和代理测试 |
-| 统计 | 累计/最近 24 小时真实 usage Token 与缓存覆盖、账号健康评分、Cline 5h/周/月剩余额度及池状态 |
+| 账号管理 | 六种调度模式、缓存活跃/备用池、24h 缓存 Token/成功率/失败摘要、三步可排序流水线、双维度统一规则可视化表格与高级 JSON、快捷预设、名称/备注搜索、右侧设置抽屉和代理测试 |
+| 统计 | 累计/最近 24 小时真实 usage Token 与缓存覆盖、账号直接成功率/样本/覆盖、Cline 5h/周/月剩余额度及池状态 |
 | 访问与安全 | 修改下游代理密钥（即时生效）、公网代理地址、鉴权开关 |
 | 订阅模型 | 背后模型 / 渠道发现状态 / 最近实际渠道 / 24h 缓存 Token 占比与样本；渠道下拉（带可用性标注）；严格钉住 / 优先+回退；排序 |
 | 操作按钮 | 探测（刷新渠道清单）、测试（单次钉住验证）、校验（固定账号全渠道实测）、一键配置（生成三种策略预览；确认后才保存） |
@@ -182,13 +182,13 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 
 `sticky` 模式分别识别 Codex 的 parent thread / `prompt_cache_key` / session/thread 字段，以及 Claude Code 的 parent-agent / session / agent 字段；parent/root 优先于 child/agent。直接 Chat 请求若已有合法 `prompt_cache_key` 或 `session_id` 会原样保留；若只收到 Codex/Claude 显式会话 Header/metadata，则派生域分离、不可反推原值的 `prompt_cache_key` 发给 Cline。无显式会话时仍只对首个 system/developer 与首个 user 消息做本机 HMAC 账号路由，但不会把该 fallback 冒充成显式上游 key。原始会话、派生 key、HMAC 指纹和消息不会进入普通日志/metadata。客户端真实提供的协议 Header 仍按允许列表透传；`Authorization`、`Proxy-Authorization`、Cookie、逐跳 Header、Installation ID 和 Attestation 始终剔除，也不会伪造 User-Agent、设备、浏览器或 TLS 指纹。NewAPI 若在到达 Switcher 前已丢失会话字段，本服务无法恢复原值，会如实显示 `message_hmac` 回退。
 
-账号错误规则默认空以兼容旧行为。状态码规则继续使用 `accountErrorRules`；其中 429 状态规则只会作用于有新鲜 100% 额度快照或明确账号/套餐/订阅额度耗尽结构化证据的 429。带 routing/provider 证据的 429 归为 provider，无充分证据（包括 HTML 429）的归为 unknown；后两者都不冷却账号，而是在同一 Authorization 下继续下一 provider。`accountContentErrorRules` 对已判定失败且完成脱敏/限长的规范化错误信息执行大小写不敏感的普通文本包含，可选限制归一化状态范围，按数组顺序首条命中；显式内容规则由操作员负责，可覆盖 429 的保守默认值，内容 `ignore` 会阻止状态规则继续处置。快捷预设只修改状态码规则并保留内容规则；只有最终账号动作是 `cooldown`/`ban` 且 SSE 尚未开始时才最多换号一次，首包后的动作只影响未来账号状态、不重放当前请求。
+`errorRules` 按数组顺序首条命中（包括 `ignore`）。`statuses` 内部 OR，`body_contains` 字符串数组为 ANY；Provider/model 范围、状态、正文和 Header 条件之间为 AND，均使用大小写不敏感普通文本而非正则。无显式命中时，明确账号认证/额度/代理错误只记录账号 `degrade`，明确具名 Provider 的 429/5xx/网络/超时/不可用只记录该模型×Provider 的 `degrade`，不自动冷却。账号 cooldown/hard-quarantine 可在首包前最多换号一次；Provider 动作只影响当前 Provider；首包后只更新未来状态，不重放当前请求。账号通过现有恢复按钮清理状态，Provider 通过控制台恢复按钮或认证的 `POST /api/providers/recover` 精确恢复 `{ model, provider }`。
 
-调度流水线固定先执行硬过滤，再按 `accountPipeline.order` 执行已启用步骤，最后应用现有账号模式。越靠前的步骤优先级越高，后续步骤只细分当前候选组；关闭的步骤仍保留位置。旧配置缺少顺序时迁移为健康过滤 → 额度池 → 健康分层 → 会话粘性；`accountMode=sticky` 且未显式启用粘性步骤时，会在其他已启用步骤之后隐式应用一次。
+调度流水线固定先执行禁用、账号冷却和硬隔离等硬过滤，再按 `accountPipeline.order` 执行额度池、账号成功率、会话粘性三个可选步骤。成功率按 `success / (success + degrade)` 降序，有数据优先、无数据置后，同率保持进入步骤前顺序；它不读取 Provider 成功率，也不淘汰低成功率账号。
 
-`cachePoolSize > 0` 仅在 sticky 模式或显式启用会话粘性步骤时生效；否则配置保持休眠，不改变账号选择，也不触发缓存池所需的额度刷新。生效后按 priority 升序、稳定账号 ID 选定活跃账号，普通 hot/warm、unknown 和非 unhealthy 的健康波动不会重排；reserve 或明确 unhealthy 会由下一优先级账号补位。正常请求只在活跃池内做 HRW；至少存在活跃账号且全部满载时先等待 `concurrencyWaitMs`，超时才允许备用溢出；若硬状态导致没有活跃候选，则立即尝试安全备用。推荐的“缓存命中优先”预设为 sticky、活跃池 2、等待 5000 ms；启用策略不代表已达到任何生产命中率目标。
+`cachePoolSize > 0` 仅在 sticky 模式或显式启用会话粘性步骤时生效；否则配置保持休眠。活跃成员仍只按硬资格、额度 reserve、priority 和稳定账号 ID 决定，成功率变化不会提升或逐出成员；成功率步骤只排序当前候选。正常请求只在活跃池内做 HRW，全部满载时先等待 `concurrencyWaitMs`，超时才允许备用溢出。
 
-额度通过账号 Bearer 后台读取半公开的 `GET /users/me/plan/usage-limits`，15 分钟后过期；失败、缺窗或接口变化均归为未知并回退普通调度，聊天请求不会等待额度刷新。健康度使用最近 24 小时每请求每账号最多一个终态结果；少于 5 个结果为数据不足，禁用/封禁/冷却优先覆盖评分。
+额度通过账号 Bearer 后台读取半公开的 `GET /users/me/plan/usage-limits`，15 分钟后过期；失败、缺窗或接口变化均归为未知并回退普通调度，聊天请求不会等待额度刷新。账号成功率按请求/账号去重，模型×Provider 按每个具名真实 attempt 记录；无样本为 null，冷却、硬隔离和禁用作为独立状态展示。
 
 统计只接收客户端聊天的最终真实 `usage`：非流式取最终响应，流式只取最后一个累计 usage 快照，供应商重试不累加，换号后的 token 只归最终响应账号。缓存 Token 占比使用明确同时返回 cache/input 的配对数据，命中请求率只以明确返回 cache 字段的请求为分母；模型统计按别名解析后的实际模型聚合，模型表只展示 24 小时缓存 Token 占比和配对样本数。统计另聚合显式/回退亲和请求、Provider fallback、Provider cooldown 与 half-open 请求数。管理测试、探测、渠道校验、模型抓取和额度刷新不进入聊天统计。动态统计保存在 `metadata.json` 的版本化、1440 分钟/50,000 账号分钟/50,000 模型分钟结构中，迁移后的模型与路由指标窗口在覆盖满 24 小时前会明确标注“统计积累中”；旧名称统计只作为可能含控制台测试的独立基线展示。首期不提供 RPM、统计重置、7 天趋势、出口 IP 或指纹伪装。
 

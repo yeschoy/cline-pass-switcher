@@ -92,28 +92,28 @@ test('request and error sections share one log view and reset the selected type 
 });
 
 test('error rule presets, pipeline controls and statistics rendering retain strict boundaries', () => {
-  for (const id of ['standard','fast','conservative','observe','clear']) assert.match(html, new RegExp(`${id}:\\{`));
+  for (const id of ['standard','fast','conservative','observe','clear']) assert.match(html, new RegExp(`${id}:\\[`));
   const errorPresets = html.slice(html.indexOf('const ERROR_RULE_PRESETS='), html.indexOf('function previewErrorPreset'));
   assert.doesNotMatch(errorPresets, /401|403/);
-  assert.match(errorPresets, /standard:\{429:\{action:'cooldown',cooldownMs:1800000\}\}/);
-  assert.match(errorPresets, /fast:\{429:\{action:'cooldown',cooldownMs:300000\},500:\{action:'cooldown',cooldownMs:60000\}/);
-  assert.match(errorPresets, /conservative:\{429:\{action:'cooldown',cooldownMs:3600000\},500:\{action:'cooldown',cooldownMs:300000\}/);
-  assert.match(errorPresets, /observe:\{429:\{action:'ignore'\},500:\{action:'ignore'\}/);
+  assert.match(errorPresets, /accountCooldownRule\('preset-account-429','30m0s'\)/);
+  assert.match(errorPresets, /providerDegradeRules/);
+  assert.match(errorPresets, /action:'ignore'/);
   const schedulingPresets = html.slice(html.indexOf('const PRESETS='), html.indexOf('function previewPreset'));
   assert.doesNotMatch(schedulingPresets, /401|403/);
-  assert.match(html, /id="errorRuleBody"/);assert.match(html,/id="errorRuleFeedback" aria-live="polite"/);assert.match(html,/onclick="addStatusErrorRule\(\)"/);assert.match(html,/onclick="addContentErrorRule\(\)"/);
+  assert.match(html, /id="errorRuleBody"/);assert.match(html,/id="errorRuleFeedback" aria-live="polite"/);assert.match(html,/onclick="addErrorRule\(\)"/);
   assert.match(html, /function previewErrorPreset\(\).*cloneRuleDraft\(\)/);
-  assert.match(html, /const next=replace\?\{\.\.\.preset\}:\{\.\.\.current,\.\.\.preset\}/);
-  assert.match(html, /const groups=\{保留:\[\],新增:\[\],修改:\[\],删除:\[\]\}/);
+  assert.match(html, /const next=replace\?cloneRuleDraft\(preset\):mergeRulesById\(current,preset\)/);
+  assert.match(html, /groups=\{保留:\[\],新增:\[\],修改:\[\],删除:\[\]\}/);
   for (const branch of ['groups.新增.push','groups.删除.push','groups.保留.push','groups.修改.push']) assert.match(html, new RegExp(branch.replace('.', '\\.')));
   assert.match(html, /name==='clear'\|\|\$\('#errorPresetReplace'\)\.checked/);
   assert.match(html, /function closeErrorPreset\(\).*PENDING_ERROR_PRESET=null/);
   assert.match(html, /applyErrorPreset\(\).*commitErrorRuleDraft\(next/);
-  assert.match(html,/onclick="moveContentErrorRule\(\$\{index\},-1,this\)"/);assert.match(html,/data-content-rule-index/);assert.match(html,/focusTarget\.focus\(\)/);
+  assert.match(html,/onclick="moveErrorRule\(\$\{index\},-1,this\)"/);assert.match(html,/data-error-rule-index/);assert.match(html,/focusTarget\.focus\(\)/);
   assert.match(html,/<details id="advancedErrorRules"[^>]+ontoggle="if\(this.open\)openAdvancedErrorRules\(\)"/);assert.match(html,/id="advancedErrorRulesJson"[^>]+oninput="markAdvancedErrorRulesDirty\(\)"/);assert.match(html,/function openAdvancedErrorRules\(\).*advancedErrorRulesJson'\)\.focus\(\)/);assert.match(html,/function applyAdvancedErrorRules\(\)/);assert.match(html,/snapshot.generation!==ERROR_RULE_GENERATION/);
-  for (const id of ['pipelineExcludeUnhealthy','pipelineQuotaPool','pipelineHealthSort','pipelineSticky']) assert.match(html, new RegExp(`id="${id}"`));
-  assert.match(html,/可排序账号调度流水线/); assert.equal((html.match(/class="pipeline-step" draggable="true"/g)||[]).length,4);
-  assert.equal((html.match(/class="ghost pipeline-move-up"/g)||[]).length,4); assert.equal((html.match(/class="ghost pipeline-move-down"/g)||[]).length,4);
+  for (const id of ['pipelineQuotaPool','pipelineHealthSort','pipelineSticky']) assert.match(html, new RegExp(`id="${id}"`));
+  assert.doesNotMatch(html,/id="pipelineExcludeUnhealthy"/);
+  assert.match(html,/可排序账号调度流水线/); assert.equal((html.match(/class="pipeline-step" draggable="true"/g)||[]).length,3);
+  assert.equal((html.match(/class="ghost pipeline-move-up"/g)||[]).length,3); assert.equal((html.match(/class="ghost pipeline-move-down"/g)||[]).length,3);
   assert.match(html,/id="pipelineOrderStatus" aria-live="polite"/); assert.match(html,/越靠前优先级越高/);
   for(const handler of ['startPipelineDrag','dropPipelineDrag','movePipelineStep','syncPipelineOrder'])assert.match(html,new RegExp(`function ${handler}\\(`));
   assert.match(html,/onclick="movePipelineStep\('quotaPool',-1,this\)"/,'native move buttons pass their focus target to production reorder logic');
@@ -121,8 +121,8 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   assert.match(html,/const target=button\.disabled\?opposite:button/,'boundary moves transfer focus to the enabled opposite-direction button');
   const collect = html.slice(html.indexOf('function collectAccounts'), html.indexOf('async function saveAccounts'));
   for (const field of ['id:a.id','name:a.name',"note:a.note||''","key:a.key||''",'enabled:a.enabled!==false','maxConcurrent:','weight:','priority:',"proxyUrl:a.proxyUrl||''","headers:a.headers||{}","perModel:a.perModel||{}"] ) assert.ok(collect.includes(field), `full account snapshot must preserve ${field}`);
-  assert.match(collect,/accountErrorRules:rules.statusRules/);assert.match(collect,/accountContentErrorRules:rules.contentRules/);
-  assert.match(collect, /accountPipeline:\{quotaPool:[^}]+excludeUnhealthy:[^}]+healthSort:[^}]+sticky:[^}]+order:pipelineOrder\(\),cachePoolSize:/);
+  assert.match(collect,/errorRules:rules/);
+  assert.match(collect, /accountPipeline:\{quotaPool:[^}]+healthSort:[^}]+sticky:[^}]+order:pipelineOrder\(\),cachePoolSize:/);
   assert.match(html,/id="cachePoolSize" type="number" min="0" max="100000" step="1"/);assert.match(html,/0 = 关闭/);assert.match(html,/仅在 sticky 模式或启用会话粘性步骤时生效/);
   assert.match(html,/cachePoolRole==='active'/);assert.match(html,/缓存活跃/);assert.match(html,/缓存备用/);
   assert.match(html, /api\('\/api\/statistics'\)/);
@@ -134,13 +134,13 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   assert.match(html, /cacheTokenRatio/); assert.match(html, /cacheHitRequestRate/);
   assert.match(html, /function affinityMetrics/); assert.match(html, /explicitAffinityRequests/); assert.match(html, /providerCircuitCooldownRequests/); assert.match(html, /providerHalfOpenRequests/);
   assert.match(html, /每次 HTTP attempt 仅发送一个 provider\.only/);
-  assert.match(html, /function providerHealthView\(state\)/);assert.match(html, /degraded: '⚠退化'/);assert.match(html, /⏸冷却/);assert.match(html, /◐待半开/);
+  assert.match(html, /function providerHealthView\(state\)/);assert.match(html, /成功率/);assert.match(html, /⏸冷却/);assert.match(html, /硬隔离/);assert.match(html,/recoverProvider/);
   const providerOrder = html.slice(html.indexOf('function sortedUpstreams'), html.indexOf('function upstreamOptions'));
   assert.doesNotMatch(providerOrder, /\.sort\(/);assert.match(providerOrder, /meta && meta\.upstreams/);
   assert.match(html, /coverage!==undefined&&Number\(coverage\)===0\)\?'无数据'/);
   assert.match(html, /value===null\|\|value===undefined/);
   const statistics = html.slice(html.indexOf('function statisticValue'), html.indexOf('async function switchSection'));
-  assert.match(statistics, /escapeHtml\(a\.name\)/);assert.match(statistics, /escapeHtml\(a\.id\)/);assert.match(statistics, /escapeHtml\(a\.health\.status\)/);assert.match(statistics, /escapeHtml\(a\.quota\.pool\)/);
+  assert.match(statistics, /escapeHtml\(a\.name\)/);assert.match(statistics, /escapeHtml\(a\.id\)/);assert.match(statistics, /escapeHtml\(accountDisposition\(a\.health\)\)/);assert.match(statistics, /escapeHtml\(a\.quota\.pool\)/);
   assert.doesNotMatch(statistics, /\.key\b|proxyUrl|\.headers\b|\.note\b|rawResponse|rawTrace|session|message/);
 });
 

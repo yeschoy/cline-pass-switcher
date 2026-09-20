@@ -24,15 +24,28 @@
   "accountMode": "single",
   "activeAccount": 0,
   "concurrencyWaitMs": 2000,
-  "accountErrorRules": {},
-  "accountContentErrorRules": [],
+  "errorRules": [
+    {
+      "id": "account-rate-limit",
+      "scope": "account",
+      "action": "cooldown",
+      "when": {
+        "statuses": [429],
+        "body_contains": "account quota exhausted"
+      },
+      "reset": {
+        "header": "Retry-After",
+        "format": "retry-after",
+        "fallback": "5m0s",
+        "max": "1h0m0s"
+      }
+    }
+  ],
   "accountPipeline": {
     "quotaPool": false,
-    "excludeUnhealthy": false,
     "healthSort": false,
     "sticky": false,
     "order": [
-      "excludeUnhealthy",
       "quotaPool",
       "healthSort",
       "sticky"

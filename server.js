@@ -36,14 +36,14 @@ const DEFAULT_CONFIG = {
   accountMode: 'single',   // single=手动指定 | roundrobin=轮询 | sticky=会话 HRW 粘性
   activeAccount: 0,        // single 模式下使用的账号下标
   concurrencyWaitMs: 2000,
-  accountErrorRules: {},   // "429": { action: 'cooldown', cooldownMs: 1800000 } | { action: 'ban' } | { action: 'ignore' }
-  accountContentErrorRules: [], // ordered failure-text contains rules with optional normalized status range
+  errorRules: [],          // canonical ordered account/provider-model failure rules
+  accountErrorRules: {},   // legacy compatibility projection only
+  accountContentErrorRules: [], // legacy compatibility projection only
   accountPipeline: {
     quotaPool: false,
-    excludeUnhealthy: false,
     healthSort: false,
     sticky: false,
-    order: ['excludeUnhealthy', 'quotaPool', 'healthSort', 'sticky'],
+    order: ['quotaPool', 'healthSort', 'sticky'],
     cachePoolSize: 0,
   },
   modelAliases: {},        // client alias -> cline-pass/* model
@@ -88,7 +88,9 @@ function atomicWriteJson(file, obj) {
     try { fs.unlinkSync(tmp); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
   }
 }
-const config = { ...DEFAULT_CONFIG, ...loadJson(CONFIG_PATH, {}) };
+const loadedConfig = loadJson(CONFIG_PATH, {});
+const configHadCanonicalErrorRules = Object.hasOwn(loadedConfig, 'errorRules');
+const config = { ...DEFAULT_CONFIG, ...loadedConfig };
 const META = loadJson(META_PATH, { models: {}, history: [], catalog: null, orModelsFetchedAt: 0, orModelList: null });
 const saveConfig = () => atomicWriteJson(CONFIG_PATH, config);
 const saveMeta = () => atomicWriteJson(META_PATH, META);
@@ -138,6 +140,10 @@ function normalizeProviderHealthState(value = {}) {
     lastFailureAt: safeProviderTimestamp(raw.lastFailureAt),
     consecutiveFailures: Math.min(PROVIDER_FAILURE_COUNT_MAX, Math.max(0, Math.floor(Number(raw.consecutiveFailures) || 0))),
     cooldownUntil: safeProviderTimestamp(raw.cooldownUntil),
+    hardQuarantined: raw.hardQuarantined === true,
+    ruleId: typeof raw.ruleId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(raw.ruleId) ? raw.ruleId : null,
+    statusCode: Number.isInteger(raw.statusCode) && raw.statusCode >= 100 && raw.statusCode <= 599 ? raw.statusCode : null,
+    updatedAt: safeProviderTimestamp(raw.updatedAt),
     failureClass: PROVIDER_FAILURE_CLASSES.has(raw.failureClass) ? raw.failureClass : null,
     note: boundedProviderNote(raw.note),
   };
@@ -153,6 +159,41 @@ function normalizeProviderHealthMetadata() {
       normalized[provider] = normalizeProviderHealthState(state);
     }
     if (JSON.stringify(normalized) !== JSON.stringify(meta.upstreamStatus)) { meta.upstreamStatus = normalized; dirty = true; }
+  }
+  return dirty;
+}
+function normalizeAccountStates() {
+  let dirty = false;
+  if (!isPlainObject(META.accountStates)) { META.accountStates = {}; return true; }
+  const normalized = {};
+  for (const [id, value] of Object.entries(META.accountStates)) {
+    if (!/^[A-Za-z0-9_-]{1,100}$/.test(id) || !isPlainObject(value)) { dirty = true; continue; }
+    const state = {
+      banned: value.banned === true || value.hardQuarantined === true,
+      hardQuarantined: value.banned === true || value.hardQuarantined === true,
+      cooldownUntil: safeProviderTimestamp(value.cooldownUntil),
+      statusCode: Number.isInteger(value.statusCode) && value.statusCode >= 100 && value.statusCode <= 599 ? value.statusCode : null,
+      reason: boundedProviderNote(value.reason),
+      ruleId: typeof value.ruleId === 'string' && ERROR_RULE_ID.test(value.ruleId) ? value.ruleId : null,
+      updatedAt: safeProviderTimestamp(value.updatedAt),
+    };
+    normalized[id] = state;
+    if (JSON.stringify(state) !== JSON.stringify(value)) dirty = true;
+  }
+  if (JSON.stringify(normalized) !== JSON.stringify(META.accountStates)) { META.accountStates = normalized; dirty = true; }
+  return dirty;
+}
+function configuredProvidersForModel(modelId) {
+  const providers = new Set(normalizeStringList(META.models?.[modelId]?.upstreams, 100).map((value) => value.toLowerCase()));
+  for (const route of [config.perModel?.[modelId], ...(config.accounts || []).map((account) => account.perModel?.[modelId])]) for (const provider of normalizeStringList(route?.upstreams, 20)) providers.add(provider.toLowerCase());
+  return providers;
+}
+function pruneOrphanProviderStates() {
+  let dirty = false;
+  for (const [modelId, meta] of Object.entries(META.models || {})) {
+    if (!isPlainObject(meta?.upstreamStatus)) continue;
+    const configured = configuredProvidersForModel(modelId);
+    for (const provider of Object.keys(meta.upstreamStatus)) if (!configured.has(provider.toLowerCase())) { delete meta.upstreamStatus[provider]; dirty = true; }
   }
   return dirty;
 }
@@ -244,6 +285,156 @@ function normalizeAccountContentErrorRules(value = [], { strict = false } = {}) 
   }
   return out;
 }
+const ERROR_RULE_SCOPES = new Set(['account', 'provider-model']);
+const ERROR_RULE_ACTIONS = new Set(['ignore', 'degrade', 'cooldown', 'hard-quarantine']);
+const ERROR_RULE_RESET_FORMATS = new Set(['retry-after', 'unix-seconds', 'unix-milliseconds', 'duration']);
+const MAX_ERROR_RULES = 100;
+const MAX_ERROR_RULE_BYTES = 64 * 1024;
+const MAX_ERROR_RULE_ITEMS = 500;
+const MAX_ERROR_RULE_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
+const ERROR_RULE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+function parseStrictDuration(value) {
+  if (typeof value !== 'string' || !value || value.length > 64 || !/^(?:\d+d)?(?:\d+h)?(?:\d+m)?(?:\d+s)?$/.test(value)) return null;
+  const matches = [...value.matchAll(/(\d+)([dhms])/g)];
+  if (!matches.length || matches.map((match) => match[0]).join('') !== value) return null;
+  const units = { d: 86400000, h: 3600000, m: 60000, s: 1000 };
+  let total = 0;
+  for (const [, amount, unit] of matches) {
+    const number = Number(amount);
+    if (!Number.isSafeInteger(number) || number < 0 || number > Math.floor(MAX_ERROR_RULE_DURATION_MS / units[unit])) return null;
+    total += number * units[unit];
+    if (!Number.isSafeInteger(total) || total > MAX_ERROR_RULE_DURATION_MS) return null;
+  }
+  return total > 0 ? total : null;
+}
+function durationText(milliseconds) {
+  let seconds = Math.max(1, Math.ceil(Number(milliseconds) / 1000));
+  const parts = [];
+  for (const [unit, size] of [['d',86400],['h',3600],['m',60],['s',1]]) {
+    const amount = Math.floor(seconds / size);
+    if (amount || parts.length || unit === 's') parts.push(`${amount}${unit}`);
+    seconds %= size;
+  }
+  return parts.join('');
+}
+function normalizeRuleStringList(value, label, { strict, max = 20, pattern = /^[a-z0-9][a-z0-9._/-]{0,199}$/i } = {}) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || !value.length || value.length > max) throw new Error(`${label} must be a non-empty array with at most ${max} entries`);
+  const out = [], seen = new Set();
+  for (const raw of value) {
+    const item = typeof raw === 'string' ? raw.trim() : '';
+    const key = item.toLowerCase();
+    if (!item || !pattern.test(item) || seen.has(key)) throw new Error(`invalid or duplicate ${label} entry`);
+    seen.add(key); out.push(item);
+  }
+  return out;
+}
+function normalizeErrorRules(value, { strict = false } = {}) {
+  const fail = (error) => { if (strict) throw error; console.warn(`[配置] 已禁用非法统一错误规则：${error.message}`); return []; };
+  try {
+    if (!Array.isArray(value) || value.length > MAX_ERROR_RULES) throw new Error(`errorRules must be an array with at most ${MAX_ERROR_RULES} entries`);
+    let bytes; try { bytes = Buffer.byteLength(JSON.stringify(value)); } catch { throw new Error('errorRules must be JSON serializable'); }
+    if (bytes > MAX_ERROR_RULE_BYTES) throw new Error('errorRules exceed 64 KiB');
+    const ids = new Set(), out = [];
+    for (const [index, raw] of value.entries()) {
+      if (!isPlainObject(raw)) throw new Error(`invalid errorRules entry ${index}`);
+      const allowed = ['id','scope','action','providers','models','when','reset'];
+      if (Object.keys(raw).some((key) => !allowed.includes(key))) throw new Error(`unknown errorRules field ${index}`);
+      const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+      if (!ERROR_RULE_ID.test(id) || ids.has(id)) throw new Error(`invalid or duplicate errorRules id ${index}`);
+      ids.add(id);
+      const scope = raw.scope === 'credential' ? 'account' : raw.scope;
+      if (!ERROR_RULE_SCOPES.has(scope)) throw new Error(`invalid errorRules scope ${index}`);
+      if (!ERROR_RULE_ACTIONS.has(raw.action)) throw new Error(`invalid errorRules action ${index}`);
+      const providers = normalizeRuleStringList(raw.providers, `errorRules[${index}].providers`, { strict });
+      const models = normalizeRuleStringList(raw.models, `errorRules[${index}].models`, { strict, pattern: /^[^\x00-\x1f\x7f]{1,300}$/ });
+      if (!isPlainObject(raw.when) || Object.keys(raw.when).some((key) => !['statuses','body_contains','header'].includes(key))) throw new Error(`invalid errorRules when ${index}`);
+      const when = {};
+      if (raw.when.statuses !== undefined) {
+        if (!Array.isArray(raw.when.statuses) || !raw.when.statuses.length || raw.when.statuses.length > MAX_ERROR_RULE_ITEMS || raw.when.statuses.some((status) => !Number.isSafeInteger(status) || status < 100 || status > 599) || new Set(raw.when.statuses).size !== raw.when.statuses.length) throw new Error(`invalid errorRules statuses ${index}`);
+        when.statuses = [...raw.when.statuses];
+      }
+      if (raw.when.body_contains !== undefined) {
+        if (raw.when.body_contains === null) throw new Error(`invalid errorRules body_contains ${index}`);
+        const list = Array.isArray(raw.when.body_contains) ? raw.when.body_contains : [raw.when.body_contains];
+        if (!list.length || list.length > 20) throw new Error(`invalid errorRules body_contains ${index}`);
+        const normalized = [], seen = new Set();
+        for (const needle of list) {
+          const text = typeof needle === 'string' ? needle.trim() : '';
+          const key = text.toLowerCase();
+          if (!text || text.length > 500 || /[\x00-\x1f\x7f]/.test(text) || seen.has(key)) throw new Error(`invalid errorRules body_contains ${index}`);
+          seen.add(key); normalized.push(text);
+        }
+        when.body_contains = Array.isArray(raw.when.body_contains) ? normalized : normalized[0];
+      }
+      if (raw.when.header !== undefined) {
+        if (!isPlainObject(raw.when.header) || Object.keys(raw.when.header).some((key) => !['name','contains'].includes(key))) throw new Error(`invalid errorRules header ${index}`);
+        const name = typeof raw.when.header.name === 'string' ? raw.when.header.name.trim() : '';
+        if (!name || name.length > 128 || !HEADER_NAME.test(name)) throw new Error(`invalid errorRules header name ${index}`);
+        const header = { name };
+        if (raw.when.header.contains !== undefined) {
+          const contains = typeof raw.when.header.contains === 'string' ? raw.when.header.contains.trim() : '';
+          if (!contains || contains.length > 500 || /[\x00-\x1f\x7f]/.test(contains)) throw new Error(`invalid errorRules header contains ${index}`);
+          header.contains = contains;
+        }
+        when.header = header;
+      }
+      const activeConditions = (when.statuses?.length ? 1 : 0) + (when.body_contains && (typeof when.body_contains === 'string' || when.body_contains.length) ? 1 : 0) + (when.header ? 1 : 0);
+      if (!activeConditions) throw new Error(`errorRules entry ${index} must enable at least one when condition`);
+      let reset;
+      if (raw.action === 'cooldown') {
+        if (!isPlainObject(raw.reset) || Object.keys(raw.reset).some((key) => !['header','format','fallback','max'].includes(key))) throw new Error(`invalid errorRules reset ${index}`);
+        const fallbackMs = parseStrictDuration(raw.reset.fallback), maxMs = parseStrictDuration(raw.reset.max);
+        if (fallbackMs === null || maxMs === null || fallbackMs > maxMs) throw new Error(`invalid errorRules reset duration ${index}`);
+        reset = { fallback: raw.reset.fallback, max: raw.reset.max };
+        if (raw.reset.header !== undefined) {
+          const header = typeof raw.reset.header === 'string' ? raw.reset.header.trim() : '';
+          if (!header || header.length > 128 || !HEADER_NAME.test(header)) throw new Error(`invalid errorRules reset header ${index}`);
+          reset.header = header;
+          const format = raw.reset.format === undefined ? (header.toLowerCase() === 'retry-after' ? 'retry-after' : null) : raw.reset.format;
+          if (!ERROR_RULE_RESET_FORMATS.has(format)) throw new Error(`invalid errorRules reset format ${index}`);
+          reset.format = format;
+        } else if (raw.reset.format !== undefined) throw new Error(`errorRules reset format requires header ${index}`);
+      } else if (raw.reset !== undefined) throw new Error(`errorRules reset is only valid for cooldown ${index}`);
+      out.push({ id, scope, action: raw.action, ...(providers ? { providers } : {}), ...(models ? { models } : {}), when, ...(reset ? { reset } : {}) });
+    }
+    return out;
+  } catch (error) { return fail(error); }
+}
+function legacyActionFromRule(rule) {
+  if (rule.action === 'ignore') return { action: 'ignore' };
+  if (rule.action === 'hard-quarantine') return { action: 'ban' };
+  if (rule.action !== 'cooldown' || rule.reset?.header || parseStrictDuration(rule.reset?.fallback) !== parseStrictDuration(rule.reset?.max)) return null;
+  return { action: 'cooldown', cooldownMs: parseStrictDuration(rule.reset.fallback) };
+}
+function legacyRuleProjection(rules = config.errorRules || []) {
+  const accountErrorRules = {}, accountContentErrorRules = [];
+  for (const rule of rules) {
+    if (rule.scope !== 'account' || rule.providers || rule.models || rule.when.header) continue;
+    const action = legacyActionFromRule(rule); if (!action) continue;
+    const body = rule.when.body_contains;
+    const statuses = rule.when.statuses;
+    if (!body && Array.isArray(statuses) && statuses.length === 1 && !Object.hasOwn(accountErrorRules, String(statuses[0]))) accountErrorRules[String(statuses[0])] = action;
+    else {
+      const needles = typeof body === 'string' ? [body] : Array.isArray(body) && body.length === 1 ? body : [];
+      if (needles.length !== 1) continue;
+      const sorted = statuses ? [...statuses].sort((a,b) => a-b) : null;
+      if (sorted && sorted.some((status,index) => index && status !== sorted[index-1] + 1)) continue;
+      accountContentErrorRules.push({ contains: needles[0], ...(sorted ? { statusMin: sorted[0], statusMax: sorted.at(-1) } : {}), ...action });
+    }
+  }
+  return { accountErrorRules, accountContentErrorRules };
+}
+function migrateLegacyErrorRules(statusRules, contentRules) {
+  const out = [];
+  for (const [index, rule] of normalizeAccountContentErrorRules(contentRules).entries()) {
+    const statuses = rule.statusMin === undefined ? undefined : Array.from({ length: rule.statusMax - rule.statusMin + 1 }, (_, offset) => rule.statusMin + offset);
+    out.push({ id: `legacy-content-${index + 1}`, scope: 'account', action: rule.action === 'ban' ? 'hard-quarantine' : rule.action, when: { ...(statuses ? { statuses } : {}), body_contains: rule.contains }, ...(rule.action === 'cooldown' ? { reset: { fallback: durationText(rule.cooldownMs), max: durationText(rule.cooldownMs) } } : {}) });
+  }
+  for (const [status, rule] of Object.entries(normalizeAccountErrorRules(statusRules))) out.push({ id: `legacy-status-${status}`, scope: 'account', action: rule.action === 'ban' ? 'hard-quarantine' : rule.action, when: { statuses: [Number(status)] }, ...(rule.action === 'cooldown' ? { reset: { fallback: durationText(rule.cooldownMs), max: durationText(rule.cooldownMs) } } : {}) });
+  return normalizeErrorRules(out, { strict: true });
+}
 const ACCOUNT_MODES = new Set(['single', 'roundrobin', 'sticky', 'least-connections', 'weighted-roundrobin', 'priority-failover']);
 const FORBIDDEN_CUSTOM_HEADER = /(?:authorization|proxy-authorization|cookie|set-cookie|host|content-length|connection|transfer-encoding|upgrade|keep-alive|te|trailer|session|thread|conversation|attestation|installation|api[-_]?key|access[-_]?token|secret|credential|device[-_]?id)/i;
 function validateNote(note) {
@@ -318,27 +509,45 @@ function validateAccountErrorRulesInput(rules = {}) {
   }
   return null;
 }
-const PIPELINE_KEYS = ['quotaPool', 'excludeUnhealthy', 'healthSort', 'sticky'];
-const PIPELINE_DEFAULT_ORDER = ['excludeUnhealthy', 'quotaPool', 'healthSort', 'sticky'];
+const PIPELINE_KEYS = ['quotaPool', 'healthSort', 'sticky'];
+const PIPELINE_DEFAULT_ORDER = ['quotaPool', 'healthSort', 'sticky'];
+const LEGACY_PIPELINE_ORDER = ['excludeUnhealthy', 'quotaPool', 'healthSort', 'sticky'];
 function validPipelineOrder(value) {
-  return Array.isArray(value) && value.length === PIPELINE_DEFAULT_ORDER.length &&
-    new Set(value).size === PIPELINE_DEFAULT_ORDER.length &&
-    value.every((step) => PIPELINE_DEFAULT_ORDER.includes(step));
+  return Array.isArray(value) && value.length === PIPELINE_DEFAULT_ORDER.length && new Set(value).size === PIPELINE_DEFAULT_ORDER.length && value.every((step) => PIPELINE_DEFAULT_ORDER.includes(step));
+}
+function validLegacyPipelineOrder(value) {
+  return Array.isArray(value) && value.length === LEGACY_PIPELINE_ORDER.length && new Set(value).size === LEGACY_PIPELINE_ORDER.length && value.every((step) => LEGACY_PIPELINE_ORDER.includes(step));
+}
+function canonicalPipelineOrder(value, fallback = PIPELINE_DEFAULT_ORDER) {
+  const source = validPipelineOrder(value) ? value : validLegacyPipelineOrder(value) ? value : validPipelineOrder(fallback) ? fallback : validLegacyPipelineOrder(fallback) ? fallback : PIPELINE_DEFAULT_ORDER;
+  const out = [];
+  for (const raw of source) {
+    const step = raw === 'excludeUnhealthy' ? 'healthSort' : raw;
+    if (!out.includes(step)) out.push(step);
+  }
+  for (const step of PIPELINE_DEFAULT_ORDER) if (!out.includes(step)) out.push(step);
+  return out;
 }
 function normalizeAccountPipeline(value, { strict = false, fallbackOrder = PIPELINE_DEFAULT_ORDER, fallbackCachePoolSize = 0 } = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     if (strict) throw new Error('accountPipeline must be an object');
     value = {};
   }
-  if (strict && Object.keys(value).some((key) => ![...PIPELINE_KEYS, 'order', 'cachePoolSize'].includes(key))) throw new Error('accountPipeline contains an unknown field');
-  const out = {};
-  for (const key of PIPELINE_KEYS) {
-    if (strict && typeof value[key] !== 'boolean') throw new Error(`accountPipeline.${key} must be boolean`);
-    out[key] = value[key] === true;
+  const legacy = Object.hasOwn(value, 'excludeUnhealthy');
+  const allowed = [...PIPELINE_KEYS, ...(legacy ? ['excludeUnhealthy'] : []), 'order', 'cachePoolSize'];
+  if (strict && Object.keys(value).some((key) => !allowed.includes(key))) throw new Error('accountPipeline contains an unknown field');
+  if (strict) {
+    for (const key of PIPELINE_KEYS) if (typeof value[key] !== 'boolean') throw new Error(`accountPipeline.${key} must be boolean`);
+    if (legacy && typeof value.excludeUnhealthy !== 'boolean') throw new Error('accountPipeline.excludeUnhealthy must be boolean');
   }
-  if (value.order === undefined) out.order = [...(validPipelineOrder(fallbackOrder) ? fallbackOrder : PIPELINE_DEFAULT_ORDER)];
-  else if (validPipelineOrder(value.order)) out.order = [...value.order];
-  else if (strict) throw new Error('accountPipeline.order must be an exact permutation of the four pipeline steps');
+  const out = {
+    quotaPool: value.quotaPool === true,
+    healthSort: value.healthSort === true || value.excludeUnhealthy === true,
+    sticky: value.sticky === true,
+  };
+  if (value.order === undefined) out.order = canonicalPipelineOrder(fallbackOrder);
+  else if (validPipelineOrder(value.order) || validLegacyPipelineOrder(value.order)) out.order = canonicalPipelineOrder(value.order);
+  else if (strict) throw new Error('accountPipeline.order must be an exact permutation of the three canonical or four legacy pipeline steps');
   else out.order = [...PIPELINE_DEFAULT_ORDER];
   if (value.cachePoolSize === undefined) out.cachePoolSize = Number.isInteger(fallbackCachePoolSize) && fallbackCachePoolSize >= 0 && fallbackCachePoolSize <= 100000 ? fallbackCachePoolSize : 0;
   else if (Number.isInteger(value.cachePoolSize) && value.cachePoolSize >= 0 && value.cachePoolSize <= 100000) out.cachePoolSize = value.cachePoolSize;
@@ -350,8 +559,10 @@ const LEGACY_AGG_FIELDS = ['requests','errors','usageRequests','inputKnownReques
 const ROUTING_AGG_FIELDS = ['explicitAffinityRequests','fallbackAffinityRequests','providerFallbackRequests','providerCircuitCooldownRequests','providerHalfOpenRequests'];
 const AGG_FIELDS = [...LEGACY_AGG_FIELDS, ...ROUTING_AGG_FIELDS];
 const HEALTH_FIELDS = ['results','penaltyUnits','errors','auth','rateLimit','networkProxy','server','other'];
+const SUCCESS_FIELDS = ['successes','degrades'];
 function emptyAggregate() { return Object.fromEntries([...AGG_FIELDS.map((key) => [key, 0]), ['lastUsedAt', 0], ['lastErrorAt', 0], ['overflowFields', []]]); }
 function emptyHealth() { return Object.fromEntries(HEALTH_FIELDS.map((key) => [key, 0])); }
+function emptySuccessHealth() { return { successes: 0, degrades: 0, overflowFields: [] }; }
 function isPlainObject(value) { return !!value && typeof value === 'object' && !Array.isArray(value); }
 function validateAggregate(value, label, fields = AGG_FIELDS) {
   if (!isPlainObject(value) || Object.keys(value).some((key) => ![...fields,'lastUsedAt','lastErrorAt','overflowFields'].includes(key))) throw new Error(`invalid statistics ${label}`);
@@ -367,9 +578,17 @@ function validateHealth(value, label) {
   if (!isPlainObject(value) || Object.keys(value).some((key) => !HEALTH_FIELDS.includes(key))) throw new Error(`invalid statistics ${label}`);
   for (const key of HEALTH_FIELDS) if (!Number.isSafeInteger(value[key]) || value[key] < 0) throw new Error(`invalid statistics ${label}.${key}`);
 }
-const STATISTICS_VERSION = 3;
+function validateSuccessHealth(value, label) {
+  if (!isPlainObject(value) || Object.keys(value).length !== 3 || !Array.isArray(value.overflowFields) || value.overflowFields.some((key) => !SUCCESS_FIELDS.includes(key)) || new Set(value.overflowFields).size !== value.overflowFields.length) throw new Error(`invalid statistics ${label}`);
+  for (const key of SUCCESS_FIELDS) {
+    const overflowed = value.overflowFields.includes(key);
+    if ((overflowed && value[key] !== null) || (!overflowed && (!Number.isSafeInteger(value[key]) || value[key] < 0))) throw new Error(`invalid statistics ${label}.${key}`);
+  }
+}
+const STATISTICS_VERSION = 4;
 const MAX_ACCOUNT_MINUTE_CELLS = 50000;
 const MAX_MODEL_MINUTE_CELLS = process.env.NODE_ENV === 'test' ? Math.max(1, Number(process.env.CLINE_PASS_TEST_MODEL_CELL_LIMIT) || 50000) : 50000;
+const MAX_PROVIDER_HEALTH_MINUTE_CELLS = process.env.NODE_ENV === 'test' ? Math.max(1, Number(process.env.CLINE_PASS_TEST_PROVIDER_HEALTH_CELL_LIMIT) || 50000) : 50000;
 const FORBIDDEN_STATISTIC_KEYS = new Set(['__proto__','prototype','constructor']);
 function validStatisticModelId(id) { return typeof id === 'string' && id.length > 0 && id.length <= 300 && !/[\x00-\x1f\x7f]/.test(id) && !FORBIDDEN_STATISTIC_KEYS.has(id); }
 function aggregateCell(map, key) {
@@ -378,33 +597,53 @@ function aggregateCell(map, key) {
 }
 function createStatistics(now = Date.now()) {
   const minute = Math.floor(now / 60000);
-  return { version: STATISTICS_VERSION, lifetime: { global: emptyAggregate(), accounts: {} }, minuteBuckets: [], recentCoverage: { droppedAccountMinuteCells: 0, accountIncompleteAt: {}, modelTrackingStartedMinute: minute, droppedModelMinuteCells: 0, modelIncompleteAt: {}, routingTrackingStartedMinute: minute }, migration: { legacyStatsMigratedAt: now, legacyRequests: 0, accountLegacyRequests: {}, ambiguousNames: 0, unmappedNames: 0 } };
+  return { version: STATISTICS_VERSION, lifetime: { global: emptyAggregate(), accounts: {} }, minuteBuckets: [], recentCoverage: { droppedAccountMinuteCells: 0, accountIncompleteAt: {}, modelTrackingStartedMinute: minute, droppedModelMinuteCells: 0, modelIncompleteAt: {}, routingTrackingStartedMinute: minute, accountHealthTrackingStartedMinute: minute, accountHealthIncompleteAt: {}, droppedProviderHealthMinuteCells: 0, providerHealthTrackingStartedMinute: minute, providerHealthIncompleteAt: {} }, migration: { legacyStatsMigratedAt: now, legacyRequests: 0, accountLegacyRequests: {}, ambiguousNames: 0, unmappedNames: 0 } };
 }
 function validateStatistics(stats) {
-  if (!isPlainObject(stats) || ![1,2,STATISTICS_VERSION].includes(stats.version)) throw new Error(stats?.version > STATISTICS_VERSION ? 'unsupported statistics version' : 'invalid statistics version');
-  const hasModels = stats.version >= 2, hasRouting = stats.version >= 3, aggregateFields = hasRouting ? AGG_FIELDS : LEGACY_AGG_FIELDS;
-  const coverageKeys = hasRouting ? ['droppedAccountMinuteCells','accountIncompleteAt','modelTrackingStartedMinute','droppedModelMinuteCells','modelIncompleteAt','routingTrackingStartedMinute'] : hasModels ? ['droppedAccountMinuteCells','accountIncompleteAt','modelTrackingStartedMinute','droppedModelMinuteCells','modelIncompleteAt'] : ['droppedAccountMinuteCells','accountIncompleteAt'];
+  if (!isPlainObject(stats) || ![1,2,3,STATISTICS_VERSION].includes(stats.version)) throw new Error(stats?.version > STATISTICS_VERSION ? 'unsupported statistics version' : 'invalid statistics version');
+  const hasModels = stats.version >= 2, hasRouting = stats.version >= 3, hasSuccessHealth = stats.version >= 4, aggregateFields = hasRouting ? AGG_FIELDS : LEGACY_AGG_FIELDS;
+  const coverageKeys = hasSuccessHealth
+    ? ['droppedAccountMinuteCells','accountIncompleteAt','modelTrackingStartedMinute','droppedModelMinuteCells','modelIncompleteAt','routingTrackingStartedMinute','accountHealthTrackingStartedMinute','accountHealthIncompleteAt','droppedProviderHealthMinuteCells','providerHealthTrackingStartedMinute','providerHealthIncompleteAt']
+    : hasRouting ? ['droppedAccountMinuteCells','accountIncompleteAt','modelTrackingStartedMinute','droppedModelMinuteCells','modelIncompleteAt','routingTrackingStartedMinute']
+      : hasModels ? ['droppedAccountMinuteCells','accountIncompleteAt','modelTrackingStartedMinute','droppedModelMinuteCells','modelIncompleteAt'] : ['droppedAccountMinuteCells','accountIncompleteAt'];
   if (Object.keys(stats).some((key) => !['version','lifetime','minuteBuckets','recentCoverage','migration'].includes(key)) || !isPlainObject(stats.lifetime) || Object.keys(stats.lifetime).some((key) => !['global','accounts'].includes(key)) || !isPlainObject(stats.lifetime.accounts) || !Array.isArray(stats.minuteBuckets) || stats.minuteBuckets.length > 1440 || !isPlainObject(stats.recentCoverage) || Object.keys(stats.recentCoverage).length !== coverageKeys.length || coverageKeys.some((key) => !Object.hasOwn(stats.recentCoverage,key)) || !Number.isSafeInteger(stats.recentCoverage.droppedAccountMinuteCells) || stats.recentCoverage.droppedAccountMinuteCells < 0 || !isPlainObject(stats.recentCoverage.accountIncompleteAt) || !isPlainObject(stats.migration)) throw new Error('invalid statistics structure');
   for (const [id, minute] of Object.entries(stats.recentCoverage.accountIncompleteAt)) if (!/^[A-Za-z0-9_-]{1,100}$/.test(id) || !Number.isSafeInteger(minute) || minute < 0) throw new Error('invalid statistics coverage');
   if (hasModels && (!Number.isSafeInteger(stats.recentCoverage.modelTrackingStartedMinute) || stats.recentCoverage.modelTrackingStartedMinute < 0 || !Number.isSafeInteger(stats.recentCoverage.droppedModelMinuteCells) || stats.recentCoverage.droppedModelMinuteCells < 0 || !isPlainObject(stats.recentCoverage.modelIncompleteAt))) throw new Error('invalid statistics model coverage');
   if (hasModels) for (const [id, minute] of Object.entries(stats.recentCoverage.modelIncompleteAt)) if (!validStatisticModelId(id) || !Number.isSafeInteger(minute) || minute < 0) throw new Error('invalid statistics model coverage');
   if (hasRouting && (!Number.isSafeInteger(stats.recentCoverage.routingTrackingStartedMinute) || stats.recentCoverage.routingTrackingStartedMinute < 0)) throw new Error('invalid statistics routing coverage');
+  if (hasSuccessHealth) {
+    const coverage = stats.recentCoverage;
+    if (!Number.isSafeInteger(coverage.accountHealthTrackingStartedMinute) || coverage.accountHealthTrackingStartedMinute < 0 || !isPlainObject(coverage.accountHealthIncompleteAt) || !Number.isSafeInteger(coverage.droppedProviderHealthMinuteCells) || coverage.droppedProviderHealthMinuteCells < 0 || !Number.isSafeInteger(coverage.providerHealthTrackingStartedMinute) || coverage.providerHealthTrackingStartedMinute < 0 || !isPlainObject(coverage.providerHealthIncompleteAt)) throw new Error('invalid statistics success health coverage');
+    for (const [id, minute] of Object.entries(coverage.accountHealthIncompleteAt)) if (!/^[A-Za-z0-9_-]{1,100}$/.test(id) || !Number.isSafeInteger(minute) || minute < 0) throw new Error('invalid statistics account health coverage');
+    for (const [modelId, providers] of Object.entries(coverage.providerHealthIncompleteAt)) {
+      if (!validStatisticModelId(modelId) || !isPlainObject(providers)) throw new Error('invalid statistics provider health coverage');
+      for (const [provider, minute] of Object.entries(providers)) if (!/^[a-z0-9][a-z0-9._/-]{0,199}$/i.test(provider) || !Number.isSafeInteger(minute) || minute < 0) throw new Error('invalid statistics provider health coverage');
+    }
+  }
   if (Object.keys(stats.migration).some((key) => !['legacyStatsMigratedAt','legacyRequests','accountLegacyRequests','ambiguousNames','unmappedNames'].includes(key)) || !Number.isSafeInteger(stats.migration.legacyStatsMigratedAt) || stats.migration.legacyStatsMigratedAt < 0 || !Number.isSafeInteger(stats.migration.legacyRequests) || stats.migration.legacyRequests < 0 || !isPlainObject(stats.migration.accountLegacyRequests) || !Number.isSafeInteger(stats.migration.ambiguousNames) || stats.migration.ambiguousNames < 0 || !Number.isSafeInteger(stats.migration.unmappedNames) || stats.migration.unmappedNames < 0) throw new Error('invalid statistics migration');
   for (const [id, requests] of Object.entries(stats.migration.accountLegacyRequests)) if (!/^[A-Za-z0-9_-]{1,100}$/.test(id) || !Number.isSafeInteger(requests) || requests < 0) throw new Error('invalid statistics legacy account');
   validateAggregate(stats.lifetime.global, 'lifetime.global', aggregateFields);
   for (const [id, aggregate] of Object.entries(stats.lifetime.accounts)) { if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new Error('invalid statistics account id'); validateAggregate(aggregate, `lifetime.accounts.${id}`, aggregateFields); }
-  let previous = -1, accountCells = 0, modelCells = 0;
+  let previous = -1, accountCells = 0, modelCells = 0, providerHealthCells = 0;
   for (const bucket of stats.minuteBuckets) {
-    const bucketKeys = hasModels ? ['minute','global','accounts','health','models'] : ['minute','global','accounts','health'];
-    if (!isPlainObject(bucket) || Object.keys(bucket).length !== bucketKeys.length || bucketKeys.some((key) => !Object.hasOwn(bucket,key)) || !Number.isSafeInteger(bucket.minute) || bucket.minute < 0 || bucket.minute <= previous || !isPlainObject(bucket.global) || !isPlainObject(bucket.accounts) || !isPlainObject(bucket.health) || (hasModels && !isPlainObject(bucket.models))) throw new Error('invalid statistics minute bucket');
+    const bucketKeys = hasSuccessHealth ? ['minute','global','accounts','health','models','accountHealth','providerHealth'] : hasModels ? ['minute','global','accounts','health','models'] : ['minute','global','accounts','health'];
+    if (!isPlainObject(bucket) || Object.keys(bucket).length !== bucketKeys.length || bucketKeys.some((key) => !Object.hasOwn(bucket,key)) || !Number.isSafeInteger(bucket.minute) || bucket.minute < 0 || bucket.minute <= previous || !isPlainObject(bucket.global) || !isPlainObject(bucket.accounts) || !isPlainObject(bucket.health) || (hasModels && !isPlainObject(bucket.models)) || (hasSuccessHealth && (!isPlainObject(bucket.accountHealth) || !isPlainObject(bucket.providerHealth)))) throw new Error('invalid statistics minute bucket');
     previous = bucket.minute; validateAggregate(bucket.global, `bucket.${bucket.minute}.global`, aggregateFields);
-    const ids = new Set([...Object.keys(bucket.accounts), ...Object.keys(bucket.health)]); accountCells += ids.size;
+    const ids = new Set([...Object.keys(bucket.accounts), ...Object.keys(bucket.health), ...(hasSuccessHealth ? Object.keys(bucket.accountHealth) : [])]); accountCells += ids.size;
     for (const [id, aggregate] of Object.entries(bucket.accounts)) { if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new Error('invalid statistics account id'); validateAggregate(aggregate, `bucket.${bucket.minute}.accounts.${id}`, aggregateFields); }
     for (const [id, health] of Object.entries(bucket.health)) { if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new Error('invalid statistics account id'); validateHealth(health, `bucket.${bucket.minute}.health.${id}`); }
     if (hasModels) for (const [id, aggregate] of Object.entries(bucket.models)) { if (!validStatisticModelId(id)) throw new Error('invalid statistics model id'); modelCells++; validateAggregate(aggregate, `bucket.${bucket.minute}.models.${id}`, aggregateFields); }
+    if (hasSuccessHealth) {
+      for (const [id, health] of Object.entries(bucket.accountHealth)) { if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new Error('invalid statistics account health id'); validateSuccessHealth(health, `bucket.${bucket.minute}.accountHealth.${id}`); }
+      for (const [modelId, providers] of Object.entries(bucket.providerHealth)) {
+        if (!validStatisticModelId(modelId) || !isPlainObject(providers)) throw new Error('invalid statistics provider health model');
+        for (const [provider, health] of Object.entries(providers)) { if (!/^[a-z0-9][a-z0-9._/-]{0,199}$/i.test(provider)) throw new Error('invalid statistics provider health provider'); providerHealthCells++; validateSuccessHealth(health, `bucket.${bucket.minute}.providerHealth.${modelId}.${provider}`); }
+      }
+    }
   }
   if (accountCells > MAX_ACCOUNT_MINUTE_CELLS) throw new Error('statistics account-minute cell limit exceeded');
   if (modelCells > MAX_MODEL_MINUTE_CELLS) throw new Error('statistics model-minute cell limit exceeded');
+  if (providerHealthCells > MAX_PROVIDER_HEALTH_MINUTE_CELLS) throw new Error('statistics provider-health-minute cell limit exceeded');
 }
 function normalizeStatistics() {
   if (META.statistics !== undefined) {
@@ -425,6 +664,19 @@ function normalizeStatistics() {
         for (const aggregate of Object.values(bucket.models)) upgrade(aggregate);
       }
       META.statistics.recentCoverage.routingTrackingStartedMinute = Math.floor(Date.now() / 60000);
+      META.statistics.version = 3;
+      dirty = true;
+    }
+    if (META.statistics.version === 3) {
+      const minute = Math.floor(Date.now() / 60000);
+      META.statistics.minuteBuckets = META.statistics.minuteBuckets.map((bucket) => ({ ...bucket, accountHealth: {}, providerHealth: {} }));
+      Object.assign(META.statistics.recentCoverage, {
+        accountHealthTrackingStartedMinute: minute,
+        accountHealthIncompleteAt: {},
+        droppedProviderHealthMinuteCells: 0,
+        providerHealthTrackingStartedMinute: minute,
+        providerHealthIncompleteAt: {},
+      });
       META.statistics.version = STATISTICS_VERSION;
       dirty = true;
     }
@@ -502,10 +754,13 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   if (JSON.stringify(aliases) !== JSON.stringify(config.modelAliases || {})) { config.modelAliases = aliases; dirty = true; }
   const pm = normalizePerModelMap(config.perModel || {});
   if (JSON.stringify(pm) !== JSON.stringify(config.perModel || {})) { config.perModel = pm; dirty = true; }
-  const rules = normalizeAccountErrorRules(config.accountErrorRules || {});
-  if (JSON.stringify(rules) !== JSON.stringify(config.accountErrorRules || {})) { config.accountErrorRules = rules; dirty = true; }
-  const contentRules = normalizeAccountContentErrorRules(config.accountContentErrorRules === undefined ? [] : config.accountContentErrorRules);
-  if (JSON.stringify(contentRules) !== JSON.stringify(config.accountContentErrorRules)) { config.accountContentErrorRules = contentRules; dirty = true; }
+  const errorRules = configHadCanonicalErrorRules
+    ? normalizeErrorRules(config.errorRules, { strict: true })
+    : migrateLegacyErrorRules(config.accountErrorRules || {}, config.accountContentErrorRules === undefined ? [] : config.accountContentErrorRules);
+  if (!configHadCanonicalErrorRules || JSON.stringify(errorRules) !== JSON.stringify(config.errorRules)) { config.errorRules = errorRules; dirty = true; }
+  const legacyRules = legacyRuleProjection(errorRules);
+  if (JSON.stringify(legacyRules.accountErrorRules) !== JSON.stringify(config.accountErrorRules || {})) { config.accountErrorRules = legacyRules.accountErrorRules; dirty = true; }
+  if (JSON.stringify(legacyRules.accountContentErrorRules) !== JSON.stringify(config.accountContentErrorRules || [])) { config.accountContentErrorRules = legacyRules.accountContentErrorRules; dirty = true; }
   const pipeline = normalizeAccountPipeline(config.accountPipeline);
   if (JSON.stringify(pipeline) !== JSON.stringify(config.accountPipeline)) { config.accountPipeline = pipeline; dirty = true; }
   const old = Array.isArray(config.accounts) ? config.accounts : [];
@@ -518,6 +773,7 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   META.models ||= {}; META.history ||= []; META.accountStates ||= {};
   if (!META.routingSecret || typeof META.routingSecret !== 'string') { META.routingSecret = crypto.randomBytes(32).toString('hex'); dirty = true; }
   if (normalizeProviderHealthMetadata()) dirty = true;
+  if (normalizeAccountStates()) dirty = true;
   if (normalizeStatistics()) dirty = true;
   if (normalizeAccountQuotas()) dirty = true;
   const ids = new Set((config.accounts || []).map((a) => a.id));
@@ -526,8 +782,9 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   for (const id of Object.keys(META.accountStates)) if (!ids.has(id)) { delete META.accountStates[id]; dirty = true; }
   for (const id of Object.keys(META.accountQuotas)) if (!ids.has(id)) { delete META.accountQuotas[id]; dirty = true; }
   for (const id of Object.keys(META.statistics.lifetime.accounts)) if (!ids.has(id)) { delete META.statistics.lifetime.accounts[id]; dirty = true; }
-  for (const bucket of META.statistics.minuteBuckets) for (const id of new Set([...Object.keys(bucket.accounts), ...Object.keys(bucket.health)])) if (!ids.has(id)) { delete bucket.accounts[id]; delete bucket.health[id]; dirty = true; }
+  for (const bucket of META.statistics.minuteBuckets) for (const id of new Set([...Object.keys(bucket.accounts), ...Object.keys(bucket.health), ...Object.keys(bucket.accountHealth || {})])) if (!ids.has(id)) { delete bucket.accounts[id]; delete bucket.health[id]; if (bucket.accountHealth) delete bucket.accountHealth[id]; dirty = true; }
   for (const id of Object.keys(META.statistics.recentCoverage.accountIncompleteAt)) if (!ids.has(id)) { delete META.statistics.recentCoverage.accountIncompleteAt[id]; dirty = true; }
+  for (const id of Object.keys(META.statistics.recentCoverage.accountHealthIncompleteAt || {})) if (!ids.has(id)) { delete META.statistics.recentCoverage.accountHealthIncompleteAt[id]; dirty = true; }
   if (dirty && persist) { saveConfig(); saveMeta(); }
 }
 normalizeConfigAndMeta({ persist: true });
@@ -584,7 +841,7 @@ function clearExpiredCooldowns() {
   let dirty = false;
   const now = Date.now();
   for (const [id, st] of Object.entries(META.accountStates || {})) {
-    if (st && !st.banned && st.cooldownUntil && st.cooldownUntil <= now) {
+    if (st && !st.hardQuarantined && !st.banned && st.cooldownUntil && st.cooldownUntil <= now) {
       delete META.accountStates[id]; dirty = true;
     }
   }
@@ -595,7 +852,7 @@ function enabledAccounts({ excludeIds = new Set() } = {}) {
   return (config.accounts || []).filter((a) => {
     if (!a || !a.key || a.enabled === false || excludeIds.has(a.id)) return false;
     const st = getAccountState(a.id);
-    if (st?.banned) return false;
+    if (st?.hardQuarantined || st?.banned) return false;
     if (st?.cooldownUntil && st.cooldownUntil > Date.now()) return false;
     return true;
   });
@@ -739,7 +996,7 @@ function statisticsQuotaProjection(account, now = Date.now()) {
   return { ...quota, lastAttemptAt: state?.lastAttemptAt || null, lastSuccessAt: state?.lastSuccessAt || null, refresh: { eligible: reason === null, reason, state: activeJob ? (activeJob.state === 'running' ? 'fetching' : 'queued') : 'idle', nextAttemptAt } };
 }
 function pipelineCandidates(list) {
-  return list.map((account) => ({ account, health: healthProjection(account), quota: quotaProjection(account.id) }));
+  return list.map((account) => ({ account, health: successHealthProjection('account', account.id), quota: quotaProjection(account.id) }));
 }
 function buildPipelineGroups(list, identity, candidates = pipelineCandidates(list)) {
   const diagnostics = [];
@@ -749,32 +1006,22 @@ function buildPipelineGroups(list, identity, candidates = pipelineCandidates(lis
     if (!identity?.fingerprint) return;
     groups = groups.flatMap((group) => {
       const byId = new Map(group.candidates.map((candidate) => [candidate.account.id, candidate]));
-      return hrwRank(group.candidates.map((candidate) => candidate.account), identity.fingerprint)
-        .map((account) => ({ ...group, candidates: [byId.get(account.id)] }));
+      return hrwRank(group.candidates.map((candidate) => candidate.account), identity.fingerprint).map((account) => ({ ...group, candidates: [byId.get(account.id)] }));
     });
     stickyApplied = true;
   };
   for (const step of config.accountPipeline.order) {
     if (!config.accountPipeline[step]) continue;
-    if (step === 'excludeUnhealthy') {
-      const total = groups.reduce((count, group) => count + group.candidates.length, 0);
-      const kept = groups.map((group) => ({ ...group, candidates: group.candidates.filter((candidate) => candidate.health.status !== 'unhealthy') })).filter((group) => group.candidates.length);
-      const keptCount = kept.reduce((count, group) => count + group.candidates.length, 0);
-      if (keptCount) {
-        if (keptCount < total) diagnostics.push('health-filtered');
-        groups = kept;
-      } else if (total) {
-        const first = groups.find((group) => group.candidates.length);
-        const best = Math.max(...first.candidates.map((candidate) => candidate.health.score ?? -1));
-        groups = [{ ...first, candidates: first.candidates.filter((candidate) => (candidate.health.score ?? -1) === best).sort((a, b) => a.account.id.localeCompare(b.account.id)) }];
-        diagnostics.push('health-filter-fallback');
-      }
-    } else if (step === 'quotaPool') {
+    if (step === 'quotaPool') {
       if (!groups.some((group) => group.candidates.some((candidate) => candidate.quota.pool !== 'unknown'))) diagnostics.push('quota-all-unknown');
       else groups = groups.flatMap((group) => ['hot','warm','unknown','reserve'].map((pool) => ({ ...group, candidates: group.candidates.filter((candidate) => candidate.quota.pool === pool), quota: pool })).filter((next) => next.candidates.length));
     } else if (step === 'healthSort') {
-      const layers = [[['available','insufficient'],'available-or-insufficient'],[['degraded'],'degraded'],[['unhealthy'],'unhealthy']];
-      groups = groups.flatMap((group) => layers.map(([statuses, health]) => ({ ...group, candidates: group.candidates.filter((candidate) => statuses.includes(candidate.health.status)), health })).filter((next) => next.candidates.length));
+      groups = groups.flatMap((group) => {
+        const rates = [...new Set(group.candidates.map((candidate) => candidate.health.successRate).filter((rate) => rate !== null))].sort((a,b) => b-a);
+        const rated = rates.map((rate) => ({ ...group, candidates: group.candidates.filter((candidate) => candidate.health.successRate === rate), health: 'rated' }));
+        const unknown = group.candidates.filter((candidate) => candidate.health.successRate === null);
+        return [...rated, ...(unknown.length ? [{ ...group, candidates: unknown, health: 'unknown' }] : [])];
+      });
     } else if (step === 'sticky') applySticky();
   }
   if (config.accountMode === 'sticky' && !config.accountPipeline.sticky) applySticky();
@@ -784,7 +1031,7 @@ function cachePoolMembership(list, candidates = null) {
   if (!cachePoolEnabled()) return null;
   candidates ||= pipelineCandidates(list);
   const size = configuredCachePoolSize();
-  const activeCandidates = candidates.filter((candidate) => candidate.health.status !== 'unhealthy' && candidate.quota.pool !== 'reserve')
+  const activeCandidates = candidates.filter((candidate) => candidate.quota.pool !== 'reserve')
     .sort((left, right) => (left.account.priority || 100) - (right.account.priority || 100) || (left.account.id < right.account.id ? -1 : left.account.id > right.account.id ? 1 : 0))
     .slice(0, size);
   const activeIds = new Set(activeCandidates.map((candidate) => candidate.account.id));
@@ -803,15 +1050,14 @@ function cachePoolRank(accounts, identity, mode) {
   }
   return strategyRank(mode, accounts);
 }
-function cacheHealthLayer(status) {
-  if (status === 'available' || status === 'insufficient') return 'available-or-insufficient';
-  return status === 'degraded' || status === 'unhealthy' ? status : 'ordinary';
+function cacheHealthLayer(health) {
+  return health?.successRate === null ? 'unknown' : 'rated';
 }
 function cachePipelineFacts(plan, membership, candidate, tier, capacityFallback) {
   return {
     diagnostics: plan.diagnostics,
     selectedQuota: candidate?.quota.pool || 'unknown',
-    selectedHealth: cacheHealthLayer(candidate?.health.status),
+    selectedHealth: cacheHealthLayer(candidate?.health),
     capacityFallback,
     cachePoolSize: membership.size,
     cachePoolTier: tier,
@@ -1131,46 +1377,33 @@ function providerHealthState(modelId, upstream) {
   statuses[upstream] = state;
   return state;
 }
-function projectModelMeta(meta) {
+function projectModelMeta(meta, modelId) {
   if (!isPlainObject(meta)) return null;
   const upstreamStatus = {};
   for (const [provider, state] of Object.entries(isPlainObject(meta.upstreamStatus) ? meta.upstreamStatus : {})) {
-    if (/^[a-z0-9][a-z0-9._/-]{0,199}$/i.test(provider)) upstreamStatus[provider] = normalizeProviderHealthState(state);
+    if (/^[a-z0-9][a-z0-9._/-]{0,199}$/i.test(provider)) upstreamStatus[provider] = { ...normalizeProviderHealthState(state), success: successHealthProjection('provider-model', modelId, provider) };
   }
   return { ...meta, upstreamStatus };
 }
-function updateProviderHealth(modelId, upstream, { success = false, classification = null, note = '', cooldownOverrideMs = null } = {}, now = Date.now()) {
+function updateProviderHealth(modelId, upstream, { success = false, classification = null, note = '' } = {}, now = Date.now()) {
   if (!upstream) return 'none';
   const previous = providerHealthState(modelId, upstream);
   if (success) {
-    const action = previous.status !== 'ok' || previous.consecutiveFailures > 0 || previous.cooldownUntil > 0 ? 'recover' : 'success';
     (META.models[modelId].upstreamStatus ||= {})[upstream] = {
       ...previous, status: 'ok', checkedAt: now, lastSuccessAt: now,
-      consecutiveFailures: 0, cooldownUntil: 0, failureClass: null, note: boundedProviderNote(note || 'success'),
+      consecutiveFailures: 0, failureClass: null, note: boundedProviderNote(note || 'success'),
     };
-    return action;
+    return 'success';
   }
-  const scope = classification?.scope;
-  const failureClass = classification?.failureClass;
-  const affectsProvider = scope === 'provider' || scope === 'unknown';
-  if (!affectsProvider || !['rate_limit','server','network','timeout','unsupported'].includes(failureClass)) return 'none';
-  const failures = Math.min(PROVIDER_FAILURE_COUNT_MAX, previous.consecutiveFailures + 1);
-  let status = 'degraded', delayMs;
-  if (failureClass === 'rate_limit') {
-    status = 'limited';
-    delayMs = classification.retryAfterMs ?? Math.min(30 * 60e3, 60e3 * (2 ** Math.min(20, failures - 1)));
-  } else if (failureClass === 'unsupported') {
-    status = 'bad'; delayMs = 60 * 60e3;
-  } else {
-    delayMs = Number.isInteger(cooldownOverrideMs) && cooldownOverrideMs > 0
-      ? cooldownOverrideMs
-      : Math.min(2 * 60e3, 15e3 * (2 ** Math.min(20, failures - 1)));
-  }
+  const scope = classification?.scope, failureClass = classification?.failureClass;
+  if (scope !== 'provider' || !['rate_limit','server','network','timeout','unsupported'].includes(failureClass)) return 'none';
+  const status = failureClass === 'rate_limit' ? 'limited' : failureClass === 'unsupported' ? 'bad' : 'degraded';
   (META.models[modelId].upstreamStatus ||= {})[upstream] = {
-    ...previous, status, checkedAt: now, lastFailureAt: now, consecutiveFailures: failures,
-    cooldownUntil: now + delayMs, failureClass, note: boundedProviderNote(note || `${classification.evidence || 'failure'}:${failureClass}`),
+    ...previous, status, checkedAt: now, lastFailureAt: now,
+    consecutiveFailures: Math.min(PROVIDER_FAILURE_COUNT_MAX, previous.consecutiveFailures + 1),
+    failureClass, note: boundedProviderNote(note || `${classification.evidence || 'failure'}:${failureClass}`),
   };
-  return 'cooldown';
+  return 'degrade';
 }
 
 // 无已知渠道的 auto/unattributed 兼容请求若收到网关返回的可用清单，则只合并为后续请求的稳定探测顺序。
@@ -1214,11 +1447,8 @@ async function validateUpstreams(modelId, acc) {
         note = safeReason(msg);
         if (httpStatus === 401 || status === 'auth') { accountFault = 'auth'; status = 'unknown'; }
         else if (/quota\s*(?:exceeded|exhausted)|subscription\s*(?:limit|expired)/i.test(msg)) { accountFault = 'quota'; status = 'unknown'; }
-        else if (status === 'limited') updateProviderHealth(modelId, slug, { classification: { scope: 'provider', evidence: 'probe_rate_limit', failureClass: 'rate_limit', retryAfterMs: null }, note });
-        else if (status === 'bad') updateProviderHealth(modelId, slug, { classification: { scope: 'provider', evidence: 'probe_unsupported', failureClass: 'unsupported', retryAfterMs: null }, note });
       } else if (json?.data?.choices || json?.choices) {
         status = 'ok';
-        updateProviderHealth(modelId, slug, { success: true, note: 'validation success' });
       }
       results[slug] = { status, ...(accountFault ? { accountFault } : {}), ms: Date.now() - t0, note };
     }));
@@ -1316,6 +1546,24 @@ function mergeAggregate(target, delta) {
   target.lastUsedAt = Math.max(target.lastUsedAt, delta.lastUsedAt); target.lastErrorAt = Math.max(target.lastErrorAt, delta.lastErrorAt);
 }
 function mergeHealth(target, delta) { for (const key of HEALTH_FIELDS) target[key] += delta[key]; }
+function addSuccessCounter(health, key, amount = 1) {
+  if (!amount || health[key] === null) return;
+  if (!Number.isSafeInteger(amount) || amount < 0 || health[key] > Number.MAX_SAFE_INTEGER - amount) {
+    health[key] = null;
+    if (!health.overflowFields.includes(key)) health.overflowFields.push(key);
+  } else health[key] += amount;
+}
+function mergeSuccessHealth(target, delta) {
+  for (const key of SUCCESS_FIELDS) if (delta[key] === null) { target[key] = null; if (!target.overflowFields.includes(key)) target.overflowFields.push(key); } else addSuccessCounter(target, key, delta[key]);
+}
+function successHealthCell(map, key) {
+  if (!Object.hasOwn(map, key)) Object.defineProperty(map, key, { value: emptySuccessHealth(), enumerable: true, configurable: true, writable: true });
+  return map[key];
+}
+function providerSuccessHealthCell(bucket, modelId, provider) {
+  const byModel = (bucket.providerHealth[modelId] ||= {});
+  return successHealthCell(byModel, provider);
+}
 function classifyHealth(trace, { success = false, clientDisconnect = false } = {}) {
   if (clientDisconnect) return null;
   if (success) return { penaltyUnits: 0, class: null, error: false };
@@ -1329,17 +1577,21 @@ function classifyHealth(trace, { success = false, clientDisconnect = false } = {
   return { penaltyUnits: 5, class: 'other', error: true };
 }
 function pruneStatistics(now = Date.now()) {
-  const stats = META.statistics, minMinute = Math.floor(now / 60000) - 1439;
+  const stats = META.statistics, coverage = stats.recentCoverage, minMinute = Math.floor(now / 60000) - 1439;
   stats.minuteBuckets = stats.minuteBuckets.filter((bucket) => bucket.minute >= minMinute);
-  for (const [id, minute] of Object.entries(stats.recentCoverage.accountIncompleteAt)) if (minute < minMinute) delete stats.recentCoverage.accountIncompleteAt[id];
-  for (const [id, minute] of Object.entries(stats.recentCoverage.modelIncompleteAt)) if (minute < minMinute) delete stats.recentCoverage.modelIncompleteAt[id];
-  let accountCells = stats.minuteBuckets.reduce((sum,bucket) => sum + new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health)]).size, 0);
+  for (const field of ['accountIncompleteAt','accountHealthIncompleteAt','modelIncompleteAt']) for (const [id, minute] of Object.entries(coverage[field] || {})) if (minute < minMinute) delete coverage[field][id];
+  for (const [modelId, providers] of Object.entries(coverage.providerHealthIncompleteAt || {})) {
+    for (const [provider, minute] of Object.entries(providers)) if (minute < minMinute) delete providers[provider];
+    if (!Object.keys(providers).length) delete coverage.providerHealthIncompleteAt[modelId];
+  }
+  let accountCells = stats.minuteBuckets.reduce((sum,bucket) => sum + new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health),...Object.keys(bucket.accountHealth)]).size, 0);
   for (const bucket of stats.minuteBuckets) {
     if (accountCells <= MAX_ACCOUNT_MINUTE_CELLS) break;
-    for (const id of new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health)])) {
+    for (const id of new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health),...Object.keys(bucket.accountHealth)])) {
       if (accountCells-- <= MAX_ACCOUNT_MINUTE_CELLS) break;
-      delete bucket.accounts[id]; delete bucket.health[id]; stats.recentCoverage.droppedAccountMinuteCells++;
-      stats.recentCoverage.accountIncompleteAt[id] = Math.max(stats.recentCoverage.accountIncompleteAt[id] || 0, bucket.minute);
+      delete bucket.accounts[id]; delete bucket.health[id]; delete bucket.accountHealth[id]; coverage.droppedAccountMinuteCells++;
+      coverage.accountIncompleteAt[id] = Math.max(coverage.accountIncompleteAt[id] || 0, bucket.minute);
+      coverage.accountHealthIncompleteAt[id] = Math.max(coverage.accountHealthIncompleteAt[id] || 0, bucket.minute);
     }
   }
   let modelCells = stats.minuteBuckets.reduce((sum,bucket) => sum + Object.keys(bucket.models).length, 0);
@@ -1347,16 +1599,25 @@ function pruneStatistics(now = Date.now()) {
     if (modelCells <= MAX_MODEL_MINUTE_CELLS) break;
     for (const id of Object.keys(bucket.models)) {
       if (modelCells-- <= MAX_MODEL_MINUTE_CELLS) break;
-      delete bucket.models[id]; stats.recentCoverage.droppedModelMinuteCells++;
-      stats.recentCoverage.modelIncompleteAt[id] = Math.max(stats.recentCoverage.modelIncompleteAt[id] || 0, bucket.minute);
+      delete bucket.models[id]; coverage.droppedModelMinuteCells++;
+      coverage.modelIncompleteAt[id] = Math.max(coverage.modelIncompleteAt[id] || 0, bucket.minute);
     }
+  }
+  let providerCells = stats.minuteBuckets.reduce((sum,bucket) => sum + Object.values(bucket.providerHealth).reduce((count, providers) => count + Object.keys(providers).length, 0), 0);
+  providerPrune: for (const bucket of stats.minuteBuckets) for (const [modelId, providers] of Object.entries(bucket.providerHealth)) for (const provider of Object.keys(providers)) {
+    if (providerCells <= MAX_PROVIDER_HEALTH_MINUTE_CELLS) break providerPrune;
+    providerCells--;
+    delete providers[provider]; coverage.droppedProviderHealthMinuteCells++;
+    const incomplete = (coverage.providerHealthIncompleteAt[modelId] ||= {});
+    incomplete[provider] = Math.max(incomplete[provider] || 0, bucket.minute);
+    if (!Object.keys(providers).length) delete bucket.providerHealth[modelId];
   }
 }
 function commitStatistics({ ts = Date.now(), modelId = null, globalError = false, usage = null, segments = [], clientDisconnect = false, affinityConfidence = 'none' }) {
   const stats = META.statistics; pruneStatistics(ts);
   const minute = Math.floor(ts / 60000);
   let bucket = stats.minuteBuckets.at(-1);
-  if (!bucket || bucket.minute !== minute) { bucket = { minute, global: emptyAggregate(), accounts: {}, health: {}, models: {} }; stats.minuteBuckets.push(bucket); }
+  if (!bucket || bucket.minute !== minute) { bucket = { minute, global: emptyAggregate(), accounts: {}, health: {}, models: {}, accountHealth: {}, providerHealth: {} }; stats.minuteBuckets.push(bucket); }
   const globalDelta = emptyAggregate(); addCounter(globalDelta, 'requests'); globalDelta.lastUsedAt = ts;
   if (globalError) { addCounter(globalDelta, 'errors'); globalDelta.lastErrorAt = ts; }
   const globalTrace = segments.flatMap((segment) => segment.trace || []);
@@ -1368,10 +1629,18 @@ function commitStatistics({ ts = Date.now(), modelId = null, globalError = false
     if (segment.error) { addCounter(delta, 'errors'); delta.lastErrorAt = ts; }
     if (segment.usage) addUsage(delta, segment.usage);
     addRoutingSignals(delta, affinityConfidence, segment.trace || []);
-    const lifetime = aggregateCell(stats.lifetime.accounts, segment.accountId); mergeAggregate(lifetime, delta);
-    const recent = aggregateCell(bucket.accounts, segment.accountId); mergeAggregate(recent, delta);
-    const result = classifyHealth(segment.trace, { success: segment.success, clientDisconnect });
-    if (result) { const hd = emptyHealth(); hd.results = 1; hd.penaltyUnits = result.penaltyUnits; if (result.error) hd.errors = 1; if (result.class) hd[result.class] = 1; mergeHealth((bucket.health[segment.accountId] ||= emptyHealth()), hd); }
+    mergeAggregate(aggregateCell(stats.lifetime.accounts, segment.accountId), delta);
+    mergeAggregate(aggregateCell(bucket.accounts, segment.accountId), delta);
+    if (!clientDisconnect) {
+      const degraded = (segment.trace || []).some((attempt) => attempt.ruleScope === 'account' && attempt.ruleAction === 'degrade');
+      const sample = degraded ? 'degrades' : segment.success ? 'successes' : null;
+      if (sample) addSuccessCounter(successHealthCell(bucket.accountHealth, segment.accountId), sample);
+    }
+  }
+  if (!clientDisconnect && validStatisticModelId(modelId)) for (const attempt of globalTrace) {
+    if (!attempt.upstream) continue;
+    const sample = attempt.status === 200 ? 'successes' : attempt.ruleScope === 'provider-model' && attempt.ruleAction === 'degrade' ? 'degrades' : null;
+    if (sample) addSuccessCounter(providerSuccessHealthCell(bucket, modelId, attempt.upstream), sample);
   }
   pruneStatistics(ts); saveMeta();
 }
@@ -1408,15 +1677,46 @@ function ratio(numerator, denominator, valid = true) { return valid && Number.is
 function projectAggregate(aggregate) {
   return { ...aggregate, cacheTokenRatio: ratio(aggregate.cacheInputCachedTokens, aggregate.cacheInputTokens, aggregate.cacheInputCachedTokens <= aggregate.cacheInputTokens), cacheHitRequestRate: ratio(aggregate.cacheHitRequests, aggregate.cacheKnownRequests) };
 }
+function aggregateSuccessHealth(scope, id, provider = null, now = Date.now()) {
+  const out = emptySuccessHealth(), min = Math.floor(now / 60000) - 1439;
+  for (const bucket of META.statistics.minuteBuckets) {
+    if (bucket.minute < min) continue;
+    const delta = scope === 'account' ? bucket.accountHealth?.[id] : bucket.providerHealth?.[id]?.[provider];
+    if (delta) mergeSuccessHealth(out, delta);
+  }
+  return out;
+}
+function successHealthProjection(scope, id, provider = null, now = Date.now()) {
+  const health = aggregateSuccessHealth(scope, id, provider, now), coverage = META.statistics.recentCoverage, min = Math.floor(now / 60000) - 1439;
+  const start = scope === 'account' ? coverage.accountHealthTrackingStartedMinute : coverage.providerHealthTrackingStartedMinute;
+  const incompleteAt = scope === 'account' ? coverage.accountHealthIncompleteAt?.[id] : coverage.providerHealthIncompleteAt?.[id]?.[provider];
+  const coverageFromMinute = Math.max(min, start, incompleteAt === undefined ? min : incompleteAt + 1);
+  const samples = health.successes === null || health.degrades === null || health.successes > Number.MAX_SAFE_INTEGER - health.degrades ? null : health.successes + health.degrades;
+  return {
+    successRate: samples && Number.isSafeInteger(samples) ? health.successes / samples : null,
+    successes: health.successes,
+    degrades: health.degrades,
+    samples,
+    coverageComplete: start <= min && incompleteAt === undefined,
+    coverageFrom: coverageFromMinute * 60000,
+  };
+}
 function healthProjection(account, now = Date.now()) {
-  const { health } = aggregateRange(account.id, now), incomplete = Object.prototype.hasOwnProperty.call(META.statistics.recentCoverage.accountIncompleteAt, account.id);
-  const state = getAccountState(account.id); let status, score = health.results ? 100 - (health.penaltyUnits / 10 / health.results * 100) : null;
-  if (account.enabled === false) status = 'disabled'; else if (state?.banned) status = 'banned'; else if (state?.cooldownUntil > now) status = 'cooling'; else if (incomplete || health.results < 5) { status = 'insufficient'; score = null; } else if (score >= 80) status = 'available'; else if (score >= 50) status = 'degraded'; else status = 'unhealthy';
-  return { status, score, results: health.results, penaltyUnits: health.penaltyUnits, coverageComplete: !incomplete };
+  const state = getAccountState(account.id);
+  return {
+    ...successHealthProjection('account', account.id, null, now),
+    disabled: account.enabled === false,
+    hardQuarantined: state?.hardQuarantined === true || state?.banned === true,
+    cooling: Number(state?.cooldownUntil) > now,
+    cooldownUntil: Number(state?.cooldownUntil) > now ? state.cooldownUntil : null,
+  };
 }
 const AFFINITY_KEY_TYPES = new Set(['parent_session','parent_thread','parent_conversation','parent_agent','prompt_cache_key','session_id','thread_id','conversation_id','agent_id','message_hmac','none']);
 const AFFINITY_CONFIDENCE = new Set(['explicit','fallback','none']);
 const UPSTREAM_PROMPT_KEY_SOURCES = new Set(['caller_prompt_cache_key','caller_session_id','caller_invalid','derived_codex','derived_claude','none']);
+const PIPELINE_DIAGNOSTICS = new Set(['quota-all-unknown']);
+const PIPELINE_QUOTA_POOLS = new Set(['ordinary','hot','warm','unknown','reserve']);
+const PIPELINE_HEALTH_LAYERS = new Set(['rated','unknown']);
 function record(modelId, info, detail = detailContext.getStore()) {
   const ts = Date.now();
   META.models[modelId] = { ...(META.models[modelId] || {}), provider: info.provider, canonical: info.canonical, lastMs: info.ms };
@@ -1441,11 +1741,18 @@ function record(modelId, info, detail = detailContext.getStore()) {
     preferredAccountId: info.preferredAccountId || null,
     preferredAccountName: info.preferredAccountName || null, accountId: info.accountId || null, accountName: info.account || null,
     selectionReason: info.selectionReason || null, overflow: !!info.overflow,
-    pipelineSteps: Array.isArray(info.pipeline?.diagnostics) ? info.pipeline.diagnostics.slice(0, 8) : [], selectedQuotaPool: info.pipeline?.selectedQuota || null, selectedHealthLayer: info.pipeline?.selectedHealth || null, capacityFallback: !!info.pipeline?.capacityFallback,
+    pipelineSteps: Array.isArray(info.pipeline?.diagnostics) ? info.pipeline.diagnostics.filter((value) => PIPELINE_DIAGNOSTICS.has(value)).slice(0, 8) : [],
+    selectedQuotaPool: PIPELINE_QUOTA_POOLS.has(info.pipeline?.selectedQuota) ? info.pipeline.selectedQuota : null,
+    selectedHealthLayer: PIPELINE_HEALTH_LAYERS.has(info.pipeline?.selectedHealth) ? info.pipeline.selectedHealth : null,
+    capacityFallback: !!info.pipeline?.capacityFallback,
     cachePoolSize: Number.isInteger(info.pipeline?.cachePoolSize) ? info.pipeline.cachePoolSize : configuredCachePoolSize(), cachePoolTier: ['active','standby'].includes(info.pipeline?.cachePoolTier) ? info.pipeline.cachePoolTier : null, cachePoolFallback: info.pipeline?.cachePoolFallback === true,
     targetProviders: Array.isArray(info.targets) ? info.targets : [], actualProvider: info.provider || null,
     attempts: Array.isArray(info.trace) ? info.trace.map((t) => ({
-      provider: t.upstream || 'auto', status: t.status, upstreamStatus: t.upstreamStatus, ms: t.ms, account: t.account, action: t.action || null,
+      provider: t.upstream || 'auto', status: t.status, upstreamStatus: t.upstreamStatus, ms: t.ms, account: t.account, action: ERROR_RULE_ACTIONS.has(t.action) ? t.action : null,
+      ruleId: typeof t.ruleId === 'string' && ERROR_RULE_ID.test(t.ruleId) ? t.ruleId : null,
+      ruleScope: ERROR_RULE_SCOPES.has(t.ruleScope) ? t.ruleScope : null,
+      ruleAction: ERROR_RULE_ACTIONS.has(t.ruleAction) ? t.ruleAction : null,
+      matchedBy: Array.isArray(t.matchedBy) ? t.matchedBy.filter((value) => ['status','body','header','provider','model','default'].includes(value)).slice(0, 5) : [],
       providerCircuitAction: ['cooldown','half-open-success','half-open-failed'].includes(t.providerCircuitAction) ? t.providerCircuitAction : null,
       errorScope: t.errorScope || null, scopeEvidence: t.scopeEvidence || null, failureClass: t.failureClass || null,
       healthAction: t.healthAction || 'none', retryAfterMs: t.retryAfterMs ?? null,
@@ -1463,7 +1770,11 @@ function record(modelId, info, detail = detailContext.getStore()) {
       accountId: attempt.accountId || info.accountId || null, accountName: attempt.account || info.account || null, attemptIndex,
       targetProvider: attempt.upstream || null, providerPath: (info.trace || []).slice(0, attemptIndex + 1).map((t) => t.upstream || 'auto'),
       status: attempt.normalizedStatus || attempt.status, upstreamStatus: attempt.upstreamStatus ?? null,
-      category: attempt.upstreamStatus === 0 ? (info.proxyError ? 'proxy' : 'network') : 'upstream', reason: safeReason(attempt.note, info.sensitiveValues), accountAction: attempt.action || null,
+      category: attempt.upstreamStatus === 0 ? (info.proxyError ? 'proxy' : 'network') : 'upstream', reason: safeReason(attempt.note, info.sensitiveValues), accountAction: attempt.ruleScope === 'account' ? attempt.ruleAction || null : null,
+      ruleId: typeof attempt.ruleId === 'string' && ERROR_RULE_ID.test(attempt.ruleId) ? attempt.ruleId : null,
+      ruleScope: ERROR_RULE_SCOPES.has(attempt.ruleScope) ? attempt.ruleScope : null,
+      ruleAction: ERROR_RULE_ACTIONS.has(attempt.ruleAction) ? attempt.ruleAction : null,
+      matchedBy: Array.isArray(attempt.matchedBy) ? attempt.matchedBy.filter((value) => ['status','body','header','provider','model','default'].includes(value)).slice(0, 5) : [],
       errorScope: attempt.errorScope || null, scopeEvidence: attempt.scopeEvidence || null, failureClass: attempt.failureClass || null,
       healthAction: attempt.healthAction || 'none', retryAfterMs: attempt.retryAfterMs ?? null,
       responseContentType: attempt.responseContentType || null, responseBytes: Number.isSafeInteger(attempt.responseBytes) ? attempt.responseBytes : null }));
@@ -2069,17 +2380,14 @@ function buildProviderAttempts(modelId, cfg = {}, now = Date.now()) {
   }
   const allowed = sourceOrder.filter((provider) => !exclude.has(provider));
   if (!allowed.length) return { attempts: [], configuredOrder, plannedOrder: [], failOpen: false, source, allExcluded: true };
-  const eligible = allowed.filter((provider) => providerHealthState(modelId, provider).cooldownUntil <= now);
-  let failOpen = false;
-  let planned = eligible;
+  let planned = allowed.filter((provider) => { const state = providerHealthState(modelId, provider); return !state.hardQuarantined && state.cooldownUntil <= now; });
   if (!planned.length) {
-    failOpen = true;
-    planned = [allowed.map((provider, index) => ({ provider, index, cooldownUntil: providerHealthState(modelId, provider).cooldownUntil }))
-      .sort((a, b) => a.cooldownUntil - b.cooldownUntil || a.index - b.index)[0].provider];
+    const future = allowed.map((provider) => providerHealthState(modelId, provider)).filter((state) => !state.hardQuarantined && state.cooldownUntil > now).map((state) => state.cooldownUntil);
+    return { attempts: [], configuredOrder, plannedOrder: [], failOpen: false, source, allExcluded: false, retryAfter: future.length ? retryAfterSeconds(Math.min(...future) - now) : null };
   }
   if (cfg.maxRetries !== null && cfg.maxRetries !== undefined) planned = planned.slice(0, Math.max(1, Number(cfg.maxRetries) + 1));
   const attempts = planned.map((upstream) => ({ upstream, attribution: 'named', sort: cfg.sort || null }));
-  return { attempts, configuredOrder, plannedOrder: [...planned], failOpen, source, allExcluded: false };
+  return { attempts, configuredOrder, plannedOrder: [...planned], failOpen: false, source, allExcluded: false };
 }
 function providerCircuitKey(accountId, modelId, provider) { return `${accountId}\0${modelId}\0${provider}`; }
 function providerCircuitRouteKey(accountId, modelId) { return `${accountId}\0${modelId}`; }
@@ -2106,7 +2414,7 @@ function ensureProviderCircuitCapacity(now = Date.now()) {
 }
 function planProviderAttempts(modelId, cfg, account) {
   const base = buildProviderAttempts(modelId, cfg), attempts = base.attempts;
-  if (!attempts.length) return { ...base, retryAfter: null };
+  if (!attempts.length) return { ...base, retryAfter: base.retryAfter ?? null };
   const now = Date.now(), cooldownMs = Number(cfg?.providerCooldownMs) || 0;
   const accountGeneration = providerCircuitAccountGenerations.get(account.id) || 0;
   const routeKey = providerCircuitRouteKey(account.id, modelId), routeGeneration = providerCircuitRouteGenerations.get(routeKey) || 0;
@@ -2283,42 +2591,74 @@ function resolveModelConfig(account, modelId) {
   return config.perModel[modelId] || {};
 }
 const MAX_RULE_FAILURE_TEXT = 16 * 1024;
-let contentRuleCacheSource = null, contentRuleCache = [];
-function compiledContentRules() {
-  if (contentRuleCacheSource !== config.accountContentErrorRules) {
-    contentRuleCacheSource = config.accountContentErrorRules;
-    contentRuleCache = (config.accountContentErrorRules || []).map((rule) => ({ ...rule, needle: rule.contains.toLowerCase() }));
-  }
-  return contentRuleCache;
-}
 function normalizeFailureForRules(value, sensitiveValues = []) {
   return safeReason(errText(value), sensitiveValues).replace(/[\r\n\t]+/g, ' ').slice(0, MAX_RULE_FAILURE_TEXT);
 }
-function projectedAccountAction(statusCode, rule) {
-  return { statusCode, action: rule.action, ...(rule.action === 'cooldown' ? { cooldownMs: rule.cooldownMs } : {}) };
-}
-function accountActionFor(result, classification, sensitiveValues = []) {
-  const statusCode = Number(result?.normalizedStatus || result?.status);
-  if (!Number.isInteger(statusCode) || statusCode < 400 || statusCode > 599) return null;
-  const failureText = normalizeFailureForRules(result?.failureText ?? result?.out?.error?.message ?? result?.body?.error?.message ?? result?.error ?? result?.netError ?? '', sensitiveValues).toLowerCase();
-  if (failureText) for (const rule of compiledContentRules()) {
-    if (rule.statusMin !== undefined && (statusCode < rule.statusMin || statusCode > rule.statusMax)) continue;
-    if (failureText.includes(rule.needle)) return projectedAccountAction(statusCode, rule);
+function responseHeaderForRule(headers, name) {
+  if (!headers) return null;
+  for (const [key, raw] of Object.entries(headers)) if (key.toLowerCase() === name.toLowerCase()) {
+    const value = Array.isArray(raw) ? raw.join(', ') : String(raw);
+    return value.length <= 4096 && !/[\x00-\x08\x0b-\x1f\x7f]/.test(value) ? value : null;
   }
-  if (statusCode === 429 && classification?.scope !== 'account') return null;
-  const rule = config.accountErrorRules?.[String(statusCode)];
-  return rule ? projectedAccountAction(statusCode, rule) : null;
+  return null;
 }
-function persistAccountAction(account, action, reason, sensitiveValues = []) {
-  if (!account?.id || !action || action.action === 'ignore') return;
+function resetDelayForRule(reset, headers, now = Date.now()) {
+  const fallback = parseStrictDuration(reset.fallback), maximum = parseStrictDuration(reset.max);
+  let delay = null;
+  if (reset.header) {
+    const raw = responseHeaderForRule(headers, reset.header), text = raw?.trim();
+    if (text) {
+      if (reset.format === 'retry-after') {
+        if (/^\d+$/.test(text)) delay = Number(text) * 1000;
+        else if (/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s\d{2}\s[A-Za-z]{3}\s\d{4}\s\d{2}:\d{2}:\d{2}\sGMT$/.test(text)) { const timestamp = Date.parse(text); if (Number.isFinite(timestamp)) delay = timestamp - now; }
+      } else if (reset.format === 'unix-seconds' && /^\d+$/.test(text)) delay = Number(text) * 1000 - now;
+      else if (reset.format === 'unix-milliseconds' && /^\d+$/.test(text)) delay = Number(text) - now;
+      else if (reset.format === 'duration') delay = parseStrictDuration(text);
+    }
+  }
+  if (!Number.isSafeInteger(delay) || delay <= 0) delay = fallback;
+  return Math.max(1, Math.min(maximum, delay));
+}
+function matchErrorRule({ result, classification, modelId, provider, sensitiveValues = [] }) {
+  const statusCode = Number(result?.normalizedStatus || result?.status);
+  const body = normalizeFailureForRules(result?.failureText ?? result?.structuredError ?? result?.out?.error?.message ?? result?.body?.error?.message ?? result?.error ?? result?.netError ?? '', sensitiveValues).toLowerCase();
+  for (const rule of config.errorRules || []) {
+    if (rule.scope === 'provider-model' && !provider) continue;
+    if (rule.providers && (!provider || !rule.providers.some((value) => value.toLowerCase() === provider.toLowerCase()))) continue;
+    if (rule.models && !rule.models.some((value) => value.toLowerCase() === modelId.toLowerCase())) continue;
+    const matchedBy = [];
+    if (rule.when.statuses) { if (!rule.when.statuses.includes(statusCode)) continue; matchedBy.push('status'); }
+    if (rule.when.body_contains) {
+      const needles = Array.isArray(rule.when.body_contains) ? rule.when.body_contains : [rule.when.body_contains];
+      if (!body || !needles.some((needle) => body.includes(needle.toLowerCase()))) continue;
+      matchedBy.push('body');
+    }
+    if (rule.when.header) {
+      const value = responseHeaderForRule(result?.responseHeaders, rule.when.header.name);
+      if (value === null || (rule.when.header.contains && !value.toLowerCase().includes(rule.when.header.contains.toLowerCase()))) continue;
+      matchedBy.push('header');
+    }
+    if (rule.providers) matchedBy.push('provider');
+    if (rule.models) matchedBy.push('model');
+    return { ruleId: rule.id, scope: rule.scope, action: rule.action, statusCode, matchedBy, ...(rule.action === 'cooldown' ? { cooldownMs: resetDelayForRule(rule.reset, result?.responseHeaders) } : {}) };
+  }
+  if (classification?.scope === 'account' && ['auth','rate_limit','network'].includes(classification.failureClass)) return { ruleId: null, scope: 'account', action: 'degrade', statusCode, matchedBy: ['default'] };
+  if (provider && classification?.scope === 'provider' && ['rate_limit','server','network','timeout','unsupported'].includes(classification.failureClass)) return { ruleId: null, scope: 'provider-model', action: 'degrade', statusCode, matchedBy: ['default'] };
+  return { ruleId: null, scope: null, action: 'ignore', statusCode, matchedBy: ['default'] };
+}
+function persistAccountAction(account, action) {
+  if (!account?.id || !action || action.scope !== 'account' || !['cooldown','hard-quarantine'].includes(action.action)) return;
   const now = Date.now();
-  const state = { banned: false, cooldownUntil: 0, statusCode: action.statusCode, reason: safeReason(reason, sensitiveValues), updatedAt: now };
-  if (action.action === 'cooldown') state.cooldownUntil = now + Math.max(1, Number(action.cooldownMs) || 1);
-  if (action.action === 'ban') state.banned = true;
-  META.accountStates ||= {};
-  META.accountStates[account.id] = state;
+  const state = { banned: action.action === 'hard-quarantine', hardQuarantined: action.action === 'hard-quarantine', cooldownUntil: action.action === 'cooldown' ? now + action.cooldownMs : 0, statusCode: action.statusCode, reason: action.ruleId ? `rule:${action.ruleId}` : 'rule', ruleId: action.ruleId, updatedAt: now };
+  META.accountStates ||= {}; META.accountStates[account.id] = state;
   clearProviderCircuitForAccount(account.id);
   try { saveMeta(); } catch (error) { console.error(`[账号] 状态持久化失败：${safeReason(error.message)}`); }
+}
+function persistProviderAction(modelId, provider, action) {
+  if (!provider || action?.scope !== 'provider-model' || !['cooldown','hard-quarantine'].includes(action.action)) return;
+  const previous = providerHealthState(modelId, provider), now = Date.now();
+  (META.models[modelId].upstreamStatus ||= {})[provider] = { ...previous, cooldownUntil: action.action === 'cooldown' ? now + action.cooldownMs : 0, hardQuarantined: action.action === 'hard-quarantine', ruleId: action.ruleId, statusCode: action.statusCode, updatedAt: now, note: action.ruleId ? `rule:${action.ruleId}` : 'rule' };
+  try { saveMeta(); } catch (error) { console.error(`[Provider] 状态持久化失败：${safeReason(error.message)}`); }
 }
 function responseHeadersFor(account, forwardedHeaders) {
   return { ...forwardedHeaders, ...(account?.headers || {}), 'Content-Type': 'application/json', Authorization: `Bearer ${account.key}` };
@@ -2336,61 +2676,62 @@ async function attemptOnce(modelId, body, attempt, account, forwardedHeaders, si
     try { json = JSON.parse(res.text); } catch {}
     if (!json) {
       const status = normalizeStatus(res.status, null, 502);
-      return { status, upstreamStatus: res.status, normalizedStatus: status, out: { error: { message: 'upstream returned non-JSON', type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter, responseContentType, responseBytes, netError: 'non-JSON response', terminalOrigin: res.status >= 400 ? 'upstream_http' : 'upstream_envelope', acc: account };
+      return { status, upstreamStatus: res.status, normalizedStatus: status, out: { error: { message: 'upstream returned non-JSON', type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter, responseHeaders: res.headers, responseContentType, responseBytes, netError: 'non-JSON response', terminalOrigin: res.status >= 400 ? 'upstream_http' : 'upstream_envelope', acc: account };
     }
     const un = unwrap(json, res.status);
-    return { status: un.status, upstreamStatus: un.upstreamStatus, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing, structuredError: upstreamErrorOf(json), retryAfter, responseContentType, responseBytes, netError: null, terminalOrigin: un.status === 200 ? 'success' : (res.status >= 400 ? 'upstream_http' : 'upstream_envelope'), acc: account };
+    return { status: un.status, upstreamStatus: un.upstreamStatus, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing, structuredError: upstreamErrorOf(json), retryAfter, responseHeaders: res.headers, responseContentType, responseBytes, netError: null, terminalOrigin: un.status === 200 ? 'success' : (res.status >= 400 ? 'upstream_http' : 'upstream_envelope'), acc: account };
   } catch (e) {
     const origin = /timeout/i.test(e.message) ? 'timeout' : account?.proxyUrl ? 'proxy' : 'network';
-    return { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${errText(e.message)}`, type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter: null, responseContentType: null, responseBytes: 0, netError: errText(e.message), terminalOrigin: origin, acc: account };
+    return { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${errText(e.message)}`, type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter: null, responseHeaders: {}, responseContentType: null, responseBytes: 0, netError: errText(e.message), terminalOrigin: origin, acc: account };
   }
 }
 function settleAttempt(modelId, attempt, result, account, { clientDisconnected = false, updateSuccess = true, cfg = {}, sensitiveValues = [] } = {}) {
   const currentGeneration = providerAttemptGenerationIsCurrent(modelId, account, attempt);
   if (clientDisconnected) {
-    const providerCircuitAction = currentGeneration
-      ? settleProviderCircuit(modelId, cfg, account, attempt, { status: 499, normalizedStatus: 499, netError: 'client cancelled', classification: { scope: 'request' } })
-      : null;
-    return { classification: null, accountAction: null, healthAction: 'none', providerCircuitAction };
+    const providerCircuitAction = currentGeneration ? settleProviderCircuit(modelId, cfg, account, attempt, { status: 499, normalizedStatus: 499, netError: 'client cancelled', classification: { scope: 'request' } }) : null;
+    return { classification: null, policy: null, accountAction: null, healthAction: 'none', providerCircuitAction };
   }
   if (result.status === 200) {
     const healthAction = updateSuccess && currentGeneration ? updateProviderHealth(modelId, attempt.upstream, { success: true }) : 'none';
     const providerCircuitAction = updateSuccess && currentGeneration ? settleProviderCircuit(modelId, cfg, account, attempt, result) : null;
-    return { classification: null, accountAction: null, healthAction, providerCircuitAction };
+    return { classification: null, policy: null, accountAction: null, healthAction, providerCircuitAction };
   }
   const classification = classifyAttemptFailure(result, attempt, account);
   result.classification = classification;
-  const accountAction = accountActionFor(result, classification, sensitiveValues);
-  const removesAccount = accountAction?.action === 'cooldown' || accountAction?.action === 'ban';
-  const cooldownOverrideMs = Number(cfg?.providerCooldownMs) > 0 ? Number(cfg.providerCooldownMs) : null;
-  const healthAction = currentGeneration && !removesAccount
-    ? updateProviderHealth(modelId, attempt.upstream, { classification, note: `${classification.evidence}:${classification.failureClass}`, cooldownOverrideMs })
-    : 'none';
+  const policy = matchErrorRule({ result, classification, modelId, provider: attempt.upstream, sensitiveValues });
+  const accountAction = policy.scope === 'account' && ['cooldown','hard-quarantine'].includes(policy.action) ? policy : null;
+  const removesAccount = !!accountAction;
+  if (currentGeneration && policy.scope === 'account') persistAccountAction(account, policy);
+  else if (currentGeneration && policy.scope === 'provider-model') persistProviderAction(modelId, attempt.upstream, policy);
+  const healthAction = currentGeneration ? (policy.action === 'degrade' ? 'degrade' : policy.action) : 'none';
+  if (currentGeneration && policy.scope === 'provider-model' && policy.action === 'degrade') updateProviderHealth(modelId, attempt.upstream, { classification, note: `${classification.evidence}:${classification.failureClass}` });
   const providerCircuitAction = currentGeneration && !removesAccount ? settleProviderCircuit(modelId, cfg, account, attempt, result) : null;
-  return { classification, accountAction, healthAction, providerCircuitAction };
+  return { classification, policy, accountAction, healthAction, providerCircuitAction };
 }
 function traceAttempt(attempt, result, account, ms, diagnostic) {
   return {
     upstream: attempt.upstream, status: result.status, upstreamStatus: result.upstreamStatus, normalizedStatus: result.normalizedStatus,
-    terminalOrigin: result.terminalOrigin, ms, note: result.note, account: account.name, accountId: account.id,
-    action: diagnostic.accountAction?.action || null, providerCircuitAction: diagnostic.providerCircuitAction || null,
+    terminalOrigin: result.terminalOrigin, ms, note: diagnostic.policy?.ruleId ? `rule:${diagnostic.policy.ruleId}` : result.note, account: account.name, accountId: account.id,
+    action: diagnostic.policy?.action || null, ruleId: diagnostic.policy?.ruleId || null, ruleScope: diagnostic.policy?.scope || null,
+    ruleAction: diagnostic.policy?.action || null, matchedBy: diagnostic.policy?.matchedBy || [],
+    providerCircuitAction: diagnostic.providerCircuitAction || null,
     errorScope: diagnostic.classification?.scope || null,
     scopeEvidence: diagnostic.classification?.evidence || null, failureClass: diagnostic.classification?.failureClass || null,
-    healthAction: diagnostic.healthAction || 'none', retryAfterMs: diagnostic.classification?.retryAfterMs ?? null,
+    healthAction: diagnostic.healthAction || 'none', retryAfterMs: diagnostic.policy?.cooldownMs ?? diagnostic.classification?.retryAfterMs ?? null,
     responseContentType: result.responseContentType || null, responseBytes: Number.isSafeInteger(result.responseBytes) ? result.responseBytes : null,
   };
 }
 
 // 两级重试：本函数固定一个账号，仅在该账号内按健康计划逐个尝试 provider。
-// 只有 account-scoped 错误命中 cooldown/ban 时，外层 handleChat 才能终止本链并最多换号一次。
+// 只有 account-scoped 错误命中 cooldown/hard-quarantine 时，外层 handleChat 才能终止本链并最多换号一次。
 async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream = false, attemptTimeoutMs = 120000, sensitiveValues = [] } = {}) {
   const t0 = Date.now();
   const plan = planProviderAttempts(modelId, cfg, account), attempts = plan.attempts;
   const trace = [];
   if (!attempts.length) {
     const allExcluded = plan.allExcluded === true;
-    return { status: 503, upstreamStatus: allExcluded ? null : 0, normalizedStatus: 503,
-      out: { error: { message: allExcluded ? 'no provider available after exclusions' : 'all configured providers are cooling down', type: 'upstream_error' } },
+    return { status: 503, upstreamStatus: null, normalizedStatus: 503,
+      out: { error: { message: allExcluded ? 'no provider available after exclusions' : 'no provider is currently eligible', type: 'upstream_error' } },
       routing: {}, acc: account, trace, t0, plan, retryAfter: plan.retryAfter || null, netError: null, accountAction: null, clientDisconnected: false };
   }
   let last = null;
@@ -2465,7 +2806,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
             const un = json ? unwrap(json, up.status) : { status: inferred, upstreamStatus: up.status, normalizedStatus: inferred, body: { error: { message: netError || 'upstream returned an invalid error response', type: 'upstream_error' } }, routing: {} };
             const result = {
               status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing,
-              structuredError: json ? upstreamErrorOf(json) : null, retryAfter: responseHeader(up.headers, 'retry-after'), responseContentType,
+              structuredError: json ? upstreamErrorOf(json) : null, retryAfter: responseHeader(up.headers, 'retry-after'), responseHeaders: up.headers, responseContentType,
               responseBytes: safeResponseBytes(text), netError: transportOrigin ? netError : null,
               terminalOrigin: up.status >= 400 ? 'upstream_http' : transportOrigin || 'upstream_envelope', acc: account,
             };
@@ -2474,20 +2815,20 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
             trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
             if (!attempt.upstream) learnAvailableProviders(modelId, result.note);
             last = { ...result, accountAction: diagnostic.accountAction, classification: diagnostic.classification };
-            if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'ban') break;
+            if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine') break;
             continue;
           }
           if (!up) {
             const origin = timedOut || /timeout/i.test(netError || '') ? 'timeout' : account.proxyUrl ? 'proxy' : 'network';
-            const result = { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${netError || 'no response'}`, type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter: null, responseContentType: null, responseBytes: 0, netError: netError || 'no response', terminalOrigin: origin, acc: account, note: netError || 'no response' };
+            const result = { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${netError || 'no response'}`, type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter: null, responseHeaders: {}, responseContentType: null, responseBytes: 0, netError: netError || 'no response', terminalOrigin: origin, acc: account, note: netError || 'no response' };
             const diagnostic = settleAttempt(modelId, attempt, result, account, { clientDisconnected: clientClosed, cfg, sensitiveValues });
             trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
             last = { ...result, accountAction: diagnostic.accountAction, classification: diagnostic.classification };
-            if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'ban') break;
+            if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine') break;
             continue;
           }
           keepCloseHook = true;
-          const result = { status: 200, upstreamStatus: 200, normalizedStatus: 200, terminalOrigin: 'success', responseContentType, responseBytes: safeResponseBytes(firstChunk), note: 'stream' };
+          const result = { status: 200, upstreamStatus: 200, normalizedStatus: 200, terminalOrigin: 'success', responseHeaders: up.headers, responseContentType, responseBytes: safeResponseBytes(firstChunk), note: 'stream' };
           const diagnostic = settleAttempt(modelId, attempt, result, account, { updateSuccess: false, cfg, sensitiveValues });
           trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
           return { status: 200, streamUp: up, streamHead: firstChunk, streamAttempt: attempt, acc: account, trace, t0, plan, started: true, cleanupClientClose };
@@ -2501,7 +2842,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
         if (result.status !== 200 && !attempt.upstream) learnAvailableProviders(modelId, result.note);
         last = { ...result, accountAction: diagnostic.accountAction, classification: diagnostic.classification };
         if (result.status === 200) break;
-        if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'ban') break;
+        if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine') break;
       } finally { clearTimeout(timer); }
     }
   } finally {
@@ -2584,12 +2925,8 @@ async function handleChat(req, res) {
       throw e;
     }
     const action = chain.accountAction;
-    if (action) {
-      const reason = chain.out?.error?.message || chain.netError || `upstream status ${chain.normalizedStatus || chain.status}`;
-      if (action.action !== 'ignore') persistAccountAction(account, action, reason, sensitiveValues);
-      accountActions.push({ account: account.name, action: action.action, statusCode: action.statusCode });
-    }
-    if (action && (action.action === 'cooldown' || action.action === 'ban') && !chain.started && accountAttempt === 0) {
+    if (action) accountActions.push({ account: account.name, action: action.action, statusCode: action.statusCode, ruleId: action.ruleId || null, scope: action.scope });
+    if (action && (action.action === 'cooldown' || action.action === 'hard-quarantine') && !chain.started && accountAttempt === 0) {
       excluded.add(account.id);
       lease.release();
       chainLease = null;
@@ -2630,19 +2967,19 @@ async function handleChat(req, res) {
       const attempt = chain.streamAttempt || { upstream: providerAttempt?.upstream || null };
       const disconnected = origin === 'client_disconnect';
       if (observed.error && providerAttempt) {
-        const result = { status: observed.normalizedStatus, upstreamStatus: 200, normalizedStatus: observed.normalizedStatus, routing: { finalProvider: observed.provider }, structuredError: observed.errorPayload, failureText: observed.error, retryAfter: null, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: 'upstream_envelope', note: safeReason(observed.error, sensitiveValues) };
+        const result = { status: observed.normalizedStatus, upstreamStatus: 200, normalizedStatus: observed.normalizedStatus, routing: { finalProvider: observed.provider }, structuredError: observed.errorPayload, failureText: observed.error, retryAfter: null, responseHeaders: up.headers, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: 'upstream_envelope', note: safeReason(observed.error, sensitiveValues) };
         const diagnostic = settleAttempt(modelId, attempt, result, acc, { cfg, sensitiveValues });
         Object.assign(providerAttempt, traceAttempt(attempt, result, acc, providerAttempt.ms, diagnostic));
         const action = diagnostic.accountAction;
-        if (action) { if (action.action !== 'ignore') persistAccountAction(acc, action, streamError, sensitiveValues); accountActions.push({ account: acc.name, action: action.action, statusCode: action.statusCode }); }
+        if (action) accountActions.push({ account: acc.name, action: action.action, statusCode: action.statusCode, ruleId: action.ruleId || null, scope: action.scope });
       } else if (error && !disconnected && providerAttempt) {
-        const result = { status: 502, upstreamStatus: 0, normalizedStatus: 502, routing: {}, structuredError: null, failureText: error, retryAfter: null, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: /timeout/i.test(String(error)) ? 'timeout' : acc.proxyUrl ? 'proxy' : 'network', note: 'stream transport error' };
+        const result = { status: 502, upstreamStatus: 0, normalizedStatus: 502, routing: {}, structuredError: null, failureText: error, retryAfter: null, responseHeaders: up.headers, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: /timeout/i.test(String(error)) ? 'timeout' : acc.proxyUrl ? 'proxy' : 'network', note: 'stream transport error' };
         const diagnostic = settleAttempt(modelId, attempt, result, acc, { cfg, sensitiveValues });
         Object.assign(providerAttempt, traceAttempt(attempt, result, acc, providerAttempt.ms, diagnostic));
         const action = diagnostic.accountAction;
-        if (action) { if (action.action !== 'ignore') persistAccountAction(acc, action, error, sensitiveValues); accountActions.push({ account: acc.name, action: action.action, statusCode: action.statusCode }); }
+        if (action) accountActions.push({ account: acc.name, action: action.action, statusCode: action.statusCode, ruleId: action.ruleId || null, scope: action.scope });
       } else if (!disconnected && providerAttempt) {
-        const result = { status: 200, upstreamStatus: 200, normalizedStatus: 200, routing: { finalProvider: observed.provider }, structuredError: null, retryAfter: null, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: 'success', note: 'stream' };
+        const result = { status: 200, upstreamStatus: 200, normalizedStatus: 200, routing: { finalProvider: observed.provider }, structuredError: null, retryAfter: null, responseHeaders: up.headers, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: 'success', note: 'stream' };
         const diagnostic = settleAttempt(modelId, attempt, result, acc, { cfg, sensitiveValues });
         Object.assign(providerAttempt, traceAttempt(attempt, result, acc, providerAttempt.ms, diagnostic));
       } else if (providerAttempt) {
@@ -2687,7 +3024,7 @@ async function handleChat(req, res) {
     requestId, requestedModel, resolvedModel: modelId, provider: routing.finalProvider || null, canonical: routing.canonicalSlug || null, ms: Date.now() - chain.t0, stream: false, result: disconnected ? 'client_cancelled' : status === 200 ? 'success' : 'failed',
     attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, error: disconnected ? null : status !== 200 ? safeOut.error.message : null,
     account: acc?.name || null, accountId: acc?.id || null, accountPath, accountActions, accountAction: chain.accountAction?.action || accountActions.at(-1)?.action || null, upstreamStatus: chain.upstreamStatus, normalizedStatus: chain.normalizedStatus, ...affinityFacts(usage),
-    strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, appliedHeaderNames: Object.keys(acc?.headers || {}), proxyError: !!acc?.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), errorCategory: chain.plan?.allExcluded ? 'routing' : null, sensitiveValues,
+    strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, appliedHeaderNames: Object.keys(acc?.headers || {}), proxyError: !!acc?.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), errorCategory: chain.plan?.attempts?.length === 0 ? 'routing' : null, sensitiveValues,
   });
   if (res.destroyed) return;
   res.writeHead(disconnected ? 499 : status, {
@@ -2761,7 +3098,7 @@ async function dispatch(req, res) {
       const ids = [...new Set([...config.knownModels, ...Object.keys(config.perModel || {}), ...Object.keys(account?.perModel || {})])];
       const sub = ids.map((id) => {
         const own = !!account && Object.prototype.hasOwnProperty.call(account.perModel || {}, id);
-        return { id, config: own ? account.perModel[id] : (config.perModel[id] || {}), configSource: account ? (own ? 'account' : 'inherited') : 'global', meta: projectModelMeta(META.models[id]) };
+        return { id, config: own ? account.perModel[id] : (config.perModel[id] || {}), configSource: account ? (own ? 'account' : 'inherited') : 'global', meta: projectModelMeta(META.models[id], id) };
       });
       return sendJSON(res, 200, { subscription: sub, catalogCount: cat.length, catalog: cat, proxyBase: publicProxyBase(), officialFetch: META.officialModelsFetch || null, accountId: account?.id || null });
     }
@@ -2851,7 +3188,7 @@ async function dispatch(req, res) {
       const store = p.endsWith('/errors') ? errorLogs : requestLogs;
       if (req.method === 'DELETE') { await store.clear(); return sendJSON(res, 200, { ok: true }); }
       const allowed = p.endsWith('/errors')
-        ? ['from','to','requestId','model','requestedModel','resolvedModel','account','accountId','accountName','status','upstreamStatus','category','provider','targetProvider','accountAction','errorScope','scopeEvidence','failureClass','healthAction','responseContentType']
+        ? ['from','to','requestId','model','requestedModel','resolvedModel','account','accountId','accountName','status','upstreamStatus','category','provider','targetProvider','accountAction','ruleId','ruleScope','ruleAction','errorScope','scopeEvidence','failureClass','healthAction','responseContentType']
         : ['from','to','requestId','model','requestedModel','resolvedModel','account','accountId','accountName','strategy','status','result','upstreamStatus','stream','provider','actualProvider','targetProviders','overflow','switched','accountAction','errorCategory'];
       const rawLimit = url.searchParams.get('limit') || '50', cursor = url.searchParams.get('cursor') || '';
       const allowedParams = new Set([...allowed, 'limit', 'cursor']);
@@ -2926,7 +3263,7 @@ async function dispatch(req, res) {
       return sendJSON(res, 200, {
         accounts: config.accounts.map((a) => { const recent = projectAggregate(aggregateRange(a.id).aggregate),lifetime=META.statistics.lifetime.accounts[a.id]; return { ...a, state: getAccountState(a.id), activeCount: activeCounts.get(a.id) || 0, health: healthProjection(a), quota: quotaProjection(a.id), cachePoolRole: cacheRoles.get(a.id) ?? null, statistics: { recent24h: recent, lifetimeRequests: lifetime ? lifetime.requests : 0, lifetimeErrors: lifetime ? lifetime.errors : 0 } }; }),
         mode: config.accountMode, active: config.activeAccount, concurrencyWaitMs: config.concurrencyWaitMs,
-        accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline,
+        errorRules: config.errorRules, accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline,
         stats: Object.fromEntries(config.accounts.map((a) => [a.name, { requests: META.statistics.lifetime.accounts[a.id]?.requests ?? 0 }])),
       });
     }
@@ -2936,11 +3273,17 @@ async function dispatch(req, res) {
       if (!ACCOUNT_MODES.has(body.mode)) return sendJSON(res, 400, { error: { message: 'invalid account mode' } });
       const wait = Number(body.concurrencyWaitMs ?? 2000);
       if (!Number.isInteger(wait) || wait < 0 || wait > 30000) return sendJSON(res, 400, { error: { message: 'concurrencyWaitMs must be an integer from 0 to 30000' } });
-      const ruleError = validateAccountErrorRulesInput(body.accountErrorRules || {});
-      if (ruleError) return sendJSON(res, 400, { error: { message: ruleError } });
-      let requestedContentRules = config.accountContentErrorRules, requestedPipeline = config.accountPipeline;
+      let requestedErrorRules = config.errorRules, requestedPipeline = config.accountPipeline;
       try {
-        if (body.accountContentErrorRules !== undefined) requestedContentRules = normalizeAccountContentErrorRules(body.accountContentErrorRules, { strict: true });
+        if (body.errorRules !== undefined) requestedErrorRules = normalizeErrorRules(body.errorRules, { strict: true });
+        else {
+          const legacy = legacyRuleProjection(config.errorRules);
+          if (body.accountErrorRules !== undefined) {
+            const ruleError = validateAccountErrorRulesInput(body.accountErrorRules); if (ruleError) throw new Error(ruleError);
+            if (JSON.stringify(normalizeAccountErrorRules(body.accountErrorRules)) !== JSON.stringify(legacy.accountErrorRules)) return sendJSON(res, 409, { error: { message: 'legacy error-rule fields cannot modify canonical errorRules' } });
+          }
+          if (body.accountContentErrorRules !== undefined && JSON.stringify(normalizeAccountContentErrorRules(body.accountContentErrorRules, { strict: true })) !== JSON.stringify(legacy.accountContentErrorRules)) return sendJSON(res, 409, { error: { message: 'legacy error-rule fields cannot modify canonical errorRules' } });
+        }
         if (body.accountPipeline !== undefined) requestedPipeline = normalizeAccountPipeline(body.accountPipeline, { strict: true, fallbackOrder: config.accountPipeline.order, fallbackCachePoolSize: configuredCachePoolSize() });
       } catch (e) { return sendJSON(res, 400, { error: { message: e.message } }); }
       if (!Number.isInteger(Number(body.active ?? 0)) || Number(body.active ?? 0) < 0 || Number(body.active ?? 0) >= body.accounts.length) return sendJSON(res, 400, { error: { message: 'active account index is out of range' } });
@@ -2970,20 +3313,22 @@ async function dispatch(req, res) {
       const requestedActive = requestedActiveId ? accs.findIndex((a) => a.id === requestedActiveId) : -1;
       const quotaRoutingWasEnabled = quotaRoutingEnabled();
       config.accounts = accs; config.accountMode = body.mode; config.activeAccount = requestedActive >= 0 ? requestedActive : Math.min(Math.max(0, Number(body.active) || 0), accs.length - 1);
-      config.concurrencyWaitMs = wait; config.accountErrorRules = normalizeAccountErrorRules(body.accountErrorRules || {}); config.accountContentErrorRules = requestedContentRules; config.accountPipeline = requestedPipeline;
+      config.concurrencyWaitMs = wait; config.errorRules = requestedErrorRules; Object.assign(config, legacyRuleProjection(requestedErrorRules)); config.accountPipeline = requestedPipeline;
       for (const [id, previous] of previousById) {
         const current = accs.find((a) => a.id === id);
         if (!current) { invalidateQuotaAccount(id, { clearSnapshot: true, deleted: true }); clearProviderCircuitForAccount(id); }
-        else if (current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) { invalidateQuotaAccount(id, { clearSnapshot: true }); clearProviderCircuitForAccount(id); }
+        else if (current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) { invalidateQuotaAccount(id, { clearSnapshot: true }); clearProviderCircuitForAccount(id); delete META.accountStates[id]; }
         else if (previous.enabled !== false && current.enabled === false) { invalidateQuotaAccount(id); clearProviderCircuitForAccount(id); }
         else for (const model of new Set([...Object.keys(previous.perModel || {}), ...Object.keys(current.perModel || {})])) if (JSON.stringify(previous.perModel?.[model]) !== JSON.stringify(current.perModel?.[model])) clearProviderCircuitForRoute(id, model);
       }
       if (quotaRoutingWasEnabled !== quotaRoutingEnabled()) advanceQuotaRoutingEpoch();
       for (const id of Object.keys(META.accountStates || {})) if (!seen.has(id)) delete META.accountStates[id];
       for (const id of Object.keys(META.statistics.lifetime.accounts)) if (!seen.has(id)) delete META.statistics.lifetime.accounts[id];
-      for (const bucket of META.statistics.minuteBuckets) for (const id of new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health)])) if (!seen.has(id)) { delete bucket.accounts[id]; delete bucket.health[id]; }
+      for (const bucket of META.statistics.minuteBuckets) for (const id of new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health),...Object.keys(bucket.accountHealth)])) if (!seen.has(id)) { delete bucket.accounts[id]; delete bucket.health[id]; delete bucket.accountHealth[id]; }
       for (const id of Object.keys(META.statistics.recentCoverage.accountIncompleteAt)) if (!seen.has(id)) delete META.statistics.recentCoverage.accountIncompleteAt[id];
+      for (const id of Object.keys(META.statistics.recentCoverage.accountHealthIncompleteAt)) if (!seen.has(id)) delete META.statistics.recentCoverage.accountHealthIncompleteAt[id];
       for (const id of activeCounts.keys()) if (!seen.has(id)) activeCounts.delete(id);
+      pruneOrphanProviderStates();
       saveConfig(); saveMeta(); RR_COUNTER = 0; strategyCounters.clear(); proxyAgents.clear(); scheduleQuotaRefresh();
       return sendJSON(res, 200, { ok: true, accounts: accs.length, mode: config.accountMode, active: config.activeAccount });
     }
@@ -2992,6 +3337,17 @@ async function dispatch(req, res) {
       const id = String(body?.id || '');
       if (!config.accounts.some((a) => a.id === id)) return sendJSON(res, 400, { error: { message: 'unknown account id' } });
       delete META.accountStates[id]; saveMeta();
+      return sendJSON(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && p === '/api/providers/recover') {
+      const body = await readJsonBody(req);
+      if (!isPlainObject(body) || Object.keys(body).length !== 2 || typeof body.model !== 'string' || typeof body.provider !== 'string') return sendJSON(res, 400, { error: { message: 'expected exact model and provider' } });
+      const model = body.model.trim(), provider = body.provider.trim();
+      if (!validStatisticModelId(model) || !/^[a-z0-9][a-z0-9._/-]{0,199}$/i.test(provider)) return sendJSON(res, 400, { error: { message: 'invalid model or provider' } });
+      const state = META.models?.[model]?.upstreamStatus?.[provider];
+      if (!state) return sendJSON(res, 400, { error: { message: 'unknown model/provider state' } });
+      META.models[model].upstreamStatus[provider] = { ...normalizeProviderHealthState(state), cooldownUntil: 0, hardQuarantined: false, ruleId: null, statusCode: null, updatedAt: Date.now() };
+      saveMeta();
       return sendJSON(res, 200, { ok: true });
     }
     if (req.method === 'POST' && p === '/api/accounts/test') {
@@ -3068,7 +3424,8 @@ async function dispatch(req, res) {
         if (scope !== 'account' || !model || model.length > 300 || /[\x00-\x1f\x7f]/.test(model)) return sendJSON(res, 400, { error: { message: 'valid account scope and model are required for inherit' } });
         delete target.perModel[model];
         clearProviderCircuitForRoute(target.id, model);
-        saveConfig();
+        pruneOrphanProviderStates();
+        saveConfig(); saveMeta();
         return sendJSON(res, 200, { ok: true, source: 'inherited' });
       }
       if (body.perModel === undefined) return sendJSON(res, 400, { error: { message: 'perModel is required' } });
@@ -3080,7 +3437,8 @@ async function dispatch(req, res) {
         if (scope === 'account') clearProviderCircuitForRoute(target.id, model);
         else for (const account of config.accounts) if (!Object.prototype.hasOwnProperty.call(account.perModel || {}, model)) clearProviderCircuitForRoute(account.id, model);
       }
-      saveConfig();
+      pruneOrphanProviderStates();
+      saveConfig(); saveMeta();
       return sendJSON(res, 200, { ok: true, scope });
     }
     if (req.method === 'GET' && (p === '/v1/models' || p === '/api/v1/models' || p === '/models')) {
