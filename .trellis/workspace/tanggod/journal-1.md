@@ -488,3 +488,26 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 20: 统一双维度错误规则与成功率
+<!-- trellis-session: v=2 fp=1b42fa38eb2a0f98 -->
+
+**Date**: 2026-09-20
+**Task**: 统一双维度错误规则与成功率
+**Branch**: `main`
+
+### Summary
+
+实现并验证统一 errorRules、账号与 Provider-model 双维度动态状态、statistics v4 24h 成功率、三步账号流水线及完整管理面；全量测试 169/169 通过。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `cb19f2e` | feat: 实现双维度错误规则与成功率 |
+| `1008fc8` | docs(spec): 同步错误规则与成功率契约 |
+
+### Status
+
+[OK] **Completed**
