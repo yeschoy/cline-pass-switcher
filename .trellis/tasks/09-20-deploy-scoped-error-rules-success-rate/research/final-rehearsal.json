@@ -1,0 +1,75 @@
+{
+  "backup": {
+    "compose": "7553338af9302148a8b1c76d07853e1c5948a2d01d52b66637a8e115ce56509c",
+    "config": "1552c9278ffc972ab8344b6b95d0239213ad0f58eb86ac33ffdb10dba52de185",
+    "deployment": "9d73a277763b26e4f2e6e986dfa900207f8eb153af19f60947b8dba7b74ff480",
+    "metadata": "25583ef59bbe69193fea9dd703f1778b887399c542aa6e8871f895979534f265",
+    "ordinaryLogs": {
+      "bytes": 1234641,
+      "files": 3,
+      "sha256": "ce596fe164ca87ec2bebd26ca8fcfe40b84bbc4d354228cbaddbd44badc75c0b"
+    }
+  },
+  "backupPath": "/opt/cline-pass-switcher/deployments/20260920-045938-c78d8bbb-scoped-rules-rate/backup-final2",
+  "firstRun": {
+    "api": {
+      "accounts": 200,
+      "detailSettings": 200,
+      "errorLogs": 200,
+      "meta": 200,
+      "models": 200,
+      "quotaInvalid": 400,
+      "requestLogs": 200,
+      "statistics": 200
+    },
+    "businessProjectionExact": true,
+    "canonicalRules": 5,
+    "configInputSha256": "1552c9278ffc972ab8344b6b95d0239213ad0f58eb86ac33ffdb10dba52de185",
+    "metadataInputSha256": "25583ef59bbe69193fea9dd703f1778b887399c542aa6e8871f895979534f265",
+    "minuteBuckets": 666,
+    "oldFactsExact": true,
+    "ordinaryLogs": {
+      "bytes": 1234641,
+      "files": 3,
+      "sha256": "ce596fe164ca87ec2bebd26ca8fcfe40b84bbc4d354228cbaddbd44badc75c0b"
+    },
+    "pipeline": {
+      "cachePoolSize": 5,
+      "healthSort": true,
+      "order": [
+        "healthSort",
+        "quotaPool",
+        "sticky"
+      ],
+      "quotaPool": true,
+      "sticky": true
+    },
+    "predictedConfigSha256": "4d4c33a327d19d98f1ce13e193ce74d2b7c367a740ce087191495951a0e07245",
+    "predictedMetadataSha256": "51e6020438b91ff51a4a5be0185d7bd3e22582148c84138b19975b8d3a146b4a",
+    "providerRowsNormalized": 85,
+    "ruleActions": {
+      "ignore": 5
+    },
+    "statisticsFrom": 3,
+    "statisticsTo": 4,
+    "trackingStartMinute": 29831354
+  },
+  "secondRun": {
+    "api": {
+      "accounts": 200,
+      "detailSettings": 200,
+      "errorLogs": 200,
+      "meta": 200,
+      "models": 200,
+      "quotaInvalid": 400,
+      "requestLogs": 200,
+      "statistics": 200
+    },
+    "byteIdempotent": true,
+    "hashes": {
+      "config": "4d4c33a327d19d98f1ce13e193ce74d2b7c367a740ce087191495951a0e07245",
+      "logs": "ce596fe164ca87ec2bebd26ca8fcfe40b84bbc4d354228cbaddbd44badc75c0b",
+      "metadata": "51e6020438b91ff51a4a5be0185d7bd3e22582148c84138b19975b8d3a146b4a"
+    }
+  }
+}

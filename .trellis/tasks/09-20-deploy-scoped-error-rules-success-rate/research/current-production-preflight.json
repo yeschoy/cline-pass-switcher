@@ -1,0 +1,111 @@
+{
+  "sourceCommit": "c78d8bbb552943910af341733950cde656cf8c1c",
+  "requiredAncestors": {
+    "cb19f2e": true,
+    "1008fc8": true
+  },
+  "sourceGate": {
+    "branch": "main",
+    "originMainEqual": true,
+    "fullTests": { "passed": 169, "failed": 0 },
+    "identityExactPath": true,
+    "identityMode0600": true,
+    "identityGitignored": true
+  },
+  "helpers": {
+    "python3": true,
+    "pythonVersion": "Python 3.14.4",
+    "docker": true,
+    "dockerVersion": "29.7.2",
+    "compose": true,
+    "composeVersion": "5.5.0"
+  },
+  "disk": { "rootFreeBytes": 427061460992 },
+  "deployment": {
+    "release": "20260919-193220-9ecc84d-provider-health",
+    "commit": "9ecc84dc8ea6cd59422b7935a97e4af701d8d242",
+    "previousRelease": "20260919-172057-3ccb929-upstream-affinity",
+    "deployedAt": "2026-09-19T19:45:42.163568+00:00"
+  },
+  "container": {
+    "imageId": "sha256:52664183bc13d52828051a066b1de549500ebabdb394ae71492225f16f75154f",
+    "oldImageInspectable": true,
+    "running": true,
+    "status": "running",
+    "health": "healthy",
+    "restartCount": 0,
+    "oomKilled": false,
+    "startedAt": "2026-09-19T19:41:52.081277704Z"
+  },
+  "compose": {
+    "sha256": "7553338af9302148a8b1c76d07853e1c5948a2d01d52b66637a8e115ce56509c",
+    "image": "cline-pass-switcher:20260919-193220-9ecc84d-provider-health",
+    "context": "./releases/20260919-193220-9ecc84d-provider-health"
+  },
+  "files": {
+    "deployment": { "sha256": "9d73a277763b26e4f2e6e986dfa900207f8eb153af19f60947b8dba7b74ff480" },
+    "config": { "sha256": "1552c9278ffc972ab8344b6b95d0239213ad0f58eb86ac33ffdb10dba52de185", "bytes": 9983 },
+    "metadata": { "sha256": "52b6d7b35242732a87c8588e4a4d849805cf50c7ffc0c554bee2d31bd99c6391", "bytes": 2615340 },
+    "ordinaryLogs": { "sha256": "a644acdd0a98d0aa7f4c588fb13b67167bb3f8c41edce105140e56597692e76c", "files": 3, "bytes": 1190053 },
+    "detailedLogs": { "sha256": "3426e16da1a3327c4b3f35cdc3e7ef1a10fa4700c4f230de160f2a267cd0f67f", "files": 3592, "bytes": 175464686 }
+  },
+  "configProjection": {
+    "accounts": 10,
+    "enabledAccounts": 8,
+    "accountMode": "sticky",
+    "concurrencyWaitMs": 2000,
+    "activeAccountPresent": true,
+    "errorRules": 0,
+    "legacyStatusRules": 5,
+    "legacyContentRules": 0,
+    "pipeline": {
+      "quotaPool": true,
+      "healthSort": true,
+      "sticky": true,
+      "order": ["excludeUnhealthy", "quotaPool", "healthSort", "sticky"],
+      "cachePoolSize": 5
+    },
+    "globalRoutes": 16,
+    "detailedLogging": true
+  },
+  "metadataProjection": {
+    "models": 25,
+    "providerStatusRows": 85,
+    "providerHardQuarantined": 0,
+    "providerCooldownRows": 2,
+    "accountStateRows": 0,
+    "accountHardQuarantined": 0,
+    "quotaRows": 10,
+    "statisticsVersion": 3,
+    "minuteBuckets": 668,
+    "accountMinuteCells": 1228,
+    "modelMinuteCells": 392,
+    "accountHealthCells": 0,
+    "providerHealthCells": 0,
+    "accountHealthTrackingStartPresent": false,
+    "providerHealthTrackingStartPresent": false
+  },
+  "api": {
+    "meta": 200,
+    "accounts": 200,
+    "models": 200,
+    "statistics": 200,
+    "requestLogs": 200,
+    "errorLogs": 200,
+    "detailSettings": 200,
+    "quotaInvalid": 400,
+    "detailAuthRequired": true,
+    "detailedLogging": true
+  },
+  "internalAlias": { "containerPresent": true, "status": 200, "configured": true },
+  "public": {
+    "remote": { "dns": false, "status": 0, "errorCategory": "gaierror" },
+    "independent": { "dns": false, "status": 0, "errorCategory": "gaierror" }
+  },
+  "inventory": {
+    "releaseCount": 21,
+    "releaseNamesSha256": "847e3410367fbe440eb16fbc99a4c49336263462119f1a7969ae1d0897caabb4",
+    "backupEntryCount": 39,
+    "backupNamesSha256": "3147cd916eef444fcfd4e1e58fe061e848db26460beb160b0048e3eccbddcdb1"
+  }
+}

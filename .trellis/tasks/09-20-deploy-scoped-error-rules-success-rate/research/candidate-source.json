@@ -1,0 +1,57 @@
+{
+  "archiveSha256": "42a24a4932f1b66f34bcca1d2a6f55c220d446d85e49d95853bcb96972f58433",
+  "image": {
+    "composeBuilt": true,
+    "imageId": "sha256:615df03dddc5883a769024e5f34146d6fbaf02a13cc9694feab3d1a16939ce55",
+    "release": "20260920-045938-c78d8bbb-scoped-rules-rate",
+    "runtimeUserReadable": true,
+    "sourceChecks": {
+      "/app/lib/detailed-log-capture.js": {
+        "mode": "644",
+        "sha256": "9af7ab1090b4ef2b2cee971a2bc5cfc20f70527bc6f4e3550a8bcd8f2ac44a5f"
+      },
+      "/app/lib/detailed-log-store.js": {
+        "mode": "644",
+        "sha256": "5d8a25aa36cbf8a9b857f486e7ae855d2dba99a5c7954dc8e3c7ac8d0e6d294d"
+      },
+      "/app/lib/jsonl-log-store.js": {
+        "mode": "644",
+        "sha256": "1c287f804fa299d41469b52200b1853e471dfd8daf20989c0b04410ce73d3afc"
+      },
+      "/app/public/index.html": {
+        "mode": "644",
+        "sha256": "f4ff3a9755295729a0dc18430735d22bbc23afef81ee7bc6a9a2610d51018120"
+      },
+      "/app/server.js": {
+        "mode": "644",
+        "sha256": "d353cf7bfa82ee27b23f470b11fd0967e80a57f78bb401cacbe72154df00834a"
+      }
+    },
+    "tag": "cline-pass-switcher:20260920-045938-c78d8bbb-scoped-rules-rate"
+  },
+  "localArchivePath": "/tmp/20260920-045938-c78d8bbb-scoped-rules-rate.tar",
+  "release": "20260920-045938-c78d8bbb-scoped-rules-rate",
+  "sourceCommit": "c78d8bbb552943910af341733950cde656cf8c1c",
+  "sourceHashes": {
+    "lib/detailed-log-capture.js": "9af7ab1090b4ef2b2cee971a2bc5cfc20f70527bc6f4e3550a8bcd8f2ac44a5f",
+    "lib/detailed-log-store.js": "5d8a25aa36cbf8a9b857f486e7ae855d2dba99a5c7954dc8e3c7ac8d0e6d294d",
+    "lib/jsonl-log-store.js": "1c287f804fa299d41469b52200b1853e471dfd8daf20989c0b04410ce73d3afc",
+    "public/index.html": "f4ff3a9755295729a0dc18430735d22bbc23afef81ee7bc6a9a2610d51018120",
+    "server.js": "d353cf7bfa82ee27b23f470b11fd0967e80a57f78bb401cacbe72154df00834a"
+  },
+  "stage": {
+    "candidateCompose": "/opt/cline-pass-switcher/.compose-20260920-045938-c78d8bbb-scoped-rules-rate.candidate.yml",
+    "candidateComposeSha256": "fda0377477082e9fb89a0cd2b9a2c2bc6951c1a0e0054e06a7c28cc030a81f59",
+    "composeChangedLines": [
+      4,
+      6
+    ],
+    "deploymentDir": "/opt/cline-pass-switcher/deployments/20260920-045938-c78d8bbb-scoped-rules-rate",
+    "liveComposeSha256": "7553338af9302148a8b1c76d07853e1c5948a2d01d52b66637a8e115ce56509c",
+    "release": "20260920-045938-c78d8bbb-scoped-rules-rate",
+    "releaseCreated": true,
+    "releaseModesOk": true,
+    "sourceHashesOk": true,
+    "uploadSha256": "42a24a4932f1b66f34bcca1d2a6f55c220d446d85e49d95853bcb96972f58433"
+  }
+}

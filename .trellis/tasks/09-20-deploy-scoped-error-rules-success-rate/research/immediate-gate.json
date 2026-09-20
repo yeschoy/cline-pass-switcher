@@ -1,0 +1,79 @@
+{
+  "api": {
+    "accounts": 200,
+    "detailSettings": 200,
+    "errorLogs": 200,
+    "meta": 200,
+    "models": 200,
+    "quotaInvalid": 400,
+    "requestLogs": 200,
+    "statistics": 200
+  },
+  "configProjection": {
+    "accounts": 10,
+    "canonicalRules": 5,
+    "enabledAccounts": 8,
+    "mode": "sticky",
+    "pipeline": {
+      "cachePoolSize": 5,
+      "healthSort": true,
+      "order": [
+        "healthSort",
+        "quotaPool",
+        "sticky"
+      ],
+      "quotaPool": true,
+      "sticky": true
+    },
+    "ruleActions": {
+      "ignore": 5
+    },
+    "ruleScopes": {
+      "account": 5
+    },
+    "waitMs": 2000
+  },
+  "configSha256": "4d4c33a327d19d98f1ce13e193ce74d2b7c367a740ce087191495951a0e07245",
+  "container": {
+    "health": "healthy",
+    "oomKilled": false,
+    "restartCount": 0,
+    "running": true
+  },
+  "detailSettings": {
+    "authRequired": true,
+    "detailedLogging": true,
+    "maxAgeMs": 604800000,
+    "maxBodyBytes": 5242880,
+    "maxTotalBytes": 1073741824
+  },
+  "imageId": "sha256:615df03dddc5883a769024e5f34146d6fbaf02a13cc9694feab3d1a16939ce55",
+  "internalAlias": 200,
+  "metadataProjection": {
+    "accountHealthTrackingStartPresent": true,
+    "accountStateRows": 0,
+    "minuteBuckets": 666,
+    "providerHealthTrackingStartPresent": true,
+    "providerStatusRows": 85,
+    "statisticsVersion": 4
+  },
+  "public": {
+    "dns": false,
+    "errorCategory": "gaierror",
+    "status": 0
+  },
+  "release": "20260920-045938-c78d8bbb-scoped-rules-rate",
+  "sourceHashesMatched": true,
+  "startupFatal": false,
+  "uiMarkers": {
+    "accountSuccessRate": true,
+    "affinity": true,
+    "cachePool": true,
+    "canonicalErrorRules": true,
+    "coverage": true,
+    "detailedLogs": true,
+    "providerRecover": true,
+    "providerSuccessRate": true,
+    "threeStepPipeline": true
+  }
+}

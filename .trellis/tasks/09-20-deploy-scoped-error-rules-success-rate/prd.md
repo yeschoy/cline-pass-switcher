@@ -32,14 +32,14 @@
 
 ## Acceptance Criteria
 
-- [ ] 最终 source gate 证明本地 `main == origin/main`，committed archive、完整测试、关键 hash、identity/SSH 全部通过。
-- [ ] 切换前只读预检冻结当前 exact image、健康、配置/数据哈希、安全投影、内部与公开入口基线且无秘密泄露。
-- [ ] 新 release/candidate Compose/exact image 唯一，Compose 只改变 image/context，release/image 文件权限满足 1000:1000 运行。
-- [ ] 复制数据 hardening 预演精确证明 config/statistics/state 迁移边界、日志恢复和二次启动幂等。
-- [ ] 切换前备份、manifest、旧 image、scratch 原子 helper、no-op guard 和 no-build rollback 均可用。
-- [ ] 新容器 exact image 匹配，healthy、restart=0、OOM=false，预测 config hash、源码 hash 和安全 schema 投影正确。
-- [ ] 即时、90 秒延迟及独立 postcheck 的本地/认证/内部 API、日志和 UI/source 门禁全部通过。
-- [ ] 未调用真实模型、未修改 NewAPI/CPA 或业务配置、未清理生产制品；公开入口按切换前基线正确处置。
+- [x] 最终 source gate 证明本地 `main == origin/main`，committed archive、完整测试、关键 hash、identity/SSH 全部通过。
+- [x] 切换前只读预检冻结当前 exact image、健康、配置/数据哈希、安全投影、内部与公开入口基线且无秘密泄露。
+- [x] 新 release/candidate Compose/exact image 唯一，Compose 只改变 image/context，release/image 文件权限满足 1000:1000 运行。
+- [x] 复制数据 hardening 预演精确证明 config/statistics/state 迁移边界、日志恢复和二次启动幂等。
+- [x] 切换前备份、manifest、旧 image、scratch 原子 helper、no-op guard 和 no-build rollback 均可用。
+- [x] 新容器 exact image 匹配，healthy、restart=0、OOM=false，预测 config hash、源码 hash 和安全 schema 投影正确。
+- [x] 即时、90 秒延迟及独立 postcheck 的本地/认证/内部 API、日志和 UI/source 门禁全部通过。
+- [x] 未调用真实模型、未修改 NewAPI/CPA 或业务配置、未清理生产制品；公开入口按切换前基线正确处置。
 - [ ] 脱敏部署证据已提交并推送，部署任务完成归档；非业务临时产物仅在用户另行同意后清理。
 
 ## Out of Scope
