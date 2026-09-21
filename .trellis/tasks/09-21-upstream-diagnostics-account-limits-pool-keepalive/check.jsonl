@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend pre-development and quality entry point"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend pre-development and quality entry point"}
+{"file": ".trellis/spec/guides/index.md", "reason": "Cross-layer and reuse guide index"}
+{"file": ".trellis/tasks/09-21-upstream-diagnostics-account-limits-pool-keepalive/research/logging-error-detail-performance.md", "reason": "Evidence for error details and logging performance"}
+{"file": ".trellis/tasks/09-21-upstream-diagnostics-account-limits-pool-keepalive/research/account-rpm-quota-pool.md", "reason": "Evidence for RPM and quota-pool design"}
+{"file": ".trellis/tasks/09-21-upstream-diagnostics-account-limits-pool-keepalive/research/newapi-keepalive-compatibility.md", "reason": "Evidence for New API keep-alive compatibility"}
+{"file": ".trellis/tasks/09-21-upstream-diagnostics-account-limits-pool-keepalive/research/technical-feasibility-review.md", "reason": "Cross-task feasibility review"}
+{"file": ".trellis/tasks/09-21-upstream-diagnostics-account-limits-pool-keepalive/research/planning-final-review.md", "reason": "Final planning readiness review"}

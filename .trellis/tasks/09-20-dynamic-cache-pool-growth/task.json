@@ -22,5 +22,7 @@
   "parent": "09-20-scoped-error-rules-dynamic-routing",
   "relatedFiles": [],
   "notes": "",
-  "meta": {}
+  "meta": {
+    "follow_up": "09-21-low-quota-pool-refresh-cooling"
+  }
 }

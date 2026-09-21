@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Account lease, attempts, stream and routing contract"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Account schema migration and stable identity"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Local rate-limit and cancellation semantics"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Complete account draft round trip"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Account drawer and validation UI"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse lease and transport owners"}
+{"file": ".trellis/tasks/09-21-upstream-diagnostics-account-limits-pool-keepalive/research/account-rpm-quota-pool.md", "reason": "Current lease callers and RPM design evidence"}
+{"file": ".trellis/tasks/09-21-upstream-diagnostics-account-limits-pool-keepalive/research/technical-feasibility-review.md", "reason": "Review against identified feasibility and lifecycle risks"}

@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Native transport, proxy, SSE and cancellation contract"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Timeout, stream and proxy failure semantics"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Keep heartbeat out of ordinary diagnostics"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse clineRequest and proxyAgentFor"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Trace full chat lifecycle"}
+{"file": ".trellis/tasks/09-21-upstream-diagnostics-account-limits-pool-keepalive/research/newapi-keepalive-compatibility.md", "reason": "Source-backed New API compatibility matrix"}
+{"file": ".trellis/tasks/09-21-upstream-diagnostics-account-limits-pool-keepalive/research/technical-feasibility-review.md", "reason": "Independent feasibility risks and required implementation seams"}

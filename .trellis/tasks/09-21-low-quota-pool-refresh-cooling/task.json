@@ -1,0 +1,28 @@
+{
+  "id": "low-quota-pool-refresh-cooling",
+  "name": "low-quota-pool-refresh-cooling",
+  "title": "低额度热池调度与刷新冷却",
+  "description": "在现有额度和热池 owner 上实现高低额度组成、低额度优先、刷新驱动冷却和额度耗尽自动恢复状态。",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "tanggod",
+  "assignee": "tanggod",
+  "createdAt": "2026-09-21",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "09-21-upstream-diagnostics-account-limits-pool-keepalive",
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "depends_on": "09-21-account-rpm-limits,09-20-dynamic-cache-pool-growth"
+  }
+}

@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Ordinary and detailed diagnostic contract"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Fail-open diagnostics and stream error boundaries"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Atomic config and metadata persistence"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Independent detail/log UI state owners"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Safe accessible diagnostic rendering"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Trace capture, API, persistence, and UI"}
+{"file": ".trellis/tasks/09-21-upstream-diagnostics-account-limits-pool-keepalive/research/logging-error-detail-performance.md", "reason": "Current gaps and recommended error-only profile"}
+{"file": ".trellis/tasks/09-21-upstream-diagnostics-account-limits-pool-keepalive/research/technical-feasibility-review.md", "reason": "Review against identified feasibility and lifecycle risks"}

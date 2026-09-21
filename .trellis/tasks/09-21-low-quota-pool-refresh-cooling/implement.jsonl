@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Quota jobs, cache pool, state and request lifecycle"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Pipeline and metadata state migration"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Safe quota-role diagnostics"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Pipeline and complete account draft ownership"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Pipeline controls and quota state rendering"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-layer quota state flow"}
+{"file": ".trellis/tasks/09-21-upstream-diagnostics-account-limits-pool-keepalive/research/account-rpm-quota-pool.md", "reason": "Pool composition and refresh-cooling evidence"}
+{"file": ".trellis/tasks/09-21-upstream-diagnostics-account-limits-pool-keepalive/research/technical-feasibility-review.md", "reason": "Independent feasibility risks and required implementation seams"}
