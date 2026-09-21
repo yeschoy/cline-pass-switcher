@@ -12,7 +12,7 @@
   "assignee": "tanggod",
   "createdAt": "2026-09-20",
   "completedAt": null,
-  "branch": null,
+  "branch": "feat/provider-success-retry-selection",
   "base_branch": "main",
   "worktree_path": null,
   "commit": null,

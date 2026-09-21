@@ -4,8 +4,18 @@
 
 - [ ] Confirm scoped-error-rules-success-rate child is merged and Provider success/state APIs are stable.
 - [ ] Run existing singleton/provider health/retry integration baseline.
+- [ ] Freeze current `ignore/degrade/cooldown/hard-quarantine` state, log and success-sample deltas for account/non-stream/pre-stream/post-start SSE paths.
 
-## 2. Incremental planner
+## 2. Action/sample contract
+
+- [ ] Generalize existing direct-health sampling so degrade/cooldown/hard-quarantine each contribute one failure sample in the declared scope; ignore contributes none.
+- [ ] Keep Provider-model sampling per named real attempt and account sampling request/account-deduplicated with failure precedence.
+- [ ] Preserve cooldown/quarantine persistence while updating Provider failure timestamps/classification exactly once; do not double count provider-circuit cooldown.
+- [ ] Cover retry-success, account replacement, post-start SSE finalization, cancellation, auto attempts, stale generation and idempotent finalizers.
+
+Checkpoint: action matrix has exact sample/state deltas and no cross-scope or sensitive-data regression.
+
+## 3. Incremental planner
 
 - [ ] Separate stable candidate source/filter facts from per-attempt selection.
 - [ ] Implement strict-first and retry-health ordering with attempted exclusion.
@@ -14,7 +24,7 @@
 
 Checkpoint: configured/discovered/excluded/hard/cooling/null/tie/no-known matrices.
 
-## 3. Transport and control flow
+## 4. Transport and control flow
 
 - [ ] Reuse singleton injectPrefs for planner/direct/unknown pipeline; assert no order/multi-only.
 - [ ] Wire provider/account action scope to same-account retry/account replacement boundaries.
@@ -23,13 +33,13 @@ Checkpoint: configured/discovered/excluded/hard/cooling/null/tie/no-known matric
 
 Checkpoint: non-stream, pre/post SSE, account replacement cap and model isolation.
 
-## 4. UI/diagnostics
+## 5. UI/diagnostics
 
 - [ ] Update strict/preferred descriptions and safe strategy/source/attempt projections.
 - [ ] Render provider success/state without reordering the static configuration list.
 - [ ] Verify ordinary logs contain no health buckets, raw rule inputs, sessions or secrets.
 
-## 5. Documentation and final gate
+## 6. Documentation and final gate
 
 - [ ] Update README/config example/specs for strict-first/health retry.
 - [ ] Run focused tests and full parent gate.
