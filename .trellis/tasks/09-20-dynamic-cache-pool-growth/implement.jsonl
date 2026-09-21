@@ -4,3 +4,6 @@
 {"file": ".trellis/spec/frontend/state-management.md", "reason": "Pipeline/raw/preset draft round-trip."}
 {"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Cache-pool UI and accessibility contracts."}
 {"file": ".trellis/tasks/09-20-scoped-error-rules-dynamic-routing/research/current-contract-gap-analysis.md", "reason": "Use verified fixed-pool behavior and gaps."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "reuse existing identity, membership, waiter and browser draft owners"}
+{"file": ".trellis/tasks/archive/2026-09/09-19-analyze-upstream-stickiness/research/session-key-contract.md", "reason": "explicit/fallback identity sources and privacy boundary"}
+{"file": ".trellis/tasks/archive/2026-09/09-17-improve-cache-hit-scheduling/research/newapi-session-path.md", "reason": "production explicit-key loss and message_hmac fallback evidence"}
