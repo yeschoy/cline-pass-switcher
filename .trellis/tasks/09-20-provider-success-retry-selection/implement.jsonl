@@ -4,3 +4,5 @@
 {"file": ".trellis/spec/frontend/state-management.md", "reason": "Route configuration and provider projection ownership."}
 {"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Provider route UI wording and safety."}
 {"file": ".trellis/tasks/09-20-scoped-error-rules-dynamic-routing/research/current-contract-gap-analysis.md", "reason": "Use verified current singleton routing and remaining gaps."}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "retryRules config normalization, compatibility and atomic persistence"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "reuse existing matchers, attempt owner and browser draft owners"}
