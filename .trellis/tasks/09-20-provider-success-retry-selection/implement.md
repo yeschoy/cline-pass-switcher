@@ -22,10 +22,10 @@ Checkpoint: action matrix has exact sample/state deltas and no cross-scope or se
 - [ ] Round-trip retryRules through authenticated accounts API, old-client omission preservation, config persistence/restart, browser snapshot, full save and raw scheduling editor.
 - [ ] Implement ordered first-match `matchRetryRule()` using normalized status plus existing bounded/redacted failure text; project only rule ID/decision/matchedBy enums.
 - [ ] Wire stop into `runChatChain()` after attempt settlement so it blocks remaining Provider attempts and outer account replacement while preserving terminal response.
-- [ ] Add the paired system-message preset that previews/applies retry stop plus provider-model health ignore atomically and preserves custom rules.
+- [ ] Add the manual paired system-message preset that previews/applies retry stop plus provider-model health ignore atomically, preserves custom rules, changes nothing on cancel and is never auto-seeded/migrated.
 - [ ] Cover exact `502 + system message must have content`, status-only/body-only misses, case-insensitive body ANY, HTTP-200 envelope/pre-stream SSE forms, post-start no-replay, cancel, auto and maxRetries.
 
-Checkpoint: deterministic request errors produce one real attempt, no account replacement and no health penalty; unrelated 502 behavior stays compatible.
+Checkpoint: default empty rules preserve behavior; only a confirmed manual preset makes deterministic request errors produce one real attempt, no account replacement and no health penalty; unrelated 502 behavior stays compatible.
 
 ## 4. Incremental planner
 

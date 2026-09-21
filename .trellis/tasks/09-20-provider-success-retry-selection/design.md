@@ -57,7 +57,7 @@ retryRules: [{
 - retry rule：`502 + body contains system message must have content -> stop`；
 - error rule：同一条件、`scope: provider-model`、`action: ignore`。
 
-这样请求级确定性错误既不重试也不处罚Provider；retry matcher本身不隐式更改健康。预设沿用stable ID merge/replace预览，保留用户自定义规则，取消无变化。
+这样请求级确定性错误既不重试也不处罚Provider；retry matcher本身不隐式更改健康。预设沿用stable ID merge/replace预览，保留用户自定义规则，取消无变化。该预设只作为手动操作入口：默认和升级后的`retryRules`均为空，不做启动迁移或隐式激活；只有操作者确认普通完整保存后才生效。
 
 `GET/POST /api/accounts` 返回/接收完整retryRules。新UI始终发送完整draft；旧客户端省略时服务器保留现值，显式字段则严格替换。Raw scheduling editor增加retryRules，仍不包含账号Key/代理/Header/route或runtime facts。成功保存后重新加载accepted server state。
 
