@@ -48,4 +48,4 @@ git diff --check
 
 - [x] 记录临时目录性能证据。
 - [x] 更新`.trellis/spec/backend/{logging-guidelines,error-handling,database-guidelines,quality-guidelines}.md`、`.trellis/spec/frontend/{state-management,quality-guidelines}.md`与README。
-- [ ] 质量检查、提交并归档后再进入RPM任务。
+- [x] 质量检查、提交并归档后再进入RPM任务。
