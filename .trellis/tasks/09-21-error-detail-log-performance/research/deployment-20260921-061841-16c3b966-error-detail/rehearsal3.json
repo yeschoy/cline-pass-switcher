@@ -1,0 +1,16 @@
+{
+  "configBytesUnchanged": true,
+  "configSha256": "95e7b78de7c955acd1a6c6ae9c2bb334d3c5862d6602d2137816383901097cf6",
+  "errorDetailLoggingEnabled": false,
+  "errorRuleCount": 4,
+  "fullDetailedLoggingPreserved": true,
+  "imageId": "sha256:9e852b57984076f583715414138993dadf5be747c46ae4a4b27292d31509bcc3",
+  "liveServiceUnchanged": true,
+  "metadataBytesUnchanged": true,
+  "metadataSha256": "26fd8993ad01e9bf1c76ad5fe49318d8e944d5aaa4f34abb87ce51685e2a4c22",
+  "ordinaryLogBytes": 2439223,
+  "ordinaryLogFileCount": 2,
+  "ordinaryLogsUnchanged": true,
+  "release": "20260921-061841-16c3b966-error-detail",
+  "secondStartIdempotent": true
+}

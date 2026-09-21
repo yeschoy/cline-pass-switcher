@@ -1,0 +1,29 @@
+{
+  "attempts": [
+    {
+      "liveMutationCrossed": false,
+      "liveServiceUnchanged": true,
+      "reason": "incorrectly expected missing false setting to be persisted",
+      "stage": "copied-data-assertion"
+    },
+    {
+      "liveMutationCrossed": false,
+      "liveServiceUnchanged": true,
+      "reason": "non-root glob expansion inside private directory failed",
+      "stage": "backup-permission-normalization"
+    },
+    {
+      "liveMutationCrossed": false,
+      "liveServiceUnchanged": true,
+      "reason": "operator added one error rule; deployment preserved it and reran copied-data rehearsal",
+      "stage": "final-config-freeze"
+    },
+    {
+      "liveMutationCrossed": true,
+      "oldServiceRecovered": true,
+      "reason": "gate expected nonexistent beginShutdown marker; actual function is shutdown",
+      "rollbackSucceeded": true,
+      "stage": "immediate-source-marker"
+    }
+  ]
+}

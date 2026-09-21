@@ -1,0 +1,12 @@
+{
+  "backupPath": "/opt/cline-pass-switcher/deployments/20260921-061841-16c3b966-error-detail/backup-final3",
+  "candidateActive": true,
+  "candidateComposeSha256": "b91baa09197369595be2501fa738e6e458ef06c911789e0c275acc367530dfb9",
+  "deploymentSucceeded": true,
+  "driftGuardRequired": true,
+  "mutationCrossed": true,
+  "preMutationComposeSha256": "fda0377477082e9fb89a0cd2b9a2c2bc6951c1a0e0054e06a7c28cc030a81f59",
+  "previousImage": "sha256:615df03dddc5883a769024e5f34146d6fbaf02a13cc9694feab3d1a16939ce55",
+  "release": "20260921-061841-16c3b966-error-detail",
+  "switchCommand": "docker compose up -d --no-build"
+}
