@@ -185,7 +185,7 @@ NewAPI 当前窗口 3,353 行中 `upstream_request_id` 非空数仍为 0，无�
 2. NewAPI 对 8 个 SSE 后置失败的最终客户端展示；缺少共享 upstream requestId。
 3. TogetherAI SSE 错误正文因 detail resource limit 不完整，不能进一步细分供应商内部原因。
 
-## 建议（本次未执行）
+## 建议与后续动作
 
 1. 不重启、不清日志。最后失败后已有 750 success + 1 cancel，无持续故障证据。
 2. 优先等待下一次自然 v4-pro 请求验证新路由；若需要即时验证，单独授权一次受控付费测试。
@@ -195,13 +195,32 @@ NewAPI 当前窗口 3,353 行中 `upstream_request_id` 非空数仍为 0，无�
 6. 生产诊断建议切换为 `detailedLogging=false + errorDetailLogging=true`，减少成功流捕获竞争并提高失败正文保留率；需要单独批准配置变更。
 7. 让 NewAPI 保存 Switcher 返回的 `X-Cline-Request-Id` 到 `upstream_request_id`，才能真正逐请求关联。
 
-## 只读不变性
+调查报告完成后，用户明确授权执行第 4 项的定向生产规则配置。2026-09-21T12:49:48Z 通过现有管理 API 新增：
 
-检查前后完全一致：
+```text
+id: deepseek-stream-terminated-502
+scope: provider-model
+providers: [deepseek]
+models: [cline-pass/deepseek-v4.1-flash]
+when.statuses: [502]
+when.body_contains: [gateway_stream_terminated]
+action: cooldown
+reset: 20s / 20s
+```
+
+配置前先验证 7/7 条目标 ordinary reason 都包含 `gateway_stream_terminated`。保存后结构 diff 仅为 `errorRules.length` 与 `errorRules[4]`；10 个账号及其并发 6、原有 4 条规则和调度状态均保持。容器继续 running/healthy、restart 0、OOM false。回滚备份：
+
+`/opt/cline-pass-switcher/verification/manual-deepseek-stream-cooldown-20260921T124915Z/config.json.before`
+
+变更后 config SHA-256：`437567e88608475205ce7173dc112ac7004a22b59fd041ece18650e94518f059`。
+
+## 只读调查阶段不变性
+
+只读检查前后完全一致：
 
 - Switcher/NewAPI container ID、image、StartedAt、running/healthy、restart 0、OOM false；
 - config SHA-256：`1b215732b183649d5cffb42c3dfb15cf017bc5e729939e3ba640d1c4ad07fa10`；
 - compose SHA-256：`b91baa09197369595be2501fa738e6e458ef06c911789e0c275acc367530dfb9`；
 - deployment SHA-256：`e12ba80df1b9a761e6e9f8b66e900a456953e6c2bb36604c95d44f224241ba66`。
 
-本次检查未改变生产状态。
+上述只读调查未改变生产状态；其后的定向规则新增是用户另行明确授权的生产配置变更，证据见前节。
