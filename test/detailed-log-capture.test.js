@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Readable, Writable } from 'node:stream';
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
-import { BodyCapture, CaptureBudget, captureBudget, DetailRedactor, MAX_BODY_BYTES, observeStream, detailRoute, DetailRoot } from '../lib/detailed-log-capture.js';
+import { BodyCapture, CaptureBudget, captureBudget, DetailRedactor, MAX_BODY_BYTES, MAX_PAYLOAD_BYTES, observeStream, detailRoute, DetailRoot } from '../lib/detailed-log-capture.js';
 
 function capture(chunks, redactor = new DetailRedactor(), options = {}, complete = true) {
   const body = new BodyCapture(options);
@@ -98,6 +99,94 @@ test('group prepass discovers structured response credentials before earlier bod
   assert.ok(group.bodies.every((body) => body.descriptor.state === 'complete'));
   for (const index of [0, 2]) for (const [key, value] of Object.entries(ordinaryFields)) assert.deepEqual(JSON.parse(group.bodies[index].text)[key], value);
   assert.match(group.bodies[1].text, /ordinary output/); assert.match(group.bodies[3].text, /\[DONE\]/);
+});
+
+test('error profile retains only failed response diagnostics with caller-owned attempt identity', () => {
+  const requestId = randomUUID(), callId = randomUUID();
+  const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: { authorization: 'Bearer ingress-secret' } });
+  const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
+  let group = null, opened = false;
+  const store = {
+    generation: 0,
+    health: { dropped: 0 },
+    open() { opened = true; return Promise.resolve(true); },
+    failure() { assert.fail('unexpected store failure'); },
+    publish({ produce, release }) { group = produce(); release(); return Promise.resolve(true); },
+  };
+  const before = captureBudget.used, active = DetailRoot.active;
+  const root = new DetailRoot(req, res, store, ['account-secret'], { profile: 'error', requestId });
+  assert.equal(opened, false); assert.equal(root.input, undefined); assert.equal(root.output, undefined);
+  const success = root.attempt({
+    token: { attemptIndex: 0, callId: randomUUID() },
+    url: 'https://example.test/chat/completions', account: { id: 'a', name: 'A', key: 'account-secret' },
+    headers: { authorization: 'Bearer account-secret' }, body: JSON.stringify({ model: 'm', messages: [{ content: 'large success prompt' }] }), model: 'm', provider: ['first'],
+  });
+  root.settleAttempt(success, { failed: false, httpStatus: 200, outcomeStatus: 200, captureState: 'success' });
+  const failed = root.attempt({
+    token: { attemptIndex: 1, callId },
+    url: 'https://example.test/chat/completions', account: { id: 'b', name: 'B', key: 'account-secret' },
+    headers: { authorization: 'Bearer account-secret' }, body: JSON.stringify({ model: 'm', api_key: 'ephemeral-secret' }), model: 'm', provider: ['second'],
+  });
+  root.settleAttempt(failed, {
+    failed: true,
+    httpStatus: 200,
+    outcomeStatus: 502,
+    responseHeaders: { 'content-type': 'application/json', 'x-echo': 'ephemeral-secret' },
+    responseBody: JSON.stringify({ error: { message: 'failed ephemeral-secret' } }),
+    responseComplete: true,
+    captureState: 'response-error',
+  });
+  assert.equal(failed.requestSource, undefined);
+  root.result = 'failed'; root.status = 502; root.finalize();
+  assert.equal(group.request.profile, 'error'); assert.equal(group.request.requestId, requestId);
+  assert.equal(group.request.requestBody, undefined); assert.equal(group.request.responseBody, undefined); assert.equal(group.request.headers, undefined);
+  assert.equal(group.attempts.length, 1); assert.equal(group.attempts[0].attemptIndex, 1); assert.equal(group.attempts[0].callId, callId);
+  assert.equal(group.attempts[0].httpStatus, 200); assert.equal(group.attempts[0].outcomeStatus, 502); assert.equal(group.attempts[0].captureState, 'response-error');
+  assert.equal(group.bodies.length, 1); assert.equal(group.attempts[0].responseBody, group.bodies[0].descriptor.bodyId);
+  assert.doesNotMatch(JSON.stringify(group), /account-secret|ephemeral-secret|large success prompt/);
+  assert.equal(captureBudget.used, before); assert.equal(DetailRoot.active, active);
+});
+
+test('error profile successful 50 MiB request holds no BodyCapture reservation or publication', () => {
+  const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: {} });
+  const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
+  let publications = 0;
+  const store = { generation: 0, health: { dropped: 0 }, open() { assert.fail('error profile must not open'); }, failure() { assert.fail('unexpected failure'); }, publish() { publications++; return Promise.resolve(true); } };
+  const before = captureBudget.used, payload = 'x'.repeat(50 * 1024 * 1024);
+  const root = new DetailRoot(req, res, store, [], { profile: 'error' });
+  const attempt = root.attempt({ token: { attemptIndex: 0, callId: randomUUID() }, url: 'https://example.test/chat/completions', body: payload, model: 'm', provider: [] });
+  root.settleAttempt(attempt, { failed: false, httpStatus: 200, outcomeStatus: 200, captureState: 'success' }); root.finalize();
+  assert.equal(captureBudget.used, before); assert.equal(publications, 0); assert.equal(attempt.input, undefined); assert.equal(attempt.output, undefined); assert.equal(attempt.requestSource, undefined);
+});
+
+test('clear generation drops an error collector source before any late settlement', () => {
+  const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: {} });
+  const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
+  let publications = 0;
+  const store = { generation: 0, health: { dropped: 0 }, open() { assert.fail('error profile must not open'); }, failure() { assert.fail('unexpected failure'); }, publish() { publications++; return Promise.resolve(true); } };
+  const root = new DetailRoot(req, res, store, [], { profile: 'error' });
+  const attempt = root.attempt({ token: { attemptIndex: 0, callId: randomUUID() }, url: 'https://example.test/chat/completions', body: 'x'.repeat(1024 * 1024), model: 'm', provider: [] });
+  store.generation++;
+  assert.equal(root.settleAttempt(attempt, { failed: true, captureState: 'no-response' }), false);
+  assert.equal(attempt.requestSource, undefined); root.finalize(); assert.equal(publications, 0);
+});
+
+test('resource-limited error request discovery fences response echoes group-wide', () => {
+  const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: {} });
+  const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
+  let group;
+  const store = { generation: 0, health: { dropped: 0 }, open() { assert.fail('error profile must not open'); }, failure() { assert.fail('unexpected failure'); }, publish({ produce, release }) { group = produce(); release(); return Promise.resolve(true); } };
+  const held = MAX_PAYLOAD_BYTES - 128;
+  assert.equal(captureBudget.reserve(held), true);
+  try {
+    const root = new DetailRoot(req, res, store, [], { profile: 'error' });
+    const attempt = root.attempt({ token: { attemptIndex: 0, callId: randomUUID() }, url: 'https://example.test/chat/completions', body: JSON.stringify({ api_key: 'request-only-secret', padding: 'x'.repeat(200) }), model: 'm', provider: [] });
+    root.settleAttempt(attempt, { failed: true, httpStatus: 500, outcomeStatus: 500, responseHeaders: { 'content-type': 'application/json' }, responseBody: JSON.stringify({ echo: 'request-only-secret' }), captureState: 'response-error' });
+    root.finalize();
+    assert.equal(group.request.state, 'resource-limited');
+    assert.equal(group.bodies[0].descriptor.state, 'resource-limited'); assert.equal(group.bodies[0].text, '');
+    assert.equal(JSON.stringify(group).includes('request-only-secret'), false);
+  } finally { captureBudget.release(held); }
 });
 
 test('5 MiB minus/exact/plus retain safe prefixes while removing credential fragments', () => {

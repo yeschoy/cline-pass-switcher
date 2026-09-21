@@ -280,8 +280,10 @@ Request-log rows additionally render only bounded affinity type/confidence, call
 api(path, body, method, asText = false, options = {})
 loadDetailSettings()
 toggleDetailedLogging()
+toggleErrorDetailLogging()
 loadDetails(next = false)
-selectDetail(requestId)
+selectDetail(requestId, expectedAttempt?)
+openErrorDetail(requestId, attemptIndex, detailCallId)
 loadDetailBody(requestId, bodyId, state)
 copyDetailBody()
 clearDetails()
@@ -291,9 +293,11 @@ The fourth `api()` argument preserves authenticated text-body reads (including 4
 
 `DETAIL_NAV_ID`, `DETAIL_LIST_ID` and `DETAIL_SELECTION_ID` are independent generations. Every section switch invalidates list/selection/navigation; metadata/body responses require the captured generation and visible details panel, and bodies also require the selected request ID. `DETAIL_CURSOR` belongs to the current filter set: editing any filter invalidates list/selection, clears the cursor and loaded copy content, disables Next and requests a refresh. Starting a query disables Next; only its accepted response can enable it.
 
-`DETAIL_CONFIRMED`, `DETAIL_TOGGLE_PENDING` and `DETAIL_SETTINGS_ID` own settings. A stale settings GET cannot undo a later POST; a failed POST restores the confirmed mode. Navigation away suppresses stale status messages, but a completed setting write still updates the confirmed value. Do not call `loadAll()`, `saveAccounts()` or mutate ACCS, bulk selection, raw editor or live scheduling controls for any diagnostic action.
+`DETAIL_CONFIRMED`, `ERROR_DETAIL_CONFIRMED`, `DETAIL_TOGGLE_PENDING` and `DETAIL_SETTINGS_ID` own the full/error-only settings. A stale settings GET cannot undo a later POST; a failed POST restores both confirmed modes. Each toggle posts only its changed field, while the server response refreshes both confirmed values. Navigation away suppresses stale status messages, but a completed setting write still updates the confirmed values. Do not call `loadAll()`, `saveAccounts()` or mutate ACCS, bulk selection, raw editor or live scheduling controls for any diagnostic action.
 
 `DETAIL_BODY_TEXT` is null during reads/invalidations; copy uses only its loaded sanitized string, not metadata, raw network errors or stale text. Clear captures navigation before awaiting DELETE, invalidates pending detail reads, removes loaded content and reloads only if that same details navigation is still visible. Missing/expired bodies remain a safe empty/error state.
+
+An ordinary error row offers an on-demand action only when both validated `detailProfile` and `detailCallId` are present; otherwise it says capture was not enabled for that attempt. The action loads the request group and exposes an attempt only after exact `(attemptIndex, callId)` matching. Mismatch never falls back to array position. A missing group uses the single truthful expired/cleared/capacity-dropped/publication-failed message; `no-response` and `stream-transport-failed` use their explicit manifest states.
 
 - **Good:** a dirty bulk/raw draft survives settings save, filtering, copy and clear.
 - **Base:** selecting a root loads only metadata; selecting one body reads only that body.
@@ -335,7 +339,7 @@ DETAIL_LIST_ID++; DETAIL_CURSOR = null; resetDetailSelection();
 | Alias text is malformed/duplicated or server target invalid | block locally when possible; server `400` remains authoritative |
 | Log filter/cursor query is rejected | show safe error; do not render stale results as current |
 | Detail filter edited while reads are pending | Invalidate response generations, selected/copy text and old cursor; disable Next |
-| Detailed toggle fails or stale settings read completes | Preserve latest confirmed mode and every account/raw/bulk draft |
+| Either detailed toggle fails or a stale settings read completes | Preserve both latest confirmed modes and every account/raw/bulk draft |
 | Detail clear completes after navigation away | Do not reload another section |
 | Dirty drawer closes by Escape/backdrop/button | confirm before discard and restore opener focus |
 | Account route or global route is invalid | server `400`; `saveModelCfg()` reloads on failure |
@@ -382,6 +386,7 @@ Cross-layer changes must assert:
 - alias generation/save/reload and log type/filter/cursor/clear keep separate state owners;
 - request logs alone filter/render `result`, historical rows without it use a display-only fallback, and the shared description distinguishes one final request from potentially many failed attempts;
 - top-level console/statistics/request/error/details sections remain mutually exclusive, request/error reuse one log owner, details keep their own generations, and stale reads or clears cannot update a different section;
+- error rows omit the detail action when capture intent was absent, and exact attempt-index/call-ID matching gates metadata/body access across retries and account replacement;
 - invalid scope, malformed JSON, immutable ID changes, empty account lists, and invalid rule shapes return `400` without persistence;
 - account recovery clears displayed dynamic state after reload;
 - every server-controlled name, reason, model, provider, and trace note is HTML-escaped before `innerHTML` use;

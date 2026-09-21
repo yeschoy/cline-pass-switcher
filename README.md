@@ -107,7 +107,8 @@ location / {
 | `accountPipeline` | 可选叠加层：`{ quotaPool, healthSort, sticky, order, cachePoolSize }`；`order` 是三步骤的精确排列；旧 `excludeUnhealthy:true` 迁移为 `healthSort:true`，不再按阈值淘汰账号 |
 | `proxyKey` | 下游代理密钥；空 = 不鉴权 |
 | `publicBaseUrl` | 公网代理地址（控制台展示用） |
-| `detailedLogging` | 默认 `false`；详细日志独立开关，也可在“详细日志”页面即时保存 |
+| `detailedLogging` | 默认 `false`；完整详细捕获，也可在“详细日志”页面即时保存 |
+| `errorDetailLogging` | 默认 `false`；仅捕获真实失败聊天 attempt 的脱敏响应诊断；完整模式同时开启时优先 |
 | `exposeCatalog` | `true` 时代理的 `/v1/models` 会合并 Cline 公开目录模型；默认 `false` 只返回订阅模型（避免客户端模型列表被淹没） |
 | `knownModels` | 订阅模型清单（控制台主表） |
 | `modelAliases` | 客户端别名到现有 `cline-pass/*` 模型的映射；路由按解析后的模型执行 |
@@ -202,19 +203,22 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 
 普通请求日志会保存亲和键类型/置信度、caller/派生上游 key 的安全来源枚举、`provider.order` 是否覆盖 sticky、以及依据最终明确 usage 得出的缓存三态（命中/明确未命中/未知）；Provider cooldown/half-open 动作只作为 bounded attempt 枚举。它不保存实际 prompt/session/thread key、派生 key、HMAC 指纹、账号 Key、代理 URL/认证值、Header 值、备注、消息正文或敏感上游正文。旧日志缺少字段时显示未知，绝不迁移或猜测。
 
-### 详细日志（默认关闭）
+### 错误详情与完整详细日志（默认关闭）
 
-进入独立的 **详细日志** 板块，启用开关后立即独立保存 `detailedLogging`，无需保存账号配置，也不改变账号、批量并发或原始调度草稿。只有配置写入成功后新请求才使用新模式；已开始的请求保持原模式。启用后会持续记录提示词、普通 Header、会话与响应内容，直到手动关闭。**请先设置代理/管理密钥**；未配置时页面明确警告详细内容没有密钥保护。
+进入独立的 **详细日志** 板块，可分别启用 `errorDetailLogging`（仅真实失败的聊天上游 attempt）和 `detailedLogging`（完整捕获）。开关会立即独立保存，无需保存账号配置，也不改变账号、批量并发或原始调度草稿；只有配置写入成功后的新请求使用新模式。两者同时开启时完整模式优先，同一请求不会重复保存。**请先设置代理/管理密钥**；未配置时页面明确警告详细内容没有密钥保护。
 
-- 按请求查看原始客户端输入、最终客户端响应及每次真实上游调用；正文按需加载，可复制脱敏文本。聊天 UUID 与普通请求日志一致；重试、换号和并行探测有独立调用 ID。`status` 是提交的 HTTP 状态，`result`（有值时）来自普通聊天终态；写出字节不证明客户端已收到。
-- 包含三种聊天别名、控制台测试/探测/渠道校验、账号/代理测试、模型列表及已有的 Responses 501/认证/验证拒绝。配置、日志查询、静态文件、后台额度及公开目录补充请求不记录；不捕获网关内部重试或代理/TLS 线缆数据。
+错误详情模式不保存 ingress/outbound 请求正文、成功响应、完整成功 SSE 或最终客户端正文。它会保存失败 attempt 的脱敏响应 Header，以及已有模型路径已经读取的错误正文；SSE 只保留触发错误的完整事件。收到响应前失败显示 `no-response`，起流后断开显示 `stream-transport-failed` 并保留响应 Header。失败后重试成功或换号成功，先前失败 attempt 仍可通过普通错误行中的 `requestId + attemptIndex + detailCallId` 精确查看。普通 JSONL 仍不保存 Header 值或正文。
+
+- 完整模式可按请求查看原始客户端输入、最终客户端响应及每次真实上游调用；错误模式只列出失败调用。正文按需加载，可复制脱敏文本。聊天 UUID 与普通请求日志一致；真实 native chat 调用拥有稳定的 attempt index 和独立调用 ID。`status` 是提交的 HTTP 状态，`result`（有值时）来自普通聊天终态；写出字节不证明客户端已收到。
+- 完整模式包含三种聊天别名、控制台测试/探测/渠道校验、账号/代理测试、模型列表及已有的 Responses 501/认证/验证拒绝；错误模式仅适用于三种聊天别名的真实失败上游调用。配置、日志查询、静态文件、后台额度及公开目录补充请求不记录；不捕获网关内部重试或代理/TLS 线缆数据。
 - Header 名称/值、结构化凭据字段、Bearer/Basic、Cookie、URL 认证/凭据查询参数及当前请求已知凭据回显会脱敏，原值不可恢复。普通模型参数与 usage 计数保留。无法识别任意自由文本中的未知秘密；不要把此功能当作通用数据脱敏或备份工具。
 - 每个请求/响应正文独立捕获最多 **5 MiB**，不截断实际流量。保留安全文本/JSON 前缀及完整 SSE 事件；缺失尾部、截断、未读、中断、无效编码或无法安全解释的片段有明确状态。部分 JSON 可能补齐结构后脱敏，因此不是可重放的原始请求。
 - 文件独立存于 `DATA_DIR/detailed-logs/`（目录 0700、文件 0600），按最早请求整组清理，最多 **7 天 / 1 GiB**，高流量可能提前淘汰。查询仅扫描有界元数据，正文单独读取；游标按时间/UUID 继续，即使前页已淘汰也不会把路径当作游标。
 - “清空详细日志”仅清除此存储；清空前的活动请求不能重新写回，清空后新请求仍可记录。普通日志和统计不受影响。启动时把已落盘的 `open` 请求身份标记为 `interrupted`；未完成正文不会被伪装成完整记录。早期元数据尚未落盘就退出的请求仍可能丢失。
-- 诊断文件写入不阻塞模型完成。内部保留负载预算为 64 MiB（不是精确 RSS 上限），并限制活动捕获/队列及脱敏工作量；超限只丢弃诊断并报告 `resource-limited`/计数，不改变流量。临时存储失败通过安全健康状态报告，恢复后后续请求可继续记录；不可读/损坏组不会被当作有效完整记录或自动删除。
+- 诊断文件写入不阻塞模型完成。内部保留负载预算为 64 MiB（不是精确 RSS 上限），并限制活动捕获/队列及脱敏工作量；超限只丢弃诊断并报告 `resource-limited`/计数，不改变流量。普通错误原因在脱敏后限制为 16 KiB，单条普通 JSONL 限制为 64 KiB，pending 队列同时限制记录数和字节数。临时存储失败通过安全健康状态报告，恢复后后续请求可继续记录；不可读/损坏组不会被当作有效完整记录或自动删除。
+- SIGTERM/SIGINT 会先停止新接入和额度调度，等待活动请求 finalizer 写入，再有界 drain 普通/详细 store；达到期限后才强制关闭连接，永久阻塞的日志 writer 不会无限拖住退出。
 
-管理 API（沿用现有密钥边界，返回 `Cache-Control: no-store`）：`GET/POST /api/logs/settings`，POST 仅接受 `{ "detailedLogging": true|false }`；`GET/DELETE /api/logs/details`；`GET /api/logs/details/<requestId>`；`GET /api/logs/details/<requestId>/bodies/<bodyId>`（脱敏 `text/plain`，`nosniff`）。列表支持 `limit` 1–200、`cursor`、`requestId`、`from`/`to` 毫秒时间戳、`model`、`account`、`status`；错误参数返回 400，过期/已清空/缺失正文返回安全 404。
+管理 API（沿用现有密钥边界，返回 `Cache-Control: no-store`）：`GET/POST /api/logs/settings`，POST 接受由 `detailedLogging` / `errorDetailLogging` 组成的非空布尔字段子集，旧的单字段请求仍兼容；`GET/DELETE /api/logs/details`；`GET /api/logs/details/<requestId>`；`GET /api/logs/details/<requestId>/bodies/<bodyId>`（脱敏 `text/plain`，`nosniff`）。列表支持 `limit` 1–200、`cursor`、`requestId`、`from`/`to` 毫秒时间戳、`model`、`account`、`status`、`result`；错误参数返回 400，过期/已清空/缺失正文返回安全 404。
 
 ---
 
@@ -228,7 +232,7 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 能。provider/unknown 429 优先采用合法 `Retry-After`，否则从 60 秒开始有界退避；冷却到期后渠道回到原人工位置接受半开请求，成功立即恢复。人工顺序不会被 `ok/degraded/unknown` 标签重排。
 
 **Q：如何确认一次 429 到底换了账号还是换了 provider？**
-先用响应的 `X-Cline-Request-Id` 查询 `/api/logs/requests?requestId=...` 与 `/api/logs/errors?requestId=...`：前者给出账号路径和全部真实 attempts，后者给出每次 `targetProvider/errorScope/scopeEvidence/accountAction`。`X-Cline-Target-Upstream` 只是规划目标，`X-Cline-Actual-Upstream: unknown` 只是未解析到终态 provider，二者都不是切换证据。若仍需区分 Cline 边缘 HTML 429 与内部 provider 限流，应做短期、受控的响应捕获并立即脱敏，不要开启持久化正文日志。
+先用响应的 `X-Cline-Request-Id` 查询 `/api/logs/requests?requestId=...` 与 `/api/logs/errors?requestId=...`：前者给出账号路径和全部真实 attempts，后者给出每次 `targetProvider/errorScope/scopeEvidence/accountAction`。`X-Cline-Target-Upstream` 只是规划目标，`X-Cline-Actual-Upstream: unknown` 只是未解析到终态 provider，二者都不是切换证据。若仍需区分 Cline 边缘 HTML 429 与内部 provider 限流，可短期启用“错误详情”，再从对应错误行按需查看精确 attempt 的脱敏 Header/正文；排障结束后关闭。
 
 **Q：直接用官方 API 写 `provider.only` 为什么不生效？**
 对规划器管道（走 Vercel AI Gateway 的模型）会被 Cline 网关丢弃，请改用 `providerOptions.gateway`，见上文。

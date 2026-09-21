@@ -145,3 +145,39 @@ test('cursor distinguishes equal-timestamp error attempts and stale cursor resta
   await group.append('errors', { ts: 20, requestId: 'fresh', attemptIndex: 0 });
   assert.equal((await group.query('errors', { limit: 1, cursor: first.nextCursor })).items[0].requestId, 'fresh');
 });
+
+test('single-record and pending record/byte fences drop diagnostics without growing a blocked queue', async (t) => {
+  const dir = tmp('cps-jsonl-pending-'); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  let releaseWrite;
+  const gate = new Promise((resolve) => { releaseWrite = resolve; });
+  let block = true;
+  const io = {
+    ...fsp,
+    async open(...args) {
+      const handle = await fsp.open(...args);
+      return {
+        write: async (...writeArgs) => { if (block) await gate; return handle.write(...writeArgs); },
+        close: (...closeArgs) => handle.close(...closeArgs),
+      };
+    },
+  };
+  const group = new JsonlLogGroup(options(dir, {
+    io,
+    maxRecordBytes: 256,
+    maxPendingRecords: 2,
+    maxPendingBytes: 320,
+  }));
+  t.after(() => close(group)); await group.ready;
+  const first = group.append('errors', { ts: 1, requestId: 'first', attemptIndex: 0, reason: 'a'.repeat(60) });
+  const second = group.append('errors', { ts: 2, requestId: 'second', attemptIndex: 0, reason: 'b'.repeat(60) });
+  const dropped = await group.append('errors', { ts: 3, requestId: 'third', attemptIndex: 0, reason: 'c'.repeat(60) });
+  assert.equal(dropped, false);
+  assert.equal(group.health.pendingRecords, 2);
+  assert.ok(group.health.pendingBytes <= 320);
+  assert.equal(group.health.dropped, 1);
+  assert.equal(await group.append('errors', { ts: 4, requestId: 'oversized', attemptIndex: 0, reason: 'x'.repeat(300) }), false);
+  assert.equal(group.health.dropped, 2);
+  block = false; releaseWrite(); await Promise.all([first, second]);
+  assert.equal(group.health.pendingRecords, 0); assert.equal(group.health.pendingBytes, 0);
+  assert.deepEqual(new Set((await group.query('errors')).items.map((row) => row.requestId)), new Set(['first', 'second']));
+});

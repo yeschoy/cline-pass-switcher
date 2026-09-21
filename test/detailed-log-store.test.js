@@ -10,7 +10,7 @@ async function setup(t, options = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cps-details-'));
   const store = new DetailedLogStore({ dir, ...options });
   await store.queue;
-  t.after(async () => { store.close(); await store.queue; await fs.rm(dir, { recursive: true, force: true }); });
+  t.after(async () => { await store.close(); await fs.rm(dir, { recursive: true, force: true }); });
   return store;
 }
 function publish(store, { ts = store.now(), text = 'sanitized prompt', generation = store.generation, requestId = randomUUID() } = {}) {
@@ -40,8 +40,8 @@ test('independent owner-only groups, metadata-only paging, on-demand body and re
 test('runtime publication, query and expiry reuse the startup inventory until explicit reconciliation', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cps-details-index-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  const seed = new DetailedLogStore({ dir }); await seed.queue; seed.close();
-  const first = publish(seed); await first.done;
+  const seed = new DetailedLogStore({ dir }); await seed.queue;
+  const first = publish(seed); await first.done; await seed.close();
 
   let corpusOpens = 0, manifestReads = 0, bodyReads = 0;
   const io = {
@@ -53,7 +53,7 @@ test('runtime publication, query and expiry reuse the startup inventory until ex
       return fs.open(name, ...args);
     }
   };
-  const store = new DetailedLogStore({ dir, io }); t.after(() => store.close()); await store.queue; store.close();
+  const store = new DetailedLogStore({ dir, io }); t.after(() => store.close()); await store.queue;
   corpusOpens = 0; manifestReads = 0; bodyReads = 0;
 
   const second = publish(store); assert.equal(await second.done, true);
@@ -75,11 +75,11 @@ test('runtime publication, query and expiry reuse the startup inventory until ex
 test('bounded inventory fails closed without deleting roots and explicit clear recovers', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cps-details-inventory-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  const seed = new DetailedLogStore({ dir }); await seed.queue; seed.close();
-  await publish(seed).done; await publish(seed).done;
+  const seed = new DetailedLogStore({ dir }); await seed.queue;
+  await publish(seed).done; await publish(seed).done; await seed.close();
   const roots = (await fs.readdir(dir)).sort(); assert.equal(roots.length, 2);
 
-  const limited = new DetailedLogStore({ dir, maxInventoryEntries: 1 }); t.after(() => limited.close()); await limited.queue; limited.close();
+  const limited = new DetailedLogStore({ dir, maxInventoryEntries: 1 }); t.after(() => limited.close()); await limited.queue;
   assert.equal(limited.inventoryOverflow, true); assert.ok(limited.health.failures >= 1);
   await assert.rejects(limited.query(), { statusCode: 503, message: 'detailed storage unavailable' });
   assert.deepEqual((await fs.readdir(dir)).sort(), roots, 'inventory pressure must not evict durable roots');
@@ -125,7 +125,7 @@ test('abandoned publication groups recover through clear or maintenance after re
       rename: async (...args) => { if (broken) throw new Error('fixture rename failure'); return fs.rename(...args); },
       rm: async (name, ...args) => { if (broken && path.basename(name).startsWith('.tmp-')) throw new Error('fixture cleanup failure'); return fs.rm(name, ...args); }
     };
-    const store = await setup(t, { io, now: () => now, maxAgeMs: 1000 }); store.close();
+    const store = await setup(t, { io, now: () => now, maxAgeMs: 1000 });
     const successful = publish(store); assert.equal(await successful.done, true);
     broken = true;
     const failed = publish(store); assert.equal(await failed.done, false);
@@ -148,7 +148,7 @@ test('queued maintenance and clear cannot delete a temporary group still owned b
   const gate = new Promise((resolve) => { unblock = resolve; }), ready = new Promise((resolve) => { written = resolve; });
   const io = { ...fs, writeFile: async (file, ...args) => { await fs.writeFile(file, ...args); if (file.endsWith('.txt')) { written(); await gate; } } };
   t.after(() => unblock());
-  const store = await setup(t, { io }); store.close();
+  const store = await setup(t, { io });
   const item = publish(store); await ready;
   const temporary = (await fs.readdir(store.dir)).find((name) => name.startsWith('.tmp-')); assert.ok(temporary);
   const query = store.query(), clear = store.clear(), fresh = publish(store);
@@ -166,7 +166,7 @@ test('persistent temporary deletion failure rejects clear and maintenance safely
     rename: async (...args) => { if (broken) throw new Error('PRIVATE fixture rename failure'); return fs.rename(...args); },
     rm: async (name, ...args) => { if (broken && path.basename(name).startsWith('.tmp-')) throw new Error('PRIVATE fixture cleanup failure'); return fs.rm(name, ...args); }
   };
-  const store = await setup(t, { io }); store.close(); broken = true;
+  const store = await setup(t, { io }); broken = true;
   const failed = publish(store); assert.equal(await failed.done, false); const generation = store.generation;
   await assert.rejects(store.clear(), { statusCode: 503, message: 'detailed storage unavailable' });
   assert.equal(store.generation, generation + 1, 'even failed clear fences pre-clear roots');
@@ -199,10 +199,22 @@ test('temporary cleanup preserves unknown files, corrupt groups and symlink targ
 });
 
 test('strict query filters and generated body identity prevent traversal/symlink reading', async (t) => {
-  for (const query of ['limit=0', 'limit=201', 'limit=2.5', 'from=NaN', 'to=9007199254740992', 'other=x', 'requestId=../x', 'cursor=bad', 'cursor=', 'status=600', 'limit=1&limit=2']) assert.throws(() => parseDetailQuery(new URLSearchParams(query)), { statusCode: 400 });
+  for (const query of ['limit=0', 'limit=201', 'limit=2.5', 'from=NaN', 'to=9007199254740992', 'other=x', 'requestId=../x', 'cursor=bad', 'cursor=', 'status=600', 'result=unknown', 'limit=1&limit=2']) assert.throws(() => parseDetailQuery(new URLSearchParams(query)), { statusCode: 400 });
   const store = await setup(t); const item = publish(store); await item.done;
   const file = path.join(store.dir, item.requestId, item.bodyId + '.txt'); await fs.unlink(file); await fs.symlink('../manifest.json', file);
   await assert.rejects(store.body(item.requestId, item.bodyId), { statusCode: 404 });
+});
+
+test('error-profile manifests reject missing or duplicate attempt identities', async (t) => {
+  const store = await setup(t);
+  for (const attempts of [
+    [{ captureState: 'no-response' }],
+    (() => { const callId = randomUUID(); return [{ attemptIndex: 0, callId }, { attemptIndex: 0, callId }]; })(),
+  ]) {
+    const requestId = randomUUID(); let released = false;
+    const result = await store.publish({ generation: store.generation, ts: store.now(), requestId, release() { released = true; }, produce: () => ({ request: { requestId, ts: store.now(), profile: 'error', state: 'complete', attemptCount: attempts.length }, attempts, bodies: [] }) });
+    assert.equal(result, false); assert.equal(released, true); await assert.rejects(store.detail(requestId), { statusCode: 404 });
+  }
 });
 
 test('transient read/rename failure and expected missing never disable later publication or delete data', async (t) => {
@@ -244,6 +256,27 @@ test('evicted active roots cannot be recreated by late completion', async (t) =>
   let released = false;
   const result = await store.publish({ requestId, ts: 2, generation: store.generation, requireOpen: true, produce() { assert.fail('evicted body must not be materialized'); }, release() { released = true; } });
   assert.equal(result, false); assert.equal(released, true); assert.deepEqual((await store.query()).items.map((row) => row.requestId), [newer.requestId]);
+});
+
+test('async close drains accepted publications and drops post-close work with release', async (t) => {
+  let unblock, bodyWritten;
+  const gate = new Promise((resolve) => { unblock = resolve; });
+  const ready = new Promise((resolve) => { bodyWritten = resolve; });
+  let hold = true;
+  const io = {
+    ...fs,
+    async writeFile(file, ...args) {
+      await fs.writeFile(file, ...args);
+      if (hold && file.endsWith('.txt')) { bodyWritten(); await gate; }
+    },
+  };
+  const store = await setup(t, { io });
+  const accepted = publish(store); await ready;
+  let closed = false; const closing = store.close().then(() => { closed = true; });
+  await new Promise((resolve) => setImmediate(resolve)); assert.equal(closed, false, 'close waits for accepted work');
+  const rejected = publish(store); assert.equal(await rejected.done, false); assert.equal(rejected.released(), true);
+  hold = false; unblock(); assert.equal(await accepted.done, true); await closing;
+  assert.equal(accepted.released(), true); assert.equal(store.pending, 0);
 });
 
 test('clear racing an opened body returns ordinary missing and permits subsequent writes', async (t) => {

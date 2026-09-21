@@ -45,7 +45,7 @@ All log APIs use the existing admin/proxy-key authentication boundary. Query `li
 - Request and error records are separate JSONL streams under one directory-level `JsonlLogGroup`. The production limits are 50,000 request records, 10,000 error records, 30 days, 5 MiB per segment, and 100 MiB combined.
 - Construction creates the protected directory and starts asynchronous recovery but never reads, parses, stats, or rewrites the historical corpus before `server.listen()`. Model traffic and new-generation appends remain available during recovery. Ordinary log query/clear returns a safe `503 ordinary logs initializing` until one complete catalog is published; it never exposes a partial historical view. Recovery failure keeps model traffic fail-open and the log API safely unavailable.
 - The group owns one bounded in-memory segment catalog and the combined budget. It stores segment names, stream, bytes, record count and timestamp bounds, never request bodies or a second corpus-sized record index. The catalog is capped at 10,000 segments / 16 MiB projected metadata, and one recovery pass is capped at 120,000 parsed records / 128 MiB input. Crossing a fence preserves disk data, drops further diagnostic admission as needed and keeps the log API safely unavailable instead of growing without bound.
-- Appends use serialized asynchronous writes to one tracked active segment per stream. After recovery, an append performs no historical directory enumeration, stat, read or full rewrite. Segment size/count/timestamp facts update only after a successful write; rolling closes the active handle and creates a new segment.
+- Appends use serialized asynchronous writes to one tracked active segment per stream. After recovery, an append performs no historical directory enumeration, stat, read or full rewrite. Segment size/count/timestamp facts update only after a successful write; rolling closes the active handle and creates a new segment. One serialized record is capped at 64 KiB, and the shared queue admits at most 10,000 pending records / 16 MiB. Admission reserves both counters before queueing and releases them on success or failure; excess diagnostics are dropped fail-open with bounded health facts.
 - Age, per-stream record and combined-byte maintenance uses the catalog. It deletes fully obsolete immutable segments and reads/atomically rewrites only a boundary segment when a threshold falls inside it. Replacement segments are written with mode `0600` and renamed before superseded segments are deleted. Maintenance is threshold/roll/minute driven, never a fixed every-100-record corpus compaction or per-request directory scan.
 - Combined-size enforcement orders both streams globally by `ts` and removes the oldest records first. It must not apply two independent 100 MiB limits.
 - Recovery reads each historical segment once, tolerates a truncated final line and malformed complete lines, enforces retention, and deduplicates record identity (`requestId` for requests and `(requestId, attemptIndex)` for errors). Interrupted old/new replacement overlap therefore does not duplicate diagnostics.
@@ -87,18 +87,19 @@ An error record may contain only:
   ts, requestId, requestedModel, resolvedModel,
   accountId, accountName, attemptIndex,
   targetProvider, providerPath,
-  status, upstreamStatus, category, reason, accountAction,
+  status, upstreamStatus, category, reason, reasonTruncated, accountAction,
   ruleId, ruleScope, ruleAction, matchedBy,
   errorScope, scopeEvidence, failureClass, healthAction,
-  retryAfterMs, responseContentType, responseBytes
+  retryAfterMs, responseContentType, responseBytes,
+  detailProfile?, detailCallId?
 }
 ```
 
-Each real failed provider/proxy attempt gets one error record. A request and all its error attempts share the same internal UUID, which is also returned as `X-Cline-Request-Id`. `X-Cline-Target-Upstream` is a plan, `X-Cline-Attempts` is the real HTTP-attempt count, and `X-Cline-Actual-Upstream` is only a parsed terminal provider; the JSONL attempt rows are authoritative for the full account/provider path.
+Each real failed provider/proxy attempt gets one error record. `reason` is redacted first and then truncated at a valid UTF-8 boundary to 16 KiB; `reasonTruncated` states whether bytes were omitted. When a full or error-only detail collector actually admitted the corresponding native call, the row also carries validated `detailProfile: "full" | "error"` and UUID-v4 `detailCallId`; legacy, disabled and capture-overflow rows omit both fields. A request and all its error attempts share the same internal UUID, which is also returned as `X-Cline-Request-Id`. The request-local native transport owner assigns monotonically increasing `attemptIndex` plus `callId` only after `req.end()` hands a real request to Node, and the same pair flows through trace, detail manifest and ordinary error row across provider retry and account replacement. `X-Cline-Target-Upstream` is a plan, `X-Cline-Attempts` is the real HTTP-attempt count, and `X-Cline-Actual-Upstream` is only a parsed terminal provider; the JSONL attempt rows are authoritative for the full account/provider path.
 
 #### Sensitive-data boundary
 
-Before persistence, redaction covers configured account keys, proxy/admin keys, proxy URL/user/password components, every configured custom Header value, and request message text. Bearer-looking values are redacted generically. Reasons are flattened but retain the complete extracted upstream error so nested provider diagnostics are not lost. This does not permit persisting a raw response body: non-JSON/invalid error responses use a generic diagnostic instead.
+Before persistence, redaction covers configured account keys, proxy/admin keys, proxy URL/user/password components, every configured custom Header value, and request message text. Bearer-looking values are redacted generically. Reasons are flattened and credential-redacted, but the ordinary projection retains at most 16 KiB. Complete bounded sanitized response diagnostics belong to the opt-in detailed owner. This does not permit persisting a raw response body: non-JSON/invalid error responses use a generic diagnostic instead.
 
 Never persist:
 
@@ -133,7 +134,7 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 | Clear requests | delete request segments only |
 | Clear errors | delete error segments only |
 | Candidate reason contains a known Key/Header value/message | persisted form contains `[REDACTED]`, never the source value |
-| Upstream returns a long structured error | persist the complete redacted error field, including its final nested provider cause |
+| Upstream returns a long structured error | persist a valid UTF-8 reason of at most 16 KiB with `reasonTruncated=true`; when error detail capture is enabled, retain the bounded sanitized response there |
 | Upstream returns a non-JSON/invalid error body | persist a generic diagnostic plus normalized media type/byte count, never the raw response body |
 | Switcher local capacity 429 | request row has `errorCategory=capacity`, `upstreamStatus=null`, and no attempts |
 | Ambiguous HTML 429 without a matching rule | persist `errorScope=unknown`, bounded evidence and default ignore, with no account action/body or implicit cooldown |
@@ -166,7 +167,7 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 - one request with multiple failures paginates every error exactly once;
 - unknown/invalid filters return `400`;
 - account keys, proxy credentials, custom Header values, account notes, raw sessions, messages, Authorization/Cookie, and upstream sensitive bodies do not occur in serialized log API results or files;
-- long structured SSE/JSON errors retain their final diagnostic text, and short message redaction does not corrupt unrelated words containing the same substring;
+- long structured SSE/JSON errors are credential-redacted, UTF-8 bounded with truthful truncation in ordinary rows, and retain bounded complete detail bodies when the relevant profile is enabled; short message redaction does not corrupt unrelated words containing the same substring;
 - SSE, account replacement, proxy failure, capacity failure, and normal JSON responses finalize no more than one request record;
 - a downstream close after observed `[DONE]` records one `200 / success`, while pre-DONE streaming and non-streaming cancellations each record one `499 / client_cancelled`, no error attempt, and no error/usage/health effect;
 - request `result` filtering returns only explicit new records, while historical rows without `result` remain readable and unmodified;
@@ -218,9 +219,10 @@ Apply when changing `lib/detailed-log-capture.js`, `lib/detailed-log-store.js`, 
 ### 2. Signatures
 
 ```js
-new DetailRoot(req, res, store, secrets)
+new DetailRoot(req, res, store, secrets, { profile: "full" | "error", requestId? })
 detailContext.run(root, dispatch) // native AsyncLocalStorage
-root.attempt({ headers, body, account, proxyUrl, method, url })
+root.attempt({ token, headers, body, account, proxyUrl, method, url, model, provider })
+root.settleAttempt(attempt, { failed, httpStatus, outcomeStatus, responseHeaders, responseBody, responseComplete, captureState })
 root.finalize()
 new BodyCapture({ budget, limit }) // production 5 MiB per body
 new DetailRedactor(secrets)
@@ -234,11 +236,11 @@ store.clear()
 
 ```text
 GET  /api/logs/settings
-  -> { detailedLogging, authRequired, maxBodyBytes, maxAgeMs, maxTotalBytes, health }
+  -> { detailedLogging, errorDetailLogging, authRequired, maxBodyBytes, maxAgeMs, maxTotalBytes, health }
 POST /api/logs/settings
-  <- { detailedLogging: boolean }
-  -> { ok: true, detailedLogging }
-GET  /api/logs/details?limit=&cursor=&requestId=&from=&to=&model=&account=&status=
+  <- a non-empty exact subset of { detailedLogging: boolean, errorDetailLogging: boolean }
+  -> { ok: true, detailedLogging, errorDetailLogging }
+GET  /api/logs/details?limit=&cursor=&requestId=&from=&to=&model=&account=&status=&result=
   -> { items: <metadata-only roots>, nextCursor, health }
 GET  /api/logs/details/<requestId>
   -> { request, attempts, bodies: <descriptors> }
@@ -254,10 +256,12 @@ DELETE /api/logs/details
 
 - Included roots: POST three chat aliases, `/api/test`, `/api/probe`, `/api/validate-upstreams`, `/api/accounts/test`, `/api/accounts/proxy-test`, existing `/v1/responses` rejection; GET `/models`, `/v1/models`, `/api/v1/models`.
 - Rejections on these routes are included without additional body consumption. GET bodies with nonzero Content-Length or Transfer-Encoding remain `unread` when the route never reads them; unframed/zero-length GET input is complete empty. Authentication and Responses 501 remain immediate.
-- Every actual native POST to configured `/chat/completions` has its own UUID call ID, including setup/network failures, provider retries, account replacement, harvest and concurrent validation. Only an included GET root's actual model-list cache-miss fetch is captured. Do not instrument enrichment, public discovery, quota, arbitrary fetches or hidden gateway retries.
+- Every actual native POST to configured `/chat/completions` has its own UUID call ID, including setup/network failures, provider retries, account replacement, harvest and concurrent validation. For ordinary chat, the capture-independent request-local transport owner also assigns the stable monotonic attempt index after `req.end()`; `DetailRoot` consumes that token rather than owning chat ordering. Only an included GET root's actual model-list cache-miss fetch is captured. Do not instrument enrichment, public discovery, quota, arbitrary fetches or hidden gateway retries.
+- Capture profiles are snapshotted at request start. `full` keeps the existing included-route request/attempt/downstream capture. `error` applies only to chat aliases and does not open an identity manifest, wrap the downstream response, copy ingress/outbound request bodies, or retain successful response/SSE bytes. It publishes at most one group containing all real failed attempts, including failures followed by eventual success. If both switches are true, `full` wins and no duplicate group/body is created.
+- Error-only non-stream attempts reuse the response text already consumed by the model path. Recognized SSE failures retain only the complete triggering event; a failure before response Headers is `no-response`, while a break after stream start retains sanitized Headers and `stream-transport-failed` without copying earlier successful chunks. Error-only request material is used only as bounded credential-discovery input after failure and is never projected as a body.
 - The root UUID is reused for ordinary chat request IDs. Original ingress, rewritten upstream and final downstream bodies remain separate. Attempt fields include actual account, model/provider target, public Node-visible headers, HTTP status and transport completeness; they are not inferred from trace length.
 - Capture is bounded observation only: one backpressured upstream Transform before SSE-head consumption, input observation inside the existing reader, and overload-preserving response write/writeHead/end wrappers. Diagnostic truncation never truncates forwarding. Response bytes mean submitted bytes, not proven peer receipt.
-- Request-start mode and clear generation are snapshots. Root finalization is idempotent and asynchronous publication is never awaited by model completion. `status` is the submitted HTTP status or null before headers; `result`, when present, comes from the existing chat finalizer, including DONE-close success and early client cancellation. Existing leases, retry policy and statistics remain authoritative.
+- Request-start mode and clear generation are snapshots. Root finalization is idempotent and asynchronous publication is never awaited by model completion. `status` is the submitted HTTP status or null before headers; `result`, when present, comes from the existing chat finalizer, including DONE-close success and early client cancellation. Manifest attempts expose validated, unique `(attemptIndex, callId)` identities plus HTTP/outcome status and capture state. Existing leases, retry policy and statistics remain authoritative.
 
 #### Sanitization and resource limits
 
@@ -286,8 +290,8 @@ DELETE /api/logs/details
 
 | Condition | Required result |
 |---|---|
-| Missing/invalid truthy persisted switch | Off; only literal true enables capture |
-| Settings POST missing/extra/nonboolean field | 400; no persistence or runtime change |
+| Missing/invalid truthy persisted switch | That profile is off; only literal true enables capture |
+| Settings POST empty, extra, or containing a nonboolean field | 400; no persistence or runtime change; legacy one-field `{ detailedLogging }` remains valid |
 | Settings atomic write fails | Safe 500; previous runtime/file retained |
 | Invalid/duplicate filter, malformed cursor or ID | 400 |
 | Expired/cleared/missing/corrupt selected record/body | Safe 404 |
@@ -304,18 +308,20 @@ DELETE /api/logs/details
 | Disk/rename failure or blocked writer | Model response/lease completion unaffected; release reservations |
 | Publication and temporary cleanup both fail | Recover abandoned owned groups at the next safe serial maintenance/clear; persistent deletion failure returns safe 503, never false clear success |
 | Active or queued capture predates clear | Cannot republish; post-clear roots remain eligible |
+| Store close begins | Already-admitted publication drains; later open/publication drops immediately and releases capture reservations |
+| Error row has intent but detail root is missing | UI says the detail is unavailable because it may have expired, been cleared/capacity-dropped, or failed publication; never invent a per-record cause |
 
 ### 5. Good / Base / Bad Cases
 
 - **Good:** alias input, rewritten provider requests, rejected SSE head and final client response remain correlated but distinct.
 - **Good:** a Location URL password scrubs an earlier JSON echo and ordinary header echo before temporary files are written.
-- **Base:** mode off creates no captures and leaves all ordinary behavior unchanged.
+- **Base:** both modes off create no captures and leave model traffic plus ordinary row fields unchanged; enabling error-only still creates no group for a successful request.
 - **Bad:** adding bodies to `JsonlLogGroup`, consuming a second flowing response stream, or claiming an unread GET body is complete empty.
 - **Bad:** sanitizing headers only after serializing bodies; field-order-dependent credential leaks result.
 
 ### 6. Tests Required
 
-`test/detailed-log-capture.test.js` covers byte boundaries, split UTF-8/SSE/escaped credentials, known-secret suffixes, malformed/unread bodies, header-URL/prose credential discovery across the group, structured/quoted Cookie component echoes without Set-Cookie attribute over-redaction, repeated URL query credentials/ordinary query preservation, ordinary content, budget release, native backpressure/destruction/error identity and downstream overloads. Every-cut JSON/nested-credential/prose/non-JSON SSE tail tests must assert group-wide omission, including earlier headers/bodies, while safe ordinary prefixes remain visible. Complete ordinary one-layer literal escapes must remain readable across root/attempt bodies and Headers. Escaped credential values, names and URL keys must remove original/decoded forms and cross-group echoes without blanking unrelated complete content; partial or nested escaped representations must retain group-wide omission. Short-secret tests must prove nonrecursive markers across repeated passes, literal metacharacter handling and matcher invalidation after new secrets. Large-prefix exact/excess output, 16,383/16,384/16,385 assignment matches and exact/excess cumulative overlapping value-span tests must prove bounded discovery/assembly, ordinary-tail preservation, group-wide omission under pressure and reservation release. Production-root and authenticated API/file regressions cover known syntax collisions, raw credential-header URLs and Bearer-wrapped URL/assignment syntax with JSON/SSE traffic equality. They must include recognized request and upstream-response credential headers containing `Bearer api_key=<secret>`, earlier ordinary header/body echoes, and absence from metadata, on-demand body APIs, files and service output. Outer-token overlap tests observe actual production matcher indexes to prove strictly increasing starts, 8,192 outer plus 8,192 inner matches at the exact budget, and rejection of match 16,385 before learning. Preserve ordinary tails/markers, omit partial inner credentials even beyond an outer delimiter, and release reservations on group-wide work-limit omission. `test/detailed-log-store.test.js` covers metadata-only reads, retention/order/restart, failures, corrupt preservation, identity/symlink rejection and clear/eviction races. It must instrument a seeded corpus and prove that normal publication, query and minute expiry perform no corpus directory walk, stored-manifest reread or body read after startup, while explicit reconciliation discovers external safe state. Failed publication plus failed temporary cleanup must recover on clear/maintenance/publication, preserve older successful records and unknown/symlink data, reject persistent deletion failure and never delete a blocked active publication's temporary group. Detailed integration suites use temporary DATA_DIR and local mocks for every route class, actual-call counts, off/on traffic equivalence, stream outcome/lease regressions, setting persistence/failure, process interruption and blocked writes. Ordinary sensitive-data tests must still pass with details enabled.
+`test/detailed-log-capture.test.js` covers byte boundaries, split UTF-8/SSE/escaped credentials, known-secret suffixes, malformed/unread bodies, header-URL/prose credential discovery across the group, structured/quoted Cookie component echoes without Set-Cookie attribute over-redaction, repeated URL query credentials/ordinary query preservation, ordinary content, budget release, native backpressure/destruction/error identity and downstream overloads. Every-cut JSON/nested-credential/prose/non-JSON SSE tail tests must assert group-wide omission, including earlier headers/bodies, while safe ordinary prefixes remain visible. Complete ordinary one-layer literal escapes must remain readable across root/attempt bodies and Headers. Escaped credential values, names and URL keys must remove original/decoded forms and cross-group echoes without blanking unrelated complete content; partial or nested escaped representations must retain group-wide omission. Short-secret tests must prove nonrecursive markers across repeated passes, literal metacharacter handling and matcher invalidation after new secrets. Large-prefix exact/excess output, 16,383/16,384/16,385 assignment matches and exact/excess cumulative overlapping value-span tests must prove bounded discovery/assembly, ordinary-tail preservation, group-wide omission under pressure and reservation release. Production-root and authenticated API/file regressions cover known syntax collisions, raw credential-header URLs and Bearer-wrapped URL/assignment syntax with JSON/SSE traffic equality. They must include recognized request and upstream-response credential headers containing `Bearer api_key=<secret>`, earlier ordinary header/body echoes, and absence from metadata, on-demand body APIs, files and service output. Outer-token overlap tests observe actual production matcher indexes to prove strictly increasing starts, 8,192 outer plus 8,192 inner matches at the exact budget, and rejection of match 16,385 before learning. Preserve ordinary tails/markers, omit partial inner credentials even beyond an outer delimiter, and release reservations on group-wide work-limit omission. `test/detailed-log-store.test.js` covers metadata-only reads, retention/order/restart, failures, corrupt preservation, identity/symlink rejection and clear/eviction races. It must instrument a seeded corpus and prove that normal publication, query and minute expiry perform no corpus directory walk, stored-manifest reread or body read after startup, while explicit reconciliation discovers external safe state. Failed publication plus failed temporary cleanup must recover on clear/maintenance/publication, preserve older successful records and unknown/symlink data, reject persistent deletion failure and never delete a blocked active publication's temporary group. Detailed integration suites use temporary DATA_DIR and local mocks for every route class, actual-call counts, off/on traffic equivalence, stream outcome/lease regressions, setting persistence/failure, process interruption and blocked writes. Error-only coverage must include provider retry, account replacement, HTTP errors, HTTP-200 envelopes, recognized SSE errors, no-response transport failures, post-start stream failures, full-profile precedence, disabled-row field omission, exact `(attemptIndex, callId)` matching and successful 50 MiB input with no body-capture reservation. Ordinary sensitive-data tests must still pass with details enabled.
 
 Run module/server syntax checks, embedded browser-script compilation and `env -u CLINE_PASS_KEY -u PROXY_KEY -u PUBLIC_BASE_URL -u PORT npm test`. Small injectable retention tests do not establish full-1-GiB performance or exact RSS, and VM/static UI tests are not browser proof.
 

@@ -88,7 +88,8 @@ metadata.json   DATA_DIR/metadata.json
     cachePoolSize: integer // 0-100000; 0 disables the cache-focused active pool
   },
   modelAliases: { [clientAlias]: "cline-pass/<known model>" },
-  detailedLogging: boolean, // default false; only literal true enables capture
+  detailedLogging: boolean,      // default false; full detailed capture
+  errorDetailLogging: boolean,   // default false; failed chat attempts only
   perModel: { [modelId]: RouteConfig }
 }
 
@@ -220,7 +221,7 @@ Quota state is keyed by stable account ID and stores only projected percentages,
 
 Durable request/error diagnostics no longer grow `metadata.history`; they are separate bounded JSONL streams under `DATA_DIR/logs/` and follow `logging-guidelines.md`. The legacy history array remains compatibility-only.
 
-Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/` store described in `logging-guidelines.md`; metadata exclusions above remain unchanged. `POST /api/logs/settings` accepts exactly `{ detailedLogging: boolean }`. Persist the complete candidate config with `atomicWriteJson(CONFIG_PATH, { ...config, detailedLogging: next })` **before** changing runtime mode. Failed writes return a safe 500 with the old mode/file intact; rejected payloads return 400 without a write. The setting must not reuse destructive account saves or reload account drafts. Missing/invalid persisted values are off, not truthy enablement.
+Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/` store described in `logging-guidelines.md`; metadata exclusions above remain unchanged. `detailedLogging` selects full capture and `errorDetailLogging` selects failed-chat-attempt capture; both default off and full wins when both are enabled. `POST /api/logs/settings` accepts a non-empty exact subset of those two boolean fields, so legacy `{ detailedLogging: boolean }` remains valid. Persist the complete candidate config with `atomicWriteJson(CONFIG_PATH, { ...config, ...candidate })` **before** changing either runtime mode. Failed writes return a safe 500 with both prior runtime values/file intact; rejected payloads return 400 without a write. The settings must not reuse destructive account saves or reload account drafts. Missing/invalid persisted values are off, not truthy enablement.
 
 #### Atomic write and file mode
 
@@ -299,7 +300,7 @@ Persistence changes must use a temporary `DATA_DIR` and assert:
 - pruning retains 1,440 minute buckets, independently caps account/model cells, and marks only the dropped account/model coverage incomplete;
 - account removal deletes its `accountStates` entry;
 - invalid canonical rule IDs/scopes/actions/applicability/status/body/Header/reset shapes and limits return `400` and preserve bytes; legacy rules migrate in content-before-status order, unchanged old-client mirrors preserve canonical rules, conflicting mirrors return `409`, and valid canonical order survives restart;
-- detailed settings default/type/unknown-field/restart tests and injected atomic-write failure preserve previous config bytes/runtime mode; independent detail retention/recovery never changes ordinary logs or metadata.
+- both detailed switches default/type/unknown-field/restart tests, legacy one-field settings writes, two-field writes and injected atomic-write failure preserve previous config bytes/runtime modes; independent detail retention/recovery never changes ordinary logs or metadata.
 
 The current integration suite directly covers malformed config preservation, legacy migration, metadata mode, routing-secret/cooldown restart, and session-value exclusion. Add focused assertions before relying on account-state cleanup or unchanged-file behavior after every validation branch.
 

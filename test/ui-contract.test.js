@@ -202,6 +202,9 @@ test('raw scheduling editor uses a labelled native modal, draft guidance and ann
 
 test('detailed logs have independent labelled controls, privacy/retention guidance and safe on-demand text', () => {
   assert.match(html, /<label for="detailedLogging"><input id="detailedLogging" type="checkbox" disabled/);
+  assert.match(html, /<label for="errorDetailLogging"><input id="errorDetailLogging" type="checkbox" disabled/);
+  assert.match(html, /错误详情/); assert.match(html, /查看错误详情/); assert.match(html, /详情不可用（已过期、已清空、被容量边界丢弃或发布失败）/);
+  assert.match(html, /attemptIndex/); assert.match(html, /detailCallId/);
   assert.match(html, /5 MiB/); assert.match(html, /7 天 \/ 1 GiB/); assert.match(html, /不提交账号草稿/);
   assert.match(html, /id="detailsStatus" aria-live="polite"/);
   assert.match(html, /<label for="detailsText">/); assert.match(html, /<textarea id="detailsText" readonly/);

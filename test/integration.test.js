@@ -1698,13 +1698,19 @@ test('detailed logging settings, route matrix, actual-call groups and credential
   const get = async (route, method = 'GET') => { const response = await fetch(`http://127.0.0.1:${port}${route}`, { method, headers: auth }); return { response, json: await response.json() }; };
   const list = async () => (await get('/api/logs/details?limit=200')).json.items;
   assert.equal((await fetch(`http://127.0.0.1:${port}/api/logs/settings`)).status, 401);
-  assert.equal((await get('/api/logs/settings')).json.detailedLogging, false);
+  const initialSettings = (await get('/api/logs/settings')).json;
+  assert.equal(initialSettings.detailedLogging, false); assert.equal(initialSettings.errorDetailLogging, false);
   await rawJson(port, '/v1/chat/completions', { model: 'alias', messages: [] }, auth);
   assert.equal((await list()).length, 0);
   const settingsBefore = fs.readFileSync(path.join(running.dir, 'config.json'));
-  for (const value of [null, [], {}, { detailedLogging: 1 }, { detailedLogging: true, extra: 1 }]) assert.equal((await rawJson(port, '/api/logs/settings', value, auth)).status, 400);
+  for (const value of [null, [], {}, { detailedLogging: 1 }, { errorDetailLogging: 1 }, { detailedLogging: true, extra: 1 }]) assert.equal((await rawJson(port, '/api/logs/settings', value, auth)).status, 400);
   assert.deepEqual(fs.readFileSync(path.join(running.dir, 'config.json')), settingsBefore);
-  assert.equal((await rawJson(port, '/api/logs/settings', { detailedLogging: true }, auth)).status, 200);
+  const errorOnly = await rawJson(port, '/api/logs/settings', { errorDetailLogging: true }, auth);
+  assert.equal(errorOnly.status, 200); assert.equal(errorOnly.json.detailedLogging, false); assert.equal(errorOnly.json.errorDetailLogging, true);
+  const legacyFull = await rawJson(port, '/api/logs/settings', { detailedLogging: true }, auth);
+  assert.equal(legacyFull.status, 200); assert.equal(legacyFull.json.detailedLogging, true); assert.equal(legacyFull.json.errorDetailLogging, true, 'legacy one-field writes preserve the independent error-only mode');
+  const both = await rawJson(port, '/api/logs/settings', { detailedLogging: true, errorDetailLogging: false }, auth);
+  assert.equal(both.status, 200); assert.equal(both.json.detailedLogging, true); assert.equal(both.json.errorDetailLogging, false);
   let expected = 0;
   const groupAfter = async (request) => {
     const response = await request; expected++;
@@ -1757,15 +1763,138 @@ test('detailed logging settings, route matrix, actual-call groups and credential
   assert.doesNotMatch(running.output(), /saved-detail-secret|detail-admin-secret|incoming-cookie-secret|ephemeral-detail-secret|ephemeral-proxy-password/);
   const countBeforeRestart = (await list()).length;
   await stop(running.child); running = await startSwitcher(null, running.dir);
-  assert.equal((await get('/api/logs/settings')).json.detailedLogging, true); assert.equal((await list()).length, countBeforeRestart);
+  const restartedSettings = (await get('/api/logs/settings')).json; assert.equal(restartedSettings.detailedLogging, true); assert.equal(restartedSettings.errorDetailLogging, false); assert.equal((await list()).length, countBeforeRestart);
   const ordinaryBefore = allText(path.join(running.dir, 'logs'));
   await get('/api/logs/details', 'DELETE'); assert.equal((await list()).length, 0); assert.equal(allText(path.join(running.dir, 'logs')), ordinaryBefore);
   await rawJson(port, '/api/logs/settings', { detailedLogging: false }, auth);
   await stop(running.child); running = await startSwitcher(null, running.dir); assert.equal((await get('/api/logs/settings')).json.detailedLogging, false);
   await stop(running.child);
-  const invalidConfig = JSON.parse(fs.readFileSync(path.join(running.dir, 'config.json'), 'utf8')); invalidConfig.detailedLogging = 'true';
+  const invalidConfig = JSON.parse(fs.readFileSync(path.join(running.dir, 'config.json'), 'utf8')); invalidConfig.detailedLogging = 'true'; invalidConfig.errorDetailLogging = 'true';
   fs.writeFileSync(path.join(running.dir, 'config.json'), JSON.stringify(invalidConfig));
-  running = await startSwitcher(null, running.dir); assert.equal((await get('/api/logs/settings')).json.detailedLogging, false);
+  running = await startSwitcher(null, running.dir); const invalidSettings = (await get('/api/logs/settings')).json; assert.equal(invalidSettings.detailedLogging, false); assert.equal(invalidSettings.errorDetailLogging, false);
+});
+
+test('error-only detail correlates every real failed chat attempt without copying successful traffic', async (t) => {
+  const responseSecret = 'error-detail-response-secret';
+  const upstream = http.createServer((req, res) => {
+    const chunks = []; req.on('data', (chunk) => chunks.push(chunk)); req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+      const provider = body.provider?.only?.[0] || body.providerOptions?.gateway?.only?.[0];
+      if (body.model === 'network') return res.destroy();
+      res.setHeader('X-Credential', `Bearer api_key=${responseSecret}`);
+      if (body.model === 'retry' && provider === 'first') { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: `first failed ${responseSecret}`, status: 500 } })); }
+      if (body.model === 'envelope') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: `wrapped failed ${responseSecret}`, status: 502 } })); }
+      if (body.model === 'long') { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'L'.repeat(20 * 1024), finalCause: 'tail-cause' } })); }
+      if (body.model === 'sse-error') { res.writeHead(200, { 'Content-Type': 'text/event-stream' }); return res.end(`data: ${JSON.stringify({ error: { message: `stream failed ${responseSecret}`, status: 502 } })}\n\n`); }
+      if (body.model === 'stream-break') { res.writeHead(200, { 'Content-Type': 'text/event-stream' }); res.write('data: {"choices":[{"delta":{"content":"started"}}]}\n\n'); return setTimeout(() => res.destroy(), 20); }
+      if (body.model === 'replace' && req.headers.authorization === 'Bearer key-a') { res.writeHead(429, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'account subscription quota exhausted', status: 429 } })); }
+      if (body.model === 'replace' && req.headers.authorization === 'Bearer key-b' && provider === 'first') { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end('{"error":{"message":"replacement provider failed","status":500}}'); }
+      res.writeHead(200, { 'Content-Type': body.stream ? 'text/event-stream' : 'application/json' });
+      res.end(body.stream ? 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n' : '{"choices":[{"message":{"content":"ok"}}]}');
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const config = {
+    port, upstreamBase: `http://127.0.0.1:${upstreamPort}`,
+    errorDetailLogging: false,
+    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }, { id: 'b', name: 'B', key: 'key-b', enabled: true, perModel: {} }],
+    accountMode: 'single', activeAccount: 0,
+    knownModels: ['success', 'retry', 'envelope', 'long', 'sse-error', 'stream-break', 'network', 'replace'],
+    perModel: { retry: { upstreams: ['first', 'second'], pinMode: 'strict' }, replace: { upstreams: ['first', 'second'], pinMode: 'strict' } },
+    errorRules: [{ id: 'replace-account', scope: 'account', action: 'cooldown', when: { statuses: [429], body_contains: 'account subscription quota exhausted' }, reset: { fallback: '1m0s', max: '1m0s' } }],
+  };
+  const running = await startSwitcher(config);
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const api = async (route) => (await fetch(`http://127.0.0.1:${port}${route}`)).json();
+  const groupFor = (id) => waitUntil(async () => { const group = await api('/api/logs/details/' + id); return group.request?.state !== undefined && group; });
+  const success = await rawJson(port, '/v1/chat/completions', { model: 'success', messages: [{ role: 'user', content: 'do not retain successful input' }] });
+  assert.equal(success.status, 200);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal((await api('/api/logs/details/' + success.headers['x-cline-request-id'])).error.message, 'detailed record unavailable');
+  const disabledFailure = await rawJson(port, '/v1/chat/completions', { model: 'envelope', messages: [] });
+  const disabledRow = await waitUntil(async () => (await api('/api/logs/errors?requestId=' + disabledFailure.headers['x-cline-request-id'])).items[0]);
+  assert.equal(Object.hasOwn(disabledRow, 'detailProfile'), false); assert.equal(Object.hasOwn(disabledRow, 'detailCallId'), false);
+  assert.equal((await api('/api/logs/details/' + disabledFailure.headers['x-cline-request-id'])).error.message, 'detailed record unavailable');
+  await fetch(`http://127.0.0.1:${port}/api/logs/errors`, { method: 'DELETE' });
+  assert.equal((await rawJson(port, '/api/logs/settings', { errorDetailLogging: true })).status, 200);
+
+  const responses = new Map();
+  for (const model of ['retry', 'envelope', 'long', 'sse-error', 'network']) responses.set(model, await rawJson(port, '/v1/chat/completions', { model, stream: model === 'sse-error', messages: [{ role: 'user', content: 'request credential-free text' }] }));
+  const streamBreak = await new Promise((resolve, reject) => {
+    const request = http.request({ hostname: '127.0.0.1', port, path: '/v1/chat/completions', method: 'POST', headers: { 'Content-Type': 'application/json' } }, (res) => {
+      const chunks = []; res.on('data', (chunk) => chunks.push(chunk));
+      const finish = () => resolve({ status: res.statusCode, headers: res.headers, text: Buffer.concat(chunks).toString(), complete: res.complete });
+      res.on('end', finish); res.on('aborted', finish); res.on('error', (error) => { if (error.code !== 'ECONNRESET') reject(error); });
+    });
+    request.on('error', reject); request.end(JSON.stringify({ model: 'stream-break', stream: true, messages: [] }));
+  });
+  responses.set('stream-break', streamBreak);
+  const replacement = await rawJson(port, '/v1/chat/completions', { model: 'replace', messages: [] }); responses.set('replace', replacement); assert.equal(replacement.status, 200);
+
+  const errors = await waitUntil(async () => { const rows = (await api('/api/logs/errors?limit=200')).items; return rows.length >= 8 && rows; });
+  const byRequest = new Map(errors.map((row) => [row.requestId, row]));
+  for (const [model, response] of responses) {
+    const id = response.headers['x-cline-request-id'], row = byRequest.get(id); assert.ok(row, model);
+    assert.equal(row.detailProfile, 'error'); assert.match(row.detailCallId, /^[0-9a-f-]{36}$/);
+    const group = await groupFor(id); assert.equal(group.request.profile, 'error'); assert.equal(group.request.requestBody, undefined); assert.equal(group.request.responseBody, undefined); assert.equal(group.request.headers, undefined);
+    const matched = group.attempts.filter((attempt) => attempt.attemptIndex === row.attemptIndex && attempt.callId === row.detailCallId); assert.equal(matched.length, 1, model);
+    if (model === 'network') { assert.equal(matched[0].captureState, 'no-response'); assert.equal(matched[0].responseBody, undefined); }
+    else if (model === 'stream-break') { assert.equal(group.request.status, 200); assert.equal(group.request.result, 'failed'); assert.equal(matched[0].captureState, 'stream-transport-failed'); assert.equal(matched[0].httpStatus, 200); assert.equal(matched[0].outcomeStatus, 502); assert.equal(matched[0].responseBody, undefined); }
+    else { assert.ok(matched[0].responseBody); const text = await (await fetch(`http://127.0.0.1:${port}/api/logs/details/${id}/bodies/${matched[0].responseBody}`)).text(); assert.equal(text.includes(responseSecret), false); }
+    assert.equal(JSON.stringify(group).includes(responseSecret), false);
+  }
+  const retryId = responses.get('retry').headers['x-cline-request-id'], retryGroup = await groupFor(retryId);
+  assert.deepEqual(retryGroup.attempts.map((attempt) => attempt.attemptIndex), [0]);
+  const replaceId = responses.get('replace').headers['x-cline-request-id'], replaceGroup = await groupFor(replaceId), replaceRows = errors.filter((row) => row.requestId === replaceId);
+  assert.deepEqual(replaceGroup.attempts.map((attempt) => attempt.accountId), ['a', 'b']); assert.deepEqual(replaceGroup.attempts.map((attempt) => attempt.attemptIndex), [0, 1]);
+  assert.equal(replaceRows.length, 2); for (const row of replaceRows) assert.equal(replaceGroup.attempts.filter((attempt) => attempt.attemptIndex === row.attemptIndex && attempt.callId === row.detailCallId).length, 1);
+  const longRow = byRequest.get(responses.get('long').headers['x-cline-request-id']); assert.equal(longRow.reasonTruncated, true); assert.ok(Buffer.byteLength(longRow.reason) <= 16 * 1024);
+  const successfulDetails = (await api('/api/logs/details?result=success')).items.map((row) => row.requestId); assert.ok(successfulDetails.includes(retryId)); assert.ok(successfulDetails.includes(replaceId));
+  const failedDetails = (await api('/api/logs/details?result=failed')).items.map((row) => row.requestId); assert.ok(failedDetails.includes(responses.get('envelope').headers['x-cline-request-id']));
+  const ordinary = fs.readdirSync(path.join(running.dir, 'logs')).map((name) => fs.readFileSync(path.join(running.dir, 'logs', name), 'utf8')).join('\n') + fs.readFileSync(path.join(running.dir, 'metadata.json'), 'utf8');
+  assert.equal(ordinary.includes(responseSecret), false); assert.equal(ordinary.includes('do not retain successful input'), false);
+
+  const fullMode = await rawJson(port, '/api/logs/settings', { detailedLogging: true, errorDetailLogging: true }); assert.equal(fullMode.status, 200);
+  const fullFailure = await rawJson(port, '/v1/chat/completions', { model: 'envelope', messages: [] });
+  const fullRow = await waitUntil(async () => (await api('/api/logs/errors?requestId=' + fullFailure.headers['x-cline-request-id'])).items[0]);
+  assert.equal(fullRow.detailProfile, 'full'); const fullGroup = await groupFor(fullFailure.headers['x-cline-request-id']); assert.equal(fullGroup.request.profile, 'full'); assert.equal(fullGroup.attempts.length, 1);
+});
+
+test('graceful shutdown drains completed ordinary and error-detail records and bounds a blocked writer', { timeout: 10000 }, async (t) => {
+  const upstream = http.createServer((req, res) => { req.resume(); req.on('end', () => { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"shutdown fixture failure"}}'); }); });
+  const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-shutdown-'));
+  const config = { port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, errorDetailLogging: true, accounts: [{ id: 'a', name: 'A', key: 'shutdown-key', enabled: true, perModel: {} }], knownModels: ['shutdown'], perModel: {}, accountErrorRules: {} };
+  let running = await startSwitcher(config, dir);
+  t.after(async () => { if (running?.child && running.child.exitCode === null) await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  const response = await rawJson(port, '/v1/chat/completions', { model: 'shutdown', messages: [] });
+  const requestId = response.headers['x-cline-request-id'];
+  await stop(running.child); running = await startSwitcher(null, dir);
+  const requests = await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${requestId}`)).json();
+  const errors = await (await fetch(`http://127.0.0.1:${port}/api/logs/errors?requestId=${requestId}`)).json();
+  const detail = await (await fetch(`http://127.0.0.1:${port}/api/logs/details/${requestId}`)).json();
+  assert.equal(requests.items.length, 1); assert.equal(errors.items.length, 1); assert.equal(detail.request.profile, 'error');
+  await stop(running.child); running = null;
+
+  const blockedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-shutdown-blocked-'));
+  t.after(() => fs.rmSync(blockedDir, { recursive: true, force: true }));
+  const loader = path.join(blockedDir, 'block-loader.mjs');
+  fs.writeFileSync(loader, `import fsp from 'node:fs/promises';\nconst writeFile=fsp.writeFile;\nfsp.writeFile=async(file,...args)=>String(file).includes('/detailed-logs/')&&String(file).endsWith('.txt')?new Promise(()=>{}):writeFile(file,...args);`);
+  const blockedPort = await unusedPort();
+  const blocked = await startSwitcher({ ...config, port: blockedPort }, blockedDir, { NODE_ENV: 'test', NODE_OPTIONS: `--import=${loader}`, CLINE_PASS_SHUTDOWN_MS: '120' });
+  const blockedResponse = await rawJson(blockedPort, '/v1/chat/completions', { model: 'shutdown', messages: [] }); assert.equal(blockedResponse.status, 500);
+  const started = Date.now(); await stop(blocked.child); assert.ok(Date.now() - started < 1000, 'shutdown deadline must bound a blocked detailed writer');
+});
+
+test('one successful chat finalization persists combined statistics and record metadata once', async (t) => {
+  const upstream = http.createServer((req, res) => { req.resume(); req.on('end', () => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"choices":[{"message":{"content":"ok"}}]}'); }); });
+  const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-meta-save-'));
+  const counter = path.join(dir, 'metadata-writes.txt'), loader = path.join(dir, 'count-loader.mjs');
+  fs.writeFileSync(loader, `import fs from 'node:fs';\nconst writeFileSync=fs.writeFileSync;\nfs.writeFileSync=function(file,...args){if(String(file).includes('metadata.json.')&&String(file).endsWith('.tmp'))writeFileSync(${JSON.stringify(counter)},'1\\n',{flag:'a'});return writeFileSync(file,...args);};`);
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'meta-key', enabled: true, perModel: {} }], knownModels: ['meta'], perModel: {}, accountErrorRules: {} }, dir, { NODE_OPTIONS: `--import=${loader}` });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  const count = () => fs.existsSync(counter) ? fs.readFileSync(counter, 'utf8').trim().split('\n').filter(Boolean).length : 0;
+  const before = count(); assert.equal((await rawJson(port, '/v1/chat/completions', { model: 'meta', messages: [] })).status, 200);
+  await waitForRequestLogs(port, 1); assert.equal(count() - before, 1);
 });
 
 test('detailed logging removes structured credential component echoes from JSON/SSE groups, APIs and files', async (t) => {
@@ -2198,9 +2327,9 @@ fsp.writeFile=async(a,...args)=>{while(String(a).endsWith('.txt')&&fs.existsSync
   assert.equal(recovered.request.state, 'interrupted'); assert.equal(recovered.request.complete, false); assert.equal(recovered.bodies.length, 0);
   const before = fs.readFileSync(path.join(dir, 'config.json'));
   fs.writeFileSync(configFault, '');
-  assert.equal((await rawJson(port, '/api/logs/settings', { detailedLogging: false })).status, 500);
+  assert.equal((await rawJson(port, '/api/logs/settings', { detailedLogging: false, errorDetailLogging: true })).status, 500);
   assert.deepEqual(fs.readFileSync(path.join(dir, 'config.json')), before);
-  assert.equal((await (await fetch(`http://127.0.0.1:${port}/api/logs/settings`)).json()).detailedLogging, true);
+  const retainedSettings = await (await fetch(`http://127.0.0.1:${port}/api/logs/settings`)).json(); assert.equal(retainedSettings.detailedLogging, true); assert.equal(retainedSettings.errorDetailLogging, false);
   fs.unlinkSync(configFault);
   fs.writeFileSync(detailFault, '');
   const failed = await rawJson(port, '/v1/chat/completions', { model: 'hold', messages: [] }); assert.equal(failed.status, 200); assert.match(failed.text, /still works/);

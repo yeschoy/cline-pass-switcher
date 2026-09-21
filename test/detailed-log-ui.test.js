@@ -21,14 +21,14 @@ function harness() {
 }
 
 test('five sections, toggle and detail reads preserve all account/bulk/raw draft owners', async () => {
-  const h = harness(), before = h.drafts();
-  h.context.handler = async (path, body) => path.includes('settings') ? { detailedLogging: body?.detailedLogging ?? false, authRequired: false } : page('row');
+  const h = harness(), before = h.drafts(); let settings = { detailedLogging: false, errorDetailLogging: false, authRequired: false };
+  h.context.handler = async (path, body) => { if (!path.includes('settings')) return page('row'); if (body) settings = { ...settings, ...body }; return settings; };
   await h.run("switchSection('details')");
   assert.equal(h.el('#detailsPanel').hidden, false);
   for (const id of ['#consolePanel', '#statisticsPanel', '#logPanel']) assert.equal(h.el(id).hidden, true);
   assert.equal(h.el('#navDetails').attrs['aria-pressed'], 'true'); assert.match(h.el('#detailsAuth').textContent, /没有密钥保护/);
   h.el('#detailedLogging').checked = true; await h.run('toggleDetailedLogging()');
-  assert.equal(h.el('#detailedLogging').checked, true); assert.equal(h.drafts(), before);
+  assert.equal(h.el('#detailedLogging').checked, true); h.el('#errorDetailLogging').checked = true; await h.run('toggleErrorDetailLogging()'); assert.equal(h.el('#errorDetailLogging').checked, true); assert.equal(h.drafts(), before);
   assert.ok(h.calls.every(([path]) => path.startsWith('/api/logs/')));
   await h.run("switchSection('console')"); assert.equal(h.el('#detailsPanel').hidden, true); assert.equal(h.el('#consolePanel').hidden, false);
 });
@@ -65,6 +65,33 @@ test('toggle failures restore confirmed state, pending reads cannot undo a save,
   const pendingClear = h.run('clearDetails()'); await h.run("switchSection('console')"); clear.resolve({ ok: true }); await pendingClear;
   assert.equal(h.calls.length, 1); assert.equal(h.calls[0][0], '/api/logs/details'); assert.equal(h.calls[0][2], 'DELETE');
   assert.equal(h.drafts(), before);
+});
+
+test('error rows require exact attempt index and call id before exposing one response body', async () => {
+  const h = harness(); h.el('#detailsPanel').hidden = false;
+  const callId = '11111111-1111-4111-8111-111111111111';
+  const group = { request: { requestId: 'root', profile: 'error' }, attempts: [
+    { attemptIndex: 0, callId: '22222222-2222-4222-8222-222222222222', captureState: 'response-error', responseBody: 'other' },
+    { attemptIndex: 1, callId, captureState: 'stream-transport-failed' },
+  ], bodies: [{ bodyId: 'other', state: 'complete', capturedBytes: 3, observedBytes: 3 }] };
+  h.context.handler = async () => group;
+  await h.run(`selectDetail('root',{attemptIndex:1,callId:${JSON.stringify(callId)}})`);
+  const projected = JSON.parse(h.el('#detailsMetadata').textContent); assert.equal(projected.attempts.length, 1); assert.equal(projected.attempts[0].callId, callId); assert.equal(projected.bodies.length, 0);
+  assert.match(h.el('#detailsStatus').textContent, /起流后传输失败/); assert.equal(h.el('#detailsMetadata').focused, true);
+  await h.run(`selectDetail('root',{attemptIndex:0,callId:${JSON.stringify(callId)}})`);
+  assert.match(h.el('#detailsMetadata').textContent, /关联校验失败/); assert.equal(h.el('#detailsBodies').innerHTML, '');
+  h.context.handler = async () => ({ ...group, attempts: [{ attemptIndex: 1, callId }, { attemptIndex: 1, callId }] });
+  await h.run(`selectDetail('root',{attemptIndex:1,callId:${JSON.stringify(callId)}})`); assert.match(h.el('#detailsMetadata').textContent, /不唯一/);
+  h.context.handler = async () => ({ error: { message: 'detailed record unavailable' } });
+  await h.run(`selectDetail('missing',{attemptIndex:1,callId:${JSON.stringify(callId)}})`);
+  assert.equal(h.el('#detailsMetadata').textContent, '详情不可用（已过期、已清空、被容量边界丢弃或发布失败）');
+  assert.match(h.run("errorDetailAction({requestId:'33333333-3333-4333-8333-333333333333',attemptIndex:1,detailProfile:'error',detailCallId:'11111111-1111-4111-8111-111111111111'})"), /查看错误详情/);
+  assert.match(h.run("errorDetailAction({requestId:'33333333-3333-4333-8333-333333333333',attemptIndex:1})"), /当时未开启错误详情/);
+  for(const invalid of [
+    "{requestId:'bad',attemptIndex:1,detailProfile:'error',detailCallId:'11111111-1111-4111-8111-111111111111'}",
+    "{requestId:'33333333-3333-4333-8333-333333333333',attemptIndex:-1,detailProfile:'error',detailCallId:'11111111-1111-4111-8111-111111111111'}",
+    "{requestId:'33333333-3333-4333-8333-333333333333',attemptIndex:1,detailProfile:'other',detailCallId:'11111111-1111-4111-8111-111111111111'}",
+  ]) { const action=h.run(`errorDetailAction(${invalid})`); assert.doesNotMatch(action,/button|查看错误详情/); assert.match(action,/关联不可用/); }
 });
 
 test('editing a detail filter invalidates pending reads and cannot reuse the old page cursor', async () => {

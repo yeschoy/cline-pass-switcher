@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { JsonlLogGroup } from './lib/jsonl-log-store.js';
-import { DetailRoot, detailContext, detailRoute, observeStream, MAX_BODY_BYTES, captureBudget } from './lib/detailed-log-capture.js';
+import { DetailRoot, DetailRedactor, detailContext, detailRoute, observeStream, MAX_BODY_BYTES, captureBudget } from './lib/detailed-log-capture.js';
 import { DetailedLogStore, parseDetailQuery, MAX_AGE_MS, MAX_TOTAL_BYTES } from './lib/detailed-log-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -30,6 +30,7 @@ const DEFAULT_CONFIG = {
   proxyKey: '',
   publicBaseUrl: '',
   detailedLogging: false,
+  errorDetailLogging: false,
   exposeCatalog: false,    // true 时 /v1/models 合并完整目录模型（默认仅订阅模型）
   upstreamBase: 'https://api.cline.bot/api/v1',
   accounts: [],            // { id, name, key, enabled, maxConcurrent, perModel } —— Cline Pass 账号池
@@ -103,6 +104,7 @@ const requestLogs = ordinaryLogs.stream('requests');
 const errorLogs = ordinaryLogs.stream('errors');
 const detailedLogs = new DetailedLogStore({ dir: path.join(DATA_DIR, 'detailed-logs') });
 const recentHistory = Array.isArray(META.history) ? [...META.history] : [];
+let shuttingDown = false;
 
 function randomId(prefix = 'acc') {
   return `${prefix}_${crypto.randomBytes(12).toString('hex')}`;
@@ -740,6 +742,7 @@ function normalizeAccountQuotas() {
 }
 function normalizeConfigAndMeta({ persist = false } = {}) {
   let dirty = false;
+  for (const field of ['detailedLogging', 'errorDetailLogging']) if (config[field] !== true && config[field] !== false) { config[field] = false; dirty = true; }
   if ((!Array.isArray(config.accounts) || config.accounts.length === 0) && config.apiKey) {
     config.accounts = [{ name: '默认账号', key: config.apiKey, enabled: true }];
     config.accountMode = 'single';
@@ -1194,7 +1197,7 @@ const OR_API = 'https://openrouter.ai/api/v1';
 
 async function accountFetchJSON(url, opts = {}, timeoutMs = 60000, account = null) {
   const headers = account ? responseHeadersFor(account, opts.headers || {}) : (opts.headers || {});
-  const result = await clineRequestJSON(url, { headers, body: opts.body || '', timeoutMs, account });
+  const result = await clineRequestJSON(url, { headers, body: opts.body || '', timeoutMs, account, attemptMeta: opts.attemptMeta || null });
   let json = null; try { json = JSON.parse(result.text); } catch { json = { raw: result.text }; }
   return { status: result.status, json };
 }
@@ -1302,7 +1305,7 @@ async function harvestAvailableProviders(modelId, pipeline, acc) {
   const body = pipeline === 'planner'
     ? { ...base, providerOptions: { gateway: { only: ['__probe__'] } } }
     : { ...base, provider: { only: ['__probe__'] } };
-  const { json } = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, { headers: chatHeaders(acc.key), body: JSON.stringify(body) }, 60000, acc);
+  const { json } = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, { headers: chatHeaders(acc.key), body: JSON.stringify(body), attemptMeta: { model: modelId, provider: ['__probe__'] } }, 60000, acc);
   return providersFromError(upstreamErrorOf(json));
 }
 function parseTier0(plan) {
@@ -1315,7 +1318,7 @@ async function probeModel(modelId, acc) {
   const t0 = Date.now();
   const body = { model: modelId, messages: [{ role: 'user', content: 'Reply with the word OK' }], max_tokens: 256 };
   const { json } = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, {
-    headers: chatHeaders(acc.key), body: JSON.stringify(body),
+    headers: chatHeaders(acc.key), body: JSON.stringify(body), attemptMeta: { model: modelId, provider: [] },
   }, 180000, acc);
   const ms = Date.now() - t0;
   if (json?.error && !json?.data) {
@@ -1434,7 +1437,7 @@ async function validateUpstreams(modelId, acc) {
         : { ...base, provider: { only: [slug] } };
       let response;
       try {
-        response = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, { headers: chatHeaders(acc.key), body: JSON.stringify(body) }, 60000, acc);
+        response = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, { headers: chatHeaders(acc.key), body: JSON.stringify(body), attemptMeta: { model: modelId, provider: [slug] } }, 60000, acc);
       } catch (error) {
         results[slug] = { status: 'unknown', accountFault: acc.proxyUrl ? 'proxy' : 'network', ms: Date.now() - t0, note: safeReason(error.message) };
         return;
@@ -1642,7 +1645,7 @@ function commitStatistics({ ts = Date.now(), modelId = null, globalError = false
     const sample = attempt.status === 200 ? 'successes' : attempt.ruleScope === 'provider-model' && attempt.ruleAction === 'degrade' ? 'degrades' : null;
     if (sample) addSuccessCounter(providerSuccessHealthCell(bucket, modelId, attempt.upstream), sample);
   }
-  pruneStatistics(ts); saveMeta();
+  pruneStatistics(ts);
 }
 function aggregateRange(accountId = null, now = Date.now()) {
   const out = emptyAggregate(), health = emptyHealth(), min = Math.floor(now / 60000) - 1439;
@@ -1717,6 +1720,15 @@ const UPSTREAM_PROMPT_KEY_SOURCES = new Set(['caller_prompt_cache_key','caller_s
 const PIPELINE_DIAGNOSTICS = new Set(['quota-all-unknown']);
 const PIPELINE_QUOTA_POOLS = new Set(['ordinary','hot','warm','unknown','reserve']);
 const PIPELINE_HEALTH_LAYERS = new Set(['rated','unknown']);
+const ORDINARY_REASON_BYTES = 16 * 1024;
+const DETAIL_CALL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+function boundedReason(value, sensitiveValues = []) {
+  const original = safeReason(value, sensitiveValues), encoded = Buffer.from(original);
+  if (encoded.length <= ORDINARY_REASON_BYTES) return { reason: original, reasonTruncated: false };
+  let bytes = encoded.subarray(0, ORDINARY_REASON_BYTES);
+  while (bytes.length) { try { return { reason: new TextDecoder('utf-8', { fatal: true }).decode(bytes), reasonTruncated: true }; } catch { bytes = bytes.subarray(0, bytes.length - 1); } }
+  return { reason: '', reasonTruncated: true };
+}
 function record(modelId, info, detail = detailContext.getStore()) {
   const ts = Date.now();
   META.models[modelId] = { ...(META.models[modelId] || {}), provider: info.provider, canonical: info.canonical, lastMs: info.ms };
@@ -1724,8 +1736,11 @@ function record(modelId, info, detail = detailContext.getStore()) {
   const { sensitiveValues: _sensitiveValues, ...safeInfo } = info;
   const legacy = {
     ts, model: modelId, ...safeInfo, result,
-    error: safeInfo.error ? safeReason(safeInfo.error, info.sensitiveValues) : safeInfo.error,
-    trace: Array.isArray(safeInfo.trace) ? safeInfo.trace.map((attempt) => ({ ...attempt, note: safeReason(attempt.note, info.sensitiveValues) })) : safeInfo.trace,
+    error: safeInfo.error ? boundedReason(safeInfo.error, info.sensitiveValues).reason : safeInfo.error,
+    trace: Array.isArray(safeInfo.trace) ? safeInfo.trace.map((attempt) => {
+      const { attemptIndex: _attemptIndex, callId: _callId, detailProfile: _detailProfile, reasonTruncated: _reasonTruncated, ...legacyAttempt } = attempt;
+      return { ...legacyAttempt, note: boundedReason(attempt.note, info.sensitiveValues).reason };
+    }) : safeInfo.trace,
   };
   recentHistory.unshift(legacy); if (recentHistory.length > 100) recentHistory.length = 100;
   const request = {
@@ -1762,25 +1777,31 @@ function record(modelId, info, detail = detailContext.getStore()) {
     durationMs: Number(info.ms) || 0, accountActions: info.accountActions || [], switched: (info.accountPath || []).length > 1, appliedHeaderNames: info.appliedHeaderNames || [],
     errorCategory: info.errorCategory || (result === 'failed' && info.error ? (info.proxyError ? 'proxy' : 'upstream') : null),
   };
-  if (detail?.requestId === request.requestId) detail.result = result;
+  if (detail?.requestId === request.requestId) { detail.result = result; if (detail.profile === 'error' && detail.status === null) detail.status = request.status; }
   const writes = [requestLogs.append(request)];
-  for (const [attemptIndex, attempt] of (result === 'client_cancelled' ? [] : (info.trace || [])).entries()) {
+  for (const [traceIndex, attempt] of (result === 'client_cancelled' ? [] : (info.trace || [])).entries()) {
     if (attempt.status === 200 && !attempt.action) continue;
+    const attemptIndex = Number.isSafeInteger(attempt.attemptIndex) && attempt.attemptIndex >= 0 ? attempt.attemptIndex : traceIndex;
+    const detailProfile = ['error', 'full'].includes(attempt.detailProfile) && DETAIL_CALL_ID.test(attempt.callId || '') ? attempt.detailProfile : null;
+    const bounded = boundedReason(attempt.note, info.sensitiveValues);
+    bounded.reasonTruncated ||= attempt.reasonTruncated === true;
     writes.push(errorLogs.append({ ts, requestId: request.requestId, requestedModel: request.requestedModel, resolvedModel: request.resolvedModel,
       accountId: attempt.accountId || info.accountId || null, accountName: attempt.account || info.account || null, attemptIndex,
-      targetProvider: attempt.upstream || null, providerPath: (info.trace || []).slice(0, attemptIndex + 1).map((t) => t.upstream || 'auto'),
+      targetProvider: attempt.upstream || null, providerPath: (info.trace || []).slice(0, traceIndex + 1).map((t) => t.upstream || 'auto'),
       status: attempt.normalizedStatus || attempt.status, upstreamStatus: attempt.upstreamStatus ?? null,
-      category: attempt.upstreamStatus === 0 ? (info.proxyError ? 'proxy' : 'network') : 'upstream', reason: safeReason(attempt.note, info.sensitiveValues), accountAction: attempt.ruleScope === 'account' ? attempt.ruleAction || null : null,
+      category: attempt.upstreamStatus === 0 ? (info.proxyError ? 'proxy' : 'network') : 'upstream', ...bounded, accountAction: attempt.ruleScope === 'account' ? attempt.ruleAction || null : null,
       ruleId: typeof attempt.ruleId === 'string' && ERROR_RULE_ID.test(attempt.ruleId) ? attempt.ruleId : null,
       ruleScope: ERROR_RULE_SCOPES.has(attempt.ruleScope) ? attempt.ruleScope : null,
       ruleAction: ERROR_RULE_ACTIONS.has(attempt.ruleAction) ? attempt.ruleAction : null,
       matchedBy: Array.isArray(attempt.matchedBy) ? attempt.matchedBy.filter((value) => ['status','body','header','provider','model','default'].includes(value)).slice(0, 5) : [],
       errorScope: attempt.errorScope || null, scopeEvidence: attempt.scopeEvidence || null, failureClass: attempt.failureClass || null,
       healthAction: attempt.healthAction || 'none', retryAfterMs: attempt.retryAfterMs ?? null,
-      responseContentType: attempt.responseContentType || null, responseBytes: Number.isSafeInteger(attempt.responseBytes) ? attempt.responseBytes : null }));
+      responseContentType: attempt.responseContentType || null, responseBytes: Number.isSafeInteger(attempt.responseBytes) ? attempt.responseBytes : null,
+      ...(detailProfile ? { detailProfile, detailCallId: attempt.callId } : {}) }));
   }
   void Promise.all(writes);
   try { saveMeta(); } catch (error) { console.error(`[诊断] metadata 持久化失败：${safeReason(error.message)}`); }
+  if (detail?.requestId === request.requestId && detail.profile === 'error') detail.finalize();
 }
 
 
@@ -1941,41 +1962,57 @@ function proxyAgentFor(proxyUrl) {
   proxyAgents.set(proxyUrl, agent);
   return agent;
 }
-function clineRequestJSON(url, { headers = {}, body, signal, timeoutMs = 120000, account = null, proxyUrl = '', method = 'POST', maxResponseBytes = Infinity } = {}) {
-  return clineRequest(url, { headers, body, signal, timeoutMs, account, proxyUrl, method }).then(async (res) => ({ status: res.status, headers: res.headers, text: await streamToString(res.body, maxResponseBytes) }));
+function clineRequestJSON(url, { headers = {}, body, signal, timeoutMs = 120000, account = null, proxyUrl = '', method = 'POST', maxResponseBytes = Infinity, attemptOwner = null, attemptMeta = null } = {}) {
+  return clineRequest(url, { headers, body, signal, timeoutMs, account, proxyUrl, method, attemptOwner, attemptMeta }).then(async (res) => ({ ...res, text: await streamToString(res.body, maxResponseBytes) }));
 }
-function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, account = null, proxyUrl = '', method = 'POST' } = {}) {
+function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, account = null, proxyUrl = '', method = 'POST', attemptOwner = null, attemptMeta = null } = {}) {
   const root = detailContext.getStore();
-  const attempt = method === 'POST' && url === `${config.upstreamBase}/chat/completions` ? root?.attempt({ url, method, headers, body: body || '', account, proxyUrl }) : null;
+  const nativeChat = method === 'POST' && url === `${config.upstreamBase}/chat/completions`;
+  let detailAttempt = null, attemptToken = null, req = null;
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const lib = u.protocol === 'https:' ? https : http;
     const data = Buffer.isBuffer(body) ? body : Buffer.from(String(body || ''));
     let settled = false;
     let response = null;
-    const onAbort = () => { response?.destroy(new Error('aborted')); req.destroy(new Error('aborted')); };
+    const onAbort = () => { response?.destroy(new Error('aborted')); req?.destroy(new Error('aborted')); };
     const cleanup = () => signal?.removeEventListener('abort', onAbort);
-    const fail = (error) => { cleanup(); if (!settled) { settled = true; reject(error); } };
+    const fail = (error) => {
+      cleanup();
+      if (!settled) {
+        settled = true;
+        if (attemptToken) error.attemptToken = attemptToken;
+        if (detailAttempt) { detailAttempt.state = 'transport-failed'; error.detailAttempt = detailAttempt; }
+        reject(error);
+      }
+    };
     const agent = proxyAgentFor(proxyUrl || account?.proxyUrl || '');
     const requestHeaders = { ...headers }; if (method !== 'GET') requestHeaders['Content-Length'] = data.length;
-    if (attempt) attempt.headers = requestHeaders;
-    const req = lib.request({ protocol: u.protocol, hostname: u.hostname, port: u.port, path: `${u.pathname}${u.search}`, method, headers: requestHeaders, ...(agent ? { agent } : {}) }, (res) => {
+    req = lib.request({ protocol: u.protocol, hostname: u.hostname, port: u.port, path: `${u.pathname}${u.search}`, method, headers: requestHeaders, ...(agent ? { agent } : {}) }, (res) => {
       response = res;
       res.once('end', cleanup);
       res.once('close', cleanup);
-      if (attempt) { attempt.status = res.statusCode || 502; attempt.responseHeaders = res.headers; }
-      const responseBody = attempt ? observeStream(res, attempt.output) : res;
-      if (!settled) { settled = true; resolve({ status: res.statusCode || 502, headers: res.headers, body: responseBody }); }
+      if (detailAttempt) { detailAttempt.status = res.statusCode || 502; detailAttempt.responseHeaders = res.headers; }
+      const responseBody = detailAttempt?.output ? observeStream(res, detailAttempt.output) : res;
+      if (!settled) { settled = true; resolve({ status: res.statusCode || 502, headers: res.headers, body: responseBody, attemptToken, detailAttempt }); }
     });
-    if (attempt) attempt.headers = req.getHeaders();
     req.on('error', fail);
     req.setTimeout(timeoutMs, () => req.destroy(new Error('upstream timeout')));
     if (signal) {
-      if (signal.aborted) onAbort();
-      else signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) { onAbort(); return; }
+      signal.addEventListener('abort', onAbort, { once: true });
     }
-    req.end(method === 'GET' ? undefined : data);
-  }).catch((error) => { if (attempt) attempt.state = 'transport-failed'; throw error; });
+    try {
+      req.end(method === 'GET' ? undefined : data);
+      if (nativeChat) {
+        if (attemptOwner) attemptToken = { attemptIndex: attemptOwner.nextAttemptIndex++, callId: crypto.randomUUID() };
+        try {
+          detailAttempt = root?.attempt({ token: attemptToken, url, method, headers: req.getHeaders(), body: body || '', account, proxyUrl, model: attemptMeta?.model || '', provider: attemptMeta?.provider ?? null }) || null;
+          if (!attemptToken && detailAttempt) attemptToken = { attemptIndex: detailAttempt.attemptIndex, callId: detailAttempt.callId };
+        } catch { detailedLogs.health.dropped++; detailAttempt = null; }
+      }
+    } catch (error) { fail(error); }
+  });
 }
 function streamToString(stream, maxBytes = Infinity) {
   if (stream.readableEnded) return Promise.resolve('');
@@ -2084,6 +2121,7 @@ function awaitQuotaJob(job, source) {
   return source.pageToken ? Promise.race([job.promise, source.pageToken.cancelPromise.then(() => 'cancelled')]) : job.promise;
 }
 async function requestQuota(id, source) {
+  if (shuttingDown) return 'cancelled';
   while (true) {
     if (source.pageToken && !source.pageToken.active) return 'cancelled';
     const account = config.accounts.find((item) => item.id === id);
@@ -2133,6 +2171,7 @@ async function runQuotaJob(job, account) {
   return snapshot ? 'refreshed' : 'failed';
 }
 function pumpQuotaQueue() {
+  if (shuttingDown) { for (const job of [...quotaQueue]) finishQueuedQuotaJob(job); return; }
   while (quotaRunning < QUOTA_GLOBAL_LIMIT && quotaQueue.length) {
     const job = quotaQueue.shift();
     if (quotaJobs.get(job.id) !== job || job.state !== 'queued') continue;
@@ -2172,7 +2211,7 @@ function releaseQuotaPageToken(token) { cancelQuotaPageToken(token); quotaPageBa
 function scheduleQuotaRefresh() {
   const version = ++quotaScheduleVersion, epoch = quotaRoutingEpoch;
   clearTimeout(quotaTimer); quotaTimer = null;
-  if (!quotaRoutingEnabled()) return;
+  if (shuttingDown || !quotaRoutingEnabled()) return;
   const arm = () => {
     if (version !== quotaScheduleVersion || epoch !== quotaRoutingEpoch || !quotaRoutingEnabled()) return;
     const run = async () => {
@@ -2189,7 +2228,7 @@ function scheduleQuotaRefresh() {
   arm();
 }
 function createSseObserver(maxBytes = 64 * 1024) {
-  let pending = Buffer.alloc(0), discardTail = Buffer.alloc(0), discarding = false, usage = null, provider = null, canonical = null, error = null, errorPayload = null, normalizedStatus = null, responseBytes = 0, done = false;
+  let pending = Buffer.alloc(0), discardTail = Buffer.alloc(0), discarding = false, usage = null, provider = null, canonical = null, error = null, errorPayload = null, errorEvent = null, normalizedStatus = null, responseBytes = 0, done = false;
   const observeEvent = (buffer) => {
     const payload = buffer.toString('utf8').split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.replace(/^data:\s?/, '')).join('\n');
     if (!payload) return;
@@ -2199,7 +2238,7 @@ function createSseObserver(maxBytes = 64 * 1024) {
     const normalized = normalizeUsage(raw?.usage); if (normalized) usage = normalized;
     const routing = parseRouting(raw || {}); if (routing.finalProvider) provider = routing.finalProvider; if (routing.canonicalSlug) canonical = routing.canonicalSlug;
     if (typeof raw?.provider === 'string') provider = slugify(raw.provider); if (typeof raw?.model === 'string') canonical = raw.model;
-    const eventError = upstreamErrorOf(event); if (!error && eventError) { error = safeReason(errText(eventError)); errorPayload = eventError; normalizedStatus = normalizeStatus(200, event, 502); }
+    const eventError = upstreamErrorOf(event); if (!error && eventError) { error = safeReason(errText(eventError)); errorPayload = eventError; errorEvent = Buffer.from(buffer); normalizedStatus = normalizeStatus(200, event, 502); }
   };
   return {
     push(chunk) {
@@ -2214,11 +2253,11 @@ function createSseObserver(maxBytes = 64 * 1024) {
       pending = Buffer.concat([pending, data]);
       while (true) {
         const match = /\r?\n\r?\n/.exec(pending.toString('latin1')); if (!match) break;
-        const end = match.index; if (end <= maxBytes) observeEvent(pending.subarray(0,end)); pending = pending.subarray(end + match[0].length);
+        const end = match.index; if (end <= maxBytes) observeEvent(pending.subarray(0, end + match[0].length)); pending = pending.subarray(end + match[0].length);
       }
       if (pending.length > maxBytes) { discardTail = pending.subarray(Math.max(0, pending.length - 3)); pending = Buffer.alloc(0); discarding = true; }
     },
-    result() { return { usage, provider, canonical, error, errorPayload, normalizedStatus, responseBytes, done }; },
+    result() { return { usage, provider, canonical, error, errorPayload, errorEvent, normalizedStatus, responseBytes, done }; },
   };
 }
 function readFirstSseEvent(stream, maxBytes = 64 * 1024) {
@@ -2275,7 +2314,7 @@ function readBody(req) {
       reject(error);
     };
     const onData = (chunk) => {
-      detail?.input.add(chunk);
+      detail?.input?.add(chunk);
       size += chunk.length;
       if (size > MAX_REQUEST_BODY_BYTES) return rejectTooLarge();
       chunks.push(chunk);
@@ -2284,7 +2323,7 @@ function readBody(req) {
       if (settled) return;
       settled = true;
       cleanup();
-      detail?.input.end();
+      detail?.input?.end();
       resolve(Buffer.concat(chunks));
     };
     const onError = (error) => {
@@ -2305,7 +2344,7 @@ function readBody(req) {
   });
 }
 async function readJsonBody(req) {
-  try { const body = JSON.parse((await readBody(req)).toString('utf8')); detailContext.getStore()?.redactor.learn(body); return body; }
+  try { const body = JSON.parse((await readBody(req)).toString('utf8')); const detail = detailContext.getStore(); if (detail?.profile === 'full') detail.redactor.learn(body); return body; }
   catch (e) {
     if (e?.statusCode) throw e;
     const invalid = new Error('invalid JSON body'); invalid.statusCode = 400; throw invalid;
@@ -2486,6 +2525,13 @@ function redactSecrets(value) {
 }
 // 把结构化上游错误归一成单行脱敏字符串；非 JSON 响应只使用通用原因，原始正文不进入诊断。
 const errText = (e) => redactSecrets(e == null ? '' : typeof e === 'string' ? e : JSON.stringify(e));
+function ordinaryFailureReason(result, sensitiveValues = []) {
+  const seeds = [config.apiKey, config.proxyKey, PROXY_KEY, ...config.accounts.flatMap((account) => [account.key, account.proxyUrl, ...Object.values(account.headers || {})])].filter(Boolean);
+  const redactor = new DetailRedactor(seeds);
+  redactor.learnHeaders(result?.responseHeaders || {});
+  redactor.learn(result?.structuredError);
+  return redactor.text(safeReason(result?.note || result?.out?.error?.message || result?.netError || '', sensitiveValues));
+}
 function responseHeader(headers, name) {
   const value = headers?.[String(name).toLowerCase()];
   return Array.isArray(value) ? value[0] : value;
@@ -2663,11 +2709,12 @@ function persistProviderAction(modelId, provider, action) {
 function responseHeadersFor(account, forwardedHeaders) {
   return { ...forwardedHeaders, ...(account?.headers || {}), 'Content-Type': 'application/json', Authorization: `Bearer ${account.key}` };
 }
-async function attemptOnce(modelId, body, attempt, account, forwardedHeaders, signal) {
-  const send = injectPrefs(body, modelId, attempt);
+async function attemptOnce(modelId, body, attempt, account, forwardedHeaders, signal, attemptOwner) {
+  const send = injectPrefs(body, modelId, attempt), requestBody = JSON.stringify(send);
   try {
     const res = await clineRequestJSON(`${config.upstreamBase}/chat/completions`, {
-      headers: responseHeadersFor(account, forwardedHeaders), body: JSON.stringify(send), signal, account,
+      headers: responseHeadersFor(account, forwardedHeaders), body: requestBody, signal, account, attemptOwner,
+      attemptMeta: { model: modelId, provider: attempt.upstream ? [attempt.upstream] : [] },
     });
     const responseContentType = normalizeResponseContentType(res.headers);
     const responseBytes = safeResponseBytes(res.text);
@@ -2676,28 +2723,42 @@ async function attemptOnce(modelId, body, attempt, account, forwardedHeaders, si
     try { json = JSON.parse(res.text); } catch {}
     if (!json) {
       const status = normalizeStatus(res.status, null, 502);
-      return { status, upstreamStatus: res.status, normalizedStatus: status, out: { error: { message: 'upstream returned non-JSON', type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter, responseHeaders: res.headers, responseContentType, responseBytes, netError: 'non-JSON response', terminalOrigin: res.status >= 400 ? 'upstream_http' : 'upstream_envelope', acc: account };
+      return { status, upstreamStatus: res.status, normalizedStatus: status, out: { error: { message: 'upstream returned non-JSON', type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter, responseHeaders: res.headers, responseContentType, responseBytes, netError: 'non-JSON response', terminalOrigin: res.status >= 400 ? 'upstream_http' : 'upstream_envelope', acc: account, attemptToken: res.attemptToken, detailAttempt: res.detailAttempt, detailResponseBody: res.text, detailCaptureState: 'response-error' };
     }
     const un = unwrap(json, res.status);
-    return { status: un.status, upstreamStatus: un.upstreamStatus, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing, structuredError: upstreamErrorOf(json), retryAfter, responseHeaders: res.headers, responseContentType, responseBytes, netError: null, terminalOrigin: un.status === 200 ? 'success' : (res.status >= 400 ? 'upstream_http' : 'upstream_envelope'), acc: account };
+    return { status: un.status, upstreamStatus: un.upstreamStatus, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing, structuredError: upstreamErrorOf(json), retryAfter, responseHeaders: res.headers, responseContentType, responseBytes, netError: null, terminalOrigin: un.status === 200 ? 'success' : (res.status >= 400 ? 'upstream_http' : 'upstream_envelope'), acc: account, attemptToken: res.attemptToken, detailAttempt: res.detailAttempt, detailResponseBody: un.status === 200 ? null : res.text, detailCaptureState: un.status === 200 ? 'success' : 'response-error' };
   } catch (e) {
     const origin = /timeout/i.test(e.message) ? 'timeout' : account?.proxyUrl ? 'proxy' : 'network';
-    return { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${errText(e.message)}`, type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter: null, responseHeaders: {}, responseContentType: null, responseBytes: 0, netError: errText(e.message), terminalOrigin: origin, acc: account };
+    return { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${errText(e.message)}`, type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter: null, responseHeaders: {}, responseContentType: null, responseBytes: 0, netError: errText(e.message), terminalOrigin: origin, acc: account, attemptToken: e.attemptToken || null, detailAttempt: e.detailAttempt || null, detailResponseBody: null, detailCaptureState: 'no-response' };
   }
 }
 function settleAttempt(modelId, attempt, result, account, { clientDisconnected = false, updateSuccess = true, cfg = {}, sensitiveValues = [] } = {}) {
   const currentGeneration = providerAttemptGenerationIsCurrent(modelId, account, attempt);
+  const detailAttempt = result.detailAttempt || null, detailRoot = detailAttempt?.root || detailContext.getStore();
+  const settleDetail = (failed, captureState = result.detailCaptureState) => detailRoot?.settleAttempt(detailAttempt, {
+    failed,
+    httpStatus: Number.isInteger(result.upstreamStatus) && result.upstreamStatus >= 100 ? result.upstreamStatus : null,
+    outcomeStatus: Number.isInteger(result.normalizedStatus) ? result.normalizedStatus : Number.isInteger(result.status) ? result.status : null,
+    responseHeaders: result.responseHeaders || {},
+    responseBody: failed ? result.detailResponseBody : null,
+    responseComplete: captureState !== 'stream-transport-failed',
+    captureState: captureState || (failed ? 'response-error' : 'success'),
+  });
   if (clientDisconnected) {
+    settleDetail(false, 'client-cancelled');
     const providerCircuitAction = currentGeneration ? settleProviderCircuit(modelId, cfg, account, attempt, { status: 499, normalizedStatus: 499, netError: 'client cancelled', classification: { scope: 'request' } }) : null;
     return { classification: null, policy: null, accountAction: null, healthAction: 'none', providerCircuitAction };
   }
   if (result.status === 200) {
+    settleDetail(false, result.detailCaptureState || 'success');
     const healthAction = updateSuccess && currentGeneration ? updateProviderHealth(modelId, attempt.upstream, { success: true }) : 'none';
     const providerCircuitAction = updateSuccess && currentGeneration ? settleProviderCircuit(modelId, cfg, account, attempt, result) : null;
     return { classification: null, policy: null, accountAction: null, healthAction, providerCircuitAction };
   }
+  settleDetail(true);
   const classification = classifyAttemptFailure(result, attempt, account);
   result.classification = classification;
+  result.ordinaryReason = ordinaryFailureReason(result, sensitiveValues);
   const policy = matchErrorRule({ result, classification, modelId, provider: attempt.upstream, sensitiveValues });
   const accountAction = policy.scope === 'account' && ['cooldown','hard-quarantine'].includes(policy.action) ? policy : null;
   const removesAccount = !!accountAction;
@@ -2709,9 +2770,14 @@ function settleAttempt(modelId, attempt, result, account, { clientDisconnected =
   return { classification, policy, accountAction, healthAction, providerCircuitAction };
 }
 function traceAttempt(attempt, result, account, ms, diagnostic) {
+  const candidate = result.attemptToken || (result.detailAttempt ? { attemptIndex: result.detailAttempt.attemptIndex, callId: result.detailAttempt.callId } : null);
+  const token = candidate && Number.isSafeInteger(candidate.attemptIndex) && candidate.attemptIndex >= 0 && DETAIL_CALL_ID.test(candidate.callId || '') ? candidate : null;
+  const detailProfile = token && ['error', 'full'].includes(result.detailAttempt?.root?.profile) ? result.detailAttempt.root.profile : null;
+  const note = boundedReason(diagnostic.policy?.ruleId ? `rule:${diagnostic.policy.ruleId}` : result.ordinaryReason || result.note);
   return {
     upstream: attempt.upstream, status: result.status, upstreamStatus: result.upstreamStatus, normalizedStatus: result.normalizedStatus,
-    terminalOrigin: result.terminalOrigin, ms, note: diagnostic.policy?.ruleId ? `rule:${diagnostic.policy.ruleId}` : result.note, account: account.name, accountId: account.id,
+    ...(token ? { attemptIndex: token.attemptIndex, callId: token.callId } : {}), ...(detailProfile ? { detailProfile } : {}),
+    terminalOrigin: result.terminalOrigin, ms, note: note.reason, reasonTruncated: note.reasonTruncated, account: account.name, accountId: account.id,
     action: diagnostic.policy?.action || null, ruleId: diagnostic.policy?.ruleId || null, ruleScope: diagnostic.policy?.scope || null,
     ruleAction: diagnostic.policy?.action || null, matchedBy: diagnostic.policy?.matchedBy || [],
     providerCircuitAction: diagnostic.providerCircuitAction || null,
@@ -2724,7 +2790,7 @@ function traceAttempt(attempt, result, account, ms, diagnostic) {
 
 // 两级重试：本函数固定一个账号，仅在该账号内按健康计划逐个尝试 provider。
 // 只有 account-scoped 错误命中 cooldown/hard-quarantine 时，外层 handleChat 才能终止本链并最多换号一次。
-async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream = false, attemptTimeoutMs = 120000, sensitiveValues = [] } = {}) {
+async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream = false, attemptTimeoutMs = 120000, sensitiveValues = [], attemptOwner = null } = {}) {
   const t0 = Date.now();
   const plan = planProviderAttempts(modelId, cfg, account), attempts = plan.attempts;
   const trace = [];
@@ -2757,14 +2823,14 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
       const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, attemptTimeoutMs);
       try {
         if (stream) {
-          const send = injectPrefs(body, modelId, attempt);
-          let up = null, netError = null, transportOrigin = null;
+          const send = injectPrefs(body, modelId, attempt), requestBody = JSON.stringify(send);
+          let up = null, netError = null, transportOrigin = null, failedAttemptToken = null, failedDetailAttempt = null;
           try {
-            up = await clineRequest(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, forwardedHeaders), body: JSON.stringify(send), signal: ctrl.signal, timeoutMs: attemptTimeoutMs, account });
-          } catch (e) { netError = timedOut ? 'upstream timeout' : errText(e.message); }
+            up = await clineRequest(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, forwardedHeaders), body: requestBody, signal: ctrl.signal, timeoutMs: attemptTimeoutMs, account, attemptOwner, attemptMeta: { model: modelId, provider: attempt.upstream ? [attempt.upstream] : [] } });
+          } catch (e) { netError = timedOut ? 'upstream timeout' : errText(e.message); failedAttemptToken = e.attemptToken || null; failedDetailAttempt = e.detailAttempt || null; }
           const responseContentType = normalizeResponseContentType(up?.headers);
           let isSSE = !!up && up.status === 200 && responseContentType === 'text/event-stream';
-          let firstChunk = null;
+          let firstChunk = null, streamErrorBody = null;
           if (isSSE) {
             try {
               const first = await readFirstSseEvent(up.body);
@@ -2779,7 +2845,11 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
                   const payload = eventText.split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.replace(/^data:\s?/, '')).join('\n');
                   const event = payload === '[DONE]' ? null : safeJsonParse(payload, 64 * 1024);
                   const eventError = upstreamErrorOf(event);
-                  if (eventError) { isSSE = false; netError = `stream error: ${errText(eventError)}`; }
+                  if (eventError) {
+                    isSSE = false; netError = `stream error: ${errText(eventError)}`;
+                    const boundary = /\r?\n\r?\n/.exec(firstChunk.toString('latin1'));
+                    streamErrorBody = firstChunk.subarray(0, boundary ? boundary.index + boundary[0].length : firstChunk.length);
+                  }
                 }
               }
             } catch (e) {
@@ -2809,6 +2879,8 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
               structuredError: json ? upstreamErrorOf(json) : null, retryAfter: responseHeader(up.headers, 'retry-after'), responseHeaders: up.headers, responseContentType,
               responseBytes: safeResponseBytes(text), netError: transportOrigin ? netError : null,
               terminalOrigin: up.status >= 400 ? 'upstream_http' : transportOrigin || 'upstream_envelope', acc: account,
+              attemptToken: up.attemptToken, detailAttempt: up.detailAttempt,
+              detailResponseBody: streamErrorBody || (transportOrigin ? null : text), detailCaptureState: transportOrigin ? 'stream-transport-failed' : 'response-error',
             };
             result.note = errText(un.body?.error?.message || netError);
             const diagnostic = settleAttempt(modelId, attempt, result, account, { clientDisconnected: clientClosed, cfg, sensitiveValues });
@@ -2820,7 +2892,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
           }
           if (!up) {
             const origin = timedOut || /timeout/i.test(netError || '') ? 'timeout' : account.proxyUrl ? 'proxy' : 'network';
-            const result = { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${netError || 'no response'}`, type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter: null, responseHeaders: {}, responseContentType: null, responseBytes: 0, netError: netError || 'no response', terminalOrigin: origin, acc: account, note: netError || 'no response' };
+            const result = { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${netError || 'no response'}`, type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter: null, responseHeaders: {}, responseContentType: null, responseBytes: 0, netError: netError || 'no response', terminalOrigin: origin, acc: account, note: netError || 'no response', attemptToken: failedAttemptToken, detailAttempt: failedDetailAttempt, detailResponseBody: null, detailCaptureState: 'no-response' };
             const diagnostic = settleAttempt(modelId, attempt, result, account, { clientDisconnected: clientClosed, cfg, sensitiveValues });
             trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
             last = { ...result, accountAction: diagnostic.accountAction, classification: diagnostic.classification };
@@ -2828,12 +2900,12 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
             continue;
           }
           keepCloseHook = true;
-          const result = { status: 200, upstreamStatus: 200, normalizedStatus: 200, terminalOrigin: 'success', responseHeaders: up.headers, responseContentType, responseBytes: safeResponseBytes(firstChunk), note: 'stream' };
+          const result = { status: 200, upstreamStatus: 200, normalizedStatus: 200, terminalOrigin: 'success', responseHeaders: up.headers, responseContentType, responseBytes: safeResponseBytes(firstChunk), note: 'stream', attemptToken: up.attemptToken, detailAttempt: up.detailAttempt, detailResponseBody: null, detailCaptureState: 'stream-started' };
           const diagnostic = settleAttempt(modelId, attempt, result, account, { updateSuccess: false, cfg, sensitiveValues });
           trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
-          return { status: 200, streamUp: up, streamHead: firstChunk, streamAttempt: attempt, acc: account, trace, t0, plan, started: true, cleanupClientClose };
+          return { status: 200, streamUp: up, streamHead: firstChunk, streamAttempt: attempt, streamAttemptToken: up.attemptToken, streamDetailAttempt: up.detailAttempt, acc: account, trace, t0, plan, started: true, cleanupClientClose };
         }
-        const result = await attemptOnce(modelId, body, attempt, account, forwardedHeaders, ctrl.signal);
+        const result = await attemptOnce(modelId, body, attempt, account, forwardedHeaders, ctrl.signal, attemptOwner);
         if (timedOut && result.status !== 200) { result.terminalOrigin = 'timeout'; result.netError = 'upstream timeout'; result.out = { error: { message: 'upstream fetch failed: upstream timeout', type: 'upstream_error' } }; }
         const ms = Date.now() - t1;
         result.note = result.netError || (result.status !== 200 ? errText(result.out?.error?.message) : 'ok');
@@ -2868,13 +2940,13 @@ async function handleChat(req, res) {
   const raw = await readBody(req);
   let body;
   try { body = JSON.parse(raw.toString('utf8')); } catch { return sendJSON(res, 400, { error: { message: 'invalid JSON body' } }); }
-  detailContext.getStore()?.redactor.learn(body);
+  if (detail?.profile === 'full') detail.redactor.learn(body);
   if (!body || typeof body !== 'object' || Array.isArray(body)) return sendJSON(res, 400, { error: { message: 'JSON body must be an object' } });
   const requestedModel = typeof body.model === 'string' ? body.model.trim() : '';
   if (!requestedModel || requestedModel.length > 300) return sendJSON(res, 400, { error: { message: 'valid model is required' } });
   const sensitiveValues = sensitiveMessageValues(body);
   let statisticsFinalized = false;
-  const finalizeStatistics = (facts) => { if (statisticsFinalized) return; statisticsFinalized = true; try { commitStatistics({ ...facts, modelId, affinityConfidence: identity?.confidence || 'none' }); } catch (error) { console.error(`[统计] 持久化失败：${safeReason(error.message)}`); } };
+  const finalizeStatistics = (facts) => { if (statisticsFinalized) return; statisticsFinalized = true; try { commitStatistics({ ...facts, modelId, affinityConfidence: identity?.confidence || 'none' }); } catch (error) { console.error(`[统计] 更新失败：${safeReason(error.message)}`); } };
   const modelId = resolveModelAlias(requestedModel);
   const recordChat = (info) => record(modelId, info, detail);
   body = { ...body, model: modelId };
@@ -2885,6 +2957,7 @@ async function handleChat(req, res) {
   const isStream = body.stream === true;
   const excluded = new Set();
   const accountPath = [];
+  const attemptOwner = { nextAttemptIndex: 0 };
   let upstreamAffinitySent = false;
   let providerOrderOverridesSticky = false;
   const affinityFacts = (usage = null) => ({
@@ -2916,7 +2989,7 @@ async function handleChat(req, res) {
     cfg = resolveModelConfig(account, modelId);
     try {
       upstreamAffinitySent = true;
-      chain = await runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream: isStream, sensitiveValues });
+      chain = await runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream: isStream, sensitiveValues, attemptOwner });
       targets = chain.plan?.plannedOrder || [];
       targetSource = chain.plan?.source || 'auto';
       if (cfg?.pinMode === 'preferred' && chain.plan?.source === 'configured' && targets.length > 0) providerOrderOverridesSticky = true;
@@ -2950,6 +3023,7 @@ async function handleChat(req, res) {
       'Content-Type': ctype, 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'Access-Control-Allow-Origin': '*',
       'X-Cline-Target-Upstream': targets.length ? targets.join('>') : targetSource === 'auto' ? 'auto' : 'none', 'X-Cline-Attempts': String(chain.trace.length), 'X-Cline-Account': headerSafe(acc.name),
     });
+    if (detail?.profile === 'error') detail.status = up.status;
     const observer = createSseObserver();
     if (chain.streamHead) { observer.push(chain.streamHead); res.write(chain.streamHead); }
     let finalized = false;
@@ -2967,23 +3041,23 @@ async function handleChat(req, res) {
       const attempt = chain.streamAttempt || { upstream: providerAttempt?.upstream || null };
       const disconnected = origin === 'client_disconnect';
       if (observed.error && providerAttempt) {
-        const result = { status: observed.normalizedStatus, upstreamStatus: 200, normalizedStatus: observed.normalizedStatus, routing: { finalProvider: observed.provider }, structuredError: observed.errorPayload, failureText: observed.error, retryAfter: null, responseHeaders: up.headers, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: 'upstream_envelope', note: safeReason(observed.error, sensitiveValues) };
+        const result = { status: observed.normalizedStatus, upstreamStatus: 200, normalizedStatus: observed.normalizedStatus, routing: { finalProvider: observed.provider }, structuredError: observed.errorPayload, failureText: observed.error, retryAfter: null, responseHeaders: up.headers, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: 'upstream_envelope', note: safeReason(observed.error, sensitiveValues), attemptToken: chain.streamAttemptToken, detailAttempt: chain.streamDetailAttempt, detailResponseBody: observed.errorEvent, detailCaptureState: 'response-error' };
         const diagnostic = settleAttempt(modelId, attempt, result, acc, { cfg, sensitiveValues });
         Object.assign(providerAttempt, traceAttempt(attempt, result, acc, providerAttempt.ms, diagnostic));
         const action = diagnostic.accountAction;
         if (action) accountActions.push({ account: acc.name, action: action.action, statusCode: action.statusCode, ruleId: action.ruleId || null, scope: action.scope });
       } else if (error && !disconnected && providerAttempt) {
-        const result = { status: 502, upstreamStatus: 0, normalizedStatus: 502, routing: {}, structuredError: null, failureText: error, retryAfter: null, responseHeaders: up.headers, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: /timeout/i.test(String(error)) ? 'timeout' : acc.proxyUrl ? 'proxy' : 'network', note: 'stream transport error' };
+        const result = { status: 502, upstreamStatus: 200, normalizedStatus: 502, routing: {}, structuredError: null, failureText: error, retryAfter: null, responseHeaders: up.headers, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: /timeout/i.test(String(error)) ? 'timeout' : acc.proxyUrl ? 'proxy' : 'network', note: 'stream transport error', attemptToken: chain.streamAttemptToken, detailAttempt: chain.streamDetailAttempt, detailResponseBody: null, detailCaptureState: 'stream-transport-failed' };
         const diagnostic = settleAttempt(modelId, attempt, result, acc, { cfg, sensitiveValues });
         Object.assign(providerAttempt, traceAttempt(attempt, result, acc, providerAttempt.ms, diagnostic));
         const action = diagnostic.accountAction;
         if (action) accountActions.push({ account: acc.name, action: action.action, statusCode: action.statusCode, ruleId: action.ruleId || null, scope: action.scope });
       } else if (!disconnected && providerAttempt) {
-        const result = { status: 200, upstreamStatus: 200, normalizedStatus: 200, routing: { finalProvider: observed.provider }, structuredError: null, retryAfter: null, responseHeaders: up.headers, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: 'success', note: 'stream' };
+        const result = { status: 200, upstreamStatus: 200, normalizedStatus: 200, routing: { finalProvider: observed.provider }, structuredError: null, retryAfter: null, responseHeaders: up.headers, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: 'success', note: 'stream', attemptToken: chain.streamAttemptToken, detailAttempt: chain.streamDetailAttempt, detailResponseBody: null, detailCaptureState: 'success' };
         const diagnostic = settleAttempt(modelId, attempt, result, acc, { cfg, sensitiveValues });
         Object.assign(providerAttempt, traceAttempt(attempt, result, acc, providerAttempt.ms, diagnostic));
       } else if (providerAttempt) {
-        const diagnostic = settleAttempt(modelId, attempt, { status: 499, normalizedStatus: 499 }, acc, { clientDisconnected: true, cfg, sensitiveValues });
+        const diagnostic = settleAttempt(modelId, attempt, { status: 499, upstreamStatus: 200, normalizedStatus: 499, responseHeaders: up.headers, attemptToken: chain.streamAttemptToken, detailAttempt: chain.streamDetailAttempt, detailCaptureState: 'client-cancelled' }, acc, { clientDisconnected: true, cfg, sensitiveValues });
         providerAttempt.healthAction = 'none';
         providerAttempt.providerCircuitAction = diagnostic.providerCircuitAction || null;
         providerAttempt.responseBytes = observed.responseBytes;
@@ -3054,12 +3128,31 @@ async function catalog() {
   return META.catalog || [];
 }
 
+let activeResponses = 0;
+const activeResponseWaiters = new Set();
+function trackActiveResponse(res) {
+  activeResponses++;
+  let scheduled = false;
+  const done = () => {
+    if (scheduled) return; scheduled = true;
+    setImmediate(() => {
+      activeResponses = Math.max(0, activeResponses - 1);
+      if (!activeResponses) { for (const resolve of [...activeResponseWaiters]) resolve(); activeResponseWaiters.clear(); }
+    });
+  };
+  res.once('finish', done); res.once('close', done);
+}
 const server = http.createServer((req, res) => {
+  trackActiveResponse(res);
+  if (shuttingDown) return sendJSON(res, 503, { error: { message: 'server shutting down' } });
   const pathname = new URL(req.url, 'http://local').pathname;
-  if (config.detailedLogging === true && detailRoute(req.method, pathname)) {
+  const profile = config.detailedLogging === true && detailRoute(req.method, pathname)
+    ? 'full'
+    : config.errorDetailLogging === true && req.method === 'POST' && CHAT_PATHS.has(pathname) ? 'error' : null;
+  if (profile) {
     if (DetailRoot.active >= 128) { detailedLogs.health.dropped++; return dispatch(req, res); }
-    const secrets = [config.proxyKey, PROXY_KEY, ...config.accounts.flatMap((account) => [account.key, account.proxyUrl])];
-    const root = new DetailRoot(req, res, detailedLogs, secrets);
+    const secrets = [config.proxyKey, PROXY_KEY, ...config.accounts.flatMap((account) => [account.key, account.proxyUrl, ...Object.values(account.headers || {})])];
+    const root = new DetailRoot(req, res, detailedLogs, secrets, { profile });
     return detailContext.run(root, () => dispatch(req, res));
   }
   return dispatch(req, res);
@@ -3159,14 +3252,15 @@ async function dispatch(req, res) {
     }
     if (p === '/api/logs/settings' || p === '/api/logs/details' || p.startsWith('/api/logs/details/')) {
       if (p === '/api/logs/settings') {
-        if (req.method === 'GET') return sendJSON(res, 200, { detailedLogging: config.detailedLogging === true, authRequired: !!PROXY_KEY, maxBodyBytes: MAX_BODY_BYTES, maxAgeMs: MAX_AGE_MS, maxTotalBytes: MAX_TOTAL_BYTES, health: { ...detailedLogs.health, captureDropped: captureBudget.dropped, retainedPayloadBytes: captureBudget.used } });
+        if (req.method === 'GET') return sendJSON(res, 200, { detailedLogging: config.detailedLogging === true, errorDetailLogging: config.errorDetailLogging === true, authRequired: !!PROXY_KEY, maxBodyBytes: MAX_BODY_BYTES, maxAgeMs: MAX_AGE_MS, maxTotalBytes: MAX_TOTAL_BYTES, health: { ...detailedLogs.health, captureDropped: captureBudget.dropped, retainedPayloadBytes: captureBudget.used } });
         if (req.method === 'POST') {
-          const body = await readJsonBody(req);
-          if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 1 || typeof body.detailedLogging !== 'boolean') return sendJSON(res, 400, { error: { message: 'expected only boolean detailedLogging' } });
-          try { atomicWriteJson(CONFIG_PATH, { ...config, detailedLogging: body.detailedLogging }); }
+          const body = await readJsonBody(req), keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : [];
+          if (!keys.length || keys.length > 2 || keys.some((key) => !['detailedLogging', 'errorDetailLogging'].includes(key) || typeof body[key] !== 'boolean')) return sendJSON(res, 400, { error: { message: 'expected one or both boolean logging settings' } });
+          const next = { detailedLogging: config.detailedLogging === true, errorDetailLogging: config.errorDetailLogging === true, ...body };
+          try { atomicWriteJson(CONFIG_PATH, { ...config, ...next }); }
           catch { return sendJSON(res, 500, { error: { message: 'logging setting could not be saved' } }); }
-          config.detailedLogging = body.detailedLogging;
-          return sendJSON(res, 200, { ok: true, detailedLogging: config.detailedLogging });
+          config.detailedLogging = next.detailedLogging; config.errorDetailLogging = next.errorDetailLogging;
+          return sendJSON(res, 200, { ok: true, detailedLogging: config.detailedLogging, errorDetailLogging: config.errorDetailLogging });
         }
       }
       if (p === '/api/logs/details') {
@@ -3217,7 +3311,7 @@ async function dispatch(req, res) {
       const t0 = Date.now();
       try {
         const model = config.knownModels[0];
-        const result = await clineRequestJSON(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, {}), body: JSON.stringify({ model, messages: [], max_tokens: 1 }), proxyUrl, account, timeoutMs: 15000 });
+        const result = await clineRequestJSON(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, {}), body: JSON.stringify({ model, messages: [], max_tokens: 1 }), proxyUrl, account, timeoutMs: 15000, attemptMeta: { model, provider: [] } });
         return sendJSON(res, 200, { ok: result.status > 0, proxyType: new URL(proxyUrl).protocol.replace(':', ''), ms: Date.now() - t0, status: result.status });
       } catch (e) {
         let reason = String(e.message || 'proxy error');
@@ -3364,7 +3458,7 @@ async function dispatch(req, res) {
       let json;
       try {
         ({ json } = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, {
-          headers: chatHeaders(k), body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Say OK' }], max_tokens: 512 }),
+          headers: chatHeaders(k), body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Say OK' }], max_tokens: 512 }), attemptMeta: { model, provider: [] },
         }, 120000, account));
       } catch (e) { return sendJSON(res, 200, { ok: false, ms: Date.now() - t0, error: safeReason(e.message), errorCategory: proxyUrl ? 'proxy' : 'network' }); }
       if (json?.error && !json?.data) {
@@ -3458,7 +3552,58 @@ async function dispatch(req, res) {
 // HTTP 响应头只允许 Latin-1，账号名里的中文等字符需要清洗（历史/统计仍用原名）
 const headerSafe = (s) => String(s ?? '').replace(/[^\x20-\x7E]/g, '').trim().slice(0, 80) || '-';
 
+const inboundSockets = new Set();
+server.on('connection', (socket) => { inboundSockets.add(socket); socket.once('close', () => inboundSockets.delete(socket)); });
+const SHUTDOWN_TIMEOUT_MS = process.env.NODE_ENV === 'test'
+  ? Math.min(30_000, Math.max(100, Number(process.env.CLINE_PASS_SHUTDOWN_MS) || 10_000))
+  : 10_000;
+let shutdownPromise = null;
+function beforeDeadline(promise, deadline) {
+  const remaining = Math.max(0, deadline - Date.now());
+  return Promise.race([
+    Promise.resolve(promise).then(() => true, () => false),
+    new Promise((resolve) => { setTimeout(() => resolve(false), remaining); }),
+  ]);
+}
+function stopQuotaWork() {
+  clearTimeout(quotaTimer); quotaTimer = null; quotaScheduleVersion++;
+  for (const job of [...quotaJobs.values()]) { detachQuotaJob(job); cancelQuotaJob(job); }
+  pumpQuotaQueue();
+}
+function destroyRuntimeConnections() {
+  server.closeAllConnections?.();
+  for (const socket of inboundSockets) socket.destroy();
+  for (const agent of proxyAgents.values()) agent.destroy?.();
+  proxyAgents.clear();
+}
+function shutdown(signal) {
+  if (shutdownPromise) return shutdownPromise;
+  shuttingDown = true;
+  shutdownPromise = (async () => {
+    const deadline = Date.now() + SHUTDOWN_TIMEOUT_MS;
+    stopQuotaWork();
+    try { server.close(); } catch {}
+    server.closeIdleConnections?.();
+    const finalizersDone = activeResponses === 0 || await beforeDeadline(new Promise((resolve) => activeResponseWaiters.add(resolve)), deadline);
+    if (!finalizersDone) {
+      console.error(`[退出] ${signal} 等待活动请求超时，正在强制关闭连接`);
+      destroyRuntimeConnections();
+      void ordinaryLogs.close(); void detailedLogs.close();
+      process.exit(0);
+      return;
+    }
+    const drained = await beforeDeadline(Promise.allSettled([ordinaryLogs.close(), detailedLogs.close()]), deadline);
+    if (!drained) console.error(`[退出] ${signal} 日志 drain 超时，正在强制收敛`);
+    destroyRuntimeConnections();
+    process.exit(0);
+  })();
+  return shutdownPromise;
+}
+process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
+process.once('SIGINT', () => { void shutdown('SIGINT'); });
+
 server.on('error', (e) => {
+  if (shuttingDown) return;
   console.error(`[错误] 端口 ${config.port} 监听失败（可能被占用）：${e.message}`);
   process.exit(1);
 });

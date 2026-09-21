@@ -5,6 +5,7 @@
   "publicBaseUrl": "",
   "exposeCatalog": false,
   "detailedLogging": false,
+  "errorDetailLogging": false,
   "upstreamBase": "https://api.cline.bot/api/v1",
   "accounts": [
     {

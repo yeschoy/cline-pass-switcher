@@ -57,13 +57,15 @@ Use this fail-open form only where the feature contract explicitly says diagnost
 - A configured proxy failure never falls back to direct transport.
 - Client cancellation aborts upstream work, stops replay/failover after output starts, releases leases once, and does not create health penalties or error attempts.
 - Stream finalization is idempotent. A complete `[DONE]` followed by close is success; close before completion is `499 / client_cancelled`; observed stream/transport errors remain failures.
-- Diagnostic capture/storage failures increment safe health counters and release reservations but never change the response body/status or block lease completion.
+- Diagnostic capture/storage failures increment safe health counters and release reservations but never change the response body/status or block lease completion. Error-only capture distinguishes `no-response` from `stream-transport-failed`, and never turns client cancellation into a failed attempt.
 
 ## Filesystem and Resource Failures
 
 Detailed storage validates path identities and file types, refuses symlinks, serializes mutations, and maps unavailable operations to safe 503 responses. Missing/cleared/expired bodies are ordinary safe 404s. Corrupt or unknown operator-owned entries are preserved rather than deleted or repaired into apparent success.
 
-Bound every error-prone input and diagnostic operation: request bodies, detail bodies, SSE events, filters, cursors, account fields, queues, work scans, timeouts, and retained bytes all have explicit limits in the quality/logging specs.
+Bound every error-prone input and diagnostic operation: request bodies, detail bodies, SSE events, filters, cursors, account fields, queues, work scans, timeouts, and retained bytes all have explicit limits in the quality/logging specs. Ordinary error reasons are redacted before their 16 KiB UTF-8 cap; serialized rows, pending record count and pending bytes have independent admission fences.
+
+SIGTERM/SIGINT shutdown is idempotent and deadline-bound: stop listening/new quota work first, keep diagnostic stores open while active response finalizers run, then fence and drain ordinary/detailed stores, and only destroy active sockets/agents when the deadline expires. `DetailedLogStore.close()` drains admitted work and rejects later publication while releasing its reservation.
 
 ## Common Mistakes
 
@@ -73,6 +75,7 @@ Bound every error-prone input and diagnostic operation: request bodies, detail b
 - Synthesizing an early stream error on `aborted` before Node reports the native terminal error.
 - Updating runtime configuration before its atomic write succeeds.
 - Swallowing a cleanup failure while claiming clear succeeded.
+- Closing log stores before active chat/stream finalizers can enqueue their terminal records, or awaiting a blocked writer without a shutdown deadline.
 - Retrying through direct transport after a configured proxy fails.
 - Matching scoped rules against successful output, raw unbounded bodies, or pre-redaction diagnostics; or allowing unmatched defaults to create cooldown/quarantine.
 
@@ -87,6 +90,7 @@ Use temporary `DATA_DIR` and local endpoints. Relevant changes must assert:
 - proxy/network/timeout/upstream statuses remain correctly classified and redacted;
 - client/stream cancellation releases resources exactly once and does not mutate health/backoff incorrectly;
 - logging enabled/disabled returns byte-equivalent model traffic despite capture/storage failures;
+- response-complete shutdown drains terminal ordinary/error-detail records, while a permanently blocked writer converges at the configured deadline;
 - canonical rule scope/action/applicability/status/body-ANY/Header/reset/first-match/default behavior and non-stream/pre-stream/post-start/cancellation boundaries leak no matched sensitive text.
 
 Run focused tests, then `npm test`, syntax checks, and `git diff --check`.

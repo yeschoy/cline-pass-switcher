@@ -164,14 +164,14 @@
   <section id="detailsPanel" aria-labelledby="detailsTitle" hidden>
     <div class="card">
       <h2 id="detailsTitle">详细日志</h2>
-      <p class="banner">默认关闭。启用后持续保存提示词、普通 Header 与响应内容，直到手动关闭；识别到的凭据会脱敏，无法查看原值。每个正文最多 5 MiB；独立保留最多 7 天 / 1 GiB，高流量可能缩短保留期。截断、未读或不安全的片段可能整段省略。正文在请求结束后可查询；进程中断后仅恢复已落盘的请求身份与 interrupted 状态。</p>
+      <p class="banner">两种捕获均默认关闭。错误详情仅保存真实失败上游调用的脱敏响应 Header、错误正文或“未收到响应/流传输失败”事实，不保存成功正文和请求正文；完整详细日志会持续保存提示词、普通 Header 与全部响应内容。两个开关同时启用时只使用完整模式，不重复保存。每个正文最多 5 MiB；独立保留最多 7 天 / 1 GiB，高流量可能缩短保留期。截断、未读或不安全的片段可能整段省略。</p>
       <p id="detailsAuth" role="status">正在确认认证状态…</p>
-      <div class="toolbar"><label for="detailedLogging"><input id="detailedLogging" type="checkbox" disabled onchange="toggleDetailedLogging()"> 启用详细日志（立即独立保存，不提交账号草稿）</label><button class="ghost" type="button" onclick="loadDetails()">刷新 / 筛选</button><button class="ghost" type="button" onclick="clearDetails()">清空详细日志</button></div>
-      <div class="toolbar"><label>请求 ID <input id="detailsRequestId"></label><label>模型 <input id="detailsModel"></label><label>账号 <input id="detailsAccount"></label><label>状态码 <input id="detailsStatusFilter" type="number" min="100" max="599"></label><label>开始时间 <input id="detailsFrom" type="datetime-local"></label><label>结束时间 <input id="detailsTo" type="datetime-local"></label></div>
+      <div class="toolbar"><label for="errorDetailLogging"><input id="errorDetailLogging" type="checkbox" disabled onchange="toggleErrorDetailLogging()"> 启用错误详情（仅失败 attempt）</label><label for="detailedLogging"><input id="detailedLogging" type="checkbox" disabled onchange="toggleDetailedLogging()"> 启用完整详细日志（立即独立保存，不提交账号草稿）</label><button class="ghost" type="button" onclick="loadDetails()">刷新 / 筛选</button><button class="ghost" type="button" onclick="clearDetails()">清空详细日志</button></div>
+      <div class="toolbar"><label>请求 ID <input id="detailsRequestId"></label><label>模型 <input id="detailsModel"></label><label>账号 <input id="detailsAccount"></label><label>状态码 <input id="detailsStatusFilter" type="number" min="100" max="599"></label><label>结果 <select id="detailsResult"><option value="">全部</option><option value="success">成功</option><option value="client_cancelled">客户端取消</option><option value="failed">失败</option></select></label><label>开始时间 <input id="detailsFrom" type="datetime-local"></label><label>结束时间 <input id="detailsTo" type="datetime-local"></label></div>
       <p id="detailsStatus" aria-live="polite"></p>
       <div class="table-wrap"><table><thead><tr><th>时间 / 请求</th><th>模型 / 账号</th><th>状态 / 完整性</th><th>操作</th></tr></thead><tbody id="detailsList"></tbody></table></div>
       <button id="detailsNext" class="ghost" type="button" disabled onclick="loadDetails(true)">下一页</button>
-      <h3>请求与实际调用（正文按需加载）</h3><pre id="detailsMetadata" style="max-height:24rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+      <h3>请求与实际调用（正文按需加载）</h3><pre id="detailsMetadata" tabindex="-1" style="max-height:24rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere"></pre>
       <div id="detailsBodies" class="toolbar"></div>
       <label for="detailsText">已脱敏正文 / 不完整原因</label><textarea id="detailsText" readonly rows="16" style="width:100%;max-height:36rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere"></textarea>
       <button id="detailsCopy" class="ghost" type="button" disabled onclick="copyDetailBody()">复制已加载正文</button>
@@ -1179,45 +1179,54 @@ async function switchSection(section){
   $('#logResult').hidden=type==='errors';
   await loadLogs(false);
 }
-let DETAIL_SETTINGS_ID=0,DETAIL_BODY_TEXT=null,DETAIL_LIST_ID=0,DETAIL_SELECTION_ID=0,DETAIL_NAV_ID=0,DETAIL_CURSOR=null,DETAIL_REQUEST=null,DETAIL_CONFIRMED=false,DETAIL_TOGGLE_PENDING=false;
+let DETAIL_SETTINGS_ID=0,DETAIL_BODY_TEXT=null,DETAIL_LIST_ID=0,DETAIL_SELECTION_ID=0,DETAIL_NAV_ID=0,DETAIL_CURSOR=null,DETAIL_REQUEST=null,DETAIL_CONFIRMED=false,ERROR_DETAIL_CONFIRMED=false,DETAIL_TOGGLE_PENDING=false;
 const detailVisible=()=>!$('#detailsPanel').hidden;
 async function detailJSON(path,body,method){const result=await api(path,body,method);if(result.error)throw Error(result.error.message||'详细日志操作失败');return result;}
 async function loadDetailSettings(){
   const nav=DETAIL_NAV_ID,version=++DETAIL_SETTINGS_ID;
   try{const data=await detailJSON('/api/logs/settings');if(nav!==DETAIL_NAV_ID||version!==DETAIL_SETTINGS_ID||!detailVisible())return;
     $('#detailsAuth').textContent=data.authRequired?'管理 API 已启用密钥认证。':'警告：未配置代理/管理密钥，当前详细内容没有密钥保护！';
-    if(!DETAIL_TOGGLE_PENDING){DETAIL_CONFIRMED=data.detailedLogging;$('#detailedLogging').checked=DETAIL_CONFIRMED;$('#detailedLogging').disabled=false;}
+    if(!DETAIL_TOGGLE_PENDING){DETAIL_CONFIRMED=data.detailedLogging===true;ERROR_DETAIL_CONFIRMED=data.errorDetailLogging===true;$('#detailedLogging').checked=DETAIL_CONFIRMED;$('#errorDetailLogging').checked=ERROR_DETAIL_CONFIRMED;$('#detailedLogging').disabled=false;$('#errorDetailLogging').disabled=false;}
   }catch{if(nav===DETAIL_NAV_ID&&version===DETAIL_SETTINGS_ID&&detailVisible())$('#detailsStatus').textContent='日志设置加载失败';}
 }
-async function toggleDetailedLogging(){
-  if(DETAIL_TOGGLE_PENDING)return;DETAIL_TOGGLE_PENDING=true;DETAIL_SETTINGS_ID++;const nav=DETAIL_NAV_ID,next=$('#detailedLogging').checked;$('#detailedLogging').disabled=true;
-  try{const data=await detailJSON('/api/logs/settings',{detailedLogging:next});DETAIL_CONFIRMED=data.detailedLogging;if(nav===DETAIL_NAV_ID&&detailVisible())$('#detailsStatus').textContent='详细日志设置已保存；账号草稿未改变';}
+async function toggleLoggingSetting(field,element){
+  if(DETAIL_TOGGLE_PENDING)return;DETAIL_TOGGLE_PENDING=true;DETAIL_SETTINGS_ID++;const nav=DETAIL_NAV_ID,next=element.checked;$('#detailedLogging').disabled=true;$('#errorDetailLogging').disabled=true;
+  try{const data=await detailJSON('/api/logs/settings',{[field]:next});DETAIL_CONFIRMED=data.detailedLogging===true;ERROR_DETAIL_CONFIRMED=data.errorDetailLogging===true;if(nav===DETAIL_NAV_ID&&detailVisible())$('#detailsStatus').textContent='日志设置已保存；账号草稿未改变';}
   catch{if(nav===DETAIL_NAV_ID&&detailVisible())$('#detailsStatus').textContent='设置保存失败，已恢复上次确认状态';}
-  finally{DETAIL_TOGGLE_PENDING=false;DETAIL_SETTINGS_ID++;$('#detailedLogging').checked=DETAIL_CONFIRMED;$('#detailedLogging').disabled=false;}
+  finally{DETAIL_TOGGLE_PENDING=false;DETAIL_SETTINGS_ID++;$('#detailedLogging').checked=DETAIL_CONFIRMED;$('#errorDetailLogging').checked=ERROR_DETAIL_CONFIRMED;$('#detailedLogging').disabled=false;$('#errorDetailLogging').disabled=false;}
 }
+function toggleDetailedLogging(){return toggleLoggingSetting('detailedLogging',$('#detailedLogging'));}
+function toggleErrorDetailLogging(){return toggleLoggingSetting('errorDetailLogging',$('#errorDetailLogging'));}
 function resetDetailSelection(){DETAIL_SELECTION_ID++;DETAIL_REQUEST=null;DETAIL_BODY_TEXT=null;$('#detailsCopy').disabled=true;$('#detailsMetadata').textContent='';$('#detailsBodies').innerHTML='';$('#detailsText').value='';}
-for(const id of ['detailsRequestId','detailsModel','detailsAccount','detailsStatusFilter','detailsFrom','detailsTo'])$('#'+id).addEventListener('input',()=>{
+for(const id of ['detailsRequestId','detailsModel','detailsAccount','detailsStatusFilter','detailsResult','detailsFrom','detailsTo'])$('#'+id).addEventListener('input',()=>{
   DETAIL_LIST_ID++;DETAIL_CURSOR=null;resetDetailSelection();$('#detailsList').innerHTML='';$('#detailsNext').disabled=true;$('#detailsStatus').textContent='筛选已改变，请点击刷新 / 筛选';
 });
 async function loadDetails(next=false){
   const id=++DETAIL_LIST_ID;resetDetailSelection();$('#detailsList').innerHTML='';$('#detailsNext').disabled=true;
   if(!next)DETAIL_CURSOR=null;const params=new URLSearchParams({limit:'50'});if(DETAIL_CURSOR)params.set('cursor',DETAIL_CURSOR);
-  for(const [key,element] of [['requestId','detailsRequestId'],['model','detailsModel'],['account','detailsAccount'],['status','detailsStatusFilter']])if($('#'+element).value.trim())params.set(key,$('#'+element).value.trim());
+  for(const [key,element] of [['requestId','detailsRequestId'],['model','detailsModel'],['account','detailsAccount'],['status','detailsStatusFilter'],['result','detailsResult']])if($('#'+element).value.trim())params.set(key,$('#'+element).value.trim());
   for(const [key,element] of [['from','detailsFrom'],['to','detailsTo']])if($('#'+element).value)params.set(key,String(new Date($('#'+element).value).getTime()));
   $('#detailsStatus').textContent='加载中…';
   try{const data=await detailJSON('/api/logs/details?'+params);if(id!==DETAIL_LIST_ID||!detailVisible())return;
-    $('#detailsList').innerHTML=data.items.map(row=>`<tr><td>${escapeHtml(new Date(row.ts).toLocaleString())}<br>${escapeHtml(row.requestId)}</td><td>${escapeHtml(row.model)}<br>${escapeHtml((row.accounts||[]).join(', '))}</td><td>${escapeHtml(row.status)} / ${escapeHtml(row.state)} · ${escapeHtml(row.attemptCount)} 次调用</td><td><button type="button" class="ghost" onclick="selectDetail(${jsArg(row.requestId)})">查看请求</button></td></tr>`).join('')||'<tr><td colspan="4">暂无详细日志</td></tr>';
+    $('#detailsList').innerHTML=data.items.map(row=>`<tr><td>${escapeHtml(new Date(row.ts).toLocaleString())}<br>${escapeHtml(row.requestId)}</td><td>${escapeHtml(row.model)}<br>${escapeHtml((row.accounts||[]).join(', '))}</td><td>${escapeHtml(row.profile||'full')} · HTTP ${escapeHtml(row.httpStatus??row.status??'—')} / outcome ${escapeHtml(row.outcomeStatus??'—')} / ${escapeHtml(row.result||'未知')}<br>${escapeHtml(row.captureState||row.state)} · ${escapeHtml(row.attemptCount)} 次调用</td><td><button type="button" class="ghost" onclick="selectDetail(${jsArg(row.requestId)})">查看请求</button></td></tr>`).join('')||'<tr><td colspan="4">暂无详细日志</td></tr>';
     DETAIL_CURSOR=data.nextCursor;$('#detailsNext').disabled=!DETAIL_CURSOR;$('#detailsStatus').textContent=`存储失败 ${data.health.failures} · 诊断丢弃 ${data.health.dropped} · 损坏记录 ${data.health.corrupt}`;
   }catch(error){if(id===DETAIL_LIST_ID&&detailVisible())$('#detailsStatus').textContent=error.message;}
 }
-async function selectDetail(requestId){
+const DETAIL_UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const validErrorDetailIntent=row=>row&&['error','full'].includes(row.detailProfile)&&DETAIL_UUID.test(row.requestId||'')&&Number.isSafeInteger(row.attemptIndex)&&row.attemptIndex>=0&&DETAIL_UUID.test(row.detailCallId||'');
+async function selectDetail(requestId,expected=null){
   const id=++DETAIL_SELECTION_ID;DETAIL_REQUEST=requestId;DETAIL_BODY_TEXT=null;$('#detailsCopy').disabled=true;$('#detailsText').value='';$('#detailsMetadata').textContent='加载中…';$('#detailsBodies').innerHTML='';
+  if(expected&&(!Number.isSafeInteger(expected.attemptIndex)||expected.attemptIndex<0||!DETAIL_UUID.test(expected.callId||''))){$('#detailsMetadata').textContent='详情关联校验失败：attemptIndex 或 callId 无效';$('#detailsStatus').textContent='无法安全定位该失败调用';$('#detailsMetadata').focus();return;}
   try{const group=await detailJSON('/api/logs/details/'+encodeURIComponent(requestId));if(id!==DETAIL_SELECTION_ID||!detailVisible())return;
-    $('#detailsMetadata').textContent=JSON.stringify({request:group.request,attempts:group.attempts,bodies:group.bodies},null,2);
-    const labels=new Map([[group.request.requestBody,'客户端请求'],[group.request.responseBody,'最终客户端响应']]);for(const [index,attempt] of group.attempts.entries()){labels.set(attempt.requestBody,`调用 ${index+1} 请求`);labels.set(attempt.responseBody,`调用 ${index+1} 响应`);}
-    $('#detailsBodies').innerHTML=group.bodies.map(body=>`<button type="button" class="ghost" onclick="loadDetailBody(${jsArg(requestId)},${jsArg(body.bodyId)},${jsArg(body.state)})">${escapeHtml(labels.get(body.bodyId)||'正文')} · ${escapeHtml(body.state)} · ${escapeHtml(body.capturedBytes)}/${escapeHtml(body.observedBytes)} bytes</button>`).join('');
-  }catch(error){if(id===DETAIL_SELECTION_ID&&detailVisible())$('#detailsMetadata').textContent=error.message;}
+    let attempts=group.attempts||[],bodies=group.bodies||[];
+    if(expected){const matches=attempts.filter(attempt=>attempt.attemptIndex===expected.attemptIndex&&attempt.callId===expected.callId);if(matches.length!==1){$('#detailsMetadata').textContent='详情关联校验失败：attemptIndex 与 callId 不一致或不唯一';$('#detailsStatus').textContent='无法安全定位该失败调用';$('#detailsMetadata').focus();return;}const matched=matches[0];attempts=[matched];bodies=bodies.filter(body=>body.bodyId===matched.responseBody);if(matched.captureState==='no-response')$('#detailsStatus').textContent='未收到上游响应，因此没有响应 Header/正文之外的可读内容';else if(matched.captureState==='stream-transport-failed')$('#detailsStatus').textContent='上游已返回 Header，但起流后传输失败；未复制此前成功 SSE 片段';}
+    $('#detailsMetadata').textContent=JSON.stringify({request:group.request,attempts,bodies},null,2);$('#detailsMetadata').focus();
+    const labels=new Map([[group.request.requestBody,'客户端请求'],[group.request.responseBody,'最终客户端响应']]);for(const attempt of attempts){const index=Number.isSafeInteger(attempt.attemptIndex)?attempt.attemptIndex+1:'?';labels.set(attempt.requestBody,`调用 ${index} 请求`);labels.set(attempt.responseBody,`调用 ${index} 响应`);}
+    $('#detailsBodies').innerHTML=bodies.map(body=>`<button type="button" class="ghost" onclick="loadDetailBody(${jsArg(requestId)},${jsArg(body.bodyId)},${jsArg(body.state)})">${escapeHtml(labels.get(body.bodyId)||'正文')} · ${escapeHtml(body.state)} · ${escapeHtml(body.capturedBytes)}/${escapeHtml(body.observedBytes)} bytes</button>`).join('');
+  }catch(error){if(id===DETAIL_SELECTION_ID&&detailVisible()){$('#detailsMetadata').textContent=expected?'详情不可用（已过期、已清空、被容量边界丢弃或发布失败）':error.message;$('#detailsMetadata').focus();}}
 }
+async function openErrorDetail(requestId,attemptIndex,detailCallId){const intent={requestId,attemptIndex,detailProfile:'error',detailCallId};if(!validErrorDetailIntent(intent))return;$('#detailsRequestId').value=requestId;DETAIL_CURSOR=null;await switchSection('details');if(!detailVisible())return;await selectDetail(requestId,{attemptIndex,callId:detailCallId});}
+function errorDetailAction(row){if(!row?.detailProfile&&!row?.detailCallId)return '<span class="dim">当时未开启错误详情</span>';if(!validErrorDetailIntent(row))return '<span class="dim">错误详情关联不可用</span>';return `<button type="button" class="ghost" onclick="openErrorDetail(${jsArg(row.requestId)},${jsArg(row.attemptIndex)},${jsArg(row.detailCallId)})">查看错误详情</button>`;}
 async function loadDetailBody(requestId,bodyId,state){
   const id=++DETAIL_SELECTION_ID;DETAIL_BODY_TEXT=null;$('#detailsCopy').disabled=true;$('#detailsText').value='加载中…';
   try{const text=await api('/api/logs/details/'+encodeURIComponent(requestId)+'/bodies/'+encodeURIComponent(bodyId),null,'GET',true);if(id!==DETAIL_SELECTION_ID||requestId!==DETAIL_REQUEST||!detailVisible())return;DETAIL_BODY_TEXT=text;$('#detailsText').value=text;$('#detailsCopy').disabled=false;$('#detailsStatus').textContent='正文状态：'+state;}
@@ -1251,7 +1260,7 @@ async function loadLogs(next=false){
   if(type==='requests'&&$('#logSwitched').value)params.set('switched',$('#logSwitched').value);
   const r=await api(`/api/logs/${type}?${params}`),items=r.items||[];
   if(queryId!==LOG_QUERY_ID||type!==$('#logType').value)return;
-  $('#logBody').innerHTML=items.map(x=>{const legacyResult=Number(x.status)>=200&&Number(x.status)<400?'success':'legacy_failed';const status=type==='requests'?`${x.status??'—'} / ${x.result||legacyResult}`:`${x.status??'—'} / ${x.upstreamStatus??'—'}`;const affinity=type==='requests'?`${affinityLogLabel(x)} · ${cacheHitLogLabel(x.cacheHit)}`:'—';return `<tr><td>${escapeHtml(new Date(x.ts).toLocaleString())}</td><td class="mono">${escapeHtml(x.requestId)}</td><td class="mono">${escapeHtml(x.requestedModel||'—')}<br><span class="dim">${escapeHtml(x.resolvedModel||'—')}</span></td><td>${escapeHtml(x.accountName||'—')}</td><td>${escapeHtml(x.strategy||x.category||'—')}<br><span class="dim">${escapeHtml(x.selectionReason||x.accountAction||'')}</span></td><td>${escapeHtml(status)}</td><td>${escapeHtml((x.targetProviders||x.providerPath||[]).join(' → ')||x.actualProvider||x.targetProvider||'—')}</td><td>${escapeHtml(affinity)}</td><td><details><summary>展开</summary><pre>${escapeHtml(JSON.stringify(x,null,2))}</pre></details></td></tr>`;}).join('')||'<tr><td colspan="9" class="empty">暂无记录</td></tr>';
+  $('#logBody').innerHTML=items.map(x=>{const legacyResult=Number(x.status)>=200&&Number(x.status)<400?'success':'legacy_failed';const status=type==='requests'?`${x.status??'—'} / ${x.result||legacyResult}`:`${x.status??'—'} / ${x.upstreamStatus??'—'}`;const affinity=type==='requests'?`${affinityLogLabel(x)} · ${cacheHitLogLabel(x.cacheHit)}`:'—',detailAction=type==='errors'?errorDetailAction(x):'';return `<tr><td>${escapeHtml(new Date(x.ts).toLocaleString())}</td><td class="mono">${escapeHtml(x.requestId)}</td><td class="mono">${escapeHtml(x.requestedModel||'—')}<br><span class="dim">${escapeHtml(x.resolvedModel||'—')}</span></td><td>${escapeHtml(x.accountName||'—')}</td><td>${escapeHtml(x.strategy||x.category||'—')}<br><span class="dim">${escapeHtml(x.selectionReason||x.accountAction||'')}</span></td><td>${escapeHtml(status)}</td><td>${escapeHtml((x.targetProviders||x.providerPath||[]).join(' → ')||x.actualProvider||x.targetProvider||'—')}</td><td>${escapeHtml(affinity)}</td><td>${detailAction}<details><summary>展开</summary><pre>${escapeHtml(JSON.stringify(x,null,2))}</pre></details></td></tr>`;}).join('')||'<tr><td colspan="9" class="empty">暂无记录</td></tr>';
   LOG_CURSOR=r.nextCursor;$('#logNext').disabled=!LOG_CURSOR;
 }
 async function clearLogs(){const type=$('#logType').value,title=type==='errors'?'错误日志':'请求日志';if(!confirm(`确认清空${title}？此操作不可撤销。`))return;await api('/api/logs/'+type,null,'DELETE');if($('#logPanel').hidden||type!==$('#logType').value)return;await loadLogs();}

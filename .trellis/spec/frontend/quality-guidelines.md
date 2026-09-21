@@ -151,9 +151,11 @@ Ordinary request/error views render only projected log fields. Never render raw 
 
 #### Detailed log panel
 
-`detailsPanel` has its own labelled fifth navigation button and never reuses ordinary `logPanel` state. Show persistent default-off/content/privacy warnings, 5 MiB per-body and seven-day/1 GiB limits, incomplete/crash-recovery guidance, and the actual `authRequired` result; an empty admin key must visibly warn that content is unprotected. The checkbox is disabled until settings load and while an independent settings POST is pending. Failure restores the last confirmed mode without touching account drafts.
+`detailsPanel` has its own labelled fifth navigation button and never reuses ordinary `logPanel` state. Show persistent default-off/content/privacy warnings, explain error-only versus full capture and full-mode precedence, retain the 5 MiB per-body and seven-day/1 GiB limits, and show the actual `authRequired` result; an empty admin key must visibly warn that content is unprotected. Both checkboxes are disabled until settings load and while either independent settings POST is pending. Failure restores both last confirmed modes without touching account drafts.
 
-The list shows metadata only. `selectDetail(requestId)` loads headers, attempt metadata and body descriptors into `textContent`; `loadDetailBody()` loads one sanitized `text/plain` body into a labelled readonly textarea. Body buttons identify client/attempt request/response, completeness and captured/observed byte counts. Do not automatically load every body on a page. Use escaping/`jsArg()` for button/table HTML and text nodes or textarea `.value` for arbitrary captured content.
+The list shows metadata only, including profile, HTTP/outcome/result and capture state. `selectDetail(requestId)` loads headers, attempt metadata and body descriptors into `textContent`; `loadDetailBody()` loads one sanitized `text/plain` body into a labelled readonly textarea. Body buttons identify client/attempt request/response, completeness and captured/observed byte counts. Do not automatically load every body on a page. Use escaping/`jsArg()` for button/table HTML and text nodes or textarea `.value` for arbitrary captured content.
+
+An error-row “view error detail” button exists only with validated capture intent. It switches sections, retrieves the group on demand, and requires exact `attemptIndex + detailCallId` agreement before showing that attempt or body. No intent says it was not enabled then; `no-response` and `stream-transport-failed` remain distinct; a 404 says only that the group may be expired, cleared, capacity-dropped or publication-failed. Never guess from array order or global health.
 
 Copy uses only `DETAIL_BODY_TEXT` obtained from the authenticated body API, is disabled until loading completes, announces failure and focuses/selects the readonly text as fallback. Clear explicitly names detailed logs and preserves ordinary logs. Filter edits invalidate stale results/cursors and ask for refresh; Next stays disabled during pending/invalidated queries. Draft/navigation ownership is in `state-management.md`.
 
@@ -189,7 +191,7 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 | Log filter changes | reset cursor before querying |
 | Clear log selected | confirm with the captured type, delete only that type, and reload only if that same section remains visible |
 | API returns `401` | show login overlay and reject the operation |
-| Detailed settings save fails | Restore confirmed checkbox; keep account/bulk/raw drafts unchanged |
+| Either detailed settings save fails | Restore both confirmed checkboxes; keep account/bulk/raw drafts unchanged |
 | Detail body missing/expired or read rejected | Announce safe missing state; no stale body/copy content |
 | Details filter changes during a read | Invalidate list/selection; reset cursor and disable Next until refreshed |
 | Clipboard write fails | Announce failure; select loaded sanitized text for manual copy |
@@ -229,7 +231,7 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 - the labelled responsive four-card quota forecast, truthful account-point units/assumptions, `textContent` rendering, exact fixed-time calculations, eligibility/exclusion counts, reset boundaries, lower-bound fallback, invalid snapshot time, and no-data state;
 - log query invalidation, filters/pagination, captured-type clear controls, request-only result filtering, safe historical fallback, bounded affinity/cache/circuit/health labels, explicit final-request versus failed-attempt wording, and model-alias batch controls;
 - preferred-mode singleton-attempt wording, stable provider ordering, escaped `degraded`/cooling/half-open health labels, and no health-rank sort;
-- independent detailed settings/privacy/retention/auth warnings, safe metadata/text and on-demand copy/clear controls; production VM tests must verify stale reads, cursor reset and no account-draft mutation.
+- independent full/error-only detailed settings, precedence/privacy/retention/auth warnings, safe metadata/text and on-demand copy/clear controls; production VM tests must verify stale reads, cursor reset, exact double-token matching, honest missing/transport states and no account-draft mutation.
 
 Manual browser review remains required for visual width, narrow-screen scrolling, focus order, keyboard-only drawer use, password masking, preview readability, and log/alias interaction. Static string tests must not be reported as visual browser automation.
 
