@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 20
-- **Last Active**: 2026-09-20
+- **Total Sessions**: 21
+- **Last Active**: 2026-09-21
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~513 | Active |
+| `journal-1.md` | ~537 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 21 | 2026-09-21 | 错误详情与日志热路径优化及生产部署 | `f137c54`, `16c3b96`, `3c249e8` | `main` |
 | 20 | 2026-09-20 | 统一双维度错误规则与成功率 | `cb19f2e`, `1008fc8` | `main` |
 | 19 | 2026-09-20 | 部署单渠道健康重试到生产 | `88c08a5` | `main` |
 | 18 | 2026-09-20 | Consolidate deployment workflow on main | `f599805`, `bb881ee` | `main` |

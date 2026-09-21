@@ -511,3 +511,27 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 21: 错误详情与日志热路径优化及生产部署
+<!-- trellis-session: v=2 fp=a70b54715e86fde7 -->
+
+**Date**: 2026-09-21
+**Task**: 错误详情与日志热路径优化及生产部署
+**Branch**: `main`
+
+### Summary
+
+实现并验证错误详情捕获、日志边界、metadata 去重和有界退出；从 committed main 发布 release 20260921-061841-16c3b966-error-detail，保留外部新增规则，完成回滚演练、即时/延迟/独立生产门禁。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f137c54` | feat: 增加错误详情捕获并优化日志热路径 |
+| `16c3b96` | docs(task): 记录错误详情与日志优化实施结果 |
+| `3c249e8` | docs(task): 记录错误详情生产部署验证 |
+
+### Status
+
+[OK] **Completed**
