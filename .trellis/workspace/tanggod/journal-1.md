@@ -652,3 +652,27 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 27: 低额度热池调度与刷新驱动恢复
+<!-- trellis-session: v=2 fp=278e2b25a3182c27 -->
+
+**Date**: 2026-09-23
+**Task**: 低额度热池调度与刷新驱动恢复
+**Branch**: `feat/low-quota-pool-refresh-cooling`
+
+### Summary
+
+扩展现有动态池/额度刷新 owner 实现固定低额度槽、低额度优先与高额度即时兜底，动态增长仅增加高额度目标。low account/degrade 设置 waiting-refresh 和独立的首包前换号 outcome；真实刷新中的 partial known100 确认 quota-exhausted，部分非100仍属未知而继续排除，只有更新且三窗口齐全、均低于100的成功快照才解除。字段级维护 rule 与 quota 正交状态；独立检查修复启动不一致状态 fail-closed、准入前日志实际组成误报、低额度池关闭时统计页文案。全量 233/233，真实 Chrome 375px 控件与保存 6/6；PRD/design 与父源要求一致，英文 spec 已同步；未部署。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c75bbe1` | feat: 实现低额度热池调度与刷新驱动恢复 |
+| `2019430` | docs(spec): 同步低额度热池与刷新驱动状态契约 |
+| `81e348e` | docs(task): 明确部分额度未知语义并记录检查与浏览器证据 |
+
+### Status
+
+[OK] **Completed**

@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 26
+- **Total Sessions**: 27
 - **Last Active**: 2026-09-23
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~654 | Active |
+| `journal-1.md` | ~678 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 27 | 2026-09-23 | 低额度热池调度与刷新驱动恢复 | `c75bbe1`, `2019430`, `81e348e` | `feat/low-quota-pool-refresh-cooling` |
 | 26 | 2026-09-23 | 账号级 RPM 限流 | `ba18795`, `1ce2804` | `feat/account-rpm-limits` |
 | 25 | 2026-09-23 | 父任务集成验收：双维度错误规则与动态路由策略 | `37271d3`, `f0852bd` | `main` |
 | 24 | 2026-09-23 | 测试稳定性：消除集成测试时钟/负载依赖 flake | `6cc2393`, `e9d8d8f`, `0ff9aab` | `feat/test-stability-timing-flakes` |
