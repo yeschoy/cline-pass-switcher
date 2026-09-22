@@ -23,8 +23,12 @@ normalizeAccount(account, index, previousById, previousByName)
 normalizeProxyUrl(value, { strict = false })
 validateAndNormalizeHeaders(value, { strict = false })
 normalizeModelAliases(value)
-normalizeAccountPipeline(value, { strict = false })
+normalizeAccountPipeline(value, { strict = false, fallbackOrder, fallbackCachePoolSize,
+  fallbackCachePoolMaxSize, fallbackSessionBindingExplicitTtlMs,
+  fallbackSessionBindingFallbackTtlMs, fallbackSessionBindingMaxEntries })
 normalizeErrorRules(value, { strict = false })
+normalizeCachePoolTarget(pipeline = config.accountPipeline)
+cachePoolTargetFor(pipeline = config.accountPipeline, value = META.cachePoolTargetSize)
 validateStatistics(statistics)
 normalizeStatistics()
 normalizeAccountQuotas()
@@ -85,7 +89,11 @@ metadata.json   DATA_DIR/metadata.json
     healthSort: boolean,
     sticky: boolean,
     order: ("quotaPool" | "healthSort" | "sticky")[],
-    cachePoolSize: integer // 0-100000; 0 disables the cache-focused active pool
+    cachePoolSize: integer,        // 0-100000; initial/minimum size; 0 disables the cache-focused active pool
+    cachePoolMaxSize: integer,     // 0-100000; grow-only upper bound; must be >= cachePoolSize
+    sessionBindingExplicitTtlMs: integer, // 60000-604800000; explicit-identity sliding TTL (default 7200000)
+    sessionBindingFallbackTtlMs: integer, // 60000-604800000; message_hmac sliding TTL (default 900000)
+    sessionBindingMaxEntries: integer     // 1-100000; process-local LRU cap (default 50000)
   },
   modelAliases: { [clientAlias]: "cline-pass/<known model>" },
   detailedLogging: boolean,      // default false; full detailed capture
@@ -118,7 +126,9 @@ Startup normalization preserves legacy behavior while making the schema explicit
 - when canonical rules are absent, migrate legacy content rules in original order before exact legacy status rules, map `ban` to account hard quarantine, persist canonical rules, and retain only lossless legacy API/config mirrors;
 - clamp `activeAccount` to the persisted account list;
 - normalize the pipeline to `quotaPool`, `healthSort`, `sticky`; recognized legacy four-step input folds `excludeUnhealthy:true` into health sorting and removes the duplicate step;
-- normalize a missing/invalid `accountPipeline.cachePoolSize` to `0`; strict management saves accept only integer values from 0 through 100000, while an older client that omits only this field preserves the current server value.
+- normalize a missing/invalid `accountPipeline.cachePoolSize` to `0`; strict management saves accept only integer values from 0 through 100000, while an older client that omits only this field preserves the current server value. Legacy four-step input that omits it defaults the pool off.
+- normalize `cachePoolMaxSize` as an integer 0-100000 with `cachePoolMaxSize >= cachePoolSize`. A missing field (legacy file or older client) falls back to the current server value, or to `cachePoolSize` when there is none, so an upgrade never enables automatic growth. Non-strict normalization clamps an explicit max below the minimum up to the minimum; strict saves return `400` instead.
+- normalize `sessionBindingExplicitTtlMs`/`sessionBindingFallbackTtlMs` as integers 60000-604800000 and `sessionBindingMaxEntries` as an integer 1-100000. A missing/invalid value falls back to the current in-range server value, then to `7200000`/`900000`/`50000`; non-strict normalization caps a fallback TTL above the explicit TTL at `Math.min(900000, explicitTtlMs)`.
 
 #### Dynamic `metadata.json`
 
@@ -150,6 +160,7 @@ Startup normalization preserves legacy behavior while making the schema explicit
     }
   },
   routingSecret,
+  cachePoolTargetSize,     // grow-only cache-pool target, integer clamped by cachePoolSize..cachePoolMaxSize
   models,
   history,                 // compatibility-only persisted array
   catalog, catalogFetchedAt,
@@ -207,7 +218,7 @@ Startup normalization preserves legacy behavior while making the schema explicit
 }
 ```
 
-`routingSecret` is generated once and persisted so HRW mapping survives restart. `accountStates` entries for removed accounts are deleted; the deterministic environment-account ID remains valid while `CLINE_PASS_KEY` is present. Expired, non-banned cooldown entries are deleted when candidates are read. Ban/cooldown state persists until expiry or `POST /api/accounts/recover` removes it.
+`routingSecret` is generated once and persisted so HRW mapping survives restart. `cachePoolTargetSize` is the single persisted cache-pool target: it is normalized by `normalizeCachePoolTarget()` to `clamp(stored, cachePoolSize, cachePoolMaxSize)`, defaults to the minimum when absent (and to `0` when the minimum is `0`), and is rewritten only by startup normalization when the effective value changed, by an explicit operator save that clamps it, or by one successful `growCachePoolOne()` increment. It is never reset by pressure drop, and it must not be accompanied by a persisted member list, session→account map or binding entry. Cache-pool membership is always re-derived from the target, priority, stable ID and eligibility, and the session-binding table is process-local and clears on restart. Automatic growth writes only `metadata.json` through `saveMeta()` and never rewrites operator `config.json`/`accountPipeline`. `accountStates` entries for removed accounts are deleted; the deterministic environment-account ID remains valid while `CLINE_PASS_KEY` is present. Expired, non-banned cooldown entries are deleted when candidates are read. Ban/cooldown state persists until expiry or `POST /api/accounts/recover` removes it.
 
 Provider state is durable runtime metadata keyed by resolved model and Provider, never by account. Legacy `upstreamStatus` facts normalize additively; explicit `cooldownUntil`, `hardQuarantined`, safe `ruleId`/status/time facts are independent from success data. Hard quarantine survives success/restart and clears only by exact recovery or Provider identity cleanup. A rule action must never copy the rule needle, Header value, response body, credential, or request content into this map.
 
@@ -251,7 +262,9 @@ Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/
 | Route has over 20 upstreams, over 50 exclusions, invalid slug/mode/sort, `maxRetries` outside 0-20, or `providerCooldownMs` outside integer 0-300000 | `400`; no write |
 | Canonical rules are non-array/over 100/over 64 KiB, have invalid/duplicate IDs, unknown fields, empty/duplicate scopes, no active condition, invalid status/body/Header/applicability, or invalid reset format/duration | `400`; no write |
 | A POST omits `errorRules` and changes either legacy mirror | `409`; preserve canonical rules and file bytes; unchanged/missing mirrors are accepted |
-| Canonical `accountPipeline` lacks any of the three booleans, has unknown fields, invalid cache size, or non-permutation order | `400`; no write; complete recognized legacy four-step input is normalized, and older omission of order/size preserves current values |
+| Canonical `accountPipeline` lacks any of the three booleans, has unknown fields, invalid `cachePoolSize`/`cachePoolMaxSize`, invalid binding TTL/entry bounds, or non-permutation order | `400`; no write; complete recognized legacy four-step input is normalized, and older omission of any field preserves current values |
+| `cachePoolMaxSize` is below `cachePoolSize`, or `sessionBindingFallbackTtlMs` exceeds `sessionBindingExplicitTtlMs` | strict save `400`; non-strict normalization clamps to the minimum / `min(900000, explicit)` |
+| Persisted `cachePoolTargetSize` is missing/non-integer/below min/above max | normalize the effect to `clamp(value, cachePoolSize, cachePoolMaxSize)`; do not fail startup and do not write a member list |
 | Legacy provider health lacks new fields | normalize to bounded defaults while preserving safe status/note/timestamps |
 | Invalid provider-health timestamp/count/status | normalize to zero/unknown/bounded values; never copy raw payload data |
 | Valid statistics v1/v2/v3 | validate each old exact field set, migrate through model/routing versions, then add empty v4 account/provider success owners and independent tracking starts without converting legacy weighted health |
@@ -286,7 +299,8 @@ Persistence changes must use a temporary `DATA_DIR` and assert:
 - malformed `config.json` causes non-zero startup, reports `cannot read config.json`, and retains the exact original bytes;
 - legacy accounts gain non-empty stable IDs, `maxConcurrent: 0`, `weight: 1`, `priority: 100`, empty note/proxy/Header fields, and `perModel`, then retain IDs across restart;
 - all new account fields, model aliases, and all 24 pipeline order permutations survive an authenticated save/restart round trip without erasing account routes;
-- missing legacy pipeline order and cache-pool size migrate to the compatibility defaults, old-client saves preserve the current order/size, valid cache-pool sizes survive restart, and malformed explicit values fail without changing file bytes;
+- missing legacy pipeline order and cache-pool size migrate to the compatibility defaults, `cachePoolMaxSize` defaults to `cachePoolSize`, old-client saves preserve the current order/size/max/TTLs/entry cap, valid new values survive restart, and malformed explicit values fail without changing file bytes;
+- a stored `cachePoolTargetSize` survives restart, is clamped into `[cachePoolSize, cachePoolMaxSize]`, is reset by an explicit operator save, and is the only pool fact written to `metadata.json`; no member IDs or `sessionBindings` key appear in the persisted bytes;
 - invalid proxy/Header/note/weight/priority/alias payloads return `400` and preserve the previous file bytes;
 - `routingSecret`, account cooldown state, and model/provider health cooldowns survive restart; routing skips only still-cooling providers and keeps model isolation;
 - legacy provider status rows gain bounded timestamps/count/class/cooldown fields without leaking secrets, while successful half-open attempts persist immediate recovery;
