@@ -18,6 +18,9 @@ The console is a single static HTML file with authenticated JSON calls. Server v
 loadAll()
 renderAccounts()
 collectAccounts()
+pipelineNumberDraft()
+pipelineIntegerDraft(id, label, min, max)
+cachePoolSizeDraft()
 openAccountDrawer(index, returnButton)
 closeAccountDrawer(force)
 saveDrawer()
@@ -65,7 +68,7 @@ DELETE   /api/logs/{requests|errors}
 
 #### Account table and drawer
 
-The main table is a status summary. Its cache/success/failure cells come from each authenticated account object's stable-ID runtime projection, never the editable/repeatable account name. It shows rolling cache Token ratio and direct 24-hour account success rate with sample/coverage facts. Disabled, cooling, and hard quarantine are separate dispositions; missing, overflowed or incomplete coverage remains explicit. Full name, note, Key, capacity, weight, priority, proxy URL, custom Header map, and account-route summary are edited in the right-side account drawer. Runtime `health`, `statistics`, active counts, quota and cache roles are projections only and never enter `collectAccounts()`.
+The main table is a status summary. Its cache/success/failure cells come from each authenticated account object's stable-ID runtime projection, never the editable/repeatable account name. It shows rolling cache Token ratio and direct 24-hour account success rate with sample/coverage facts. Disabled, cooling, and hard quarantine are separate dispositions; missing, overflowed or incomplete coverage remains explicit. Full name, note, Key, capacity, weight, priority, proxy URL, custom Header map, and account-route summary are edited in the right-side account drawer. Runtime `health`, `statistics`, active counts, quota, cache roles and the `ACCS.cachePool` min/max/target/binding summary are projections only and never enter `collectAccounts()`.
 
 The drawer:
 
@@ -107,13 +110,15 @@ The modal focuses the textarea on open and returns focus to its opener after app
 
 The three canonical pipeline rows (`quotaPool`, account `healthSort`, and `sticky`) are native draggable elements with visible handles, current position numbers, independent enablement checkboxes, and native up/down button equivalents. Mouse drop and keyboard-operable buttons call the same DOM reorder owner, update first/last disabled states, and announce the draft-only result through `aria-live`. Disabled steps remain orderable and retain their positions; reordering never sends a request.
 
-The seven scheduling presets produce an editable draft and preview. They may change only scheduling fields and merge stable-ID canonical error rules. The cache-hit preset sets sticky mode, size 2 and a 5000 ms wait while exposing priorities for review. Presets never mutate names, Keys, enablement, proxy, Header maps, model routes, custom rules or the three pipeline toggles.
+The seven scheduling presets produce an editable draft and preview. They may change only scheduling fields and merge stable-ID canonical error rules. The cache-hit preset sets sticky mode, `cachePoolSize: 2`, `cachePoolMaxSize: 2` (auto-growth inert) and a 5000 ms wait while exposing priorities for review; when applied onto a draft whose max is smaller, `previewPreset()` raises max to at least min and shows that change. Presets never mutate names, Keys, enablement, proxy, Header maps, model routes, custom rules or the three pipeline toggles.
 
 The error-rule panel owns one complete ordered `ERROR_RULE_DRAFT` array and renders native controls for stable ID, account/provider-model scope, Provider/model applicability, statuses, body ANY, Header, action, and cooldown reset. Operators can add/edit/delete/reorder rules; invalid changes are announced without mutating the draft. Its advanced JSON is a generation-checked `<details>` snapshot with explicit apply/refresh.
 
 The five error-rule presets are `standard`, `fast`, `conservative`, `observe`, and `clear`. They read the complete current array and show preserve/add/modify/delete groups. Merge replaces only matching stable IDs and preserves custom rules; replace may delete them; clear forces replacement.
 
-Cancel discards the relevant draft. Confirm submits through the ordinary complete account save, so the server applies the same validation as manual edits. No persistent selected-preset state exists. Pipeline controls submit the three canonical booleans plus the exact DOM order and bounded cache-pool size. Empty, fractional, nonnumeric, or out-of-range pool-size drafts block visual save and preset preview without coercion or a request. Authenticated account rows may display only the safe runtime `cachePoolRole` labels active/standby; that field is never submitted as static account configuration.
+Cancel discards the relevant draft. Confirm submits through the ordinary complete account save, so the server applies the same validation as manual edits. No persistent selected-preset state exists. Pipeline controls submit the three canonical booleans plus the exact DOM order and the five bounded integer fields (`cachePoolSize`, `cachePoolMaxSize`, both session-binding TTLs and `sessionBindingMaxEntries`). Empty, fractional, nonnumeric, or out-of-range drafts — including `cachePoolMaxSize < cachePoolSize` and `sessionBindingFallbackTtlMs > sessionBindingExplicitTtlMs` — block visual save and preset preview without coercion or a request. Authenticated account rows may display only the safe runtime `cachePoolRole` labels active/standby; that field is never submitted as static account configuration.
+
+The fieldset legend is “会话命中条件门与未命中调度步骤（可选）” and the help paragraph explains that sticky + healthSort is a binding gate (“已有绑定先命中”) while the remaining sorted steps only order the current active set; it must not claim that 越靠前优先级越高 or read the gate’s position as a linear priority. A persistent read-only runtime line (default `#cachePoolRuntime`, `aria-live="polite"`) reports `当前目标 <targetSize>（最小 <minSize> / 上限 <maxSize>）` and `会话绑定 <已启用|未启用>，当前 <size> / <maxEntries> 条`, written only with `textContent` from `ACCS.cachePool`; it is display-only state and never enters `collectAccounts()`. The raw scheduling modal’s help text must likewise mention `priority/稳定 ID` membership, `grow-one`, the binding gate for `sticky+healthSort`, and that the saved sticky position is compatibility-only. New number controls carry native `min`/`max`/`step` attributes: `cachePoolSize`/`cachePoolMaxSize` 0-100000, `sessionBindingExplicitTtlMs`/`sessionBindingFallbackTtlMs` 60000-604800000, `sessionBindingMaxEntries` 1-100000; each is associated with a `<label for=...>` and the shared `cachePoolHelp` description.
 
 #### Provider setup preview
 
@@ -174,7 +179,9 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 | Drawer is dirty and user presses Escape/backdrop/Close | ask before discarding |
 | Proxy test on unsaved account | explain that the account must be saved first |
 | Scheduling or error-rule preset is cancelled | no account, rule, pipeline, or global field changes |
-| Cache-pool size is empty, fractional, nonnumeric, or out of range | Block visual save/preset preview without coercing to zero or sending a request |
+| Cache-pool min/max is empty, fractional, nonnumeric, or out of range | Block visual save/preset preview without coercing to zero or sending a request |
+| `cachePoolMaxSize < cachePoolSize`, or a fallback TTL exceeds the explicit TTL | Block visual save/preset preview and announce the cross-field error; do not send a request |
+| Binding TTL is outside 60000-604800000, or entries cap is outside 1-100000 | Block visual save/preset preview without coercion or a request |
 | Visual rule edit is invalid or duplicate | Announce the error and keep the unified draft unchanged |
 | Advanced rule JSON is invalid or stale | Preserve the text; reject apply without mutating the current draft or sending a request |
 | Rule preset merge/replace/clear is confirmed | Submit the live computed status draft plus unchanged ordered content rules through the normal complete API |
@@ -223,7 +230,8 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 - seven bounded scheduling presets plus five unified-draft error-rule presets, native status/content rows, ordered keyboard buttons, generation-checked advanced JSON, cache-pool input/role/help contracts, merge/replace/clear diffs, cancel behavior, and forbidden-field absence;
 - account-scoped one-click provider setup modal/strategy/proposal/test/confirm/cancel boundaries, stale scope rejection, and bounded provider cooldown input;
 - labelled modal/drawer semantics, Escape handling, focus return, dirty confirmation, and `aria-live` feedback;
-- account snapshot preservation for hidden fields, canonical `errorRules`, all three pipeline booleans, the three-step order, and `cachePoolSize`;
+- account snapshot preservation for hidden fields, canonical `errorRules`, all three pipeline booleans, the three-step order, and every bounded pipeline integer (`cachePoolSize`, `cachePoolMaxSize`, both TTLs, `sessionBindingMaxEntries`);
+- cache-pool help/runtime text: the gate/miss-pipeline legend and help wording, the `aria-live` runtime line showing target/min/max and binding size/cap, native bounds on all five number inputs, and the absence of the removed “越靠前优先级越高” claim;
 - five mutually exclusive top sections with one statistics panel, one shared ordinary-log DOM, one independent details panel, explicit active state, and no anchor/scroll shortcut;
 - statistics stale-response guards, escaped server text, unknown/known-zero rendering, table wrapping, and forbidden sensitive fields;
 - statistics entry/manual/timer coalescing, abort and pageshow restoration ownership; remaining/reset-only quota text plus disabled/partial/error/stale states; draft preservation and routing-independent refresh;
@@ -257,7 +265,7 @@ const accountPipeline = {
   healthSort: pipelineHealthSort.checked,
   sticky: pipelineSticky.checked,
   order: pipelineOrder(),
-  cachePoolSize: Number(cachePoolSize.value)
+  ...pipelineNumberDraft()
 };
 ```
 

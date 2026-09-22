@@ -20,7 +20,10 @@ Frontend entry points:
 loadAll()
 renderAccounts()
 collectAccounts()
-saveAccounts()
+saveAccounts(payload = null)
+pipelineIntegerDraft(id, label, min, max)
+cachePoolSizeDraft()
+pipelineNumberDraft()
 saveModelCfg(modelId, patch)
 setupUpstreams(modelId, button)
 renderUpstreamSetupProposal()
@@ -63,9 +66,12 @@ API signatures:
 
 ```text
 GET /api/accounts
-  -> { accounts: [{ ..., health, statistics: { recent24h, lifetimeRequests, lifetimeErrors } }],
+  -> { accounts: [{ ..., health, cachePoolRole, statistics: { recent24h, lifetimeRequests, lifetimeErrors } }],
        mode, active, concurrencyWaitMs, errorRules,
-       accountErrorRules, accountContentErrorRules, accountPipeline, stats }
+       accountErrorRules, accountContentErrorRules, accountPipeline,
+       cachePool: { minSize, maxSize, targetSize,
+                    binding: { enabled, size, maxEntries, counters } },
+       stats }
 
 POST /api/accounts
   <- { accounts, mode, active, concurrencyWaitMs, errorRules?,
@@ -187,11 +193,13 @@ Probe/validation/setup use the explicit route-scope account ID when present. One
 
 The active radio is an array index in the submitted list. The server resolves the selected account ID before filtering empty-key rows, so a blank row before the selected row must not shift the active account.
 
-`ACCS.accountPipeline` is a complete canonical snapshot with `quotaPool`, `healthSort`, `sticky`, an exact three-step `order`, and integer `cachePoolSize` 0-100000. The ordered DOM and cache-pool input are live draft owners. The server also recognizes complete legacy four-step input, folds `excludeUnhealthy:true` into health sorting, and returns only canonical three-step state.
+`ACCS.accountPipeline` is a complete canonical snapshot with `quotaPool`, `healthSort`, `sticky`, an exact three-step `order`, integer `cachePoolSize` (minimum) and `cachePoolMaxSize` (maximum) 0-100000, integer `sessionBindingExplicitTtlMs`/`sessionBindingFallbackTtlMs` 60000-604800000, and integer `sessionBindingMaxEntries` 1-100000. The ordered DOM, the five bounded number inputs, and the runtime read-only `#cachePoolRuntime` region are live projections; `#cachePoolRuntime` is written with `textContent` and shows `当前目标 <targetSize>（最小 <minSize> / 上限 <maxSize>）；会话绑定 <已启用|未启用>，当前 <binding.size> / <binding.maxEntries> 条`. The server also recognizes complete legacy four-step input, folds `excludeUnhealthy:true` into health sorting, and returns only canonical three-step state.
+
+The pipeline fieldset and raw editor must describe conditional semantics, not a single linear priority list. The legend is “会话命中条件门与未命中调度步骤（可选）” and `#pipelineOrderHelp` must state both that a sticky+healthSort combination is a 会话命中条件门 where 已有绑定先命中 and that 未命中调度步骤 only orders the current active candidates by the relative `quotaPool`/`healthSort` positions, with `sticky 的保存位置仅为配置兼容`. Do not reuse the removed “越靠前优先级越高” claim or infer the gate from its saved position; `sticky` keeps its persisted slot for round-trip compatibility but is not a linear miss stage. `#pipelineOrderHelp` and `#pipelineOrderStatus` stay associated through `aria-describedby`/`aria-live` and remain static text; only `#cachePoolRuntime` interpolates bounded server numerics, and only through `textContent`.
 
 #### Local account drafts and bulk concurrency
 
-`loadAll()` hydrates mode, wait, one complete ordered `ERROR_RULE_DRAFT = errorRules`, and pipeline controls from the server snapshot. `renderAccounts()` and `renderErrorRules()` only project existing drafts: search, add/delete/reorder, drawer apply, mode changes, bulk redraw and navigation preserve the complete rule array plus temporarily invalid advanced-JSON text. The active radio reads live mode without resetting `ACCS.active`.
+`loadAll()` hydrates mode, wait, one complete ordered `ERROR_RULE_DRAFT = errorRules`, and pipeline controls (`#pipelineQuotaPool`/`#pipelineHealthSort`/`#pipelineSticky`, `#cachePoolSize`, `#cachePoolMaxSize`, `#sessionBindingExplicitTtlMs`, `#sessionBindingFallbackTtlMs`, `#sessionBindingMaxEntries`, plus `#cachePoolRuntime`) from the server snapshot. A missing new field falls back to its documented default (`cachePoolMaxSize` to the minimum, `7200000`/`900000`/`50000`), so an older server snapshot still hydrates. `renderAccounts()` and `renderErrorRules()` only project existing drafts: search, add/delete/reorder, drawer apply, mode changes, bulk redraw and navigation preserve the complete rule array plus temporarily invalid advanced-JSON text. The active radio reads live mode without resetting `ACCS.active`.
 
 `BULK_SELECTION` is a transient `Set` of account object references, not names or filtered indexes. `visibleAccountRows()` retains original indexes; `updateBulkSelection()` intersects selection with current visible objects and uses that same set for names/count and application. Search changes and reload clear selection; redraw prunes hidden/deleted objects; new rows begin unselected. Duplicate names and unsaved rows must never transfer selection to another object.
 
@@ -212,9 +220,9 @@ for (const account of updateBulkSelection()) account.maxConcurrent = value;
 
 #### Raw scheduling draft editor
 
-`openRawScheduling(button)`, `validateRawScheduling(value, names)`, `applyRawScheduling()`, and `closeRawScheduling(force=false)` reuse the live scheduling controls and the unified rule draft; `RAW_SCHEDULING` is only an editor snapshot, never a second account/rule store. The complete JSON has exactly `accountMode`, `concurrencyWaitMs`, `errorRules`, `accountPipeline`, and `accountNames`; `accountPipeline` contains the three canonical booleans, the same exact order shown by visual controls, and integer `cachePoolSize` 0-100000. `accountMode` maps to the existing mode control; ordered names include all accounts, duplicates and unsaved rows regardless of search. Names are reference-only, not identities. Never project IDs, Keys, notes, proxies, Headers, account parameters, runtime state or `perModel` into this editor.
+`openRawScheduling(button)`, `validateRawScheduling(value, names)`, `applyRawScheduling()`, and `closeRawScheduling(force=false)` reuse the live scheduling controls and the unified rule draft; `RAW_SCHEDULING` is only an editor snapshot, never a second account/rule store. The complete JSON has exactly `accountMode`, `concurrencyWaitMs`, `errorRules`, `accountPipeline`, and `accountNames`; `accountPipeline` contains the three canonical booleans, the same exact order shown by visual controls, and the five bounded integers `cachePoolSize`, `cachePoolMaxSize`, `sessionBindingExplicitTtlMs`, `sessionBindingFallbackTtlMs`, `sessionBindingMaxEntries`. `PIPELINE_NUMBER_CONTROLS` maps each integer field to its control ID so `rawSchedulingControls()`/`pipelineNumberDraft()`/`applyRawScheduling()`/`applyPreset()` share one owner. `accountMode` maps to the existing mode control; ordered names include all accounts, duplicates and unsaved rows regardless of search. Names are reference-only, not identities. Never project IDs, Keys, notes, proxies, Headers, account parameters, runtime state or `perModel` into this editor.
 
-Validation precedes every control write: six modes; integer wait 0–30000; exactly three boolean pipeline keys and order permutation; bounded cache size; and the complete canonical ordered rule schema (IDs, scopes, actions, applicability, statuses, body ANY, Header, and strict reset). Unknown/missing/duplicate fields, invalid JSON numeric types, prototype-like keys, unsafe text, and changed reference names are rejected without coercion.
+Validation precedes every control write: six modes; integer wait 0–30000; exactly three boolean pipeline keys and order permutation; `cachePoolSize`/`cachePoolMaxSize` integers 0–100000; `sessionBindingExplicitTtlMs`/`sessionBindingFallbackTtlMs` integers 60000–604800000; `sessionBindingMaxEntries` integer 1–100000; `cachePoolMaxSize >= cachePoolSize`; `sessionBindingFallbackTtlMs <= sessionBindingExplicitTtlMs`; and the complete canonical ordered rule schema (IDs, scopes, actions, applicability, statuses, body ANY, Header, and strict reset). Unknown/missing/duplicate fields, invalid JSON numeric types, prototype-like keys, unsafe text, and changed reference names are rejected without coercion.
 
 | Condition | Local result |
 |---|---|
@@ -247,7 +255,7 @@ Raw sessions and message content must never be added to account, model, history 
 
 #### Preset, alias, and log state
 
-Preset selection owns a temporary draft only. Confirm submits the complete ordinary account payload; cancel discards it. Presets may not mutate Key, proxy, Header, note, enablement, or `perModel`.
+Preset selection owns a temporary draft only. Confirm submits the complete ordinary account payload; cancel discards it. Presets may not mutate Key, proxy, Header, note, enablement, or `perModel`. The cache-hit preset drafts sticky mode, `cachePoolSize: 2`, `cachePoolMaxSize: 2` (auto-growth stays inert) and a 5000 ms wait while exposing priorities for review. `applyPreset()` writes every `PIPELINE_NUMBER_CONTROLS` input from the draft; `previewPreset()` raises `cachePoolMaxSize` to `max(currentMax, presetMax ?? presetMin)` so the cache preset never leaves max below min and records that change in the preview diff.
 
 `ALIASES` owns the `/api/model-aliases` snapshot. Batch generation edits text locally; successful save reloads aliases and models. Alias targets are server-provided known `cline-pass/*` models.
 
@@ -321,8 +329,10 @@ DETAIL_LIST_ID++; DETAIL_CURSOR = null; resetDetailSelection();
 | Advanced JSON generation is stale after a visual edit/reload | Reject apply and require explicit refresh from the current draft; never overwrite newer rules |
 | Error-rule preset is cancelled | discard `PENDING_ERROR_PRESET`; do not mutate the unified draft/server state |
 | Rule preset merge/replace/clear is confirmed | update only status rules, preserve content order, and send the computed unified draft through `saveAccounts()`; server validation remains authoritative |
-| Visual `cachePoolSize` is empty, fractional, nonnumeric, or outside 0-100000 | Announce a field error; do not construct/send a request or change the draft |
-| `accountPipeline` is incomplete, contains unknown keys/non-booleans, or has invalid `cachePoolSize` | server `400`; retain/reload prior state |
+| Visual `cachePoolSize`/`cachePoolMaxSize` is empty, fractional, nonnumeric, or outside 0-100000 | Announce a field error; do not construct/send a request or change the draft |
+| Visual `sessionBindingExplicitTtlMs`/`sessionBindingFallbackTtlMs` is outside 60000-604800000, or `sessionBindingMaxEntries` is outside 1-100000 | Announce a field error; do not construct/send a request or change the draft |
+| `cachePoolMaxSize < cachePoolSize`, or `sessionBindingFallbackTtlMs > sessionBindingExplicitTtlMs` | Announce the cross-field error; do not construct/send a request |
+| `accountPipeline` is incomplete, contains unknown keys/non-booleans, or has any invalid/out-of-range/out-of-order new field | server `400`; retain/reload prior state |
 | Statistics response becomes stale after navigation | ignore it; do not update hidden/newly selected content |
 | A quota refresh settles after navigation, pagehide or a newer visit | Ignore stale success/catch/finally; do not update status/button/table or cancel another source |
 | Manual/timer/entry refresh overlaps in one visit | Coalesce into one POST; do not queue replay work |
@@ -378,7 +388,8 @@ Cross-layer changes must assert:
 - filtering/searching account rows or a blank-key row does not change which account is active;
 - scheduling preset preview/cancel/apply changes only allowed fields and round-trips through the normal save; the cache-hit preset drafts sticky/2/5000, exposes priorities, and cancellation changes nothing;
 - visual add/edit/delete/reorder and advanced JSON apply share one generation-controlled canonical rule array; invalid/stale text cannot overwrite it, and presets preview stable-ID merge/replace/clear;
-- all three pipeline booleans, the three-step order, and `cachePoolSize` survive a full save; recognized legacy four-step input migrates deterministically while malformed values fail without persistence;
+- all three pipeline booleans, the three-step order, and every bounded integer field (`cachePoolSize`, `cachePoolMaxSize`, both TTLs, `sessionBindingMaxEntries`) survive a full save and reload together with the runtime `cachePool.minSize/maxSize/targetSize` and `binding.enabled/size/maxEntries` projection (the VM hydration test asserts the rendered `#cachePoolRuntime` target/min/max and `size / maxEntries` text); recognized legacy four-step input migrates deterministically while malformed values fail without persistence;
+- the cache-hit preset drafts sticky mode with `cachePoolSize: 2`/`cachePoolMaxSize: 2` and raises max to at least min when the current draft had a smaller max, and raw scheduling apply/validate keeps the five integer fields and both cross-field rules in one owner;
 - statistics generation invalidation prevents stale rendering, coverage-zero/null values remain unknown, per-model cache Token summaries join by resolved ID, account summaries stay stable-ID keyed, and all rendered server text is escaped;
 - statistics entry/manual/five-minute refresh coalesces per visit, aborts page ownership on leave, restores one visit on pageshow, and guards success/catch/finally from older visits;
 - remaining/reset-only quota rendering preserves known 0%/100%, omits redundant used text, and labels unconfigured, disabled, unknown, partial, failed and stale snapshots truthfully without changing drafts or quota routing;
@@ -420,7 +431,7 @@ const accountPipeline = {
   healthSort: pipelineHealthSort.checked,
   sticky: pipelineSticky.checked,
   order: pipelineOrder(),
-  cachePoolSize: Number(cachePoolSize.value)
+  ...pipelineNumberDraft()   // cachePoolSize/cachePoolMaxSize/TTLs/maxEntries, validated first
 };
 ```
 
