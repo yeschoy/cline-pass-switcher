@@ -1007,7 +1007,7 @@ test('new scheduling modes, account fields, model aliases and independent logs',
   assert.deepEqual(roundTrip.accounts[0].perModel,draftAccounts[0].perModel);
   assert.deepEqual(roundTrip.accounts[1].perModel,draftAccounts[1].perModel);
   assert.equal(roundTrip.mode,'sticky');assert.equal(roundTrip.active,1);assert.equal(roundTrip.concurrencyWaitMs,987);
-  assert.deepEqual(roundTrip.accountErrorRules,rules);assert.deepEqual(roundTrip.accountPipeline,{quotaPool:false,healthSort:true,sticky:false,order:['healthSort','quotaPool','sticky'],cachePoolSize:0,cachePoolMaxSize:0,sessionBindingExplicitTtlMs:7200000,sessionBindingFallbackTtlMs:900000,sessionBindingMaxEntries:50000});
+  assert.deepEqual(roundTrip.accountErrorRules,rules);assert.deepEqual(roundTrip.accountPipeline,{quotaPool:false,healthSort:true,sticky:false,order:['healthSort','quotaPool','sticky'],cachePoolSize:0,cachePoolMaxSize:0,cachePoolLowQuotaSize:0,sessionBindingExplicitTtlMs:7200000,sessionBindingFallbackTtlMs:900000,sessionBindingMaxEntries:50000});
   const bytes=fs.readFileSync(path.join(running.dir,'config.json'));
   const invalidHeader=await rawJson(switchPort,'/api/accounts',{accounts:[{...accounts[0],headers:{Authorization:'bad'}},accounts[1]],mode:'single',active:0,concurrencyWaitMs:20,accountErrorRules:{}});assert.equal(invalidHeader.status,400);assert.deepEqual(fs.readFileSync(path.join(running.dir,'config.json')),bytes);
   const invalidProxy=await rawJson(switchPort,'/api/accounts',{accounts:[{...accounts[0],proxyUrl:'ftp://user:pass@example.test'},accounts[1]],mode:'single',active:0,concurrencyWaitMs:20,accountErrorRules:{}});assert.equal(invalidProxy.status,400);
@@ -1257,7 +1257,7 @@ test('runtime counter overflow becomes null with an exact marker', async (t) => 
 });
 
 const PIPELINE_STEP_ORDER = ['quotaPool','healthSort','sticky'];
-const PIPELINE_RUNTIME_DEFAULTS = {cachePoolMaxSize:0,sessionBindingExplicitTtlMs:7200000,sessionBindingFallbackTtlMs:900000,sessionBindingMaxEntries:50000};
+const PIPELINE_RUNTIME_DEFAULTS = {cachePoolMaxSize:0,cachePoolLowQuotaSize:0,sessionBindingExplicitTtlMs:7200000,sessionBindingFallbackTtlMs:900000,sessionBindingMaxEntries:50000};
 const pipelinePermutations = (items) => items.length < 2 ? [items] : items.flatMap((item,index) => pipelinePermutations(items.filter((_,i)=>i!==index)).map(rest=>[item,...rest]));
 
 test('pipeline migrates legacy four-step input into canonical three-step order and validates atomically', async (t) => {

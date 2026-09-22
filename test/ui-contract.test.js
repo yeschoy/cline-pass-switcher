@@ -123,9 +123,9 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   for (const field of ['id:a.id','name:a.name',"note:a.note||''","key:a.key||''",'enabled:a.enabled!==false','maxConcurrent:','maxRpm:','weight:','priority:',"proxyUrl:a.proxyUrl||''","headers:a.headers||{}","perModel:a.perModel||{}"] ) assert.ok(collect.includes(field), `full account snapshot must preserve ${field}`);
   assert.match(collect,/errorRules:rules/);
   assert.match(collect, /accountPipeline:\{quotaPool:[^}]+healthSort:[^}]+sticky:[^}]+order:pipelineOrder\(\),\.\.\.pipelineNumberDraft\(\)/);
-  for(const id of ['cachePoolSize','cachePoolMaxSize'])assert.match(html,new RegExp(`id="${id}" type="number" min="0" max="100000" step="1"`));
+  for(const id of ['cachePoolSize','cachePoolMaxSize','cachePoolLowQuotaSize'])assert.match(html,new RegExp(`id="${id}" type="number" min="0" max="100000" step="1"`));
   for(const id of ['sessionBindingExplicitTtlMs','sessionBindingFallbackTtlMs'])assert.match(html,new RegExp(`id="${id}" type="number" min="60000" max="604800000" step="1"`));
-  assert.match(html,/id="sessionBindingMaxEntries" type="number" min="1" max="100000" step="1"/);assert.match(html,/最小值 0 = 关闭/);assert.match(html,/max=min 可关闭自动扩容/);assert.match(html,/当前目标与会话绑定状态/);
+  assert.match(html,/id="sessionBindingMaxEntries" type="number" min="1" max="100000" step="1"/);assert.match(html,/最小总数 0 = 关闭/);assert.match(html,/max=min 可关闭自动扩容/);assert.match(html,/当前目标与会话绑定状态/);
   assert.match(html,/cachePoolRole==='active'/);assert.match(html,/缓存活跃/);assert.match(html,/缓存备用/);
   assert.match(html, /api\('\/api\/statistics'\)/);
   assert.match(html, /id="statisticsStatus"[^>]+aria-live="polite"/);
