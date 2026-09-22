@@ -106,7 +106,7 @@ Runtime environment keys are `DATA_DIR`, `CLINE_PASS_KEY`, `PROXY_KEY`, `PUBLIC_
 
 #### Account selection and lease
 
-- An available account has a non-empty `key`, `enabled !== false`, no active ban, and no unexpired cooldown.
+- An available account has a non-empty `key`, `enabled !== false`, no active ban, no unexpired rule cooldown and (when role-aware pool routing is enabled) no `waiting-refresh`/`quota-exhausted` disposition. See the low-quota scenario below.
 - `maxConcurrent: 0` means unlimited. Otherwise `tryLease()` increments `activeCounts` synchronously and returns an idempotent `release()`.
 - `tryLeaseResult()` returns a structured `{ lease, blockedBy, retryAt }` instead of only a lease. Admission order is fixed: **hard eligibility (caller) → `maxConcurrent` → RPM**. A concurrency block returns `blockedBy: 'concurrency'` without touching RPM; an RPM block returns `blockedBy: 'rpm'` without incrementing `activeCounts`. `blockedBy` is exactly `concurrency` | `rpm` | `mixed` | `unavailable` (`BLOCKED_BY_REASONS`); an account that is simultaneously concurrency-full and RPM-exhausted is `mixed`.
 - `single` waits only for the configured active account (or the first statically available fallback).
@@ -255,9 +255,9 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - Page tokens and the routing scheduler are separate sources. Response/socket close withdraws only that page token; disabling quota routing advances a routing epoch and withdraws only routing ownership. A queued job is dropped and a running job aborted only after its final valid owner leaves. Source withdrawal/invalidation publishes neither success nor failure/backoff state.
 - Account generation is independent of routing epoch. Key/proxy replacement and deletion clear the old snapshot; disablement retains last-good display data. All three cancel old-generation work. Publication rechecks ID, enabled/key/proxy identity, generation and at least one live source, preventing disable/re-enable and key A→B→A resurrection.
 - Accepted quota rows are only `five_hour`, `weekly`, and `monthly`, each with finite `percentUsed` in 0-100 and an optional RFC3339 reset time. Upstream reset times may use 1–9 fractional digits with `Z` or a numeric offset; impossible Gregorian dates, missing timezones and over-precision are `schema` failures. Accepted values normalize to canonical millisecond UTC before persistence/projection. `statisticsQuotaProjection()` adds safe attempt/success times plus `refresh.{eligible,reason,state,nextAttemptAt}` without exposing credentials, owner tokens, controllers or raw responses. Reading retained/partial/error data never makes it fresh for routing.
-- Canonical `accountPipeline` has exactly three booleans, an exact permutation of `quotaPool`, `healthSort`, and `sticky`, integer `cachePoolSize` (minimum) and `cachePoolMaxSize` (maximum) 0-100000, plus integer `sessionBindingExplicitTtlMs`, `sessionBindingFallbackTtlMs` and `sessionBindingMaxEntries`. Recognized legacy four-step input is accepted and normalized: `excludeUnhealthy:true` folds into `healthSort:true`, and the duplicate step is removed deterministically. With minimum 0 and all booleans false, legacy selection remains unchanged. The dynamic-growth and stateful-binding contracts are owned by the `Dynamic cache-pool growth and stateful session binding` scenario below.
+- Canonical `accountPipeline` has exactly three booleans, an exact permutation of `quotaPool`, `healthSort`, and `sticky`, integer `cachePoolSize` (minimum), `cachePoolMaxSize` (maximum), `cachePoolLowQuotaSize` (fixed low slots) 0-100000, plus integer `sessionBindingExplicitTtlMs`, `sessionBindingFallbackTtlMs` and `sessionBindingMaxEntries`. Recognized legacy four-step input is accepted and normalized: `excludeUnhealthy:true` folds into `healthSort:true`, and the duplicate step is removed deterministically. With minimum 0 and all booleans false, legacy selection remains unchanged. The dynamic-growth and stateful-binding contracts are owned by the `Dynamic cache-pool growth and stateful session binding` scenario below.
 - `healthSort` stably refines account groups by direct account success rate descending, known before unknown, preserving prior order on ties. It never filters accounts and never reads Provider-model success data. Cache-pool membership likewise ignores success-rate fluctuations.
-- A positive cache pool is effective only in sticky account mode or with the explicit sticky step. A configured positive minimum outside those conditions is dormant. Effective membership is derived per request from hard eligibility, non-`reserve` quota pool, priority and stable account ID, truncated to the persisted grow-only target; success-rate changes never promote or evict members, and no member list is persisted. Shared quota admission remains unchanged.
+- A positive cache pool is effective only in sticky account mode or with the explicit sticky step. A configured positive minimum outside those conditions is dormant. With `cachePoolLowQuotaSize: 0`, effective membership remains the exact legacy non-`reserve`, priority/ID ordering to the persisted target. With positive low slots, the low-quota scenario below replaces membership and selection ranking, not the target, quota job or lease owners. Success-rate changes never alter membership; no member list is persisted.
 
 ### 4. Validation & Error Matrix
 
@@ -488,7 +488,7 @@ This scenario owns one pool target, one grow-one decision, and the only session-
 ```js
 normalizeAccountPipeline(value, {
   strict = false, fallbackOrder = PIPELINE_DEFAULT_ORDER, fallbackCachePoolSize = 0,
-  fallbackCachePoolMaxSize,
+  fallbackCachePoolMaxSize, fallbackCachePoolLowQuotaSize = 0,
   fallbackSessionBindingExplicitTtlMs = SESSION_BINDING_EXPLICIT_TTL_MS,
   fallbackSessionBindingFallbackTtlMs = SESSION_BINDING_FALLBACK_TTL_MS,
   fallbackSessionBindingMaxEntries = SESSION_BINDING_MAX_ENTRIES,
@@ -554,17 +554,17 @@ POST /api/accounts
 
 #### Pipeline schema and cross-field bounds
 
-- Canonical `accountPipeline` fields are the three booleans, the exact three-step `order` permutation, `cachePoolSize` (minimum), `cachePoolMaxSize` (maximum), `sessionBindingExplicitTtlMs`, `sessionBindingFallbackTtlMs`, and `sessionBindingMaxEntries`.
+- Canonical `accountPipeline` fields are the three booleans, the exact three-step `order` permutation, `cachePoolSize` (minimum total), `cachePoolMaxSize` (maximum total), `cachePoolLowQuotaSize` (fixed low target), `sessionBindingExplicitTtlMs`, `sessionBindingFallbackTtlMs`, and `sessionBindingMaxEntries`.
 - `cachePoolSize` and `cachePoolMaxSize` are integers 0-100000 with `0 <= cachePoolSize <= cachePoolMaxSize`. A TTL is an integer 60000-604800000 ms. `sessionBindingMaxEntries` is an integer 1-100000.
 - Non-strict normalization is permissive and deterministic: a missing/invalid `cachePoolMaxSize` becomes `Math.max(cachePoolSize, fallbackMax)` where `fallbackMax` is the caller-provided current value or `cachePoolSize`; a missing/invalid TTL or entry cap falls back to the caller-provided value when it is in range, otherwise to the constant default; an out-of-order `cachePoolMaxSize` clamps to `cachePoolSize`; a fallback TTL above the explicit TTL clamps to `Math.min(SESSION_BINDING_FALLBACK_TTL_MS, explicit)`. Strict saves never clamp; they throw.
-- `DEFAULT_CONFIG.accountPipeline` ships the feature inert: `cachePoolSize: 0`, `cachePoolMaxSize: 0`, `sessionBindingExplicitTtlMs: 7_200_000`, `sessionBindingFallbackTtlMs: 900_000`, `sessionBindingMaxEntries: 50_000`.
+- `DEFAULT_CONFIG.accountPipeline` ships the feature inert: `cachePoolSize: 0`, `cachePoolMaxSize: 0`, `cachePoolLowQuotaSize: 0`, `sessionBindingExplicitTtlMs: 7_200_000`, `sessionBindingFallbackTtlMs: 900_000`, `sessionBindingMaxEntries: 50_000`.
 - Strict saves reject unknown keys, missing/non-boolean flags, missing/invalid order, and every out-of-range or cross-field violation before any persistence; `fallback*` arguments come from the current `config.accountPipeline`, so an older client that omits a field preserves the server value instead of resetting it to the default.
 - Recognized legacy four-step input (`excludeUnhealthy`) is still folded into `healthSort: true` and the duplicate step removed; legacy input that omits all new fields yields `cachePoolMaxSize = cachePoolSize` (auto-growth inert).
 
 #### Pool target and membership derivation
 
 - `cachePoolTargetFor()` is the only target owner: `cachePoolSize === 0` returns `0`; otherwise it returns `Math.min(max, Math.max(min, Number.isInteger(META.cachePoolTargetSize) ? META.cachePoolTargetSize : min))`. `META.cachePoolTargetSize` is the single persisted grow-only value; member IDs are never persisted.
-- `cachePoolMembership(list, candidates)` derives membership on every call from the current target: eligible candidates are `quota.pool !== 'reserve'`, sorted by `priority` ascending then stable `id` ascending; active candidates are `eligible.slice(0, target)`. An `enabled`/hard-state-ineligible account never appears because candidate lists come from `enabledAccounts()`. Success rate is never an eligibility input.
+- With `cachePoolLowQuotaSize === 0`, `cachePoolMembership(list, candidates)` derives the unchanged legacy membership: eligible candidates are `quota.pool !== 'reserve'`, sorted by `priority` ascending then stable `id` ascending; active candidates are `eligible.slice(0, target)`. Positive low slots use the derived quota-role algorithm in the next scenario. An `enabled`/hard-state-ineligible account never appears because candidate lists come from `enabledAccounts()`. Success rate is never an eligibility input.
 - `cachePoolRoles()` projects `active`/`standby`/`null` per account for the console. `active` means "inside the current target"; `standby` means "eligible but beyond the target".
 - The effective pool requires `cachePoolSize > 0` **and** `stickyEffective()` (sticky account mode or the explicit sticky step). Outside that condition the configured minimum is dormant and `cachePoolRoles()` returns an empty map.
 
@@ -583,7 +583,7 @@ POST /api/accounts
 - Effective sticky is `config.accountMode === 'sticky' || config.accountPipeline.sticky === true`. Stateful binding is enabled only when `stickyEffective() && config.accountPipeline.healthSort === true` **and** the request has a fingerprint and an `ownerRequestId`.
 - Toggle matrix: sticky off + healthSort off uses the legacy path; sticky off + healthSort on sorts every request and keeps no table; sticky on + healthSort off keeps the existing stateless HRW and keeps no table; both on uses the stateful binding gate.
 - Miss stages call `buildPipelineGroups(..., { skipSticky: true })`, so `sticky` is a precondition gate rather than a linear miss stage; `quotaPool` and `healthSort` keep their relative `order`. Within a resulting group the final tie-break is the existing `cachePoolRank()` HRW/mode rank, so explicit identities stay stable inside equal-rate layers.
-- A hit is accepted only when the bound account is still inside the current active set **and** hard-eligible (the candidate list already excludes disabled/`reserve`); otherwise the entry is deleted and the request continues as a miss. Rate, hot/warm/unknown and provider failures never invalidate a binding.
+- A hit is accepted only when the bound account is still inside the current active set **and** hard-eligible (the candidate list excludes disabled/`reserve` and active quota dispositions); otherwise the entry is deleted and the request continues as a miss. In role-aware mode a newly admissible low candidate invalidates an older high binding: role priority precedes sticky. With low=0, ordinary rate/hot/warm/unknown movement and provider failures retain the earlier binding behavior.
 - When no cache pool is effective, the miss/active candidate set is every non-`reserve` candidate, so the combined mode still works with `cachePoolSize: 0`.
 - `selectionResult()` reasons in this scenario are `cache-pool-active`, `cache-pool-active-overflow`, `pipeline-sticky-primary` and `pipeline-capacity-fallback`. `cachePoolFallback` is always `false` and `cachePoolTier` is always `active` (or `null`); the removed standby tier must not resurface.
 
@@ -596,9 +596,9 @@ POST /api/accounts
 - `createProvisionalSessionBinding()` runs after a real lease is acquired and before the first native attempt. It returns a token `{ fingerprint, accountId, generation, ownerRequestId, owned: true, committed: false }` or `null` when there is no fingerprint, the source is `none`, or no `ownerRequestId` exists.
 - The native chat transport calls `attemptOwner.onAttemptCommit()` immediately after `req.end()` hands a real request to Node, which calls `commitSessionBindingSelection()`: the entry is set to `confirmed` only when generation and account still match, then touched.
 - `cleanupSessionBindingSelection()` removes an entry only when the token is owned, not committed, still `provisional`, and both `generation` and `ownerRequestId` match. A selection that never produced a native attempt (local validation/routing failure, cancellation before `req.end()`) therefore cleans up after itself, while a stale finalizer can never overwrite or delete a newer binding for the same session. Concurrent first requests for one session read the provisional entry and converge on one account.
-- Invalidation seam (one function per trigger, all delegating to `deleteSessionBinding`/`invalidateSessionBindingsOutside`, and the two bulk invalidators notify capacity waiters after a removal): account deletion, disablement, key or proxy identity rotation, `persistAccountAction()` cooldown/hard-quarantine, manual account save removing an account from the active set, and a quota snapshot whose pool becomes `reserve` (`maximum >= 95`). `reserve` is the implemented observable of confirmed exhaustion; there is no separate exhausted state or seam. `reconcileSessionBindings()` prunes expiry and drops entries outside the current active set; it runs on account save, account recovery, quota job settlement and summary reads.
-- Never invalidated by: provider failure, ordinary request failure, success-rate movement, hot/warm/unknown quota movement, or temporary capacity overflow. An account-scoped replacement updates the binding because the replacement lease establishes a new generation, and manual recovery does not resurrect a deleted entry (the next request misses again).
-- A full bound account waits only for that account up to the existing deadline, then may lease another active account as a temporary overflow (`bindingResult: 'temporary-overflow'`, `overflow: true`) without rewriting the binding; the next request tries the original account again. A saturated miss in combined mode may grow one member, promote it, and only then create the binding.
+- Invalidation seam (one function per trigger, all delegating to `deleteSessionBinding`/`invalidateSessionBindingsOutside`, and the two bulk invalidators notify capacity waiters after a removal): account deletion, disablement, key or proxy identity rotation, `persistAccountAction()` cooldown/hard-quarantine, manual account save removing an account from the active set, and a quota snapshot whose pool becomes `reserve` (`maximum >= 95`). Positive low slots additionally invalidate on quota hold/exhaustion and when an older high binding must yield to an admissible low. `reserve` classification and durable `quota-exhausted` are distinct: only a known 100% window confirms the latter (including a partial snapshot). `reconcileSessionBindings()` prunes expiry and drops entries outside the current active set; it runs on account save, account recovery, quota job settlement and summary reads.
+- Never invalidated by: provider failure, ordinary request failure, success-rate movement, or temporary capacity overflow. With low=0, hot/warm/unknown quota movement alone does not invalidate; with positive low slots, actual role priority and active membership may do so. An account-scoped replacement updates the binding because the replacement lease establishes a new generation, and manual recovery does not resurrect a deleted entry (the next request misses again).
+- With low=0 a full bound account waits only for that account up to the existing deadline, then may lease another active account as a temporary overflow (`bindingResult: 'temporary-overflow'`, `overflow: true`) without rewriting the binding; the next request tries the original account again. A saturated miss in combined mode may grow one member, promote it, and only then create the binding.
 
 #### Diagnostics projection
 
@@ -702,4 +702,89 @@ if (lookup.entry) return leaseBoundAccount(lookup.entry, lookup.result); // hit/
 const plan = buildPipelineGroups(active, identity, activeCandidates, { skipSticky: true }); // quotaPool/healthSort order only
 const chosen = tryPipelinePlanLease(plan, identity, mode);
 return attachBindingMiss(result, identity, ownerRequestId, lookup.result); // provisional entry after the real lease
+```
+
+---
+
+## Scenario: Low-quota cache-pool roles and refresh-owned disposition
+
+### 1. Scope / Trigger
+
+Use when changing quota-derived membership, role-aware lease selection, account-failure settlement, the single quota job pump or account-state recovery. This extends the existing dynamic pool target and two-slot quota owner; it creates no member list, per-role lease queue, scheduler or expiry timer. The positive-low feature is effective only for a positive cache pool in sticky account mode or with the sticky pipeline step.
+
+### 2. Signatures
+
+```js
+configuredCachePoolLowQuotaSize()
+quotaProjection(accountId, now = Date.now())
+cachePoolMembership(list, candidates = null) // { lowSize, targetSize, actual: { high, low, unknown }, activeCandidates, ... }
+buildPipelineGroups(list, identity, candidates, { skipSticky = false })
+cachePipelineFacts(plan, membership, candidate, tier, capacityFallback)
+acquireCachePoolAccountLease(identity, options)
+acquireStatefulBindingAccountLease(identity, options)
+quotaDemandOutcome(account, source, now = Date.now())
+quotaNextAttemptAt(account, successAt, now = Date.now())
+reconcileQuotaDisposition(id, snapshot)
+persistLowQuotaHold(account)
+```
+
+```text
+GET /api/accounts -> accountPipeline.cachePoolLowQuotaSize,
+  cachePool: { minSize, maxSize, lowSize, targetSize, actual: { high, low, unknown }, binding },
+  accounts[].{ cachePoolRole, cachePoolQuotaRole, state, quota }
+GET /api/statistics -> accounts[].quota.{ quotaDisposition, quotaRetryAt, refresh }
+POST /api/statistics/quota-refresh <- { force: boolean } // existing job owner
+```
+
+### 3. Contracts
+
+- `0 <= cachePoolLowQuotaSize <= cachePoolSize <= cachePoolMaxSize <= 100000`. `cachePoolLowQuotaSize: 0` is an exact bypass of role-aware membership/selection: no low-priority override, no quota hold promotion, and the original priority/ID non-`reserve` membership and selection remain intact. A positive configured minimum without effective sticky remains dormant. The single persisted `META.cachePoolTargetSize` is total active size; `lowSize` is fixed while grow-one increases the high target (`targetSize - lowSize`).
+- Role input uses only a **fresh complete** latest successful three-window quota snapshot (`quotaProjection`). `used = max(five_hour, weekly, monthly percentUsed)`: `used < 80` is high/hot, `80 <= used < 95` low/warm, `used >= 95` reserve (excluded), and incomplete/stale/failed data unknown. Known numeric `0` is high, never unknown. Unknown is a last-resort filler, never a fabricated high/low.
+- Derive up to `lowSize` warm members by remaining (`100 - used`) ascending then priority/ID; up to `targetSize - lowSize` hot members by remaining descending then priority/ID. Fill shortages from unselected **known** hot/warm, then unknown, truncated to total target. `cachePool.actual` counts actual high/low/unknown members, not intended slots. Membership does not depend on success rate. A `quota-exhausted` state may be confirmed from a partial snapshot even though that snapshot cannot assign any routing role.
+- For a positive low target, `buildPipelineGroups()` fixes low → high → unknown priority before optional quota/health/sticky and mode ranking **within** each role. An admissible low beats an older high session binding; a bound low blocked by concurrency or RPM may temporarily overflow to an admissible high without rebinding or waiting for low, and a held low is excluded before ranking. A blocked role reports truthful capacity facts. RPM-only or mixed blocks never trigger growth. Only after the existing wait/deadline, if *every* active candidate has finite `maxConcurrent`, is concurrency-full and RPM-available and the promoted candidate is RPM-available, may existing grow-one commit; do not double-lease or grow beyond max.
+- The selected lease's bounded `selectedQuotaRole` (`low`/`high`/`unknown`, or null for low=0) is a request snapshot: later quota refresh must not change failure attribution. Only an actual low-role attempt whose final canonical rule/default policy is `scope: 'account', action: 'degrade'` persists `waiting-refresh` and returns independent `quotaRemovalAction: 'waiting-refresh'`. It stops that account's provider chain and allows at most one pre-output account replacement. `provider-model`, explicit `ignore`, cancellation, and explicit account `cooldown`/`hard-quarantine` create no extra quota hold; a post-start SSE failure can affect future routing but is never replayed.
+- `META.accountStates` rule and quota dimensions are independent. Waiting has no fixed-duration cooldown: the next routing scheduler cycle requests a real quota fetch, bypassing only the recent-success cache. Existing failure backoff, same-account dedupe, generation/routing-epoch fences and the global two transport slots remain authoritative. Manual `force` also bypasses success cache, not failure backoff. Disable/re-enable retains a hold; key/proxy rotation and deletion clear its stale identity; manual account recovery clears rule fields only.
+- Each **new actual successful** quota snapshot evaluates every known window, independently of chat errors: any known `percentUsed >= 100` (even partial) confirms `quota-exhausted`. Enabling positive low slots on an existing persisted successful known-100 snapshot also reconciles it immediately on save/startup, without fabricating a new fetch; this does **not** allow cached data to clear a newer hold. Failed work retains the prior disposition. For exhausted windows `quotaRetryAt` is the earliest valid **future** reset; after it, retry and re-evaluate every window, including another still-100 window. Without a future reset, use the existing success/failure cadence, not a busy loop. Partial non-100 success is unknown for recovery and keeps an existing waiting/exhausted disposition; only a real three-window success with all `percentUsed < 100`, fetched no earlier than the disposition, clears the quota dimension. Neither recovery nor rule expiry clears the other dimension or changes operator `enabled`.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| Legacy missing low, explicit low 0, or dormant non-sticky pool | Preserve existing membership and selection; no synthetic hold |
+| 79.999/80/94.999/95/100 max-used boundaries | High/low/low/reserve/reserve respectively; known zero is high |
+| Low concurrency/RPM/hold blocked, high available | Immediate high-role fallback without waiting on low or growing |
+| All active RPM-blocked or a promotion candidate RPM-blocked | Local bounded capacity response; no new target/member/attempt |
+| Low account/degrade before first SSE output | Persist waiting-refresh, stop that chain, replace at most once; independent rule action remains degrade |
+| Explicit account cooldown/hard, provider-model action, ignore or cancellation | No additional quota hold; started stream never replays |
+| Latest successful snapshot has partial known 100 | Confirm durable quota-exhausted; exclude from routing, schedule by earliest valid exhausted reset |
+| Partial known 80, refresh error, or old cached success after hold | Keep waiting/exhausted and exclude; never infer missing windows or clear from cached data |
+| Full new success with all three windows below 100 | Clear only quota disposition; an independent rule quarantine stays |
+| Manual account recover on held account | Clear only rule fields; leave quota hold in place |
+
+### 5. Good / Base / Bad Cases
+
+- **Good:** with low target 1 and total target 2, a warm 94.999% account serves first, then its RPM block immediately falls back to a high hot account; a later pure-concurrency grow increases the high target but not the low slot.
+- **Good:** a low account/degrade before output installs waiting-refresh, swaps to another account at most once, and a subsequent failed/partial non-100 quota refresh retains the hold until a complete new success.
+- **Base:** low=0 and a positive pool preserve prior priority/ID membership and sticky selection, including absence of synthetic quota holds.
+- **Bad:** using partial weekly=80 as proof of recovery, checking only fresh-complete snapshots for known 100%, or deleting a quota hold when a rule cooldown expires.
+
+### 6. Tests Required
+
+`test/low-quota-pool.test.js` is the focused local-mock/temporary-`DATA_DIR` regression suite: `fresh quota thresholds choose lowest remaining low, highest remaining high, then high on low RPM block`; `known low filler beats unknown; concurrent low lease falls back to high without growth`; `role priority supersedes an older high binding when low RPM recovers`; `pure concurrency growth expands the high target once and retains low slots across restart`; `low account degradation holds and replaces before output; failed refresh retains hold, successful refresh restores`; `partial known 100 persists across restart and manual recover; earliest then later reset drive recovery`; `provider-scope and explicit ignore never create low quota hold; no reset retries on success cadence`; `post-start low account failure holds only future traffic without replay`; `cancelled low stream does not create a quota hold or an account failure sample`; `fresh quota recovery clears only quota fields and preserves an independent rule quarantine`. The same suite asserts `pre-admission capacity rows do not fabricate zero pool composition`. Existing `test/integration.test.js` covers low=0 pool, quota job/lease/RPM/stream boundaries. Run `env -u CLINE_PASS_KEY -u PROXY_KEY -u PUBLIC_BASE_URL -u PORT npm test` and `git diff --check`; no real browser or live upstream is implied.
+
+### 7. Wrong vs Correct
+
+```js
+// Wrong: partial success silently recovers a held account; all-zero diagnostics
+// also claim a composition for a request that never acquired a pool lease.
+if (snapshot.limits.weekly?.percentUsed < 100) delete META.accountStates[id];
+record(modelId, { pipeline: { cachePoolActual: { high: 0, low: 0, unknown: 0 } } });
+
+// Correct: reconcile only after real success using all three windows and
+// disposition time; keep pre-admission composition absent (null).
+if (windows.length === 3 && windows.every(w => w.percentUsed < 100) &&
+    snapshot.fetchedAt >= disposition.quotaDispositionAt)
+  META.accountStates[id] = { ...disposition, quotaDisposition: null,
+    quotaDispositionAt: 0, quotaRetryAt: 0, quotaReason: null };
+record(modelId, { pipeline: selected?.pipeline ?? null });
 ```

@@ -24,7 +24,7 @@ normalizeProxyUrl(value, { strict = false })
 validateAndNormalizeHeaders(value, { strict = false })
 normalizeModelAliases(value)
 normalizeAccountPipeline(value, { strict = false, fallbackOrder, fallbackCachePoolSize,
-  fallbackCachePoolMaxSize, fallbackSessionBindingExplicitTtlMs,
+  fallbackCachePoolMaxSize, fallbackCachePoolLowQuotaSize = 0, fallbackSessionBindingExplicitTtlMs,
   fallbackSessionBindingFallbackTtlMs, fallbackSessionBindingMaxEntries })
 normalizeErrorRules(value, { strict = false })
 normalizeRetryRules(value, { strict = false })
@@ -33,6 +33,8 @@ cachePoolTargetFor(pipeline = config.accountPipeline, value = META.cachePoolTarg
 validateStatistics(statistics)
 normalizeStatistics()
 normalizeAccountQuotas()
+normalizeAccountStates()
+reconcileQuotaDisposition(id, snapshot)
 parseQuotaPayload(json, fetchedAt)
 normalizeConfigAndMeta({ persist = false })
 saveConfig() // atomicWriteJson(CONFIG_PATH, config)
@@ -97,6 +99,7 @@ metadata.json   DATA_DIR/metadata.json
     order: ("quotaPool" | "healthSort" | "sticky")[],
     cachePoolSize: integer,        // 0-100000; initial/minimum size; 0 disables the cache-focused active pool
     cachePoolMaxSize: integer,     // 0-100000; grow-only upper bound; must be >= cachePoolSize
+    cachePoolLowQuotaSize: integer, // 0-100000; fixed low target, <= cachePoolSize; 0 disables role-aware routing
     sessionBindingExplicitTtlMs: integer, // 60000-604800000; explicit-identity sliding TTL (default 7200000)
     sessionBindingFallbackTtlMs: integer, // 60000-604800000; message_hmac sliding TTL (default 900000)
     sessionBindingMaxEntries: integer     // 1-100000; process-local LRU cap (default 50000)
@@ -136,6 +139,7 @@ Startup normalization preserves legacy behavior while making the schema explicit
 - normalize the pipeline to `quotaPool`, `healthSort`, `sticky`; recognized legacy four-step input folds `excludeUnhealthy:true` into health sorting and removes the duplicate step;
 - normalize a missing/invalid `accountPipeline.cachePoolSize` to `0`; strict management saves accept only integer values from 0 through 100000, while an older client that omits only this field preserves the current server value. Legacy four-step input that omits it defaults the pool off.
 - normalize `cachePoolMaxSize` as an integer 0-100000 with `cachePoolMaxSize >= cachePoolSize`. A missing field (legacy file or older client) falls back to the current server value, or to `cachePoolSize` when there is none, so an upgrade never enables automatic growth. Non-strict normalization clamps an explicit max below the minimum up to the minimum; strict saves return `400` instead.
+- normalize `cachePoolLowQuotaSize` as an integer 0-100000 with `0 <= low <= cachePoolSize <= cachePoolMaxSize`. Legacy absence defaults to `0` (including a new size-zero installation); an older management client omitting the field preserves the current server value. Explicit `0` disables role-aware membership/selection even for a positive pool. Non-strict invalid input falls back to `0` and an excessive low target clamps to the minimum; strict saves reject either without writing. A positive cache preset explicitly drafts `1`, never auto-migrate existing positive pools to `1`.
 - normalize `sessionBindingExplicitTtlMs`/`sessionBindingFallbackTtlMs` as integers 60000-604800000 and `sessionBindingMaxEntries` as an integer 1-100000. A missing/invalid value falls back to the current in-range server value, then to `7200000`/`900000`/`50000`; non-strict normalization caps a fallback TTL above the explicit TTL at `Math.min(900000, explicitTtlMs)`.
 
 Account-level RPM runtime state is deliberately process-local and is never persisted. `server.js` keeps one rolling-window owner per account (`rpmWindows`, `RPM_WINDOW_MS` = 60 s; only the test environment may shrink it through `CLINE_PASS_TEST_RPM_WINDOW_MS`) holding committed native chat start times plus uncommitted reservations. It clears on restart, is independent per process/replica, and is explicitly not a cross-process hard cap. Account deletion and key/proxy identity rotation clear that account's window, and `maxRpm: 0` disables the limit and drops the state; ordinary disable/re-enable keeps already-committed in-window facts (POST `/api/accounts` calls `clearRpmState()` only on deletion, key/proxy rotation, or a limit that becomes `0`). `metadata.json` must never contain the timestamps array, the `head` cursor, the reservation count, or the `rpmWindows` map.
@@ -166,7 +170,11 @@ Account-level RPM runtime state is deliberately process-local and is never persi
       cooldownUntil,
       statusCode,
       reason, ruleId,
-      updatedAt
+      updatedAt,
+      quotaDisposition: null | "waiting-refresh" | "quota-exhausted",
+      quotaDispositionAt, // positive safe integer when held, otherwise 0
+      quotaRetryAt,       // 0 for waiting-refresh/no valid future reset; otherwise safe timestamp
+      quotaReason: null | "account-degrade" | "known-exhausted"
     }
   },
   routingSecret,
@@ -228,7 +236,7 @@ Account-level RPM runtime state is deliberately process-local and is never persi
 }
 ```
 
-`routingSecret` is generated once and persisted so HRW mapping survives restart. `cachePoolTargetSize` is the single persisted cache-pool target: it is normalized by `normalizeCachePoolTarget()` to `clamp(stored, cachePoolSize, cachePoolMaxSize)`, defaults to the minimum when absent (and to `0` when the minimum is `0`), and is rewritten only by startup normalization when the effective value changed, by an explicit operator save that clamps it, or by one successful `growCachePoolOne()` increment. It is never reset by pressure drop, and it must not be accompanied by a persisted member list, session→account map or binding entry. Cache-pool membership is always re-derived from the target, priority, stable ID and eligibility, and the session-binding table is process-local and clears on restart. Automatic growth writes only `metadata.json` through `saveMeta()` and never rewrites operator `config.json`/`accountPipeline`. `accountStates` entries for removed accounts are deleted; the deterministic environment-account ID remains valid while `CLINE_PASS_KEY` is present. Expired, non-banned cooldown entries are deleted when candidates are read. Ban/cooldown state persists until expiry or `POST /api/accounts/recover` removes it.
+`routingSecret` is generated once and persisted so HRW mapping survives restart. `cachePoolTargetSize` is the single persisted cache-pool target: it is normalized by `normalizeCachePoolTarget()` to `clamp(stored, cachePoolSize, cachePoolMaxSize)`, defaults to the minimum when absent (and to `0` when the minimum is `0`), and is rewritten only by startup normalization when the effective value changed, by an explicit operator save that clamps it, or by one successful `growCachePoolOne()` increment. It is never reset by pressure drop, and it must not be accompanied by a persisted member list, session→account map or binding entry. Cache-pool membership is always re-derived from the target, quota-role eligibility (when low > 0), priority and stable ID; high/low/unknown member counts and IDs are never persisted. The session-binding table is process-local and clears on restart. Automatic growth writes only `metadata.json` through `saveMeta()` and never rewrites operator `config.json`/`accountPipeline`. `accountStates` entries for removed accounts are deleted; the deterministic environment-account ID remains valid while `CLINE_PASS_KEY` is present. Expired rule cooldown fields are cleared when candidates are read; an independent quota disposition is never deleted with them. Rule ban/cooldown persists until expiry or `POST /api/accounts/recover` clears only the rule dimension. `waiting-refresh`/`quota-exhausted` persist across restart and remain independent of operator enablement and rule quarantine. A successful quota job alone may clear the quota dimension; a disable/re-enable retains it, whereas key/proxy identity rotation or deletion removes the affected quota state. Legacy account-state entries gain canonical null/zero quota fields on startup.
 
 Provider state is durable runtime metadata keyed by resolved model and Provider, never by account. Legacy `upstreamStatus` facts normalize additively; explicit `cooldownUntil`, `hardQuarantined`, safe `ruleId`/status/time facts are independent from success data. Hard quarantine survives success/restart and clears only by exact recovery or Provider identity cleanup. A rule action must never copy the rule needle, Header value, response body, credential, or request content into this map.
 
@@ -238,7 +246,7 @@ Provider state is durable runtime metadata keyed by resolved model and Provider,
 
 Legacy name-keyed `stats` is migration input only. It moves once into the separately labelled `migration` baseline and never fabricates exact chat, token, cache, recent-window, or health facts. Unknown newer statistics versions, malformed aggregates, unordered buckets, excess cells, invalid IDs, and malformed quota snapshots fail startup before any save.
 
-Quota state is keyed by stable account ID and stores only projected percentages, canonical ISO reset times, `lastAttemptAt`, `lastSuccessAt`, and a safe error enum. Upstream reset times accept RFC3339 timestamps with an optional 1–9 digit fractional second and mandatory `Z` or numeric offset, reject impossible Gregorian calendar dates, and normalize through `Date#toISOString()` to millisecond UTC before persistence. A successful partial snapshot replaces the complete prior snapshot and is cacheable without becoming routing-fresh; a failed attempt retains the last-good snapshot while recording only its safe category/time. It never stores keys, Headers, proxy values, credential-bearing URLs, raw provider payloads, page-owner tokens, routing epochs, generations, queues or success-version counters. Account deletion prunes account statistics, health coverage, state and quota while retaining global history. Credential/proxy changes clear quota but retain local statistics; disabling an account retains last-good quota for diagnostic display while preventing refresh/publication.
+Quota snapshots are keyed by stable account ID and store only projected percentages, canonical ISO reset times, `lastAttemptAt`, `lastSuccessAt`, and a safe error enum. The separate `accountStates` quota dimension stores only the validated disposition/timestamps/reason enum, not quota percentages or raw payloads. Persisted active dispositions require a positive safe `quotaDispositionAt`, safe nonnegative `quotaRetryAt`, and the matching reason (`waiting-refresh` → `account-degrade` with retryAt 0; `quota-exhausted` → `known-exhausted`). An absent/null disposition requires zero/null companion values. Unknown quota-prefixed fields or inconsistent combinations fail startup before any rewrite, preserving original metadata bytes. An old entry without quota fields is normalized to null/zero. Upstream reset times accept RFC3339 timestamps with an optional 1–9 digit fractional second and mandatory `Z` or numeric offset, reject impossible Gregorian calendar dates, and normalize through `Date#toISOString()` to millisecond UTC before persistence. A successful partial snapshot replaces the complete prior snapshot and is cacheable without becoming routing-fresh; a failed attempt retains the last-good snapshot while recording only its safe category/time. It never stores keys, Headers, proxy values, credential-bearing URLs, raw provider payloads, page-owner tokens, routing epochs, generations, queues or success-version counters. Account deletion prunes account statistics, health coverage, state and quota while retaining global history. Credential/proxy changes clear quota but retain local statistics; disabling an account retains last-good quota for diagnostic display while preventing refresh/publication.
 
 Durable request/error diagnostics no longer grow `metadata.history`; they are separate bounded JSONL streams under `DATA_DIR/logs/` and follow `logging-guidelines.md`. The legacy history array remains compatibility-only.
 
@@ -278,6 +286,8 @@ Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/
 | `retryRules` is non-array/over 100/over 64 KiB, or an entry is missing `id`/`decision`/`when`, has an unknown field, a non-`stop` decision, a duplicate ID, empty/out-of-range/duplicate statuses, or a missing/empty/oversized/control-byte/case-insensitively duplicate `body_contains` | `400`; no write; persisted canonical invalidity fails startup without rewriting bytes |
 | Canonical `accountPipeline` lacks any of the three booleans, has unknown fields, invalid `cachePoolSize`/`cachePoolMaxSize`, invalid binding TTL/entry bounds, or non-permutation order | `400`; no write; complete recognized legacy four-step input is normalized, and older omission of any field preserves current values |
 | `cachePoolMaxSize` is below `cachePoolSize`, or `sessionBindingFallbackTtlMs` exceeds `sessionBindingExplicitTtlMs` | strict save `400`; non-strict normalization clamps to the minimum / `min(900000, explicit)` |
+| Explicit `cachePoolLowQuotaSize` is a string, fraction, negative, above 100000 or above `cachePoolSize` | strict save `400` before any write; omitted older-client field retains the current value; legacy absence defaults to 0 |
+| Persisted quota disposition has an unknown quota key/enum, missing or invalid timestamp, mismatched reason, or nonzero retryAt for `waiting-refresh` | fail startup without rewriting the malformed `metadata.json` bytes; do not silently normalize an inconsistent new state |
 | Persisted `cachePoolTargetSize` is missing/non-integer/below min/above max | normalize the effect to `clamp(value, cachePoolSize, cachePoolMaxSize)`; do not fail startup and do not write a member list |
 | Legacy provider health lacks new fields | normalize to bounded defaults while preserving safe status/note/timestamps |
 | Invalid provider-health timestamp/count/status | normalize to zero/unknown/bounded values; never copy raw payload data |
@@ -318,6 +328,7 @@ Persistence changes must use a temporary `DATA_DIR` and assert:
 - all new account fields, model aliases, and all 24 pipeline order permutations survive an authenticated save/restart round trip without erasing account routes;
 - missing legacy pipeline order and cache-pool size migrate to the compatibility defaults, `cachePoolMaxSize` defaults to `cachePoolSize`, old-client saves preserve the current order/size/max/TTLs/entry cap, valid new values survive restart, and malformed explicit values fail without changing file bytes;
 - a stored `cachePoolTargetSize` survives restart, is clamped into `[cachePoolSize, cachePoolMaxSize]`, is reset by an explicit operator save, and is the only pool fact written to `metadata.json`; no member IDs or `sessionBindings` key appear in the persisted bytes;
+- `test/low-quota-pool.test.js` (`low slot configuration, legacy omission and invalid bounds preserve bytes`) covers legacy missing/old-client omission/explicit zero and invalid bounds, restart/round-trip, plus malformed persisted quota-state combinations failing startup with original metadata bytes intact; `expired rule cooldown and manual recovery clear only rule fields, not quota disposition` and `disable/re-enable retains both quota holds; key/proxy rotation and deletion prune only the affected identities` assert independent state owners;
 - invalid proxy/Header/note/weight/priority/alias payloads return `400` and preserve the previous file bytes;
 - `maxRpm` strict validation rejects numeric strings, fractions, negatives, `null` and values over 100000 with `400` while preserving the exact `config.json` bytes; a persisted value round-trips through save/restart, an old-client omission preserves the stable-`id` value, a legacy/absent value normalizes to `0`, and no window/reservation state ever appears in `metadata.json`; regression owner is `test/integration.test.js` (`account maxRpm round-trips through config and API, preserves old-client omission and rejects invalid values without writing bytes`, `RPM windows clear on restart and credential rotation but survive disable/re-enable; zero means unlimited`);
 - `routingSecret`, account cooldown state, and model/provider health cooldowns survive restart; routing skips only still-cooling providers and keeps model isolation;
@@ -379,4 +390,4 @@ if (META.statistics === undefined) META.statistics = createStatistics();
 else validateStatistics(META.statistics);
 ```
 
-The same fail-closed rule applies to quota snapshots and overflow metadata.
+The same fail-closed rule applies to quota snapshots, the canonical quota disposition and overflow metadata. For example, do **not** repair `{ quotaDisposition: 'waiting-refresh', quotaRetryAt: 5 }` into a valid-looking hold: reject the existing metadata without overwriting it; only legacy absence receives defaults.

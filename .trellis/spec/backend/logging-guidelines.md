@@ -67,7 +67,8 @@ A request record may contain only:
   preferredAccountId, preferredAccountName,
   accountId, accountName, selectionReason, overflow, switched,
   pipelineSteps, selectedQuotaPool, selectedHealthLayer, capacityFallback,
-  cachePoolSize, cachePoolMaxSize, cachePoolTargetSize, cachePoolTier, cachePoolFallback,
+  cachePoolSize, cachePoolMaxSize, cachePoolLowQuotaSize, cachePoolTargetSize,
+  cachePoolActual, selectedQuotaRole, cachePoolTier, cachePoolFallback,
   bindingSource, bindingResult,
   providerPlanSource, providerMode,
   targetProviders, actualProvider, attempts,
@@ -84,7 +85,7 @@ Strategy evidence is a bounded server projection, not a delivery promise. `provi
 
 Retry evidence uses the same bounded allowlist on request rows and error rows: `retryRuleId` is a validated `ERROR_RULE_ID` or null, `retryDecision` is exactly `stop` or `continue` (default `continue`), and `retryMatchedBy` is at most `status`, `body`. Retry needles, matched body fragments, raw rule conditions, and provider success-rate values are never persisted; an older row without these fields is read as unknown and is never migrated.
 
-Affinity fields are bounded server enums/booleans only: `affinityKeyType` names the winning kind, `affinityConfidence` is `explicit`/`fallback`/`none`, `upstreamPromptCacheKeySource` is caller/derived/none/invalid, and `upstreamPromptCacheKeyApplied` means a valid field was sent, not that a remote router used it. `cacheHit` is true only for explicit cached tokens above zero, false only for explicit zero, and null when unknown. Pipeline fields are server-owned bounded values: `pipelineSteps` contains at most eight `quota-all-unknown` facts; `selectedQuotaPool` is `ordinary`, `hot`, `warm`, `unknown`, or `reserve`; `selectedHealthLayer` is `rated` or `unknown` when the success-rate step or cache-pool projection owns a health grouping, otherwise null; `capacityFallback` is boolean; `cachePoolSize` is the configured minimum and `cachePoolMaxSize` the configured maximum (both bounded integers), `cachePoolTargetSize` is the current effective grow-only target, `cachePoolTier` is `active` or null, and `cachePoolFallback` is a boolean that is now always `false`. The standby tier and `cache-pool-standby-overflow` reason no longer exist; a saturated miss returns `capacity-unavailable` or grows one member, and a saturated *bound* session temporarily overflows within the active set. `bindingSource` is exactly `explicit`, `fallback`, or `none`; `bindingResult` is exactly `hit`, `miss`, `invalidated`, `temporary-overflow`, `provisional`, or `not-applicable`. Selection reasons may additionally be `cache-pool-active`, `cache-pool-active-overflow`, `pipeline-sticky-primary`, or `pipeline-capacity-fallback`. `errorCategory` distinguishes bounded request outcomes such as `capacity`, `routing`, `proxy`, and `upstream`; in particular a local capacity 429 has no upstream attempt and must never be labelled as an upstream 429. Raw candidate lists, health buckets, quota payloads, percentages, identities, bindings, fingerprints, credentials, proxy data, and messages remain forbidden.
+Affinity fields are bounded server enums/booleans only: `affinityKeyType` names the winning kind, `affinityConfidence` is `explicit`/`fallback`/`none`, `upstreamPromptCacheKeySource` is caller/derived/none/invalid, and `upstreamPromptCacheKeyApplied` means a valid field was sent, not that a remote router used it. `cacheHit` is true only for explicit cached tokens above zero, false only for explicit zero, and null when unknown. Pipeline fields are server-owned bounded values: `pipelineSteps` contains at most eight `quota-all-unknown` facts; `selectedQuotaPool` is `ordinary`, `hot`, `warm`, `unknown`, or `reserve`; `selectedHealthLayer` is `rated` or `unknown` when the success-rate step or cache-pool projection owns a health grouping, otherwise null; `capacityFallback` is boolean; `cachePoolSize` is the configured minimum and `cachePoolMaxSize` the configured maximum (both bounded integers), `cachePoolTargetSize` is the current effective grow-only target, `cachePoolTier` is `active` or null, and `cachePoolFallback` is a boolean that is now always `false`. The standby tier and `cache-pool-standby-overflow` reason no longer exist; a saturated miss returns `capacity-unavailable` or grows one member, and a saturated *bound* session temporarily overflows within the active set. `cachePoolLowQuotaSize` is a bounded integer 0-100000; `cachePoolActual` is either null (no pool lease/admission, including pre-admission capacity failure) or `{ high, low, unknown }` bounded nonnegative counts from the selected pool membership, never a fabricated zero composition. `selectedQuotaRole` is `low`/`high`/`unknown` only for role-aware selected leases and null with low=0/no lease. Role fallback is represented by the existing bounded `capacityFallback`/selection reason and may be a temporary high overflow, not a persisted role or candidate list. An attempt/error row's independent `quotaRemovalAction` is only `waiting-refresh` or null and does not override canonical `accountAction`. API quota disposition (`waiting-refresh`/`quota-exhausted`) and safe future `quotaRetryAt` are management projections, not raw quota snapshots in ordinary rows. `bindingSource` is exactly `explicit`, `fallback`, or `none`; `bindingResult` is exactly `hit`, `miss`, `invalidated`, `temporary-overflow`, `provisional`, or `not-applicable`. Selection reasons may additionally be `cache-pool-active`, `cache-pool-active-overflow`, `pipeline-sticky-primary`, or `pipeline-capacity-fallback`. `errorCategory` distinguishes bounded request outcomes such as `capacity`, `routing`, `proxy`, and `upstream`; in particular a local capacity 429 has no upstream attempt and must never be labelled as an upstream 429. Raw candidate lists, health buckets, quota payloads, percentages, identities, bindings, fingerprints, credentials, proxy data, and messages remain forbidden.
 
 An error record may contain only:
 
@@ -96,7 +97,7 @@ An error record may contain only:
   status, upstreamStatus, category, reason, reasonTruncated, accountAction,
   ruleId, ruleScope, ruleAction, matchedBy,
   retryRuleId, retryDecision, retryMatchedBy,
-  errorScope, scopeEvidence, failureClass, healthAction,
+  errorScope, scopeEvidence, failureClass, healthAction, quotaRemovalAction,
   retryAfterMs, responseContentType, responseBytes,
   detailProfile?, detailCallId?
 }
@@ -115,9 +116,10 @@ Never persist:
 - account note;
 - raw session/thread/conversation value or HMAC fingerprint;
 - message text, reasoning/content, or upstream response body;
-- a retry-rule needle, matched body fragment, raw retry condition, candidate rate map, or provider success-rate value.
+- a retry-rule needle, matched body fragment, raw retry condition, candidate rate map, or provider success-rate value;
+- raw quota response, percent-used/remaining values, reset payload, member/candidate ID lists or per-session quota state. Selected/preferred account IDs in the bounded request record remain allowed.
 
-Only bounded identity-source/type/confidence enums, upstream-key source/applied booleans, cache-hit tri-state, bounded cache-pool min/max/target integers and tier, `bindingSource`/`bindingResult` enums, fixed binding hit/miss/invalidated/overflow/provisional counters, provider circuit actions, `providerPlanSource`/`providerMode`/`providerSelection` enums, retry `retryRuleId`/`retryDecision`/`retryMatchedBy` fields, and applied safe Header names may be recorded. The actual caller/derived key and every raw/HMAC identity remain forbidden, including truncated/hash-prefix correlation tags. The session-binding map itself is never projected: no fingerprint, bound account ID map, entry list, expiry or `ownerRequestId` may appear in a request/error row, a management response body, or a service log line.
+Only bounded identity-source/type/confidence enums, upstream-key source/applied booleans, cache-hit tri-state, bounded cache-pool min/max/low/target integers, actual role counts and selected-role/tier enums, `bindingSource`/`bindingResult` enums, fixed binding hit/miss/invalidated/overflow/provisional counters, provider circuit actions, `providerPlanSource`/`providerMode`/`providerSelection` enums, retry `retryRuleId`/`retryDecision`/`retryMatchedBy` fields, and applied safe Header names may be recorded. The actual caller/derived key and every raw/HMAC identity remain forbidden, including truncated/hash-prefix correlation tags. The session-binding map itself is never projected: no fingerprint, bound account ID map, entry list, expiry or `ownerRequestId` may appear in a request/error row, a management response body, or a service log line.
 
 #### Query and cursor
 
@@ -146,7 +148,9 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 | Upstream returns a non-JSON/invalid error body | persist a generic diagnostic plus normalized media type/byte count, never the raw response body |
 | Switcher local capacity 429 | request row has `errorCategory=capacity`, `upstreamStatus=null`, safe `selectionReason`, and no attempts |
 | A saturated bound session overflows to another active account | request row records `bindingResult=temporary-overflow`, `overflow=true`, and still names the bound account as `preferredAccountId`; the binding itself is unchanged |
-| A cache-pool request is projected | persist bounded `cachePoolSize`/`cachePoolMaxSize`/`cachePoolTargetSize` integers, `cachePoolTier=active` (or null) and `cachePoolFallback=false`; never a member list or binding entry |
+| A cache-pool request is projected | persist bounded `cachePoolSize`/`cachePoolMaxSize`/`cachePoolLowQuotaSize`/`cachePoolTargetSize` integers, actual high/low/unknown counts only after a lease, `selectedQuotaRole` only for a positive low target, `cachePoolTier=active` (or null) and `cachePoolFallback=false`; never a member list or binding entry |
+| Capacity is rejected before any pool lease | `cachePoolActual=null` and `selectedQuotaRole=null`, never an invented `{ high: 0, low: 0, unknown: 0 }`; retain safe `blockedBy`/`retryAfter` |
+| Low-role account/degrade removes an account | real attempt/error row may contain `quotaRemovalAction: 'waiting-refresh'`; no raw percentage/reset/reason text from quota response |
 | Ambiguous HTML 429 without a matching rule | persist `errorScope=unknown`, bounded evidence and default ignore, with no account action/body or implicit cooldown |
 | Pipeline diagnostics contain a non-owned/raw value | omit it; persist only the bounded enum/boolean projection |
 | `providerPlanSource`/`providerMode`/`providerSelection`/`retryDecision` is not a documented enum | omit the field (`null`/`continue`) instead of persisting the raw value |
@@ -161,8 +165,9 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 - **Good:** a capacity fallback records its bounded pipeline groups/reason without recording quota percentages or health buckets.
 - **Base:** a successful request creates one `200 / success` request record and no error record.
 - **Base:** a client cancellation creates one `499 / client_cancelled` request record and no error record.
-- **Base:** a capacity rejection has no account but still records strategy, status, request ID, and safe reason category.
+- **Base:** a capacity rejection has no account but still records strategy, status, request ID, and safe reason category; pre-admission `cachePoolActual` is null, not zero.
 - **Bad:** `JSON.stringify(req)`, `JSON.stringify(account)`, or persisting a raw upstream error object. These cross the trust boundary.
+- **Bad:** log a quota window percentage, reset payload or active member list, or fill absent composition with zeros before admission.
 - **Bad:** unlinking old segments before replacement segments are durable; a rename failure would lose diagnostics.
 - **Bad:** synchronously compacting the corpus before listening, enumerating/statting files per append, or running combined retention after every request.
 - **Bad:** returning a partial historical list while background recovery is incomplete.
@@ -176,7 +181,7 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 
 - request response ID equals the logged request ID;
 - a combined sticky+healthSort session logs `bindingSource` `explicit`/`fallback` and `bindingResult` `miss` then `hit`, a saturated bound session logs `temporary-overflow` with `overflow=true`, sticky-only/healthSort-only logs `not-applicable`, and no raw session, fingerprint, binding account map or entry list appears in any JSONL row, API payload or metadata file;
-- cache-pool rows carry bounded `cachePoolSize`/`cachePoolMaxSize`/`cachePoolTargetSize`, `cachePoolTier` is never `standby`, and `cachePoolFallback` is always `false`;
+- cache-pool rows carry bounded `cachePoolSize`/`cachePoolMaxSize`/`cachePoolTargetSize`, `cachePoolTier` is never `standby`, and `cachePoolFallback` is always `false`; `test/low-quota-pool.test.js` (`pre-admission capacity rows do not fabricate zero pool composition`, `low account degradation holds and replaces before output; failed refresh retains hold, successful refresh restores`) checks the null-versus-actual counts, bounded role/removal action and absence of raw quota/member details;
 - caller/derived/message-fallback affinity produces the exact bounded source/type/confidence/applied facts, final explicit usage produces true/false/null cache hit, and no raw caller key, derived key, session or fingerprint occurs in JSONL/API/UI;
 - requested/resolved models, strategy, selection reason, overflow and account path are present where applicable;
 - one request with multiple failures paginates every error exactly once;
@@ -216,6 +221,9 @@ await requestLogs.append({
   selectedHealthLayer: safeHealthLayer,
   capacityFallback: Boolean(capacityFallback),
   cachePoolSize: boundedCachePoolSize,
+  cachePoolLowQuotaSize: boundedLowSize,
+  cachePoolActual: safeActualComposition ?? null, // null before pool admission; each count validated
+  selectedQuotaRole: safeSelectedRole,
   cachePoolTier: safeCachePoolTier,
   cachePoolFallback: Boolean(cachePoolFallback),
   appliedHeaderNames: Object.keys(account?.headers || {})
