@@ -673,7 +673,7 @@ function validateSuccessHealth(value, label) {
   }
 }
 const STATISTICS_VERSION = 4;
-const MAX_ACCOUNT_MINUTE_CELLS = 50000;
+const MAX_ACCOUNT_MINUTE_CELLS = process.env.NODE_ENV === 'test' ? Math.max(1, Number(process.env.CLINE_PASS_TEST_ACCOUNT_MINUTE_CELL_LIMIT) || 50000) : 50000;
 const MAX_MODEL_MINUTE_CELLS = process.env.NODE_ENV === 'test' ? Math.max(1, Number(process.env.CLINE_PASS_TEST_MODEL_CELL_LIMIT) || 50000) : 50000;
 const MAX_PROVIDER_HEALTH_MINUTE_CELLS = process.env.NODE_ENV === 'test' ? Math.max(1, Number(process.env.CLINE_PASS_TEST_PROVIDER_HEALTH_CELL_LIMIT) || 50000) : 50000;
 const FORBIDDEN_STATISTIC_KEYS = new Set(['__proto__','prototype','constructor']);
