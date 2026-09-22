@@ -629,3 +629,26 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 26: 账号级 RPM 限流
+<!-- trellis-session: v=2 fp=f442d174f6113101 -->
+
+**Date**: 2026-09-23
+**Task**: 账号级 RPM 限流
+**Branch**: `feat/account-rpm-limits`
+
+### Summary
+
+在既有 lease/waiters owner 旁实现每账号进程内滚动 60s RPM 窗口：准入顺序固定 hard eligibility→maxConcurrent→RPM（并发阻塞不触碰 RPM、RPM 阻塞不增 activeCount）；permit 与真实 req.end() 同点提交、发送前失败释放并唤醒、发送后一律不退款；Provider retry 无 permit 时立即本地 429 且不换号/不伪造 upstream attempt，保留此前真实错误行；动态池仅在全体 active 有限并发满载且 RPM 可用时 grow，检查阶段修出并修复『RPM 耗尽的备用账号被晋升』缺陷。管理面计数覆盖 chat aliases 与各管理 chat 调用，catalog/quota/临时 credential test 不计。spec 已同步 maxRpm 严格语义、permit 契约、Retry-After 的 RPM 例外（1-3600s）与前端投影。全量 210/210。未部署。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ba18795` | feat: 实现账号级 RPM 限流 |
+| `1ce2804` | docs(spec): 同步账号级 RPM 准入与 permit 契约 |
+
+### Status
+
+[OK] **Completed**
