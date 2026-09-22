@@ -332,10 +332,12 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - page close, routing off/on, disable/re-enable, key A→B→A, proxy rotation and deletion fence queued/header/body completions; owner-only cancellation records no failure/backoff; slow-drip responses hit the absolute deadline;
 - the statistics refresh API rejects invalid/query/overload requests before work, returns bounded outcome counts, changes no configuration, refreshes only enabled keyed persisted accounts and never enters ordinary/detailed chat logs or chat statistics;
 - `/api/statistics` is authenticated, coverage-labelled, bounded, stable-ID/resolved-model keyed, migrates v1 model coverage truthfully, and contains no sensitive/raw provider data; `/api/accounts` account summaries stay ID-bound across duplicate/renamed names.
+- test-only timing budgets are split by purpose: a *semantic* budget injected through `CLINE_PASS_TEST_*` (quota deadline, success/failure intervals, binding TTL) stays an order of magnitude above real round-trip overhead and is never the synchronization point for "the work finished"; a *synchronization* wait observes a real state (mock admission/request count, `quota.refresh.state`, a published request/error log row, a `metadata.json` field) instead of a fixed delay;
+- a bounded settle window is acceptable only for a negative assertion ("no further upstream call", "an obsolete callback did not re-arm") and must be paired with a positive observable assertion;
 
 The current integration suite directly covers stable identities, provider/account failover, capacity overflow, valid SSE, fragmented pre-response SSE errors, wrapped post-start SSE errors without replay, `[DONE]`-then-close success, streaming/non-streaming client cancellation projections, unchanged empty-content and empty-tool-result pass-through, deliberate Responses API rejection, prompt oversized-body rejection, HRW input-order independence, minimal remapping after account removal, missing usage, oversized CRLF SSE recovery, statistics corruption rejection, and quota generation invalidation.
 
-Run `node --check server.js`, `npm test`, and `git diff --check` after changing this boundary. Signal-handling changes additionally require a response-complete drain/restart test and a blocked-writer deadline test.
+Run `node --check server.js`, `npm test`, and `git diff --check` after changing this boundary. Signal-handling changes additionally require a response-complete drain/restart test and a blocked-writer deadline test. A timing-sensitive case must also be reproduced under bounded load (parallel CPU burners) before a fix is claimed: an idle-only green run does not prove that a wall-clock dependency was removed.
 
 ### 7. Wrong vs Correct
 
