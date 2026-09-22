@@ -582,3 +582,27 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 24: 测试稳定性：消除集成测试时钟/负载依赖 flake
+<!-- trellis-session: v=2 fp=b9c04db168f50350 -->
+
+**Date**: 2026-09-23
+**Task**: 测试稳定性：消除集成测试时钟/负载依赖 flake
+**Branch**: `feat/test-stability-timing-flakes`
+
+### Summary
+
+定位并修复负载下复现的集成测试 flake：根因是把 CLINE_PASS_TEST_* 注入的产品语义时间（绝对截止 80ms）当成发布完成的同步点。用例语义截止提升为 1000ms 并改由预算推导耗时断言；负向等待改为有上界窗口并配对正向断言；睡眠改为对 quota.refresh.nextAttemptAt 与已发布日志行的条件等待；50k 单元用例复用既有 CELL_LIMIT 钩子（新增 ACCOUNT_MINUTE 钩子，仅测试且缺省等于生产）缩小夹具并保持原子淘汰/coverage 断言。验收：空载 7 次、10 进程负载 5 次、20 进程强负载 1 次全量 194/194；反向验证回退截止即复现 2≠4；变异检查证明断言判别力未失。未部署。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6cc2393` | test: 消除集成测试的时钟/负载依赖 flake |
+| `e9d8d8f` | docs(spec): 记录测试语义预算与同步预算的区分 |
+| `0ff9aab` | docs(task): 记录测试稳定性取证、实现计划与检查报告 |
+
+### Status
+
+[OK] **Completed**
