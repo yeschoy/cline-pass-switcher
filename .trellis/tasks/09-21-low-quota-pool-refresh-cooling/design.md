@@ -61,7 +61,7 @@ role-aware启用时active candidates分成low-drain、high-reserve、unknown-fil
 - refresh失败/unknown保留hold并走现有bounded backoff；
 - role-aware启用时，对每次最新成功snapshot独立评估所有已知有效window；任一>=100即`quota-exhausted`，即使partial且此前未hold；
 - `quotaRetryAt`取已耗尽窗口中最早有效未来`resetsAt`，到时刷新再评估；若另一个窗口仍100%则继续并计算下一次；
-- 成功snapshot中全部已知window<100才清除quota disposition；缺失窗口不能把已确认exhausted解除；
+- 只有成功snapshot的三个窗口齐全、均<100且成功时间不早于disposition，才清除waiting-refresh或quota-exhausted；部分非100成功仍属unknown并保留原disposition，部分已知100成功确认/保持exhausted；
 - 没有有效resetsAt时按现有failure/success周期重试，不永久定时器泄漏。
 
 人工recover只字段级清rule cooldown/quarantine，不绕过quota-exhausted；force quota refresh可提前重新判断但仍遵守failure backoff，且只有真实成功snapshot能清除。账号key替换/删除清理旧quota state。`clearExpiredCooldowns()`、`persistAccountAction()`和quota reconciliation都必须字段级merge/clear，禁止删除另一维度。
