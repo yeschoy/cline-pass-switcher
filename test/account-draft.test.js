@@ -5,7 +5,8 @@ import vm from 'node:vm';
 
 const script = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8').match(/<script>([\s\S]*?)<\/script>/)[1];
 const DEFAULT_PIPELINE_ORDER = ['quotaPool','healthSort','sticky'];
-const fixture = () => ({mode:'single', active:1, concurrencyWaitMs:2000, errorRules:[], accountPipeline:{quotaPool:false,healthSort:false,sticky:false,cachePoolSize:0,order:[...DEFAULT_PIPELINE_ORDER]}, accounts:[0,1,2].map(i => ({id:`id${i}`, name:i < 2 ? 'duplicate <name>' : 'other', note:`note${i}`, key:`fake${i}`, enabled:i !== 1, maxConcurrent:i+1, weight:i+1, priority:10+i, proxyUrl:'http://localhost:1234', headers:{'X-Test':'fixture'}, perModel:{model:{upstreams:['mock']}}, activeCount:0, cachePoolRole:i===0?'active':i===1?'standby':null}))});
+const DEFAULT_PIPELINE = {quotaPool:false,healthSort:false,sticky:false,order:[...DEFAULT_PIPELINE_ORDER],cachePoolSize:0,cachePoolMaxSize:0,sessionBindingExplicitTtlMs:7200000,sessionBindingFallbackTtlMs:900000,sessionBindingMaxEntries:50000};
+const fixture = () => ({mode:'single', active:1, concurrencyWaitMs:2000, errorRules:[], accountPipeline:{...DEFAULT_PIPELINE,order:[...DEFAULT_PIPELINE_ORDER]}, cachePool:{minSize:0,maxSize:0,targetSize:0,binding:{enabled:false,size:0,maxEntries:50000}}, accounts:[0,1,2].map(i => ({id:`id${i}`, name:i < 2 ? 'duplicate <name>' : 'other', note:`note${i}`, key:`fake${i}`, enabled:i !== 1, maxConcurrent:i+1, weight:i+1, priority:10+i, proxyUrl:'http://localhost:1234', headers:{'X-Test':'fixture'}, perModel:{model:{upstreams:['mock']}}, activeCount:0, cachePoolRole:i===0?'active':i===1?'standby':null}))});
 function harness() {
   const elements = new Map(), calls = [], timers = new Map(), windowListeners = {};
   let timerId = 0;
@@ -19,7 +20,7 @@ function harness() {
   pipelineList.appendChild=node=>{const index=pipelineList.children.indexOf(node);if(index>=0)pipelineList.children.splice(index,1);pipelineList.children.push(node);return node;};
   el('#accMode').options = ['single','roundrobin','sticky','least-connections','weighted-roundrobin','priority-failover'].map(value=>({value}));
   context.snapshot = fixture();
-  run("ACCS = snapshot; $('#accMode').value='single'; $('#concurrencyWaitMs').value='2000'; $('#cachePoolSize').value='0'; hydrateErrorRuleDraft(snapshot.errorRules); renderAccounts();");
+  run("ACCS = snapshot; $('#accMode').value='single'; $('#concurrencyWaitMs').value='2000'; $('#cachePoolSize').value='0'; $('#cachePoolMaxSize').value='0'; $('#sessionBindingExplicitTtlMs').value='7200000'; $('#sessionBindingFallbackTtlMs').value='900000'; $('#sessionBindingMaxEntries').value='50000'; hydrateErrorRuleDraft(snapshot.errorRules); renderAccounts();");
   const snapshot = () => JSON.parse(run('JSON.stringify(ACCS)'));
   return {run,el,calls,snapshot,context,timers,windowListeners,pipelineList};
 }
@@ -66,7 +67,7 @@ test('search/select-all, empty selection, rename, deletion and unsaved objects c
 
 test('redraw callers preserve scheduling and invalid unapplied advanced JSON; explicit save sends the unified draft', async () => {
   const h = harness();
-  h.el('#accMode').value='sticky'; h.el('#concurrencyWaitMs').value='987'; h.el('#cachePoolSize').value='2';
+  h.el('#accMode').value='sticky'; h.el('#concurrencyWaitMs').value='987'; h.el('#cachePoolSize').value='2'; h.el('#cachePoolMaxSize').value='4';
   h.run("openAdvancedErrorRules(); $('#advancedErrorRulesJson').value='{ unfinished'; markAdvancedErrorRulesDirty()");
   h.el('#pipelineQuotaPool').checked=true; h.el('#pipelineSticky').checked=true;
   h.run('openAccountDrawer(0)'); h.el('#drawerNote').value='pending drawer note'; h.run('saveDrawer(); renderAccounts(); selectAccount(1,true)');
@@ -84,7 +85,7 @@ test('redraw callers preserve scheduling and invalid unapplied advanced JSON; ex
   assert.deepEqual(payload.accounts,h.snapshot().accounts.map(({activeCount,cachePoolRole,...a})=>a));
   assert.equal(payload.active,1); assert.equal(payload.concurrencyWaitMs,987);
   assert.deepEqual(payload.errorRules,[{id:'ignore-quota',scope:'account',action:'ignore',when:{statuses:[429],body_contains:'quota exceeded'}}]);
-  assert.deepEqual(payload.accountPipeline,{quotaPool:true,healthSort:false,sticky:true,order:DEFAULT_PIPELINE_ORDER,cachePoolSize:2});
+  assert.deepEqual(payload.accountPipeline,{quotaPool:true,healthSort:false,sticky:true,order:DEFAULT_PIPELINE_ORDER,cachePoolSize:2,cachePoolMaxSize:4,sessionBindingExplicitTtlMs:7200000,sessionBindingFallbackTtlMs:900000,sessionBindingMaxEntries:50000});
   assert.equal(h.snapshot().accounts[1].maxConcurrent,42);
 });
 
@@ -96,14 +97,18 @@ test('visual and advanced rule editors share one ordered draft and reject stale 
   h.context.validAdvanced=[{id:'provider-fatal',scope:'provider-model',action:'degrade',providers:['mock'],models:['model'],when:{statuses:[500],body_contains:['fatal','down'],header:{name:'X-Error',contains:'yes'}}}];h.run("refreshAdvancedErrorRules(true); $('#advancedErrorRulesJson').value=JSON.stringify(validAdvanced); markAdvancedErrorRulesDirty(); applyAdvancedErrorRules()");draft=JSON.parse(h.run('JSON.stringify(ERROR_RULE_DRAFT)'));assert.deepEqual(draft,h.context.validAdvanced);assert.equal(h.calls.length,0);
 });
 
-test('visual save and preset preview reject invalid cache pool drafts without coercion or requests', async () => {
+test('visual save and preset preview reject invalid pool/binding drafts without coercion or requests', async () => {
   for (const value of ['', ' ', '-1', '1.5', '100001', 'NaN']) {
-    const h=harness(),before=h.snapshot();h.el('#cachePoolSize').value=value;
+    const h=harness(),before=h.snapshot();h.el('#cachePoolSize').value=value;h.el('#cachePoolMaxSize').value='100000';
     await h.run('saveAccounts()');assert.equal(h.calls.length,0,`save must reject ${JSON.stringify(value)}`);assert.deepEqual(h.snapshot(),before);assert.equal(h.el('#cachePoolSize').value,value);assert.match(h.el('#accMsg').textContent,/0–100000/);
     h.el('#preset').value='cache';h.run('previewPreset()');assert.equal(h.run('PENDING_PRESET'),null);assert.equal(h.el('#presetModal').style.display,undefined);assert.equal(h.calls.length,0);
   }
+  const invalid=[['#cachePoolMaxSize','-1'],['#cachePoolMaxSize','100001'],['#sessionBindingExplicitTtlMs','59999'],['#sessionBindingFallbackTtlMs','604800001'],['#sessionBindingMaxEntries','0'],['#sessionBindingMaxEntries','1.5']];
+  for(const [id,value] of invalid){const h=harness();h.el(id).value=value;await h.run('saveAccounts()');assert.equal(h.calls.length,0);assert.ok(h.el('#accMsg').textContent);}
+  {const h=harness();h.el('#cachePoolSize').value='2';h.el('#cachePoolMaxSize').value='1';await h.run('saveAccounts()');assert.equal(h.calls.length,0);assert.match(h.el('#accMsg').textContent,/不得小于/);}
+  {const h=harness();h.el('#sessionBindingExplicitTtlMs').value='60000';h.el('#sessionBindingFallbackTtlMs').value='60001';await h.run('saveAccounts()');assert.equal(h.calls.length,0);assert.match(h.el('#accMsg').textContent,/不得大于/);}
   for (const value of ['0','100000']) {
-    const h=harness();h.el('#cachePoolSize').value=value;assert.equal(h.run('collectAccounts().accountPipeline.cachePoolSize'),Number(value));
+    const h=harness();h.el('#cachePoolSize').value=value;h.el('#cachePoolMaxSize').value='100000';assert.equal(h.run('collectAccounts().accountPipeline.cachePoolSize'),Number(value));
   }
 });
 
@@ -127,13 +132,13 @@ test('upstream setup proposals are deterministic, scope-guarded and save only af
 
 test('real loadAll hydration resets controls, order and old selection on reload', async () => {
   const h = harness(); h.run("selectAllAccounts(true); movePipelineStep('sticky',-1)");
-  const hydrated=fixture(); hydrated.accountPipeline.cachePoolSize=3; hydrated.accountPipeline.order=['sticky','healthSort','quotaPool'];
+  const hydrated=fixture(); hydrated.accountPipeline.cachePoolSize=3; hydrated.accountPipeline.cachePoolMaxSize=5; hydrated.cachePool={minSize:3,maxSize:5,targetSize:4,binding:{enabled:true,size:2,maxEntries:50000}}; hydrated.accountPipeline.order=['sticky','healthSort','quotaPool'];
   h.context.responses = {'/api/models':{},'/api/accounts':hydrated,'/api/security':{},'/api/meta':{configured:true},'/api/model-aliases':{aliases:{}}};
   // Model rendering is unrelated to the account hydration boundary.
   h.run('render = () => {}; api = async path => responses[path]');
   h.run("commitErrorRuleDraft([{id:'pending',scope:'account',action:'hard-quarantine',when:{statuses:[418]}}])"); h.el('#accMode').value='sticky';
   await h.run('loadAll()');
-  assert.equal(h.run('BULK_SELECTION.size'),0); assert.equal(h.el('#accMode').value,'single'); assert.equal(Number(h.el('#cachePoolSize').value),3);
+  assert.equal(h.run('BULK_SELECTION.size'),0); assert.equal(h.el('#accMode').value,'single'); assert.equal(Number(h.el('#cachePoolSize').value),3);assert.equal(Number(h.el('#cachePoolMaxSize').value),5);assert.match(h.el('#cachePoolRuntime').textContent,/当前目标 4.*当前 2 \/ 50000/);
   assert.deepEqual(JSON.parse(h.run('JSON.stringify(ERROR_RULE_DRAFT)')),[]); assert.equal(h.el('#bulkApply').disabled,true);
   assert.deepEqual(JSON.parse(h.run('JSON.stringify(pipelineOrder())')),hydrated.accountPipeline.order);
   assert.equal(h.el('#pipelineOrderStatus').textContent,'','reload clears obsolete draft-only order feedback');
@@ -297,7 +302,7 @@ test('raw editor projects only live scheduling and all reference names; combined
   assert.equal(draft.accountPipeline.quotaPool,true); assert.equal(draft.accountPipeline.cachePoolSize,0);
   draft.accountMode='priority-failover'; draft.concurrencyWaitMs=30000;
   draft.errorRules=[{id:'ignore-100',scope:'account',action:'ignore',when:{statuses:[100]}},{id:'cool-599',scope:'provider-model',action:'cooldown',when:{statuses:[599],body_contains:'overloaded'},reset:{fallback:'1s',max:'30d'}}];
-  draft.accountPipeline={quotaPool:false,healthSort:true,sticky:true,order:['sticky','healthSort','quotaPool'],cachePoolSize:100000};
+  draft.accountPipeline={...draft.accountPipeline,quotaPool:false,healthSort:true,sticky:true,order:['sticky','healthSort','quotaPool'],cachePoolSize:100000,cachePoolMaxSize:100000};
   h.el('#rawSchedulingJson').value=JSON.stringify(draft); h.run('applyRawScheduling()');
   assert.deepEqual(h.snapshot(),before); assert.equal(h.calls.length,0);
   assert.equal(h.el('#rawSchedulingDialog').open,false);
@@ -317,7 +322,7 @@ test('successful raw save hydrates persisted values and clears obsolete draft fe
   const draft=rawDraft(h);
   draft.accountMode='sticky'; draft.concurrencyWaitMs=987;
   draft.errorRules=[{id:'quota-418',scope:'account',action:'hard-quarantine',when:{statuses:[418],body_contains:'quota exhausted'}}];
-  draft.accountPipeline={quotaPool:true,healthSort:true,sticky:true,order:['quotaPool','sticky','healthSort'],cachePoolSize:2};
+  draft.accountPipeline={...draft.accountPipeline,quotaPool:true,healthSort:true,sticky:true,order:['quotaPool','sticky','healthSort'],cachePoolSize:2,cachePoolMaxSize:4};
   h.el('#rawSchedulingJson').value=JSON.stringify(draft); h.run('applyRawScheduling()');
   const before=h.snapshot();
   assert.match(h.el('#rawSchedulingFeedback').textContent,/尚未生效/);
@@ -430,12 +435,15 @@ test('raw validator accepts six modes and numeric limits but rejects missing fie
     h.context.candidate={...base};delete h.context.candidate[key];
     assert.throws(()=>h.run('validateRawScheduling(candidate,RAW_SCHEDULING.names)'));
   }
-  for(const key of [...Object.keys(base.accountPipeline).filter(key=>key!=='cachePoolSize')])for(const value of [null,'true',0]){
+  for(const key of ['quotaPool','healthSort','sticky'])for(const value of [null,'true',0]){
     h.context.candidate={...base,accountPipeline:{...base.accountPipeline,[key]:value}};
     assert.throws(()=>h.run('validateRawScheduling(candidate,RAW_SCHEDULING.names)'));
   }
-  for(const cachePoolSize of [0,100000]){h.context.candidate={...base,accountPipeline:{...base.accountPipeline,cachePoolSize}};h.run('validateRawScheduling(candidate,RAW_SCHEDULING.names)');}
-  for(const cachePoolSize of [null,'2',true,-1,100001,1.5]){h.context.candidate={...base,accountPipeline:{...base.accountPipeline,cachePoolSize}};assert.throws(()=>h.run('validateRawScheduling(candidate,RAW_SCHEDULING.names)'));}
+  for(const size of [0,100000]){h.context.candidate={...base,accountPipeline:{...base.accountPipeline,cachePoolSize:size,cachePoolMaxSize:100000}};h.run('validateRawScheduling(candidate,RAW_SCHEDULING.names)');}
+  for(const key of ['cachePoolSize','cachePoolMaxSize'])for(const value of [null,'2',true,-1,100001,1.5]){h.context.candidate={...base,accountPipeline:{...base.accountPipeline,[key]:value}};assert.throws(()=>h.run('validateRawScheduling(candidate,RAW_SCHEDULING.names)'));}
+  for(const key of ['sessionBindingExplicitTtlMs','sessionBindingFallbackTtlMs'])for(const value of [null,'60000',true,59999,604800001,1.5]){h.context.candidate={...base,accountPipeline:{...base.accountPipeline,[key]:value}};assert.throws(()=>h.run('validateRawScheduling(candidate,RAW_SCHEDULING.names)'));}
+  for(const value of [null,'1',true,0,100001,1.5]){h.context.candidate={...base,accountPipeline:{...base.accountPipeline,sessionBindingMaxEntries:value}};assert.throws(()=>h.run('validateRawScheduling(candidate,RAW_SCHEDULING.names)'));}
+  for(const patch of [{cachePoolSize:2,cachePoolMaxSize:1},{sessionBindingExplicitTtlMs:60000,sessionBindingFallbackTtlMs:60001}]){h.context.candidate={...base,accountPipeline:{...base.accountPipeline,...patch}};assert.throws(()=>h.run('validateRawScheduling(candidate,RAW_SCHEDULING.names)'));}
   for(const value of [NaN,Infinity]){
     h.context.candidate={...base,concurrencyWaitMs:value};
     assert.throws(()=>h.run('validateRawScheduling(candidate,RAW_SCHEDULING.names)'));

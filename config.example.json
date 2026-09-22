@@ -51,7 +51,11 @@
       "healthSort",
       "sticky"
     ],
-    "cachePoolSize": 0
+    "cachePoolSize": 0,
+    "cachePoolMaxSize": 0,
+    "sessionBindingExplicitTtlMs": 7200000,
+    "sessionBindingFallbackTtlMs": 900000,
+    "sessionBindingMaxEntries": 50000
   },
   "modelAliases": {
     "glm-5.3-flash": "cline-pass/glm-5.3-flash"
