@@ -763,6 +763,10 @@ test('provider cooldown skips repeated failures and admits only one half-open pr
   await waitUntil(() => seen.some((entry) => entry.model === 'stale' && entry.provider === 'first'));
   assert.equal((await rawJson(port, '/api/config', { scope: 'global', perModel: { stale: route(80) } })).status, 200);
   assert.equal((await staleRequest).status, 200);
+  const staleView = await (await fetch(`http://127.0.0.1:${port}/api/models`)).json();
+  const staleModel = staleView.subscription.find((row) => row.id === 'stale');
+  assert.equal(staleModel.meta.upstreamStatus.first.success.samples, 0, 'a stale-generation failure records no provider failure sample');
+  assert.equal(staleModel.meta.upstreamStatus.second.success.samples, 0, 'a stale-generation success records no provider success sample');
   seen.length = 0;
   assert.equal((await request('stale')).status, 200);
   assert.equal(seen[0].provider, 'first', 'a completion from the replaced route generation must not recreate cooldown state');
@@ -1210,7 +1214,7 @@ test('all explicit usage aliases, precedence, cache ratios, stream snapshots, re
   assert.equal(byModel.zero.recent24h.cacheInputKnownRequests,1);assert.equal(byModel.zero.recent24h.cacheInputTokens,0);assert.equal(byModel.zero.recent24h.cacheTokenRatio,null);
   assert.equal(byModel.missing.recent24h.requests,1);assert.equal(byModel.missing.recent24h.cacheInputKnownRequests,0);
   assert.equal(seen.filter(x=>x.model==='retry').length,2,'provider retry must not duplicate usage');
-  const a=stats.accounts.find(x=>x.id==='a'),b=stats.accounts.find(x=>x.id==='b');assert.equal(a.lifetime.inputTokens,171);assert.equal(b.lifetime.inputTokens,17);assert.equal(a.lifetime.requests,11);assert.equal(b.lifetime.requests,1);assert.equal(a.health.samples,10);assert.equal(a.health.degrades,0);assert.equal(b.health.samples,1);assert.equal(b.health.successes,1,'A→B replacement records independent account success samples');
+  const a=stats.accounts.find(x=>x.id==='a'),b=stats.accounts.find(x=>x.id==='b');assert.equal(a.lifetime.inputTokens,171);assert.equal(b.lifetime.inputTokens,17);assert.equal(a.lifetime.requests,11);assert.equal(b.lifetime.requests,1);assert.equal(a.health.samples,11);assert.equal(a.health.degrades,1,'account cooldown records exactly one failure sample');assert.equal(b.health.samples,1);assert.equal(b.health.successes,1,'A→B replacement records independent account success samples');
   const globalBeforeRestart=stats.lifetime.global,modelsBeforeRestart=stats.models;await stop(running.child);running.child=null;running=await startSwitcher(null,running.dir);stats=await(await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json();assert.deepEqual(stats.lifetime.global,globalBeforeRestart,'statistics must survive restart exactly');assert.deepEqual(stats.models,modelsBeforeRestart,'model statistics must survive restart exactly');
   const accountView=await(await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json();assert.equal((await rawJson(switchPort,'/api/accounts',{accounts:accountView.accounts.filter(x=>x.id==='a'),mode:'single',active:0,concurrencyWaitMs:0,accountErrorRules:{}})).status,200);
   stats=await(await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json();assert.equal(stats.accounts.some(x=>x.id==='b'),false);assert.deepEqual(stats.lifetime.global,globalBeforeRestart,'deleting an account retains global history');
@@ -2587,4 +2591,381 @@ test('canonical scoped error rules match status/body/header, isolate state, pers
   assert.equal((await rawJson(port,'/api/accounts',{accounts:current.accounts,mode:current.mode,active:current.active,concurrencyWaitMs:current.concurrencyWaitMs,errorRules:validFormats,accountPipeline:current.accountPipeline})).status,200);current=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal(current.errorRules[0].scope,'account');const configBytes=fs.readFileSync(path.join(dir,'config.json'));
   const invalid=[null,{},[{id:'x',scope:'account',action:'degrade',when:{}}],[{id:'-x',scope:'account',action:'degrade',when:{statuses:[500]}}],[{id:'x',scope:'credentialx',action:'degrade',when:{statuses:[500]}}],[{id:'x',scope:'account',action:'degrade',providers:['bad provider'],when:{statuses:[500]}}],[{id:'x',scope:'account',action:'degrade',when:{statuses:[500],body_contains:null}}],[{id:'x',scope:'account',action:'degrade',when:{statuses:[500],header:null}}],[{id:'x',scope:'account',action:'cooldown',when:{statuses:[500]},reset:{fallback:'300',max:'1h'}}],[{id:'x',scope:'account',action:'cooldown',when:{statuses:[500]},reset:{header:'X-Reset',fallback:'5s',max:'1h'}}],[{id:'x',scope:'account',action:'degrade',when:{statuses:[500],header:{name:'Bad Header'}}}]];
   for(const rules of invalid){const rejected=await rawJson(port,'/api/accounts',{accounts:current.accounts,mode:current.mode,active:current.active,concurrencyWaitMs:current.concurrencyWaitMs,errorRules:rules,accountPipeline:current.accountPipeline});assert.equal(rejected.status,400,JSON.stringify(rules));assert.deepEqual(fs.readFileSync(path.join(dir,'config.json')),configBytes);}
+});
+
+test('strict first follows source order, retries and preferred follow provider-model success rate, singleton-only and safe failures', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+      const provider = body.provider?.only?.[0] || body.providerOptions?.gateway?.only?.[0] || null;
+      seen.push({ model: body.model, provider, only: body.provider?.only || null, gatewayOnly: body.providerOptions?.gateway?.only || null, order: body.provider?.order || body.providerOptions?.gateway?.order || null });
+      if ((provider === 'a' || provider === 'b') && body.model !== 'iso-ok' && body.model !== 'cool-model') {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: { message: `${provider} failed`, status: 500 } }));
+      }
+      if (body.model === 'null-last' && provider === 'y') {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: { message: 'y failed', status: 502 } }));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }], provider }));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-provider-selection-'));
+  fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({
+    routingSecret: 'fixed-selection-secret',
+    models: {
+      'discovered-model': { upstreams: ['d1', 'd2'], pipeline: 'planner' },
+      'hard-model': { upstreams: ['a'], upstreamStatus: { a: { hardQuarantined: true } } },
+      'cool-model': { upstreams: ['a', 'b'], upstreamStatus: { a: { cooldownUntil: Date.now() + 600000 } } },
+      'null-last': { upstreams: ['x', 'y'], pipeline: 'planner', upstreamStatus: { x: { hardQuarantined: true } } },
+      'configured-wins': { upstreams: ['d1', 'd2'] },
+    },
+  }));
+  const route = (upstreams, extra = {}) => ({ upstreams, exclude: [], pinMode: 'strict', sort: null, maxRetries: null, providerCooldownMs: 0, ...extra });
+  const config = {
+    port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 0,
+    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }],
+    knownModels: ['strict-rate', 'preferred-rate', 'capped-rate', 'iso-fail', 'iso-ok', 'auto-model', 'excluded-model', 'hard-model', 'cool-model', 'discovered-model', 'null-last', 'configured-wins', 'health-fail'],
+    perModel: {
+      'strict-rate': route(['a', 'b', 'c']),
+      'preferred-rate': route(['a', 'b', 'c'], { pinMode: 'preferred' }),
+      'health-fail': route(['a', 'b', 'c'], { pinMode: 'preferred' }),
+      'capped-rate': route(['a', 'b', 'c'], { maxRetries: 1 }),
+      'iso-fail': route(['a']),
+      'iso-ok': route(['a']),
+      'excluded-model': route(['a'], { exclude: ['a'] }),
+      'hard-model': route(['a']),
+      'cool-model': route(['a', 'b']),
+      'null-last': route(['x', 'y'], { pinMode: 'preferred' }),
+      'configured-wins': route(['a']),
+    },
+    errorRules: [],
+  };
+  let running = await startSwitcher(config, dir);
+  t.after(async () => { if (running?.child) await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  const call = (model) => rawJson(port, '/v1/chat/completions', { model, messages: [] });
+
+  assert.equal((await call('strict-rate')).status, 200);
+  assert.deepEqual(seen.filter((row) => row.model === 'strict-rate').map((row) => row.provider), ['a', 'b', 'c'], 'cold strict uses source order');
+  seen.length = 0;
+  assert.equal((await call('strict-rate')).status, 200);
+  assert.deepEqual(seen.map((row) => row.provider), ['a', 'c'], 'strict retry excludes the attempted provider and orders the rest by success rate');
+
+  seen.length = 0;
+  assert.equal((await call('preferred-rate')).status, 200);
+  assert.deepEqual(seen.map((row) => row.provider), ['a', 'b', 'c'], 'cold preferred falls back to source order while rates are unknown');
+  seen.length = 0;
+  assert.equal((await call('preferred-rate')).status, 200);
+  assert.deepEqual(seen.map((row) => row.provider), ['c'], 'preferred selects by provider-model success rate from the first attempt');
+
+  seen.length = 0;
+  assert.equal((await call('capped-rate')).status, 500);
+  assert.deepEqual(seen.map((row) => row.provider), ['a', 'b'], 'maxRetries caps real outer attempts after the first');
+  assert.equal((await call('iso-fail')).status, 500);
+  assert.equal((await call('iso-ok')).status, 200);
+  const modelsView = await (await fetch(`http://127.0.0.1:${port}/api/models`)).json();
+  assert.equal(modelsView.subscription.find((row) => row.id === 'iso-fail').meta.upstreamStatus.a.success.successRate, 0);
+  assert.equal(modelsView.subscription.find((row) => row.id === 'iso-ok').meta.upstreamStatus.a.success.successRate, 1, 'provider success rate is isolated per resolved model');
+
+  seen.length = 0;
+  assert.equal((await call('auto-model')).status, 200);
+  assert.deepEqual(seen.map((row) => row.provider), [null], 'a truly empty candidate source allows exactly one unattributed auto attempt');
+  assert.equal(seen[0].only, null); assert.equal(seen[0].gatewayOnly, null);
+
+  seen.length = 0;
+  assert.equal((await call('excluded-model')).status, 503);
+  assert.deepEqual(seen, [], 'a fully excluded known list never falls back to auto');
+  assert.equal((await call('hard-model')).status, 503);
+  assert.deepEqual(seen, [], 'a fully hard-quarantined list fails safely');
+  seen.length = 0;
+  assert.equal((await call('cool-model')).status, 200);
+  assert.deepEqual(seen.map((row) => row.provider), ['b'], 'a durable cooldown removes only that provider from the plan');
+  seen.length = 0;
+  assert.equal((await call('discovered-model')).status, 200);
+  assert.deepEqual(seen.map((row) => row.provider), ['d1'], 'stable discovered order is authoritative when nothing is configured');
+
+  const named = seen.filter((row) => row.model === 'discovered-model');
+  for (const row of [...named]) assert.ok((row.only?.length ?? 0) <= 1 && (row.gatewayOnly?.length ?? 0) <= 1 && row.order === null);
+  const everyNamed = seen.concat(await (async () => { seen.length = 0; assert.equal((await call('strict-rate')).status, 200); return seen.slice(); })());
+  for (const row of everyNamed) {
+    assert.ok((row.only?.length ?? 0) <= 1, 'provider.only is at most a singleton');
+    assert.ok((row.gatewayOnly?.length ?? 0) <= 1, 'gateway.only is at most a singleton');
+    assert.equal(row.order, null, 'named attempts never inject provider order');
+  }
+  // The unknown pipeline injects the same singleton only into both provider shapes.
+  const unknownPipeline = await (async () => { seen.length = 0; assert.equal((await call('strict-rate')).status, 200); return seen.slice(); })();
+  assert.ok(unknownPipeline.length > 0);
+  for (const row of unknownPipeline) {
+    assert.deepEqual(row.only, [row.provider], 'unknown pipeline injects a singleton provider.only');
+    assert.deepEqual(row.gatewayOnly, [row.provider], 'the same singleton is injected into providerOptions.gateway.only');
+  }
+
+  // Configured upstreams stay authoritative even when discovery already knows other providers.
+  seen.length = 0;
+  assert.equal((await call('configured-wins')).status, 500);
+  assert.deepEqual(seen.map((row) => row.provider), ['a'], 'a non-empty configured list overrides the discovered order');
+
+  // An unrated provider must sort after a rated one even when it has the earlier source index.
+  seen.length = 0;
+  assert.equal((await call('null-last')).status, 502);
+  assert.deepEqual(seen.map((row) => row.provider), ['y'], 'a hard-quarantined provider stays out of the candidate snapshot');
+  assert.equal((await rawJson(port, '/api/providers/recover', { model: 'null-last', provider: 'x' })).status, 200);
+  seen.length = 0;
+  assert.equal((await call('null-last')).status, 200);
+  assert.deepEqual(seen.map((row) => row.provider), ['y', 'x'], 'a rated provider precedes an unrated provider (null last) despite its later source index');
+
+  // Bounded strategy evidence: plan source/mode on the request row plus one selection enum per real attempt.
+  const logRow = (response) => waitUntil(async () => {
+    const page = await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${response.headers['x-cline-request-id']}`)).json();
+    return page.items[0] || null;
+  });
+  const attemptErrors = (response) => waitUntil(async () => {
+    const page = await (await fetch(`http://127.0.0.1:${port}/api/logs/errors?requestId=${response.headers['x-cline-request-id']}&limit=20`)).json();
+    return page.items.length ? page.items : null;
+  });
+
+  // strict: the first real attempt stays source-order even though provider c already holds the best rate.
+  seen.length = 0;
+  const strictEvidence = await call('strict-rate');
+  assert.equal(strictEvidence.status, 200);
+  assert.deepEqual(seen.map((row) => row.provider), ['a', 'c'], 'strict still starts with the source-order provider');
+  const strictLog = await logRow(strictEvidence);
+  assert.equal(strictLog.providerPlanSource, 'configured');
+  assert.equal(strictLog.providerMode, 'strict');
+  assert.deepEqual(strictLog.attempts.map((attempt) => attempt.providerSelection), ['strict-first', 'health'], 'strict first attempt is strict-first and its retry is health-selected');
+  assert.deepEqual(strictLog.attempts.map((attempt) => attempt.provider), ['a', 'c']);
+  assert.deepEqual([...strictLog.targetProviders].sort(), ['a', 'b', 'c'], 'the request row still exposes the planned candidate order');
+  const strictErrorRows = await attemptErrors(strictEvidence);
+  assert.deepEqual(strictErrorRows.map((row) => row.providerSelection), ['strict-first'], 'error rows carry the same bounded selection enum');
+
+  // preferred: every attempt, including the first, is health-selected.
+  seen.length = 0;
+  const preferredEvidence = await call('preferred-rate');
+  assert.equal(preferredEvidence.status, 200);
+  assert.deepEqual(seen.map((row) => row.provider), ['c'], 'preferred picks by health from the first attempt');
+  const preferredLog = await logRow(preferredEvidence);
+  assert.equal(preferredLog.providerPlanSource, 'configured');
+  assert.equal(preferredLog.providerMode, 'preferred');
+  assert.deepEqual(preferredLog.attempts.map((attempt) => attempt.providerSelection), ['health']);
+
+  // A preferred retry chain marks every attempt and every error row as health-selected.
+  seen.length = 0;
+  const preferredRetry = await call('health-fail');
+  assert.equal(preferredRetry.status, 200);
+  assert.deepEqual(seen.map((row) => row.provider), ['a', 'b', 'c'], 'cold preferred retries in source order while every rate is unknown');
+  const preferredRetryLog = await logRow(preferredRetry);
+  assert.equal(preferredRetryLog.providerPlanSource, 'configured');
+  assert.equal(preferredRetryLog.providerMode, 'preferred');
+  assert.deepEqual(preferredRetryLog.attempts.map((attempt) => attempt.providerSelection), ['health', 'health', 'health']);
+  assert.deepEqual((await attemptErrors(preferredRetry)).map((row) => row.providerSelection), ['health', 'health'], 'preferred failure rows never claim strict-first');
+
+  // discovered source and unattributed auto stay distinguishable bounded facts.
+  const discoveredLog = await logRow(await call('discovered-model'));
+  assert.equal(discoveredLog.providerPlanSource, 'discovered');
+  assert.equal(discoveredLog.providerMode, 'strict');
+  assert.deepEqual(discoveredLog.attempts.map((attempt) => attempt.providerSelection), ['strict-first']);
+  const autoLog = await logRow(await call('auto-model'));
+  assert.equal(autoLog.providerPlanSource, 'auto');
+  assert.equal(autoLog.providerMode, 'strict');
+  assert.deepEqual(autoLog.attempts.map((attempt) => attempt.providerSelection), ['compat-auto'], 'a truly empty candidate source is projected as compat-auto');
+  const routingFailLog = await logRow(await call('excluded-model'));
+  assert.equal(routingFailLog.providerPlanSource, 'configured', 'a safe routing failure still reports its plan source');
+  assert.equal(routingFailLog.providerMode, 'strict');
+  assert.deepEqual(routingFailLog.attempts, [], 'a plan rejected before any real attempt records no attempt selection');
+
+  // The projection stays bounded: enums only, no rate numbers, candidate maps or credentials.
+  const observedSelections = new Set([strictLog, preferredLog, preferredRetryLog, discoveredLog, autoLog].flatMap((row) => row.attempts.map((attempt) => attempt.providerSelection)));
+  assert.deepEqual([...observedSelections].sort(), ['compat-auto', 'health', 'strict-first']);
+  for (const row of [strictLog, preferredLog, preferredRetryLog, discoveredLog, autoLog]) {
+    for (const attempt of row.attempts) assert.equal(Object.hasOwn(attempt, 'rates'), false, 'attempt rows never carry the candidate rate map');
+  }
+  const serializedLogs = JSON.stringify(await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?limit=200`)).json());
+  assert.equal(serializedLogs.includes('successRate'), false, 'ordinary request logs never persist provider success-rate values');
+  assert.equal(serializedLogs.includes('"rates"'), false);
+  assert.equal(serializedLogs.includes('key-a'), false, 'ordinary request logs never persist account keys');
+});
+
+test('retry rules stop deterministic request errors before remaining providers or account replacement and stay independent from health', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+      const provider = body.provider?.only?.[0] || body.providerOptions?.gateway?.only?.[0] || null, auth = req.headers.authorization;
+      seen.push({ model: body.model, provider, auth });
+      if (body.model === 'retry-stop' && provider === 'first') { res.writeHead(502, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'System Message Must Have Content', status: 502 } })); }
+      if (body.model === 'retry-any' && provider === 'first') { res.writeHead(502, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'prefix SYSTEM MESSAGE MUST HAVE CONTENT suffix', status: 502 } })); }
+      if (body.model === 'retry-envelope' && provider === 'first') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'system message must have content', status: 502 } })); }
+      if (body.model === 'retry-status-miss' && provider === 'first') { res.writeHead(503, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'different body', status: 503 } })); }
+      if (body.model === 'retry-body-miss' && provider === 'first') { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'system message must have content', status: 500 } })); }
+      if (body.model === 'retry-first-match' && provider === 'first') { res.writeHead(502, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'only beta here', status: 502 } })); }
+      if (body.model === 'retry-compat' && provider === 'first') { res.writeHead(502, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'plain failure', status: 502 } })); }
+      if (body.model === 'retry-account' && auth === 'Bearer key-a') { res.writeHead(502, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'system message must have content', status: 502 } })); }
+      if (body.model === 'retry-sse' && provider === 'first') { res.writeHead(200, { 'Content-Type': 'text/event-stream' }); return res.end('data: ' + JSON.stringify({ error: { message: 'system message must have content', status: 502 } }) + '\n\n'); }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }], provider }));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-retry-rules-'));
+  const route = (providers) => ({ upstreams: providers, exclude: [], pinMode: 'strict', sort: null, maxRetries: null, providerCooldownMs: 0 });
+  const models = ['retry-stop', 'retry-any', 'retry-envelope', 'retry-status-miss', 'retry-body-miss', 'retry-first-match', 'retry-compat', 'retry-account', 'retry-sse'];
+  const config = {
+    port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 0,
+    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }, { id: 'b', name: 'B', key: 'key-b', enabled: true, perModel: {} }],
+    knownModels: models, perModel: Object.fromEntries(models.map((model) => [model, route(['first', 'second'])])),
+    retryRules: [
+      { id: 'stop-first-match', decision: 'stop', when: { statuses: [502], body_contains: ['alpha needle'] } },
+      { id: 'stop-beta', decision: 'stop', when: { statuses: [502], body_contains: ['beta'] } },
+      { id: 'stop-system-message', decision: 'stop', when: { statuses: [502], body_contains: ['system message must have content'] } },
+      { id: 'stop-status-only', decision: 'stop', when: { statuses: [503], body_contains: ['never appears'] } },
+    ],
+    errorRules: [
+      { id: 'ignore-system-message', scope: 'provider-model', action: 'ignore', models: ['retry-stop', 'retry-any', 'retry-envelope', 'retry-account', 'retry-sse'], when: { statuses: [502], body_contains: 'system message must have content' } },
+      { id: 'account-cooldown', scope: 'account', action: 'cooldown', models: ['retry-account'], when: { statuses: [502] }, reset: { fallback: '5m0s', max: '5m0s' } },
+    ],
+  };
+  let running = await startSwitcher(config, dir);
+  t.after(async () => { if (running?.child) await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  const call = (model, extra = {}) => rawJson(port, '/v1/chat/completions', { model, messages: [], ...extra });
+
+  let response = await call('retry-stop');
+  assert.equal(response.status, 502);
+  assert.deepEqual(seen.filter((row) => row.model === 'retry-stop').map((row) => row.provider), ['first'], 'a matched retry stop leaves exactly one real attempt');
+  let modelsView = await (await fetch(`http://127.0.0.1:${port}/api/models`)).json();
+  assert.equal(modelsView.subscription.find((row) => row.id === 'retry-stop').meta.upstreamStatus.first.success.degrades, 0, 'the paired provider-model ignore rule keeps the retry stop out of the success rate');
+
+  seen.length = 0; assert.equal((await call('retry-any')).status, 502);
+  assert.deepEqual(seen.map((row) => row.provider), ['first'], 'body needles match case-insensitively as plain substrings');
+  seen.length = 0; assert.equal((await call('retry-envelope')).status, 502);
+  assert.deepEqual(seen.map((row) => row.provider), ['first'], 'an HTTP 200 error envelope is normalized before retry matching');
+  seen.length = 0; assert.equal((await call('retry-sse', { stream: true })).status, 502);
+  assert.deepEqual(seen.map((row) => row.provider), ['first'], 'a pre-stream SSE error event matches the retry rule and never replays');
+  const sseRow = (await (await fetch(`http://127.0.0.1:${port}/api/models`)).json()).subscription.find((row) => row.id === 'retry-sse');
+  assert.equal(sseRow.meta.upstreamStatus.first.success.degrades, 0, 'the paired ignore rule also covers the pre-stream SSE form');
+  seen.length = 0; assert.equal((await call('retry-status-miss')).status, 200);
+  assert.deepEqual(seen.map((row) => row.provider), ['first', 'second'], 'a status-only match without the body needle keeps the compatible retry default');
+  seen.length = 0; assert.equal((await call('retry-body-miss')).status, 200);
+  assert.deepEqual(seen.map((row) => row.provider), ['first', 'second'], 'a body-only match without the status keeps the compatible retry default');
+  seen.length = 0; assert.equal((await call('retry-first-match')).status, 502);
+  assert.deepEqual(seen.map((row) => row.provider), ['first'], 'later retry rules are reachable when an earlier status match misses the body');
+  modelsView = await (await fetch(`http://127.0.0.1:${port}/api/models`)).json();
+  assert.equal(modelsView.subscription.find((row) => row.id === 'retry-first-match').meta.upstreamStatus.first.success.degrades, 1, 'a retry stop without a paired ignore rule keeps the independent default provider degrade');
+
+  seen.length = 0; assert.equal((await call('retry-compat')).status, 200);
+  assert.deepEqual(seen.map((row) => row.provider), ['first', 'second'], 'no retry rule match preserves the current continue behavior');
+
+  seen.length = 0; assert.equal((await call('retry-account')).status, 502);
+  assert.deepEqual(seen.map((row) => row.auth), ['Bearer key-a'], 'a retry stop blocks account replacement even when an account action would normally allow it');
+
+  await waitUntil(async () => { const page = await (await fetch(`http://127.0.0.1:${port}/api/logs/errors?requestedModel=retry-first-match&limit=5`)).json(); return page.items[0]?.retryRuleId === 'stop-beta' && page; });
+  const errorRow = (await (await fetch(`http://127.0.0.1:${port}/api/logs/errors?requestedModel=retry-first-match&limit=5`)).json()).items[0];
+  assert.equal(errorRow.retryRuleId, 'stop-beta'); assert.equal(errorRow.retryDecision, 'stop'); assert.deepEqual(errorRow.retryMatchedBy, ['status', 'body']);
+  const stopRow = (await (await fetch(`http://127.0.0.1:${port}/api/logs/errors?requestedModel=retry-account&limit=5`)).json()).items[0];
+  assert.equal(stopRow.retryRuleId, 'stop-system-message');
+  const serialized = JSON.stringify(await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?limit=200`)).json()) + JSON.stringify(await (await fetch(`http://127.0.0.1:${port}/api/logs/errors?limit=200`)).json());
+  assert.equal(serialized.includes('body_contains'), false, 'ordinary logs never project raw rule conditions');
+  assert.equal(serialized.includes('needle'), false, 'ordinary logs never project rule needles');
+  assert.equal(fs.readFileSync(path.join(dir, 'metadata.json'), 'utf8').includes('system message must have content'), false, 'durable metadata never stores a retry needle');
+
+  await stop(running.child); running.child = null; running = await startSwitcher(null, dir);
+  const view = await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+  assert.equal(view.retryRules.length, 4, 'retryRules round-trip through restart');
+});
+
+test('retryRules management API validates strictly, preserves old-client omission and keeps config bytes on rejection', async (t) => {
+  const config = {
+    port: await unusedPort(), accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 0,
+    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }],
+    knownModels: ['m'], perModel: {}, errorRules: [],
+    retryRules: [{ id: 'stop-default', decision: 'stop', when: { statuses: [502], body_contains: ['system message must have content'] } }],
+  };
+  let running = await startSwitcher(config);
+  t.after(async () => { if (running?.child) await stop(running.child); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const view = await (await fetch(`http://127.0.0.1:${running.port || config.port}/api/accounts`)).json();
+  assert.deepEqual(view.retryRules, config.retryRules);
+  const replacement = [{ id: 'stop-x', decision: 'stop', when: { statuses: [500, 599], body_contains: ['a', 'b'] } }];
+  assert.equal((await rawJson(config.port, '/api/accounts', { accounts: view.accounts, mode: view.mode, active: view.active, concurrencyWaitMs: view.concurrencyWaitMs, errorRules: view.errorRules, accountPipeline: view.accountPipeline, retryRules: replacement })).status, 200);
+  let current = await (await fetch(`http://127.0.0.1:${config.port}/api/accounts`)).json();
+  assert.deepEqual(current.retryRules, replacement, 'new UI round trip');
+  assert.equal((await rawJson(config.port, '/api/accounts', { accounts: current.accounts, mode: current.mode, active: current.active, concurrencyWaitMs: current.concurrencyWaitMs, errorRules: current.errorRules, accountPipeline: current.accountPipeline })).status, 200);
+  current = await (await fetch(`http://127.0.0.1:${config.port}/api/accounts`)).json();
+  assert.deepEqual(current.retryRules, replacement, 'an older client that omits retryRules preserves the current value');
+  const configBytes = fs.readFileSync(path.join(running.dir, 'config.json'));
+  const invalid = [
+    null, {}, 'x',
+    [{ id: 'x', decision: 'stop', when: { statuses: [502] } }],
+    [{ id: 'x', decision: 'stop', when: { body_contains: 'needle' } }],
+    [{ id: 'x', decision: 'continue', when: { statuses: [502], body_contains: 'needle' } }],
+    [{ id: 'x', decision: 'stop', when: { statuses: [502], body_contains: 'needle' }, extra: true }],
+    [{ id: '-x', decision: 'stop', when: { statuses: [502], body_contains: 'needle' } }],
+    [{ id: 'x', decision: 'stop', when: { statuses: [99], body_contains: 'needle' } }],
+    [{ id: 'x', decision: 'stop', when: { statuses: [502], body_contains: '' } }],
+    [{ id: 'x', decision: 'stop', when: { statuses: [502], body_contains: 'a'.repeat(501) } }],
+    [{ id: 'x', decision: 'stop', when: { statuses: [502], body_contains: ['a', 'A'] } }],
+    [replacement[0], { ...replacement[0] }],
+    Array.from({ length: 101 }, (_, index) => ({ id: `stop-${index}`, decision: 'stop', when: { statuses: [502], body_contains: 'needle' } })),
+    Array.from({ length: 20 }, (_, index) => ({ id: `stop-big-${index}`, decision: 'stop', when: { statuses: [502], body_contains: Array.from({ length: 20 }, (_, needle) => `needle-${index}-${needle}`.padEnd(400, 'x')) } })),
+  ];
+  for (const retryRules of invalid) {
+    const rejected = await rawJson(config.port, '/api/accounts', { accounts: current.accounts, mode: current.mode, active: current.active, concurrencyWaitMs: current.concurrencyWaitMs, errorRules: current.errorRules, accountPipeline: current.accountPipeline, retryRules });
+    assert.equal(rejected.status, 400, JSON.stringify(retryRules).slice(0, 200));
+    assert.deepEqual(fs.readFileSync(path.join(running.dir, 'config.json')), configBytes, 'a rejected payload never rewrites config bytes');
+  }
+});
+
+test('rule actions record exactly the declared direct health sample and disposition per scope', async (t) => {
+  const upstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'provider failed', status: 502 } }));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-sample-matrix-'));
+  const route = (providers) => ({ upstreams: providers, exclude: [], pinMode: 'strict', sort: null, maxRetries: null, providerCooldownMs: 0 });
+  const models = ['cooldown-pm', 'hard-pm', 'ignore-pm', 'hard-account'];
+  let running = await startSwitcher({
+    port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 0,
+    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }],
+    knownModels: models, perModel: Object.fromEntries(models.map((model) => [model, route(['first'])])),
+    errorRules: [
+      { id: 'pm-cool', scope: 'provider-model', action: 'cooldown', models: ['cooldown-pm'], when: { statuses: [502] }, reset: { fallback: '5m0s', max: '5m0s' } },
+      { id: 'pm-hard', scope: 'provider-model', action: 'hard-quarantine', models: ['hard-pm'], when: { statuses: [502] } },
+      { id: 'pm-ignore', scope: 'provider-model', action: 'ignore', models: ['ignore-pm'], when: { statuses: [502] } },
+      { id: 'acct-hard', scope: 'account', action: 'hard-quarantine', models: ['hard-account'], when: { statuses: [502] } },
+    ],
+  }, dir);
+  t.after(async () => { if (running?.child) await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  const call = (model) => rawJson(port, '/v1/chat/completions', { model, messages: [] });
+  const modelRow = async (model) => (await (await fetch(`http://127.0.0.1:${port}/api/models`)).json()).subscription.find((row) => row.id === model);
+
+  assert.equal((await call('cooldown-pm')).status, 502);
+  let row = await modelRow('cooldown-pm');
+  assert.equal(row.meta.upstreamStatus.first.success.degrades, 1, 'provider-model cooldown records exactly one failure sample');
+  assert.ok(row.meta.upstreamStatus.first.cooldownUntil > Date.now(), 'provider-model cooldown also keeps its temporary disposition');
+
+  assert.equal((await call('hard-pm')).status, 502);
+  row = await modelRow('hard-pm');
+  assert.equal(row.meta.upstreamStatus.first.success.degrades, 1, 'provider-model hard-quarantine records exactly one failure sample');
+  assert.equal(row.meta.upstreamStatus.first.hardQuarantined, true, 'provider-model hard-quarantine also keeps its durable disposition');
+
+  assert.equal((await call('ignore-pm')).status, 502);
+  row = await modelRow('ignore-pm');
+  assert.equal(row.meta.upstreamStatus.first.success.samples, 0, 'provider-model ignore records no failure sample');
+  assert.equal(row.meta.upstreamStatus.first.cooldownUntil, 0);
+  assert.equal(row.meta.upstreamStatus.first.hardQuarantined, false);
+
+  assert.equal((await call('hard-account')).status, 502);
+  row = await modelRow('hard-account');
+  assert.equal(row.meta.upstreamStatus.first.success.samples, 0, 'an account-scope action never records a provider-model sample');
+  const stats = await (await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();
+  const account = stats.accounts.find((entry) => entry.id === 'a');
+  assert.equal(account.health.degrades, 1, 'account hard-quarantine records exactly one account failure sample');
+  assert.equal(account.health.samples, 1, 'provider-model actions and ignore add no account sample');
 });

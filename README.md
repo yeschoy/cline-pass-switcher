@@ -7,7 +7,7 @@
 Node.js 本地/服务器代理 + 网页控制台，用于 [Cline Pass](https://cline.bot/cline-pass) 订阅：
 
 - 🔍 **上游枚举与校验** —— 列出订阅模型背后每一条上游渠道，并一键实测哪些「✔可用 / ⏳限流 / ✘不可钉」
-- 🎯 **精确钉住与一键配置上游** —— 严格钉住 / 优先+回退均由 switcher 外层执行；每个具名 HTTP attempt 只注入当前 provider 的单元素 `only`。可按账号执行探测→校验→预览→测试→确认，并支持 provider 内成本、首字、吞吐排序
+- 🎯 **精确钉住与一键配置上游** —— 首选固定+健康回退 / Switcher 健康自动选择都由 switcher 外层执行；每个具名 HTTP attempt 只注入当前 provider 的单元素 `only`。可按账号执行探测→校验→预览→测试→确认，并支持 provider 内成本、首字、吞吐排序
 - 🧬 **双维度错误策略** —— 一套有序 `errorRules` 可分别作用于账号或模型×Provider，支持状态码、正文 ANY、响应 Header、Provider/model 范围及 ignore/degrade/cooldown/hard-quarantine；只有显式规则会冷却或硬隔离
 - 🚫 **上游排除** —— 勾「排除」的已知渠道不会进入 attempt 计划；已知渠道全部被排除时安全失败，不会用 auto 绕过排除
 - 👥 **账号池** —— 支持单账号、轮询、HRW 粘性、最少连接、加权轮询和优先级容灾；六种安全预设可先预览再应用
@@ -102,7 +102,8 @@ location / {
 | `accountMode` | `single` / `roundrobin` / `sticky` / `least-connections` / `weighted-roundrobin` / `priority-failover` |
 | `activeAccount` | 单账号模式下使用的下标 |
 | `concurrencyWaitMs` | 容量等待时间，0～30000 ms，默认 2000 |
-| `errorRules` | 唯一权威的有序错误规则数组；每条含稳定 `id`、`account`/`provider-model` 维度、动作、可选 Provider/model 范围，以及 status/body/Header AND 条件。`cooldown.reset` 使用显式格式与严格 `d/h/m/s` fallback/max；最多 100 条/64 KiB |
+| `errorRules` | 唯一权威的有序错误规则数组；每条含稳定 `id`、`account`/`provider-model` 维度、动作、可选 Provider/model 范围，以及 status/body/Header AND 条件。`cooldown.reset` 使用显式格式与严格 `d/h/m/s` fallback/max；最多 100 条/64 KiB。动作与直接健康样本固定为 `ignore`/0、`degrade`/1、`cooldown`/1、`hard-quarantine`/1 个失败样本，后两者同时保持临时/持续处置 |
+| `retryRules` | 唯一权威的有序“停止重试”数组；每条含稳定 `id`、固定 `decision: "stop"`，以及同时存在的 `when.statuses` 与 `when.body_contains`。两类条件 AND、body 数组 ANY、大小写不敏感普通文本（不支持正则/Header）；首条命中即停止本请求剩余 Provider 与账号替换。缺失默认 `[]`；最多 100 条/64 KiB。普通日志只投影 `retryRuleId`/`retryDecision`/`retryMatchedBy` 枚举，不记录 needle 或匹配片段 |
 | `accountErrorRules` / `accountContentErrorRules` | 只读兼容镜像。旧配置启动时按“内容规则在前、状态规则在后”迁移；旧客户端不提交 `errorRules` 时只能原样回传镜像，试图修改会得到 409 |
 | `accountPipeline` | 可选叠加层：三个开关与 `order`，缓存池 min/max，以及显式/消息回退会话绑定 TTL 和 LRU 上限。`0 <= cachePoolSize <= cachePoolMaxSize <= 100000`；默认 TTL 为 2h/15m、上限 50,000。旧配置缺 max 时自动取 min，不会升级后自动扩容 |
 | `proxyKey` | 下游代理密钥；空 = 不鉴权 |
@@ -112,7 +113,7 @@ location / {
 | `exposeCatalog` | `true` 时代理的 `/v1/models` 会合并 Cline 公开目录模型；默认 `false` 只返回订阅模型（避免客户端模型列表被淹没） |
 | `knownModels` | 订阅模型清单（控制台主表） |
 | `modelAliases` | 客户端别名到现有 `cline-pass/*` 模型的映射；路由按解析后的模型执行 |
-| `perModel` | 每模型路由：`{ upstreams, exclude, pinMode, sort, maxRetries, providerCooldownMs }`；`maxRetries` 是首试后的外层重试次数，`providerCooldownMs` 为 0～300000（0 关闭）并在首包前确定性失败后短暂跳过该 Provider。账号内同名配置整项覆盖全局配置，不逐字段合并 |
+| `perModel` | 每模型路由：`{ upstreams, exclude, pinMode, sort, maxRetries, providerCooldownMs }`。`upstreams` 非空时是权威来源顺序，否则使用探测到的渠道顺序；`pinMode: "strict"` 首次固定来源顺序首个可用渠道，失败后从剩余渠道按 Provider-model 24h 成功率回退；`pinMode: "preferred"` 从首次起就用同一健康顺序。每次 named HTTP attempt 只注入一个 provider。`maxRetries` 是首试后的外层重试次数，`providerCooldownMs` 为 0～300000（0 关闭）并在首包前确定性失败后短暂跳过该 Provider。账号内同名配置整项覆盖全局配置，不逐字段合并 |
 | `apiKey` | 旧版单 key 字段，启动时自动迁移进 `accounts` |
 
 ---
@@ -165,17 +166,17 @@ Cline Pass 订阅模型在 Cline 网关之后分成两条管道，钉住上游�
 
 | 卡片 | 功能 |
 |---|---|
-| 账号管理 | 六种调度模式、缓存活跃/备用池、24h 缓存 Token/成功率/失败摘要、三步可排序流水线、双维度统一规则可视化表格与高级 JSON、快捷预设、名称/备注搜索、右侧设置抽屉和代理测试 |
+| 账号管理 | 六种调度模式、缓存活跃/备用池、24h 缓存 Token/成功率/失败摘要、三步可排序流水线、双维度统一规则可视化表格与高级 JSON、请求级停止重试规则与手动配对预设、快捷预设、名称/备注搜索、右侧设置抽屉和代理测试 |
 | 统计 | 累计/最近 24 小时真实 usage Token 与缓存覆盖、账号直接成功率/样本/覆盖、Cline 5h/周/月剩余额度及池状态 |
 | 访问与安全 | 修改下游代理密钥（即时生效）、公网代理地址、鉴权开关 |
-| 订阅模型 | 背后模型 / 渠道发现状态 / 最近实际渠道 / 24h 缓存 Token 占比与样本；渠道下拉（带可用性标注）；严格钉住 / 优先+回退；排序 |
+| 订阅模型 | 背后模型 / 渠道发现状态 / 最近实际渠道 / 24h 缓存 Token 占比与样本；渠道下拉（带可用性标注）；首选固定+健康回退 / Switcher 健康自动选择；排序 |
 | 操作按钮 | 探测（刷新渠道清单）、测试（单次钉住验证）、校验（固定账号全渠道实测）、一键配置（生成三种策略预览；确认后才保存） |
 | 测试台 | 任选模型+渠道发一条小请求，直接看网关是否采纳 |
 | 请求/错误日志 | 独立 JSONL 视图、筛选、游标分页、详情与分类清空 |
 | 模型别名 | 批量生成去前缀别名、统一前后缀、冲突校验和完整映射保存 |
 | 完整目录 | Cline 公开目录模型，`:free` 变体可精确钉住 |
 
-代理同时做了兼容性标准化：解包 Cline 的 `{"data":...}` 包装为标准 OpenAI 格式，并在可验证时保留真实上游 HTTP 状态；仅网络失败或无有效状态的错误包使用 502。响应附加不含密钥/会话值的诊断头：`X-Cline-Target-Upstream` 是最终账号的外层规划顺序，`X-Cline-Attempts` 是跨账号累计的真实 HTTP attempt 数，`X-Cline-Actual-Upstream` 只在响应 routing 中可解析终态 provider 时有值。三者都不能代替请求/错误日志中的逐次账号与 provider 路径。
+代理同时做了兼容性标准化：解包 Cline 的 `{"data":...}` 包装为标准 OpenAI 格式，并在可验证时保留真实上游 HTTP 状态；仅网络失败或无有效状态的错误包使用 502。响应附加不含密钥/会话值的诊断头：`X-Cline-Target-Upstream` 是最终账号按 strict/preferred 策略给出的候选偏好顺序，`X-Cline-Attempts` 是跨账号累计的真实 HTTP attempt 数，`X-Cline-Actual-Upstream` 只在响应 routing 中可解析终态 provider 时有值。静态渠道列表与规划顺序都不能冒充实际执行路径；三者都不能代替请求/错误日志中的逐次账号与 provider 路径。
 
 ## NewAPI、会话粘性与 Header 边界
 
@@ -183,7 +184,9 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 
 `sticky` 模式分别识别 Codex 的 parent thread / `prompt_cache_key` / session/thread 字段，以及 Claude Code 的 parent-agent / session / agent 字段；parent/root 优先于 child/agent。直接 Chat 请求若已有合法 `prompt_cache_key` 或 `session_id` 会原样保留；若只收到 Codex/Claude 显式会话 Header/metadata，则派生域分离、不可反推原值的 `prompt_cache_key` 发给 Cline。无显式会话时仍只对首个 system/developer 与首个 user 消息做本机 HMAC 账号路由，但不会把该 fallback 冒充成显式上游 key。原始会话、派生 key、HMAC 指纹和消息不会进入普通日志/metadata。客户端真实提供的协议 Header 仍按允许列表透传；`Authorization`、`Proxy-Authorization`、Cookie、逐跳 Header、Installation ID 和 Attestation 始终剔除，也不会伪造 User-Agent、设备、浏览器或 TLS 指纹。NewAPI 若在到达 Switcher 前已丢失会话字段，本服务无法恢复原值，会如实显示 `message_hmac` 回退。
 
-`errorRules` 按数组顺序首条命中（包括 `ignore`）。`statuses` 内部 OR，`body_contains` 字符串数组为 ANY；Provider/model 范围、状态、正文和 Header 条件之间为 AND，均使用大小写不敏感普通文本而非正则。无显式命中时，明确账号认证/额度/代理错误只记录账号 `degrade`，明确具名 Provider 的 429/5xx/网络/超时/不可用只记录该模型×Provider 的 `degrade`，不自动冷却。账号 cooldown/hard-quarantine 可在首包前最多换号一次；Provider 动作只影响当前 Provider；首包后只更新未来状态，不重放当前请求。账号通过现有恢复按钮清理状态，Provider 通过控制台恢复按钮或认证的 `POST /api/providers/recover` 精确恢复 `{ model, provider }`。
+`errorRules` 按数组顺序首条命中（包括 `ignore`）。`statuses` 内部 OR，`body_contains` 字符串数组为 ANY；Provider/model 范围、状态、正文和 Header 条件之间为 AND，均使用大小写不敏感普通文本而非正则。命中 `degrade`/`cooldown`/`hard-quarantine` 会为对应维度记录一个失败样本并（后两者）保持临时/持续处置，`ignore` 不写样本也不处置。无显式命中时，明确账号认证/额度/代理错误只记录账号 `degrade`，明确具名 Provider 的 429/5xx/网络/超时/不可用只记录该模型×Provider 的 `degrade`，不自动冷却。账号 cooldown/hard-quarantine 可在首包前最多换号一次；Provider 动作只影响当前 Provider；首包后只更新未来状态，不重放当前请求。账号通过现有恢复按钮清理状态，Provider 通过控制台恢复按钮或认证的 `POST /api/providers/recover` 精确恢复 `{ model, provider }`。
+
+`retryRules` 是独立的请求级停止条件：`statuses` 与 `body_contains` 同时命中即立即停止本请求全部剩余 Provider 与账号替换，并保留原始最终状态/正文；无命中则保持现有继续重试行为。它不隐式修改健康状态，只有同时存在的 `errorRules` 才决定样本与处置。控制台的“无效 system 消息停止重试”是手动预设：预览确认后同时加入 `retryRules: stop` 与同条件的 provider-model `ignore`，从而对确定性请求错误只发送一个真实 attempt、不换号、不降低渠道成功率；预设默认不启用，也不会在启动迁移中自动写入。
 
 调度固定先执行禁用、账号冷却、硬隔离和 reserve 等资格过滤。只有 success-rate 时，每次请求按 `success / (success + degrade)` 降序，有数据优先、无数据置后；只有 sticky 时继续使用无状态 HRW。sticky 与 healthSort 同时生效时，sticky 变为“已有会话绑定命中门”：hit 直接使用绑定账号，miss 才按 `order` 中 quotaPool/healthSort 的相对顺序处理当前活跃候选，并用 HRW 做同层稳定 tie-break。成功率变化不会迁移已有绑定。
 

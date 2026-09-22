@@ -69,6 +69,7 @@ A request record may contain only:
   pipelineSteps, selectedQuotaPool, selectedHealthLayer, capacityFallback,
   cachePoolSize, cachePoolMaxSize, cachePoolTargetSize, cachePoolTier, cachePoolFallback,
   bindingSource, bindingResult,
+  providerPlanSource, providerMode,
   targetProviders, actualProvider, attempts,
   status, result, upstreamStatus, durationMs,
   accountActions, appliedHeaderNames, errorCategory
@@ -78,6 +79,10 @@ A request record may contain only:
 `result` is exactly `success`, `client_cancelled`, or `failed`. `status` remains the final request status; client cancellation is `499`, has `errorCategory: null`, and suppresses all error-log attempt projection even when abort plumbing produced an internal transport trace. Older JSONL rows without `result` remain readable and are never migrated.
 
 `attempts` is a projection of provider/status/timing/account/action facts. Canonical rule diagnostics are limited to validated `ruleId`, `ruleScope`, `ruleAction`, and `matchedBy` condition-kind enums; they never contain needles, Header values, matched body text, or response bodies. Optional circuit/classification/media/byte facts remain bounded. These fields describe switcher-visible HTTP attempts; target lists and gateway-internal behavior are never promoted into an actual provider path.
+
+Strategy evidence is a bounded server projection, not a delivery promise. `providerPlanSource` is exactly `configured`, `discovered`, or `auto`; `providerMode` is exactly `strict` or `preferred`; and `attempts[].providerSelection` (also present on error rows) is exactly `strict-first`, `health`, or `compat-auto`. `compat-auto` belongs only to an unattributed `auto` attempt from a completely empty candidate source. A capacity rejection before any lease or provider plan reports `null` for both fields with no attempt selections; a routing rejection raised from `runChatChain()` still reports its `configured`/`discovered`/`auto` source and mode with an empty `attempts` array. These enums are the only provider-order evidence: the candidate rate map and success-rate numbers are never projected, `targetProviders` remains a bounded plan (provider slugs from the source order), and the static configuration list never claims to be the real runtime order.
+
+Retry evidence uses the same bounded allowlist on request rows and error rows: `retryRuleId` is a validated `ERROR_RULE_ID` or null, `retryDecision` is exactly `stop` or `continue` (default `continue`), and `retryMatchedBy` is at most `status`, `body`. Retry needles, matched body fragments, raw rule conditions, and provider success-rate values are never persisted; an older row without these fields is read as unknown and is never migrated.
 
 Affinity fields are bounded server enums/booleans only: `affinityKeyType` names the winning kind, `affinityConfidence` is `explicit`/`fallback`/`none`, `upstreamPromptCacheKeySource` is caller/derived/none/invalid, and `upstreamPromptCacheKeyApplied` means a valid field was sent, not that a remote router used it. `cacheHit` is true only for explicit cached tokens above zero, false only for explicit zero, and null when unknown. Pipeline fields are server-owned bounded values: `pipelineSteps` contains at most eight `quota-all-unknown` facts; `selectedQuotaPool` is `ordinary`, `hot`, `warm`, `unknown`, or `reserve`; `selectedHealthLayer` is `rated` or `unknown` when the success-rate step or cache-pool projection owns a health grouping, otherwise null; `capacityFallback` is boolean; `cachePoolSize` is the configured minimum and `cachePoolMaxSize` the configured maximum (both bounded integers), `cachePoolTargetSize` is the current effective grow-only target, `cachePoolTier` is `active` or null, and `cachePoolFallback` is a boolean that is now always `false`. The standby tier and `cache-pool-standby-overflow` reason no longer exist; a saturated miss returns `capacity-unavailable` or grows one member, and a saturated *bound* session temporarily overflows within the active set. `bindingSource` is exactly `explicit`, `fallback`, or `none`; `bindingResult` is exactly `hit`, `miss`, `invalidated`, `temporary-overflow`, `provisional`, or `not-applicable`. Selection reasons may additionally be `cache-pool-active`, `cache-pool-active-overflow`, `pipeline-sticky-primary`, or `pipeline-capacity-fallback`. `errorCategory` distinguishes bounded request outcomes such as `capacity`, `routing`, `proxy`, and `upstream`; in particular a local capacity 429 has no upstream attempt and must never be labelled as an upstream 429. Raw candidate lists, health buckets, quota payloads, percentages, identities, bindings, fingerprints, credentials, proxy data, and messages remain forbidden.
 
@@ -90,6 +95,7 @@ An error record may contain only:
   targetProvider, providerPath,
   status, upstreamStatus, category, reason, reasonTruncated, accountAction,
   ruleId, ruleScope, ruleAction, matchedBy,
+  retryRuleId, retryDecision, retryMatchedBy,
   errorScope, scopeEvidence, failureClass, healthAction,
   retryAfterMs, responseContentType, responseBytes,
   detailProfile?, detailCallId?
@@ -108,9 +114,10 @@ Never persist:
 - any Header value, Authorization, Cookie, or request body;
 - account note;
 - raw session/thread/conversation value or HMAC fingerprint;
-- message text, reasoning/content, or upstream response body.
+- message text, reasoning/content, or upstream response body;
+- a retry-rule needle, matched body fragment, raw retry condition, candidate rate map, or provider success-rate value.
 
-Only bounded identity-source/type/confidence enums, upstream-key source/applied booleans, cache-hit tri-state, bounded cache-pool min/max/target integers and tier, `bindingSource`/`bindingResult` enums, fixed binding hit/miss/invalidated/overflow/provisional counters, provider circuit actions, and applied safe Header names may be recorded. The actual caller/derived key and every raw/HMAC identity remain forbidden, including truncated/hash-prefix correlation tags. The session-binding map itself is never projected: no fingerprint, bound account ID map, entry list, expiry or `ownerRequestId` may appear in a request/error row, a management response body, or a service log line.
+Only bounded identity-source/type/confidence enums, upstream-key source/applied booleans, cache-hit tri-state, bounded cache-pool min/max/target integers and tier, `bindingSource`/`bindingResult` enums, fixed binding hit/miss/invalidated/overflow/provisional counters, provider circuit actions, `providerPlanSource`/`providerMode`/`providerSelection` enums, retry `retryRuleId`/`retryDecision`/`retryMatchedBy` fields, and applied safe Header names may be recorded. The actual caller/derived key and every raw/HMAC identity remain forbidden, including truncated/hash-prefix correlation tags. The session-binding map itself is never projected: no fingerprint, bound account ID map, entry list, expiry or `ownerRequestId` may appear in a request/error row, a management response body, or a service log line.
 
 #### Query and cursor
 
@@ -142,6 +149,9 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 | A cache-pool request is projected | persist bounded `cachePoolSize`/`cachePoolMaxSize`/`cachePoolTargetSize` integers, `cachePoolTier=active` (or null) and `cachePoolFallback=false`; never a member list or binding entry |
 | Ambiguous HTML 429 without a matching rule | persist `errorScope=unknown`, bounded evidence and default ignore, with no account action/body or implicit cooldown |
 | Pipeline diagnostics contain a non-owned/raw value | omit it; persist only the bounded enum/boolean projection |
+| `providerPlanSource`/`providerMode`/`providerSelection`/`retryDecision` is not a documented enum | omit the field (`null`/`continue`) instead of persisting the raw value |
+| A retry needle, matched body fragment, raw rule condition, candidate rate map, or success-rate number would be projected | never persist it; keep only validated `retryRuleId` plus `retryMatchedBy` condition kinds |
+| A historical JSONL row lacks strategy/retry fields | read them as unknown; never migrate, backfill, or infer them from adjacent rows |
 | Diagnostic JSONL or metadata persistence fails | report only a redacted service error; do not change the chat response |
 
 ### 5. Good / Base / Bad Cases
@@ -178,6 +188,7 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 - request `result` filtering returns only explicit new records, while historical rows without `result` remain readable and unmodified;
 - pipeline diagnostics, provider circuit actions, and provider health actions accept only the documented enum/boolean projection and contain no quota percentages, raw health data, or secrets;
 - scoped-rule rows expose only bounded ID/scope/action/condition kinds; unknown/provider/account defaults expose correct attribution while needles, Header values, raw bodies and request content remain absent;
+- strategy evidence persists only the bounded `providerPlanSource`/`providerMode`/`providerSelection` enums (with `compat-auto` limited to a truly empty `auto` source), and retry evidence persists only `retryRuleId`/`retryDecision`/`retryMatchedBy`; a candidate rate map, needle, matched fragment, or provider success-rate value never appears in a JSONL row, API payload, or metadata file;
 - simulated log/metadata write failures do not alter the already-determined chat status or body.
 
 Run `node --check lib/jsonl-log-store.js`, `node --test test/jsonl-log-store.test.js`, `npm test`, and `git diff --check` after changes.

@@ -559,3 +559,26 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 23: 单渠道健康选择与请求级重试停止
+<!-- trellis-session: v=2 fp=fc4eda3a26e64020 -->
+
+**Date**: 2026-09-22
+**Task**: 单渠道健康选择与请求级重试停止
+**Branch**: `feat/provider-success-retry-selection`
+
+### Summary
+
+实现 strict-first+健康回退与 preferred 健康首试的逐次 Provider 选择（排除已尝试项、maxRetries 限制 outer attempt、仅空来源允许 compat auto、全 exclude/all-hard 安全失败、单元素 only 无 order），新增顶层有序 retryRules（status AND body 首条命中即停止剩余 Provider 与账号替换、保留终态、SSE 首包后不判定不重放、与健康动作独立），修正规则动作样本语义为 ignore/0、degrade/1、cooldown/1、hard-quarantine/1 并排除 stale generation 与取消，日志新增有界策略与重试证据，控制台新增重试规则编辑器与手动配对预设。独立质量检查修复 stale generation 仍写 Provider 样本的缺陷；全量 194/194 通过；spec 已同步；未部署。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c952406` | feat: 实现单渠道健康选择与请求级重试停止 |
+| `f12bd64` | docs(spec): 同步重试规则与 Provider 健康选择契约 |
+
+### Status
+
+[OK] **Completed**

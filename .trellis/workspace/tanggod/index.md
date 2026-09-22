@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 22
+- **Total Sessions**: 23
 - **Last Active**: 2026-09-22
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~561 | Active |
+| `journal-1.md` | ~584 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 23 | 2026-09-22 | 单渠道健康选择与请求级重试停止 | `c952406`, `f12bd64` | `feat/provider-success-retry-selection` |
 | 22 | 2026-09-22 | 缓存热池动态扩容与会话命中优先 | `e6cd568`, `bb974c4`, `a51a187` | `feat/dynamic-cache-pool-growth` |
 | 21 | 2026-09-21 | 错误详情与日志热路径优化及生产部署 | `f137c54`, `16c3b96`, `3c249e8` | `main` |
 | 20 | 2026-09-20 | 统一双维度错误规则与成功率 | `cb19f2e`, `1008fc8` | `main` |

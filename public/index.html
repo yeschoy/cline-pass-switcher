@@ -193,7 +193,7 @@
     switcher 的每次 HTTP attempt 只注入一个 provider，避免网关内部不可观测的多渠道 <code class="mono">order</code> 回退。
     两类管道还都支持 <code class="mono">sort</code>（最低成本 / 最快首字 / 最高吞吐）。<br>
     ③ <b>目录模型 :free 变体</b>：属于直连管道，可精确钉住。<br>
-    ④ <b>多上游优先级 + 健康故障转移</b>：switcher 严格按人工顺序逐次发送单 provider 请求，只临时绕过仍在冷却的渠道，不按健康标签重排其余渠道；全部冷却时仅放行最早恢复者。流式请求在首包（SSE 开始）前同样可切换，SSE 开始后只更新未来健康状态、绝不重放。
+    ④ <b>多上游优先级 + 健康故障转移</b>：strict 首次固定使用来源顺序首个可用渠道，失败后从剩余渠道中按 Provider-model 24h 成功率回退；preferred 从首次起就用同一健康顺序。每次 HTTP attempt 只发送单 provider 请求，全部冷却时仅放行最早恢复者；SSE 开始后只更新未来健康状态、绝不重放。
   </div>
 
   <div class="toolbar">
@@ -251,6 +251,21 @@
         <textarea id="advancedErrorRulesJson" rows="18" spellcheck="false" oninput="markAdvancedErrorRulesDirty()" style="width:100%;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere"></textarea>
         <div id="advancedErrorRulesFeedback" aria-live="polite"></div>
         <div class="toolbar" style="margin-top:8px"><button type="button" onclick="applyAdvancedErrorRules()">应用到页面草稿</button><button type="button" class="ghost" onclick="refreshAdvancedErrorRules()">从当前草稿刷新</button></div>
+      </details>
+    </section>
+    <section id="retryRulesEditor" style="margin-top:12px" aria-labelledby="retryRulesTitle">
+      <h3 id="retryRulesTitle" style="font-size:14px;margin-bottom:8px">请求级停止重试规则</h3>
+      <div class="toolbar"><button class="ghost" type="button" onclick="previewRetryPreset()">预览“无效 system 消息停止重试”</button><button type="button" class="ghost" onclick="addRetryRule()">＋ 添加停止规则</button></div>
+      <p class="dim" style="font-size:12px;margin-bottom:8px">首条命中即停止本请求剩余 Provider 与账号替换；状态码与正文条件为 AND，正文数组为 ANY（大小写不敏感的普通文本，不支持正则）。无命中时保持现有重试行为。命中值只在请求内匹配，不进入普通日志或元数据。更改仅进入页面草稿，点击“保存账号配置”后生效。</p>
+      <div class="table-wrap"><table style="min-width:1120px"><thead><tr><th>ID</th><th>决策</th><th>状态码</th><th>正文 ANY</th><th>顺序</th><th>操作</th></tr></thead><tbody id="retryRuleBody"></tbody></table></div>
+      <div id="retryRuleFeedback" aria-live="polite" class="dim" style="font-size:12px;margin-top:6px"></div>
+      <details id="advancedRetryRules" style="margin-top:10px" ontoggle="if(this.open)openAdvancedRetryRules()">
+        <summary>高级 JSON（完整 retryRules 草稿）</summary>
+        <p class="dim" style="font-size:12px;margin:8px 0">JSON 修改不会自动生效；完整校验后点击“应用到页面草稿”。可视化规则变化会使已打开的 JSON 过期，防止覆盖新草稿。</p>
+        <label for="advancedRetryRulesJson">retryRules JSON</label>
+        <textarea id="advancedRetryRulesJson" rows="12" spellcheck="false" oninput="markAdvancedRetryRulesDirty()" style="width:100%;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere"></textarea>
+        <div id="advancedRetryRulesFeedback" aria-live="polite"></div>
+        <div class="toolbar" style="margin-top:8px"><button type="button" onclick="applyAdvancedRetryRules()">应用到页面草稿</button><button type="button" class="ghost" onclick="refreshAdvancedRetryRules()">从当前草稿刷新</button></div>
       </details>
     </section>
     <fieldset style="border:1px solid var(--border);padding:10px;margin-top:12px"><legend class="dim">会话命中条件门与未命中调度步骤（可选）</legend>
@@ -356,6 +371,7 @@
 </div>
 <div id="presetModal" class="modal"><div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="presetTitle"><h2 id="presetTitle">预设变更预览</h2><div id="presetDiff" style="white-space:pre-wrap;margin:14px 0"></div><div id="presetAdjust"></div><button onclick="applyPreset()">确认并保存</button> <button class="ghost" onclick="closePreset()">取消</button></div></div>
 <div id="errorPresetModal" class="modal"><div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="errorPresetTitle"><h2 id="errorPresetTitle">错误规则预设变更预览</h2><div id="errorPresetDiff" style="white-space:pre-wrap;margin:14px 0"></div><button onclick="applyErrorPreset()">确认并通过账号配置保存</button> <button class="ghost" onclick="closeErrorPreset()">取消</button></div></div>
+<div id="retryPresetModal" class="modal"><div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="retryPresetTitle"><h2 id="retryPresetTitle">请求停止重试预设变更预览</h2><div id="retryPresetDiff" style="white-space:pre-wrap;margin:14px 0"></div><p class="dim" style="font-size:12px">同时加入 502 + 正文“system message must have content”的停止重试规则与同条件的 Provider-model 忽略健康规则；取消不产生任何变化。</p><button onclick="applyRetryPreset()">确认并通过账号配置保存</button> <button class="ghost" onclick="closeRetryPreset()">取消</button></div></div>
 <div id="upstreamSetupModal" class="modal"><div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="upstreamSetupTitle"><h2 id="upstreamSetupTitle">上游一键配置预览</h2><label for="upstreamSetupStrategy" class="dim">策略</label><select id="upstreamSetupStrategy" onchange="renderUpstreamSetupProposal()"><option value="cache">缓存优先（strict）</option><option value="available">可用性优先（preferred）</option><option value="automatic">自动 sticky</option></select><pre id="upstreamSetupDiff" style="white-space:pre-wrap;margin:14px 0"></pre><div id="upstreamSetupStatus" aria-live="polite" class="dim" style="margin-bottom:12px"></div><button type="button" onclick="testUpstreamSetup()">测试建议</button> <button type="button" onclick="applyUpstreamSetup()">确认保存</button> <button type="button" class="ghost" onclick="closeUpstreamSetup()">取消</button></div></div>
 <script>
 let DATA = null;
@@ -504,9 +520,9 @@ function render() {
         ${upstreamPanel(s.id, m, s.config)}
       </td>
       <td>
-        <div><select onchange="saveCfg(${jsArg(s.id)},'pinMode',this.value)" title="严格与优先+回退都由 switcher 外层逐次执行；每次 HTTP attempt 仅发送一个 provider.only">
-          <option value="strict" ${mode === 'strict' ? 'selected' : ''}>严格钉住</option>
-          <option value="preferred" ${mode === 'preferred' ? 'selected' : ''}>优先+回退</option>
+        <div><select onchange="saveCfg(${jsArg(s.id)},'pinMode',this.value)" title="两种模式都由 switcher 外层逐次回退；每次 HTTP attempt 仅发送一个 provider.only。strict 首次用来源顺序首个可用渠道，失败后按 Provider-model 24h 成功率；preferred 从首次起使用同一健康顺序。">
+          <option value="strict" ${mode === 'strict' ? 'selected' : ''}>首选固定+健康回退</option>
+          <option value="preferred" ${mode === 'preferred' ? 'selected' : ''}>Switcher 健康自动选择</option>
         </select></div>
         <select onchange="saveCfg(${jsArg(s.id)},'sort',this.value)" style="margin-top:4px" title="仅排序当前 provider 内部端点，不改变人工 provider 优先级">
           <option value="" ${!sort ? 'selected' : ''}>网关智能选</option>
@@ -564,6 +580,7 @@ async function loadAll() {
   const runtime=ACCS.cachePool||{},binding=runtime.binding||{};
   $('#cachePoolRuntime').textContent=`当前目标 ${runtime.targetSize??cacheMin}（最小 ${runtime.minSize??cacheMin} / 上限 ${runtime.maxSize??pipeline.cachePoolMaxSize??cacheMin}）；会话绑定 ${binding.enabled?'已启用':'未启用'}，当前 ${binding.size??0} / ${binding.maxEntries??pipeline.sessionBindingMaxEntries??50000} 条`;
   hydrateErrorRuleDraft(ACCS.errorRules || []);
+  hydrateRetryRuleDraft(ACCS.retryRules || []);
   setPipelineOrder(ACCS.accountPipeline?.order || PIPELINE_DEFAULT_ORDER);
   $('#pipelineQuotaPool').checked=!!ACCS.accountPipeline?.quotaPool;$('#pipelineHealthSort').checked=!!ACCS.accountPipeline?.healthSort;$('#pipelineSticky').checked=!!ACCS.accountPipeline?.sticky;
   BULK_SELECTION.clear(); $('#bulkFeedback').textContent = '';
@@ -765,7 +782,7 @@ function showTest(r, model, target) {
       <div>实际上游 <b class="${hit && !hitExcluded ? 'match' : 'mismatch'}">${escapeHtml(r.actual || '未知')}</b></div>
       <div>耗时 <b>${r.ms} ms</b></div>
     </div>${traceHtml(r.trace)}
-    ${hitExcluded ? `<div class="mismatch">⚠ 排除未生效：命中了被排除的上游 ${escapeHtml(r.actual)}（该渠道可能不在本地已知清单内，或网关未遵守白名单；先点「探测」刷新渠道列表再试）</div>` : hit ? '✔ 上游匹配，选择已生效。' : (r.actual ? '✘ 未命中首个目标上游：渠道可能限流或不可钉（点「校验」检查全部渠道）；严格模式失败会直接报错，可改用「优先+回退」。' : '该模型响应未携带上游信息，无法回读实际上游。')}
+    ${hitExcluded ? `<div class="mismatch">⚠ 排除未生效：命中了被排除的上游 ${escapeHtml(r.actual)}（该渠道可能不在本地已知清单内，或网关未遵守白名单；先点「探测」刷新渠道列表再试）</div>` : hit ? '✔ 上游匹配，选择已生效。' : (r.actual ? '✘ 未命中首个目标上游：渠道可能限流或不可钉（点「校验」检查全部渠道）；strict 首次固定来源顺序首个可用渠道，失败后按渠道成功率回退，preferred 从首次起按成功率选择。' : '该模型响应未携带上游信息，无法回读实际上游。')}
     <div class="dim" style="margin-top:6px">回复：${escapeHtml(r.content || '(空)')}　·　背后模型：${escapeHtml(r.canonicalSlug || '—')}　·　管道：${r.pipeline === 'direct' ? '直连(OpenRouter)' : r.pipeline === 'planner' ? '规划器(Vercel)' : '未知'}</div>`;
 }
 
@@ -1066,13 +1083,56 @@ function refreshAdvancedErrorRules(force=false){if(ADVANCED_ERROR_RULES?.dirty&&
 function applyAdvancedErrorRules(){const snapshot=ADVANCED_ERROR_RULES;if(!snapshot)return refreshAdvancedErrorRules(true);if(snapshot.generation!==ERROR_RULE_GENERATION){$('#advancedErrorRulesFeedback').textContent='可视化草稿已变化，请先从当前草稿刷新';return;}let value;try{value=JSON.parse($('#advancedErrorRulesJson').value);validateErrorRuleDraft(value);commitErrorRuleDraft(value,'高级 JSON 已应用到页面草稿，尚未保存');const text=advancedRuleText();ADVANCED_ERROR_RULES={generation:ERROR_RULE_GENERATION,text,dirty:false};$('#advancedErrorRulesJson').value=text;$('#advancedErrorRulesFeedback').textContent='';}catch(error){$('#advancedErrorRulesFeedback').textContent=error.message||'高级 JSON 无效';}}
 // Editor snapshots detect stale sources; existing controls remain the scheduling draft owner.
 let RAW_SCHEDULING = null;
+// 停止重试规则与 errorRules 共用同一条完整草稿边界：可视化/高级 JSON/预设/原始调度都只改这个草稿。
+let RETRY_RULE_DRAFT = [], RETRY_RULE_GENERATION = 0, ADVANCED_RETRY_RULES = null, PENDING_RETRY_PRESET = null;
+function cloneRetryRuleDraft(value=RETRY_RULE_DRAFT){return JSON.parse(JSON.stringify(value));}
+function validateRetryRuleDraft(value){
+  if(!Array.isArray(value)||value.length>100||jsonUtf8Bytes(value)>64*1024)throw Error('retryRules 必须是不超过 100 条/64 KiB 的数组');
+  const ids=new Set();
+  for(const [index,rule]of value.entries()){
+    if(!ruleObject(rule)||Object.keys(rule).some(key=>!['id','decision','when'].includes(key)))throw Error(`第 ${index+1} 条停止规则字段无效`);
+    if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(rule.id||'')||ids.has(rule.id))throw Error(`第 ${index+1} 条停止规则 ID 无效或重复`);ids.add(rule.id);
+    if(rule.decision!=='stop')throw Error(`第 ${index+1} 条停止规则 decision 必须为 stop`);
+    if(!ruleObject(rule.when)||Object.keys(rule.when).some(key=>!['statuses','body_contains'].includes(key)))throw Error(`第 ${index+1} 条停止规则 when 无效`);
+    if(!Array.isArray(rule.when.statuses)||!rule.when.statuses.length||rule.when.statuses.length>500||rule.when.statuses.some(status=>!Number.isSafeInteger(status)||status<100||status>599)||new Set(rule.when.statuses).size!==rule.when.statuses.length)throw Error(`第 ${index+1} 条停止规则 statuses 无效`);
+    if(rule.when.body_contains===undefined||rule.when.body_contains===null)throw Error(`第 ${index+1} 条停止规则正文条件无效`);
+    const list=Array.isArray(rule.when.body_contains)?rule.when.body_contains:[rule.when.body_contains];
+    if(!list.length||list.length>20||list.some(text=>typeof text!=='string'||!text.trim()||text.trim().length>500||/[\x00-\x1f\x7f]/.test(text))||new Set(list.map(text=>text.trim().toLowerCase())).size!==list.length)throw Error(`第 ${index+1} 条停止规则正文条件无效`);
+  }
+}
+function retryRuleFailure(error){$('#retryRuleFeedback').textContent=error?.message||'停止重试规则草稿无效';}
+function commitRetryRuleDraft(next,message='停止重试规则草稿已更新，尚未保存'){
+  const normalized=cloneRetryRuleDraft(next);validateRetryRuleDraft(normalized);RETRY_RULE_DRAFT=normalized;RETRY_RULE_GENERATION++;renderRetryRules();$('#retryRuleFeedback').textContent=message;
+}
+function hydrateRetryRuleDraft(rules){
+  try{const next=JSON.parse(JSON.stringify(rules||[]));validateRetryRuleDraft(next);RETRY_RULE_DRAFT=next;RETRY_RULE_GENERATION++;$('#retryRuleFeedback').textContent='';renderRetryRules();if(!ADVANCED_RETRY_RULES||!ADVANCED_RETRY_RULES.dirty)refreshAdvancedRetryRules(true);}catch{$('#retryRuleFeedback').textContent='服务端 retryRules 无效，未加载';}
+}
+function renderRetryRules(){
+  const rows=RETRY_RULE_DRAFT.map((rule,index)=>{const when=rule.when||{},body=Array.isArray(when.body_contains)?when.body_contains.join('\n'):when.body_contains||'';return `<tr data-retry-rule-index="${index}"><td><label>ID <input aria-label="停止规则 ${index+1} ID" value="${escapeHtml(rule.id)}" onchange="updateRetryRule(${index},'id',this.value)"></label></td><td><span class="badge">stop</span></td><td><input aria-label="停止规则 ${index+1} 状态码" placeholder="502" value="${escapeHtml((when.statuses||[]).join(', '))}" onchange="updateRetryRule(${index},'statuses',this.value)"></td><td><textarea aria-label="停止规则 ${index+1} 正文 ANY" rows="2" placeholder="每行一个" onchange="updateRetryRule(${index},'body',this.value)">${escapeHtml(body)}</textarea></td><td><button type="button" class="ghost mini retry-rule-up" ${index===0?'disabled':''} onclick="moveRetryRule(${index},-1,this)">↑</button> <button type="button" class="ghost mini retry-rule-down" ${index===RETRY_RULE_DRAFT.length-1?'disabled':''} onclick="moveRetryRule(${index},1,this)">↓</button></td><td><button type="button" class="ghost mini" onclick="deleteRetryRule(${index})">删除</button></td></tr>`;}).join('');
+  $('#retryRuleBody').innerHTML=rows||'<tr><td colspan="6" class="empty">暂无停止重试规则</td></tr>';
+}
+function addRetryRule(){try{const next=cloneRetryRuleDraft();let suffix=next.length+1,id=`stop-${suffix}`;while(next.some(rule=>rule.id===id))id=`stop-${++suffix}`;next.push({id,decision:'stop',when:{statuses:[502],body_contains:'replace-me'}});commitRetryRuleDraft(next,'已添加停止规则，请修改正文条件后保存');}catch(error){retryRuleFailure(error);}}
+function updateRetryRule(index,field,raw){try{const next=cloneRetryRuleDraft(),rule=next[index];if(!rule)throw Error('停止规则已不存在');const text=String(raw).trim();if(field==='id')rule.id=text;else if(field==='statuses')rule.when.statuses=commaList(raw).map(Number);else if(field==='body'){const list=String(raw).split('\n').map(value=>value.trim()).filter(Boolean);rule.when.body_contains=list.length===1?list[0]:list;}commitRetryRuleDraft(next);}catch(error){retryRuleFailure(error);}}
+function deleteRetryRule(index){try{const next=cloneRetryRuleDraft();next.splice(index,1);commitRetryRuleDraft(next);}catch(error){retryRuleFailure(error);}}
+function moveRetryRule(index,direction,button){try{const next=cloneRetryRuleDraft(),target=index+direction;if(target<0||target>=next.length)return;[next[index],next[target]]=[next[target],next[index]];commitRetryRuleDraft(next);const selector=`[data-retry-rule-index="${target}"] .${direction<0?'retry-rule-down':'retry-rule-up'}`,focusTarget=document.querySelector(selector);if(focusTarget&&!focusTarget.disabled)focusTarget.focus();else button?.focus?.();}catch(error){retryRuleFailure(error);}}
+function advancedRetryRuleText(){return JSON.stringify(RETRY_RULE_DRAFT,null,2);}
+function openAdvancedRetryRules(){if(!ADVANCED_RETRY_RULES||!ADVANCED_RETRY_RULES.dirty&&ADVANCED_RETRY_RULES.generation!==RETRY_RULE_GENERATION)refreshAdvancedRetryRules(true);else if(ADVANCED_RETRY_RULES.generation!==RETRY_RULE_GENERATION)$('#advancedRetryRulesFeedback').textContent='可视化草稿已变化，应用前请从当前草稿刷新';setTimeout(()=>$('#advancedRetryRulesJson').focus(),0);}
+function markAdvancedRetryRulesDirty(){if(ADVANCED_RETRY_RULES)ADVANCED_RETRY_RULES.dirty=$('#advancedRetryRulesJson').value!==ADVANCED_RETRY_RULES.text;}
+function refreshAdvancedRetryRules(force=false){if(ADVANCED_RETRY_RULES?.dirty&&!force&&!confirm('高级 JSON 有未应用修改，确认从当前草稿刷新？'))return;const text=advancedRetryRuleText();ADVANCED_RETRY_RULES={generation:RETRY_RULE_GENERATION,text,dirty:false};$('#advancedRetryRulesJson').value=text;$('#advancedRetryRulesFeedback').textContent='';}
+function applyAdvancedRetryRules(){const snapshot=ADVANCED_RETRY_RULES;if(!snapshot)return refreshAdvancedRetryRules(true);if(snapshot.generation!==RETRY_RULE_GENERATION){$('#advancedRetryRulesFeedback').textContent='可视化草稿已变化，请先从当前草稿刷新';return;}let value;try{value=JSON.parse($('#advancedRetryRulesJson').value);validateRetryRuleDraft(value);commitRetryRuleDraft(value,'高级 JSON 已应用到页面草稿，尚未保存');const text=advancedRetryRuleText();ADVANCED_RETRY_RULES={generation:RETRY_RULE_GENERATION,text,dirty:false};$('#advancedRetryRulesJson').value=text;$('#advancedRetryRulesFeedback').textContent='';}catch(error){$('#advancedRetryRulesFeedback').textContent=error.message||'高级 JSON 无效';}}
+// 手动配对预设：同时加入 retryRules:stop 与同条件 provider-model 忽略健康规则；不自动启用、不启动迁移。
+const RETRY_PRESET={retryRules:[{id:'stop-empty-system-message',decision:'stop',when:{statuses:[502],body_contains:'system message must have content'}}],errorRules:[{id:'ignore-empty-system-message',scope:'provider-model',action:'ignore',when:{statuses:[502],body_contains:'system message must have content'}}]};
+function presetDiffLines(before,after){const beforeMap=new Map(before.map(rule=>[rule.id,rule])),afterMap=new Map(after.map(rule=>[rule.id,rule])),groups={保留:[],新增:[],修改:[],删除:[]};for(const id of [...new Set([...beforeMap.keys(),...afterMap.keys()])]){if(!beforeMap.has(id))groups.新增.push(id);else if(!afterMap.has(id))groups.删除.push(id);else if(JSON.stringify(beforeMap.get(id))===JSON.stringify(afterMap.get(id)))groups.保留.push(id);else groups.修改.push(id);}return Object.entries(groups).map(([label,items])=>`${label}（${items.length}）${items.length?': '+items.join(', '):''}`).join('\n');}
+function previewRetryPreset(){const retryBefore=cloneRetryRuleDraft(),errorBefore=cloneRuleDraft();const retryAfter=mergeRulesById(retryBefore,RETRY_PRESET.retryRules),errorAfter=mergeRulesById(errorBefore,RETRY_PRESET.errorRules);PENDING_RETRY_PRESET={retryRules:retryAfter,errorRules:errorAfter};$('#retryPresetDiff').textContent=`retryRules:\n${presetDiffLines(retryBefore,retryAfter)}\n\nerrorRules:\n${presetDiffLines(errorBefore,errorAfter)}`;$('#retryPresetModal').style.display='flex';}
+function closeRetryPreset(){$('#retryPresetModal').style.display='none';PENDING_RETRY_PRESET=null;}
+async function applyRetryPreset(){if(!PENDING_RETRY_PRESET)return;const pending=PENDING_RETRY_PRESET;try{validateRetryRuleDraft(pending.retryRules);validateErrorRuleDraft(pending.errorRules);}catch(error){retryRuleFailure(error);return;}closeRetryPreset();commitRetryRuleDraft(pending.retryRules,'停止重试预设已应用到页面草稿');commitErrorRuleDraft(pending.errorRules,'预设健康规则已应用到页面草稿');await saveAccounts();}
 const RAW_PIPELINE_CONTROLS = {quotaPool:'pipelineQuotaPool',healthSort:'pipelineHealthSort',sticky:'pipelineSticky'};
 const PIPELINE_NUMBER_CONTROLS = {cachePoolSize:'cachePoolSize',cachePoolMaxSize:'cachePoolMaxSize',sessionBindingExplicitTtlMs:'sessionBindingExplicitTtlMs',sessionBindingFallbackTtlMs:'sessionBindingFallbackTtlMs',sessionBindingMaxEntries:'sessionBindingMaxEntries'};
 function rawSchedulingControls() {
   const accountPipeline=Object.fromEntries(Object.entries(RAW_PIPELINE_CONTROLS).map(([key,id]) => [key,$('#'+id).checked]));
   accountPipeline.order=pipelineOrder();
   for(const [key,id] of Object.entries(PIPELINE_NUMBER_CONTROLS))accountPipeline[key]=$('#'+id).value;
-  return {accountMode:$('#accMode').value, concurrencyWaitMs:$('#concurrencyWaitMs').value,errorRules:JSON.stringify(ERROR_RULE_DRAFT),accountPipeline};
+  return {accountMode:$('#accMode').value, concurrencyWaitMs:$('#concurrencyWaitMs').value,errorRules:JSON.stringify(ERROR_RULE_DRAFT),retryRules:JSON.stringify(RETRY_RULE_DRAFT),accountPipeline};
 }
 function pipelineIntegerDraft(id,label,min,max) {
   const raw=String($('#'+id).value),value=Number(raw);
@@ -1093,7 +1153,7 @@ function pipelineNumberDraft() {
   return values;
 }
 function validateRawScheduling(value, names) {
-  if (!exactRuleObject(value,['accountMode','concurrencyWaitMs','errorRules','accountPipeline','accountNames'])) throw Error('根对象必须且只能包含五个指定字段');
+  if (!exactRuleObject(value,['accountMode','concurrencyWaitMs','errorRules','retryRules','accountPipeline','accountNames'])) throw Error('根对象必须且只能包含六个指定字段');
   if (!Array.from($('#accMode').options).some(option => option.value === value.accountMode)) throw Error('accountMode 无效');
   if (!Number.isInteger(value.concurrencyWaitMs) || value.concurrencyWaitMs < 0 || value.concurrencyWaitMs > 30000) throw Error('concurrencyWaitMs 必须为 0–30000 的整数');
   if (!exactRuleObject(value.accountPipeline,[...Object.keys(RAW_PIPELINE_CONTROLS),'order',...Object.keys(PIPELINE_NUMBER_CONTROLS)])) throw Error('accountPipeline 必须包含三个开关、order、缓存池 min/max 与会话绑定边界');
@@ -1105,6 +1165,7 @@ function validateRawScheduling(value, names) {
   if(value.accountPipeline.cachePoolMaxSize<value.accountPipeline.cachePoolSize)throw Error('accountPipeline.cachePoolMaxSize 不得小于 cachePoolSize');
   if(value.accountPipeline.sessionBindingFallbackTtlMs>value.accountPipeline.sessionBindingExplicitTtlMs)throw Error('fallback TTL 不得大于 explicit TTL');
   validateErrorRuleDraft(value.errorRules);
+  validateRetryRuleDraft(value.retryRules);
   if (!Array.isArray(value.accountNames) || !value.accountNames.every(name => typeof name === 'string') || JSON.stringify(value.accountNames) !== JSON.stringify(names)) throw Error('accountNames 仅供参考，不可修改');
 }
 function openRawScheduling(button) {
@@ -1113,7 +1174,7 @@ function openRawScheduling(button) {
   let value;
   try {
     if (!controls.concurrencyWaitMs.trim()) throw Error('concurrencyWaitMs 不可为空');
-    value = {accountMode:controls.accountMode,concurrencyWaitMs:Number(controls.concurrencyWaitMs),errorRules:cloneRuleDraft(),accountPipeline:{...controls.accountPipeline,...pipelineNumberDraft()},accountNames:names};
+    value = {accountMode:controls.accountMode,concurrencyWaitMs:Number(controls.concurrencyWaitMs),errorRules:cloneRuleDraft(),retryRules:cloneRetryRuleDraft(),accountPipeline:{...controls.accountPipeline,...pipelineNumberDraft()},accountNames:names};
     validateRawScheduling(value,names);
   } catch (e) { $('#rawSchedulingFeedback').textContent = e.message; return; }
   const text = JSON.stringify(value,null,2);
@@ -1142,13 +1203,14 @@ function applyRawScheduling() {
   catch (e) { $('#rawSchedulingError').textContent = e.message; return; }
   $('#accMode').value = value.accountMode; $('#concurrencyWaitMs').value = String(value.concurrencyWaitMs);
   commitErrorRuleDraft(value.errorRules,'原始调度 JSON 已应用到错误规则草稿');
+  commitRetryRuleDraft(value.retryRules,'原始调度 JSON 已应用到停止重试草稿');
   for(const [key,id] of Object.entries(PIPELINE_NUMBER_CONTROLS))$('#'+id).value=String(value.accountPipeline[key]);
   setPipelineOrder(value.accountPipeline.order);
   for (const [key,id] of Object.entries(RAW_PIPELINE_CONTROLS)) $('#'+id).checked = value.accountPipeline[key];
   renderAccounts(); closeRawScheduling(true);
   $('#rawSchedulingFeedback').textContent = '草稿已更新，尚未生效；请保存账号配置';
 }
-function collectAccounts(){validateErrorRuleDraft(ERROR_RULE_DRAFT);const rules=cloneRuleDraft();return {accounts:ACCS.accounts.map(a=>({id:a.id,name:a.name,note:a.note||'',key:a.key||'',enabled:a.enabled!==false,maxConcurrent:Number(a.maxConcurrent)||0,weight:Number(a.weight)||1,priority:Number(a.priority)||100,proxyUrl:a.proxyUrl||'',headers:a.headers||{},perModel:a.perModel||{}})),mode:$('#accMode').value,active:ACCS.active||0,errorRules:rules,accountPipeline:{quotaPool:$('#pipelineQuotaPool').checked,healthSort:$('#pipelineHealthSort').checked,sticky:$('#pipelineSticky').checked,order:pipelineOrder(),...pipelineNumberDraft()}};}
+function collectAccounts(){validateErrorRuleDraft(ERROR_RULE_DRAFT);validateRetryRuleDraft(RETRY_RULE_DRAFT);const rules=cloneRuleDraft(),retryRules=cloneRetryRuleDraft();return {accounts:ACCS.accounts.map(a=>({id:a.id,name:a.name,note:a.note||'',key:a.key||'',enabled:a.enabled!==false,maxConcurrent:Number(a.maxConcurrent)||0,weight:Number(a.weight)||1,priority:Number(a.priority)||100,proxyUrl:a.proxyUrl||'',headers:a.headers||{},perModel:a.perModel||{}})),mode:$('#accMode').value,active:ACCS.active||0,errorRules:rules,retryRules,accountPipeline:{quotaPool:$('#pipelineQuotaPool').checked,healthSort:$('#pipelineHealthSort').checked,sticky:$('#pipelineSticky').checked,order:pipelineOrder(),...pipelineNumberDraft()}};}
 async function saveAccounts(payload=null){if(!payload){try{payload=collectAccounts();}catch(e){return accMsg(e.message,true);}}payload.concurrencyWaitMs=Number($('#concurrencyWaitMs').value);if(payload.errorRules===undefined)payload.errorRules=cloneRuleDraft();if(!payload.accounts.some(a=>a.key))return accMsg('至少需要一个 key 非空的账号',true);const r=await api('/api/accounts',payload);if(!r.ok)return accMsg(r.error?.message||'保存失败',true);accMsg(`已保存：${r.accounts} 个账号 · ${r.mode}`);await loadAll();}
 async function recoverAccount(id){const r=await api('/api/accounts/recover',{id});if(r.ok){accMsg('账号已恢复');await loadAll();}}
 async function recoverProvider(model,provider){const r=await api('/api/providers/recover',{model,provider});if(!r.ok){$('#accLive').textContent=r.error?.message||'Provider 恢复失败';return;}$('#accLive').textContent=`已恢复 ${model} / ${provider}`;await loadAll();}

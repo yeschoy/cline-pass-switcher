@@ -27,6 +27,7 @@ normalizeAccountPipeline(value, { strict = false, fallbackOrder, fallbackCachePo
   fallbackCachePoolMaxSize, fallbackSessionBindingExplicitTtlMs,
   fallbackSessionBindingFallbackTtlMs, fallbackSessionBindingMaxEntries })
 normalizeErrorRules(value, { strict = false })
+normalizeRetryRules(value, { strict = false })
 normalizeCachePoolTarget(pipeline = config.accountPipeline)
 cachePoolTargetFor(pipeline = config.accountPipeline, value = META.cachePoolTargetSize)
 validateStatistics(statistics)
@@ -82,6 +83,11 @@ metadata.json   DATA_DIR/metadata.json
     when: { statuses?, body_contains?, header? },
     reset? // cooldown only: explicit Header format + strict fallback/max duration
   }],
+  retryRules: [{
+    id,
+    decision: "stop",
+    when: { statuses: integer[], body_contains: string | string[] } // both required; status AND body
+  }],
   accountErrorRules: {},        // legacy compatibility projection only
   accountContentErrorRules: [], // legacy compatibility projection only
   accountPipeline: {
@@ -123,6 +129,7 @@ Startup normalization preserves legacy behavior while making the schema explicit
 - normalize global and account routes with the same functions; missing/invalid persisted `providerCooldownMs` becomes 0, while strict saves accept only integer 0-300000;
 - default an invalid/missing wait to 2000 ms;
 - treat `errorRules` as the only authoritative ordered array, capped at 100 entries / 64 KiB with strict stable IDs, scopes, actions, applicability, conditions, Header names and reset durations; persisted canonical invalidity fails startup without rewriting bytes;
+- treat `retryRules` as the only authoritative ordered request-level stop array, capped at 100 entries / 64 KiB. Each entry requires a stable unique ID, `decision: "stop"`, and both `when.statuses` (non-empty unique safe integers 100-599) and `when.body_contains` (a non-empty string or a 1-20 element control-byte-free needle array with no case-insensitive duplicates). Unknown fields, a non-`stop` decision, duplicate IDs, missing conditions, out-of-range statuses, empty/oversized needles and oversize arrays are strict `400` at the management boundary and fail startup from a persisted canonical value without rewriting bytes. A missing/invalid legacy field normalizes to `[]`; the manual console preset is never auto-seeded or auto-migrated, and an older client that omits the field preserves the current server value;
 - when canonical rules are absent, migrate legacy content rules in original order before exact legacy status rules, map `ban` to account hard quarantine, persist canonical rules, and retain only lossless legacy API/config mirrors;
 - clamp `activeAccount` to the persisted account list;
 - normalize the pipeline to `quotaPool`, `healthSort`, `sticky`; recognized legacy four-step input folds `excludeUnhealthy:true` into health sorting and removes the duplicate step;
@@ -262,6 +269,8 @@ Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/
 | Route has over 20 upstreams, over 50 exclusions, invalid slug/mode/sort, `maxRetries` outside 0-20, or `providerCooldownMs` outside integer 0-300000 | `400`; no write |
 | Canonical rules are non-array/over 100/over 64 KiB, have invalid/duplicate IDs, unknown fields, empty/duplicate scopes, no active condition, invalid status/body/Header/applicability, or invalid reset format/duration | `400`; no write |
 | A POST omits `errorRules` and changes either legacy mirror | `409`; preserve canonical rules and file bytes; unchanged/missing mirrors are accepted |
+| A POST omits `retryRules` | preserve the current server value; never reset to `[]` or auto-seed the preset |
+| `retryRules` is non-array/over 100/over 64 KiB, or an entry is missing `id`/`decision`/`when`, has an unknown field, a non-`stop` decision, a duplicate ID, empty/out-of-range/duplicate statuses, or a missing/empty/oversized/control-byte/case-insensitively duplicate `body_contains` | `400`; no write; persisted canonical invalidity fails startup without rewriting bytes |
 | Canonical `accountPipeline` lacks any of the three booleans, has unknown fields, invalid `cachePoolSize`/`cachePoolMaxSize`, invalid binding TTL/entry bounds, or non-permutation order | `400`; no write; complete recognized legacy four-step input is normalized, and older omission of any field preserves current values |
 | `cachePoolMaxSize` is below `cachePoolSize`, or `sessionBindingFallbackTtlMs` exceeds `sessionBindingExplicitTtlMs` | strict save `400`; non-strict normalization clamps to the minimum / `min(900000, explicit)` |
 | Persisted `cachePoolTargetSize` is missing/non-integer/below min/above max | normalize the effect to `clamp(value, cachePoolSize, cachePoolMaxSize)`; do not fail startup and do not write a member list |
@@ -286,7 +295,7 @@ Startup normalization is permissive for legacy files; management APIs validate s
 - **Good:** an account route and global route both pass through `normalizeRouteConfig()`, so their persisted shapes stay identical.
 - **Good:** a known counter overflow persists as `null` plus one matching `overflowFields` entry, and the statistics API renders it as unknown.
 - **Good:** changing an account key invalidates its quota generation/state while retaining that stable ID's local usage history.
-- **Base:** `errorRules: []`, all-false canonical `accountPipeline` with `cachePoolSize: 0`, and `maxConcurrent: 0` preserve no-action/legacy-routing/unlimited behavior.
+- **Base:** `errorRules: []`, `retryRules: []`, all-false canonical `accountPipeline` with `cachePoolSize: 0`, and `maxConcurrent: 0` preserve no-action/continue-retry/legacy-routing/unlimited behavior.
 - **Base:** a missing metadata file creates a routing secret and owner-only metadata on first migration save.
 - **Bad:** catching JSON parse failure and saving defaults; this destroys operator configuration.
 - **Bad:** using account name or key as the state-map key; renaming or credential rotation would orphan state.
@@ -314,6 +323,7 @@ Persistence changes must use a temporary `DATA_DIR` and assert:
 - pruning retains 1,440 minute buckets, independently caps account/model cells, and marks only the dropped account/model coverage incomplete;
 - account removal deletes its `accountStates` entry;
 - invalid canonical rule IDs/scopes/actions/applicability/status/body/Header/reset shapes and limits return `400` and preserve bytes; legacy rules migrate in content-before-status order, unchanged old-client mirrors preserve canonical rules, conflicting mirrors return `409`, and valid canonical order survives restart;
+- `retryRules` strict validation rejects unknown fields, non-`stop` decisions, duplicate IDs, missing/oversized/out-of-range conditions and oversize arrays while preserving exact config bytes; a missing field defaults to `[]` without auto-seeding, an old-client omission preserves the stored value, and valid canonical entries round-trip through save and restart;
 - both detailed switches default/type/unknown-field/restart tests, legacy one-field settings writes, two-field writes and injected atomic-write failure preserve previous config bytes/runtime modes; independent detail retention/recovery never changes ordinary logs or metadata.
 
 The current integration suite directly covers malformed config preservation, legacy migration, metadata mode, routing-secret/cooldown restart, and session-value exclusion. Add focused assertions before relying on account-state cleanup or unchanged-file behavior after every validation branch.

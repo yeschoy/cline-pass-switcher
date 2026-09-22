@@ -295,7 +295,7 @@ test('raw editor projects only live scheduling and all reference names; combined
   h.el('#pipelineQuotaPool').checked=true;
   h.el('#accSearch').value='other'; h.run('clearBulkSelection(); openRawScheduling()');
   const draft=rawDraft(h), before=h.snapshot();
-  assert.deepEqual(Object.keys(draft),['accountMode','concurrencyWaitMs','errorRules','accountPipeline','accountNames']);
+  assert.deepEqual(Object.keys(draft),['accountMode','concurrencyWaitMs','errorRules','retryRules','accountPipeline','accountNames']);
   assert.deepEqual(draft.accountNames,before.accounts.map(a=>a.name));
   assert.equal(draft.accountMode,'sticky'); assert.equal(draft.concurrencyWaitMs,987);
   assert.deepEqual(draft.errorRules,[{id:'quota-418',scope:'account',action:'hard-quarantine',when:{statuses:[418],body_contains:'quota exceeded'}}]);
@@ -448,4 +448,79 @@ test('raw validator accepts six modes and numeric limits but rejects missing fie
     h.context.candidate={...base,concurrencyWaitMs:value};
     assert.throws(()=>h.run('validateRawScheduling(candidate,RAW_SCHEDULING.names)'));
   }
+});
+
+test('retry rule visual/advanced drafts are bounded, escaped and preserve a paired preset on cancel', async () => {
+  const h=harness();
+  h.run('addRetryRule()');
+  let draft=JSON.parse(h.run('JSON.stringify(RETRY_RULE_DRAFT)'));
+  assert.equal(draft.length,1); assert.equal(draft[0].decision,'stop'); assert.ok(draft[0].when.body_contains);
+  h.run("updateRetryRule(0,'id','stop-empty'); updateRetryRule(0,'statuses','502, 503'); updateRetryRule(0,'body','system message must have content\\n<unsafe needle>')");
+  draft=JSON.parse(h.run('JSON.stringify(RETRY_RULE_DRAFT)'));
+  assert.deepEqual(draft[0].when.statuses,[502,503]);
+  assert.deepEqual(draft[0].when.body_contains,['system message must have content','<unsafe needle>']);
+  assert.match(h.el('#retryRuleBody').innerHTML,/&lt;unsafe needle&gt;/); assert.doesNotMatch(h.el('#retryRuleBody').innerHTML,/<unsafe needle>/);
+  // Invalid visual edits keep the previous draft and never reach the API.
+  for(const raw of ['', '99, 600', '502, 502']) {
+    const before=JSON.parse(h.run('JSON.stringify(RETRY_RULE_DRAFT)'));
+    h.run(`updateRetryRule(0,'statuses',${JSON.stringify(raw)})`);
+    assert.deepEqual(JSON.parse(h.run('JSON.stringify(RETRY_RULE_DRAFT)')),before);
+  }
+  // Duplicate body needles (case-insensitive) are rejected without mutation.
+  {const before=JSON.parse(h.run('JSON.stringify(RETRY_RULE_DRAFT)')); h.run("updateRetryRule(0,'body','needle\\nNEEDLE')"); assert.deepEqual(JSON.parse(h.run('JSON.stringify(RETRY_RULE_DRAFT)')),before);}
+  assert.equal(h.calls.length,0);
+
+  // Advanced JSON shares one ordered draft and rejects stale snapshots.
+  h.run('openAdvancedRetryRules()');
+  const stale=h.el('#advancedRetryRulesJson').value;
+  h.run("deleteRetryRule(0)");
+  h.el('#advancedRetryRulesJson').value=stale; h.run('applyAdvancedRetryRules()');
+  assert.match(h.el('#advancedRetryRulesFeedback').textContent,/可视化草稿已变化/);
+  assert.equal(h.run('RETRY_RULE_DRAFT.length'),0);
+
+  // The paired preset previews both drafts and cancels without any change.
+  h.context.confirm=()=>true;
+  h.run("commitErrorRuleDraft([{id:'custom-ignored',scope:'account',action:'ignore',when:{statuses:[418]}}])");
+  h.run('openAdvancedRetryRules(); refreshAdvancedRetryRules(true)');
+  const before={retry:h.run('JSON.stringify(RETRY_RULE_DRAFT)'),error:h.run('JSON.stringify(ERROR_RULE_DRAFT)')};
+  h.run('previewRetryPreset()');
+  assert.ok(h.run('PENDING_RETRY_PRESET'));
+  h.run('closeRetryPreset()');
+  assert.deepEqual({retry:h.run('JSON.stringify(RETRY_RULE_DRAFT)'),error:h.run('JSON.stringify(ERROR_RULE_DRAFT)')},before);
+  assert.equal(h.calls.length,0);
+
+  h.run('previewRetryPreset()');
+  h.context.sent=[]; h.run("api=async(path,body)=>{sent.push({path,body});return {ok:false,error:{message:'fixture'}};}");
+  await h.run('applyRetryPreset()');
+  const payload=JSON.parse(h.run('JSON.stringify(sent[0].body)'));
+  assert.deepEqual(payload.retryRules,[{id:'stop-empty-system-message',decision:'stop',when:{statuses:[502],body_contains:'system message must have content'}}]);
+  assert.deepEqual(payload.errorRules.find(rule=>rule.id==='ignore-empty-system-message'),{id:'ignore-empty-system-message',scope:'provider-model',action:'ignore',when:{statuses:[502],body_contains:'system message must have content'}});
+  assert.ok(payload.errorRules.some(rule=>rule.id==='custom-ignored'),'the paired preset merges by stable ID and preserves custom rules');
+});
+
+test('raw scheduling editor round-trips retryRules, rejects invalid retry drafts and detects stale retry edits', () => {
+  const h=harness(); h.run('openRawScheduling()');
+  const base=rawDraft(h);
+  assert.deepEqual(base.retryRules,[]);
+  base.retryRules=[{id:'stop-raw',decision:'stop',when:{statuses:[502],body_contains:['raw needle']}}];
+  h.el('#rawSchedulingJson').value=JSON.stringify(base); h.run('applyRawScheduling()');
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(RETRY_RULE_DRAFT)')),base.retryRules);
+  // Invalid raw retryRules keep controls and draft unchanged and keep the dialog open.
+  const controls=liveScheduling(h), draftBefore=JSON.parse(h.run('JSON.stringify(RETRY_RULE_DRAFT)'));
+  for(const retryRules of [null,[{id:'x',decision:'stop',when:{statuses:[502]}}],[{id:'x',decision:'stop',when:{body_contains:'needle'}}],[{id:'x',decision:'continue',when:{statuses:[502],body_contains:'needle'}}]]) {
+    h.run("openRawScheduling()");
+    const candidate={...base,retryRules};
+    h.el('#rawSchedulingJson').value=JSON.stringify(candidate); h.run('applyRawScheduling()');
+    assert.equal(h.el('#rawSchedulingDialog').open,true); assert.ok(h.el('#rawSchedulingError').textContent);
+    assert.deepEqual(JSON.parse(h.run('JSON.stringify(RETRY_RULE_DRAFT)')),draftBefore);
+    assert.equal(liveScheduling(h),controls);
+  }
+  h.run('closeRawScheduling(true)');
+  // A retry draft edit after opening the raw editor makes its snapshot stale.
+  h.run('openRawScheduling()'); const text=h.el('#rawSchedulingJson').value;
+  h.run("commitRetryRuleDraft([{id:'stop-newer',decision:'stop',when:{statuses:[500],body_contains:'newer'}}])");
+  h.run('applyRawScheduling()');
+  assert.equal(h.el('#rawSchedulingJson').value,text);
+  assert.match(h.el('#rawSchedulingError').textContent,/重新打开/);
+  assert.equal(h.calls.length,0);
 });

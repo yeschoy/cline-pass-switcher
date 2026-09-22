@@ -38,6 +38,7 @@ const DEFAULT_CONFIG = {
   activeAccount: 0,        // single 模式下使用的账号下标
   concurrencyWaitMs: 2000,
   errorRules: [],          // canonical ordered account/provider-model failure rules
+  retryRules: [],          // canonical ordered request-level retry-stop rules
   accountErrorRules: {},   // legacy compatibility projection only
   accountContentErrorRules: [], // legacy compatibility projection only
   accountPipeline: {
@@ -95,6 +96,7 @@ function atomicWriteJson(file, obj) {
 }
 const loadedConfig = loadJson(CONFIG_PATH, {});
 const configHadCanonicalErrorRules = Object.hasOwn(loadedConfig, 'errorRules');
+const configHadCanonicalRetryRules = Object.hasOwn(loadedConfig, 'retryRules');
 const config = { ...DEFAULT_CONFIG, ...loadedConfig };
 const META = loadJson(META_PATH, { models: {}, history: [], catalog: null, orModelsFetchedAt: 0, orModelList: null });
 const saveConfig = () => atomicWriteJson(CONFIG_PATH, config);
@@ -297,6 +299,15 @@ const ERROR_RULE_RESET_FORMATS = new Set(['retry-after', 'unix-seconds', 'unix-m
 const MAX_ERROR_RULES = 100;
 const MAX_ERROR_RULE_BYTES = 64 * 1024;
 const MAX_ERROR_RULE_ITEMS = 500;
+const MAX_RETRY_RULES = 100;
+const MAX_RETRY_RULE_BYTES = 64 * 1024;
+const MAX_RETRY_RULE_ITEMS = 20;
+const RETRY_RULE_DECISIONS = new Set(['stop']);
+const RETRY_MATCH_KINDS = new Set(['status', 'body']);
+// 有界策略证据投影：只描述计划来源/模式与本次选择依据，不包含候选清单或成功率数值。
+const PROVIDER_PLAN_SOURCES = new Set(['configured', 'discovered', 'auto']);
+const PROVIDER_MODES = new Set(['strict', 'preferred']);
+const PROVIDER_SELECTIONS = new Set(['strict-first', 'health', 'compat-auto']);
 const MAX_ERROR_RULE_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
 const ERROR_RULE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
@@ -404,6 +415,37 @@ function normalizeErrorRules(value, { strict = false } = {}) {
         } else if (raw.reset.format !== undefined) throw new Error(`errorRules reset format requires header ${index}`);
       } else if (raw.reset !== undefined) throw new Error(`errorRules reset is only valid for cooldown ${index}`);
       out.push({ id, scope, action: raw.action, ...(providers ? { providers } : {}), ...(models ? { models } : {}), when, ...(reset ? { reset } : {}) });
+    }
+    return out;
+  } catch (error) { return fail(error); }
+}
+function normalizeRetryRules(value, { strict = false } = {}) {
+  const fail = (error) => { if (strict) throw error; console.warn(`[配置] 已禁用非法重试规则：${error.message}`); return []; };
+  try {
+    if (!Array.isArray(value) || value.length > MAX_RETRY_RULES) throw new Error(`retryRules must be an array with at most ${MAX_RETRY_RULES} entries`);
+    let bytes; try { bytes = Buffer.byteLength(JSON.stringify(value)); } catch { throw new Error('retryRules must be JSON serializable'); }
+    if (bytes > MAX_RETRY_RULE_BYTES) throw new Error('retryRules exceed 64 KiB');
+    const ids = new Set(), out = [];
+    for (const [index, raw] of value.entries()) {
+      if (!isPlainObject(raw)) throw new Error(`invalid retryRules entry ${index}`);
+      if (Object.keys(raw).some((key) => !['id','decision','when'].includes(key))) throw new Error(`unknown retryRules field ${index}`);
+      const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+      if (!ERROR_RULE_ID.test(id) || ids.has(id)) throw new Error(`invalid or duplicate retryRules id ${index}`);
+      ids.add(id);
+      if (!RETRY_RULE_DECISIONS.has(raw.decision)) throw new Error(`invalid retryRules decision ${index}`);
+      if (!isPlainObject(raw.when) || Object.keys(raw.when).some((key) => !['statuses','body_contains'].includes(key))) throw new Error(`invalid retryRules when ${index}`);
+      if (!Array.isArray(raw.when.statuses) || !raw.when.statuses.length || raw.when.statuses.length > MAX_ERROR_RULE_ITEMS || raw.when.statuses.some((status) => !Number.isSafeInteger(status) || status < 100 || status > 599) || new Set(raw.when.statuses).size !== raw.when.statuses.length) throw new Error(`invalid retryRules statuses ${index}`);
+      if (raw.when.body_contains === undefined || raw.when.body_contains === null) throw new Error(`invalid retryRules body_contains ${index}`);
+      const list = Array.isArray(raw.when.body_contains) ? raw.when.body_contains : [raw.when.body_contains];
+      if (!list.length || list.length > MAX_RETRY_RULE_ITEMS) throw new Error(`invalid retryRules body_contains ${index}`);
+      const normalized = [], seen = new Set();
+      for (const needle of list) {
+        const text = typeof needle === 'string' ? needle.trim() : '';
+        const key = text.toLowerCase();
+        if (!text || text.length > 500 || /[\x00-\x1f\x7f]/.test(text) || seen.has(key)) throw new Error(`invalid retryRules body_contains ${index}`);
+        seen.add(key); normalized.push(text);
+      }
+      out.push({ id, decision: 'stop', when: { statuses: [...raw.when.statuses], body_contains: Array.isArray(raw.when.body_contains) ? normalized : normalized[0] } });
     }
     return out;
   } catch (error) { return fail(error); }
@@ -602,6 +644,9 @@ const ROUTING_AGG_FIELDS = ['explicitAffinityRequests','fallbackAffinityRequests
 const AGG_FIELDS = [...LEGACY_AGG_FIELDS, ...ROUTING_AGG_FIELDS];
 const HEALTH_FIELDS = ['results','penaltyUnits','errors','auth','rateLimit','networkProxy','server','other'];
 const SUCCESS_FIELDS = ['successes','degrades'];
+// 直接成功率样本只由 generation 校验后的 healthAction 决定：处置动作与样本同源，
+// 但只有真正应用过的处置（或具名成功）才产生样本，规则命中/取消/stale generation 本身不写样本。
+const SAMPLE_FAILURE_ACTIONS = new Set(['degrade','cooldown','hard-quarantine']);
 function emptyAggregate() { return Object.fromEntries([...AGG_FIELDS.map((key) => [key, 0]), ['lastUsedAt', 0], ['lastErrorAt', 0], ['overflowFields', []]]); }
 function emptyHealth() { return Object.fromEntries(HEALTH_FIELDS.map((key) => [key, 0])); }
 function emptySuccessHealth() { return { successes: 0, degrades: 0, overflowFields: [] }; }
@@ -817,6 +862,8 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   const legacyRules = legacyRuleProjection(errorRules);
   if (JSON.stringify(legacyRules.accountErrorRules) !== JSON.stringify(config.accountErrorRules || {})) { config.accountErrorRules = legacyRules.accountErrorRules; dirty = true; }
   if (JSON.stringify(legacyRules.accountContentErrorRules) !== JSON.stringify(config.accountContentErrorRules || [])) { config.accountContentErrorRules = legacyRules.accountContentErrorRules; dirty = true; }
+  const retryRules = configHadCanonicalRetryRules ? normalizeRetryRules(config.retryRules, { strict: true }) : [];
+  if (!configHadCanonicalRetryRules || JSON.stringify(retryRules) !== JSON.stringify(config.retryRules)) { config.retryRules = retryRules; dirty = true; }
   const pipeline = normalizeAccountPipeline(config.accountPipeline);
   if (JSON.stringify(pipeline) !== JSON.stringify(config.accountPipeline)) { config.accountPipeline = pipeline; dirty = true; }
   if (normalizeCachePoolTarget(pipeline)) dirty = true;
@@ -1949,14 +1996,17 @@ function commitStatistics({ ts = Date.now(), modelId = null, globalError = false
     mergeAggregate(aggregateCell(stats.lifetime.accounts, segment.accountId), delta);
     mergeAggregate(aggregateCell(bucket.accounts, segment.accountId), delta);
     if (!clientDisconnect) {
-      const degraded = (segment.trace || []).some((attempt) => attempt.ruleScope === 'account' && attempt.ruleAction === 'degrade');
-      const sample = degraded ? 'degrades' : segment.success ? 'successes' : null;
+      const trace = segment.trace || [];
+      const degraded = trace.some((attempt) => attempt.ruleScope === 'account' && SAMPLE_FAILURE_ACTIONS.has(attempt.healthAction));
+      // 具名成功样本必须来自通过 generation 校验的 attempt；未归属 auto 成功沿用既有账号样本语义（有专项用例）。
+      const succeeded = segment.success && trace.some((attempt) => attempt.healthAction === 'success' || (!attempt.upstream && attempt.status === 200));
+      const sample = degraded ? 'degrades' : succeeded ? 'successes' : null;
       if (sample) addSuccessCounter(successHealthCell(bucket.accountHealth, segment.accountId), sample);
     }
   }
   if (!clientDisconnect && validStatisticModelId(modelId)) for (const attempt of globalTrace) {
     if (!attempt.upstream) continue;
-    const sample = attempt.status === 200 ? 'successes' : attempt.ruleScope === 'provider-model' && attempt.ruleAction === 'degrade' ? 'degrades' : null;
+    const sample = attempt.healthAction === 'success' ? 'successes' : attempt.ruleScope === 'provider-model' && SAMPLE_FAILURE_ACTIONS.has(attempt.healthAction) ? 'degrades' : null;
     if (sample) addSuccessCounter(providerSuccessHealthCell(bucket, modelId, attempt.upstream), sample);
   }
   pruneStatistics(ts);
@@ -2083,8 +2133,11 @@ function record(modelId, info, detail = detailContext.getStore()) {
     cachePoolTargetSize: Number.isInteger(info.pipeline?.cachePoolTargetSize) ? info.pipeline.cachePoolTargetSize : configuredCachePoolTargetSize(),
     cachePoolTier: ['active','standby'].includes(info.pipeline?.cachePoolTier) ? info.pipeline.cachePoolTier : null, cachePoolFallback: info.pipeline?.cachePoolFallback === true,
     targetProviders: Array.isArray(info.targets) ? info.targets : [], actualProvider: info.provider || null,
+    providerPlanSource: PROVIDER_PLAN_SOURCES.has(info.providerPlanSource) ? info.providerPlanSource : null,
+    providerMode: PROVIDER_MODES.has(info.providerMode) ? info.providerMode : null,
     attempts: Array.isArray(info.trace) ? info.trace.map((t) => ({
       provider: t.upstream || 'auto', status: t.status, upstreamStatus: t.upstreamStatus, ms: t.ms, account: t.account, action: ERROR_RULE_ACTIONS.has(t.action) ? t.action : null,
+      providerSelection: PROVIDER_SELECTIONS.has(t.providerSelection) ? t.providerSelection : null,
       ruleId: typeof t.ruleId === 'string' && ERROR_RULE_ID.test(t.ruleId) ? t.ruleId : null,
       ruleScope: ERROR_RULE_SCOPES.has(t.ruleScope) ? t.ruleScope : null,
       ruleAction: ERROR_RULE_ACTIONS.has(t.ruleAction) ? t.ruleAction : null,
@@ -2092,6 +2145,9 @@ function record(modelId, info, detail = detailContext.getStore()) {
       providerCircuitAction: ['cooldown','half-open-success','half-open-failed'].includes(t.providerCircuitAction) ? t.providerCircuitAction : null,
       errorScope: t.errorScope || null, scopeEvidence: t.scopeEvidence || null, failureClass: t.failureClass || null,
       healthAction: t.healthAction || 'none', retryAfterMs: t.retryAfterMs ?? null,
+      retryRuleId: typeof t.retryRuleId === 'string' && ERROR_RULE_ID.test(t.retryRuleId) ? t.retryRuleId : null,
+      retryDecision: t.retryDecision === 'stop' ? 'stop' : 'continue',
+      retryMatchedBy: Array.isArray(t.retryMatchedBy) ? t.retryMatchedBy.filter((value) => RETRY_MATCH_KINDS.has(value)).slice(0, 2) : [],
       responseContentType: t.responseContentType || null, responseBytes: Number.isSafeInteger(t.responseBytes) ? t.responseBytes : null,
     })) : [],
     status: result === 'client_cancelled' ? 499 : result === 'success' ? 200 : (info.normalizedStatus || 502), result, upstreamStatus: info.upstreamStatus ?? null,
@@ -2108,6 +2164,7 @@ function record(modelId, info, detail = detailContext.getStore()) {
     bounded.reasonTruncated ||= attempt.reasonTruncated === true;
     writes.push(errorLogs.append({ ts, requestId: request.requestId, requestedModel: request.requestedModel, resolvedModel: request.resolvedModel,
       accountId: attempt.accountId || info.accountId || null, accountName: attempt.account || info.account || null, attemptIndex,
+      providerSelection: PROVIDER_SELECTIONS.has(attempt.providerSelection) ? attempt.providerSelection : null,
       targetProvider: attempt.upstream || null, providerPath: (info.trace || []).slice(0, traceIndex + 1).map((t) => t.upstream || 'auto'),
       status: attempt.normalizedStatus || attempt.status, upstreamStatus: attempt.upstreamStatus ?? null,
       category: attempt.upstreamStatus === 0 ? (info.proxyError ? 'proxy' : 'network') : 'upstream', ...bounded, accountAction: attempt.ruleScope === 'account' ? attempt.ruleAction || null : null,
@@ -2117,6 +2174,9 @@ function record(modelId, info, detail = detailContext.getStore()) {
       matchedBy: Array.isArray(attempt.matchedBy) ? attempt.matchedBy.filter((value) => ['status','body','header','provider','model','default'].includes(value)).slice(0, 5) : [],
       errorScope: attempt.errorScope || null, scopeEvidence: attempt.scopeEvidence || null, failureClass: attempt.failureClass || null,
       healthAction: attempt.healthAction || 'none', retryAfterMs: attempt.retryAfterMs ?? null,
+      retryRuleId: typeof attempt.retryRuleId === 'string' && ERROR_RULE_ID.test(attempt.retryRuleId) ? attempt.retryRuleId : null,
+      retryDecision: attempt.retryDecision === 'stop' ? 'stop' : 'continue',
+      retryMatchedBy: Array.isArray(attempt.retryMatchedBy) ? attempt.retryMatchedBy.filter((value) => RETRY_MATCH_KINDS.has(value)).slice(0, 2) : [],
       responseContentType: attempt.responseContentType || null, responseBytes: Number.isSafeInteger(attempt.responseBytes) ? attempt.responseBytes : null,
       ...(detailProfile ? { detailProfile, detailCallId: attempt.callId } : {}) }));
   }
@@ -2736,25 +2796,73 @@ function injectPrefs(body, modelId, { upstream, sort = null }) {
   return b;
 }
 
-function buildProviderAttempts(modelId, cfg = {}, now = Date.now()) {
+// 稳定候选快照：configured 非空时权威，否则 stable discovered；exclude/硬隔离/冷却在快照阶段过滤。
+// 实际逐次选择由 selectProviderAttempt() 完成——strict 首试按来源顺序，后续与 preferred 都按 Provider-model 24h 成功率。
+function buildProviderPlan(modelId, cfg = {}, account = null, now = Date.now()) {
   const configuredOrder = normalizeStringList(cfg.upstreams, 20);
   const discoveredOrder = normalizeStringList(META.models[modelId]?.upstreams, 100);
   const exclude = new Set(normalizeStringList(cfg.exclude, 50));
   const source = configuredOrder.length ? 'configured' : discoveredOrder.length ? 'discovered' : 'auto';
-  const sourceOrder = source === 'configured' ? configuredOrder : source === 'discovered' ? discoveredOrder : [];
-  if (source === 'auto') {
-    return { attempts: [{ upstream: null, attribution: 'auto', sort: cfg.sort || null }], configuredOrder, plannedOrder: [], failOpen: false, source, allExcluded: false };
-  }
-  const allowed = sourceOrder.filter((provider) => !exclude.has(provider));
-  if (!allowed.length) return { attempts: [], configuredOrder, plannedOrder: [], failOpen: false, source, allExcluded: true };
-  let planned = allowed.filter((provider) => { const state = providerHealthState(modelId, provider); return !state.hardQuarantined && state.cooldownUntil <= now; });
-  if (!planned.length) {
+  const mode = cfg.pinMode === 'preferred' ? 'preferred' : 'strict';
+  const plan = {
+    source, mode, sort: cfg.sort || null, providerCooldownMs: Number(cfg.providerCooldownMs) || 0,
+    maxAttempts: cfg.maxRetries === null || cfg.maxRetries === undefined ? Infinity : Math.max(1, Number(cfg.maxRetries) + 1),
+    accountGeneration: account ? (providerCircuitAccountGenerations.get(account.id) || 0) : 0,
+    routeGeneration: account ? (providerCircuitRouteGenerations.get(providerCircuitRouteKey(account.id, modelId)) || 0) : 0,
+    sourceOrder: [], sourceIndex: new Map(), available: [], rates: new Map(), plannedOrder: [], allExcluded: false, retryAfter: null,
+  };
+  if (source === 'auto') { plan.maxAttempts = 1; return plan; }
+  plan.sourceOrder = source === 'configured' ? configuredOrder : discoveredOrder;
+  plan.sourceIndex = new Map(plan.sourceOrder.map((provider, index) => [provider, index]));
+  const allowed = plan.sourceOrder.filter((provider) => !exclude.has(provider));
+  plan.allExcluded = allowed.length === 0;
+  plan.available = allowed.filter((provider) => { const state = providerHealthState(modelId, provider); return !state.hardQuarantined && state.cooldownUntil <= now; });
+  if (!plan.allExcluded && !plan.available.length) {
     const future = allowed.map((provider) => providerHealthState(modelId, provider)).filter((state) => !state.hardQuarantined && state.cooldownUntil > now).map((state) => state.cooldownUntil);
-    return { attempts: [], configuredOrder, plannedOrder: [], failOpen: false, source, allExcluded: false, retryAfter: future.length ? retryAfterSeconds(Math.min(...future) - now) : null };
+    plan.retryAfter = future.length ? retryAfterSeconds(Math.min(...future) - now) : null;
   }
-  if (cfg.maxRetries !== null && cfg.maxRetries !== undefined) planned = planned.slice(0, Math.max(1, Number(cfg.maxRetries) + 1));
-  const attempts = planned.map((upstream) => ({ upstream, attribution: 'named', sort: cfg.sort || null }));
-  return { attempts, configuredOrder, plannedOrder: [...planned], failOpen: false, source, allExcluded: false };
+  for (const provider of plan.available) plan.rates.set(provider, successHealthProjection('provider-model', modelId, provider, now).successRate);
+  plan.plannedOrder = plan.mode === 'preferred'
+    ? healthOrderedProviders(plan, plan.available)
+    : plan.available.length ? [plan.available[0], ...healthOrderedProviders(plan, plan.available.slice(1))] : [];
+  return plan;
+}
+// Provider-model 24h 直接成功率降序；null 最后，同率/都未知按来源顺序。
+function healthOrderedProviders(plan, providers) {
+  return [...providers].sort((left, right) => {
+    const rateLeft = plan.rates.get(left), rateRight = plan.rates.get(right);
+    const unknownLeft = rateLeft === null || rateLeft === undefined, unknownRight = rateRight === null || rateRight === undefined;
+    if (unknownLeft && unknownRight) return (plan.sourceIndex.get(left) ?? 0) - (plan.sourceIndex.get(right) ?? 0);
+    if (unknownLeft) return 1;
+    if (unknownRight) return -1;
+    if (rateRight !== rateLeft) return rateRight - rateLeft;
+    return (plan.sourceIndex.get(left) ?? 0) - (plan.sourceIndex.get(right) ?? 0);
+  });
+}
+function namedProviderAttempt(plan, provider, extra = {}) {
+  return { upstream: provider, attribution: 'named', sort: plan.sort, circuitAccountGeneration: plan.accountGeneration, circuitRouteGeneration: plan.routeGeneration, ...extra };
+}
+function autoProviderAttempt(plan) {
+  return { upstream: null, attribution: 'auto', selection: 'compat-auto', sort: plan.sort, circuitAccountGeneration: plan.accountGeneration, circuitRouteGeneration: plan.routeGeneration };
+}
+// 每次 named attempt 前从 remaining 重新选择，排除本请求已尝试项。
+function selectProviderAttempt(modelId, plan, account, attempted, now = Date.now()) {
+  const remaining = plan.available.filter((provider) => !attempted.has(provider));
+  if (!remaining.length) return { attempt: null, retryAfter: null };
+  // strict 模式的首个 attempt 是 strict-first（本请求首个真实尝试，按来源顺序取首个可用 provider）；
+  // strict 的后续重试与 preferred 的全部尝试都按 Provider-model 24h 成功率（health）。这是纯证据标注，不改变选择。
+  const strictFirst = plan.mode === 'strict' && attempted.size === 0;
+  const ordered = strictFirst ? remaining : healthOrderedProviders(plan, remaining);
+  const selection = strictFirst ? 'strict-first' : 'health';
+  if (!(plan.providerCooldownMs > 0)) return { attempt: namedProviderAttempt(plan, ordered[0], { selection }), retryAfter: null };
+  let blockedUntil = null;
+  for (const provider of ordered) {
+    const key = providerCircuitKey(account.id, modelId, provider), state = providerCircuitStates.get(key);
+    if (!state) return { attempt: namedProviderAttempt(plan, provider, { circuitKey: key, selection }), retryAfter: null };
+    if (state.cooldownUntil > now || state.halfOpen) { blockedUntil = Math.min(blockedUntil ?? Infinity, state.cooldownUntil > now ? state.cooldownUntil : now + 1000); continue; }
+    return { attempt: namedProviderAttempt(plan, provider, { circuitKey: key, circuitHalfOpen: true, selection }), retryAfter: null };
+  }
+  return { attempt: null, retryAfter: retryAfterSeconds(Math.max(1000, (blockedUntil ?? now + 1000) - now)) };
 }
 function providerCircuitKey(accountId, modelId, provider) { return `${accountId}\0${modelId}\0${provider}`; }
 function providerCircuitRouteKey(accountId, modelId) { return `${accountId}\0${modelId}`; }
@@ -2778,27 +2886,6 @@ function ensureProviderCircuitCapacity(now = Date.now()) {
     providerCircuitStates.delete(removable[0]);
   }
   return true;
-}
-function planProviderAttempts(modelId, cfg, account) {
-  const base = buildProviderAttempts(modelId, cfg), attempts = base.attempts;
-  if (!attempts.length) return { ...base, retryAfter: base.retryAfter ?? null };
-  const now = Date.now(), cooldownMs = Number(cfg?.providerCooldownMs) || 0;
-  const accountGeneration = providerCircuitAccountGenerations.get(account.id) || 0;
-  const routeKey = providerCircuitRouteKey(account.id, modelId), routeGeneration = providerCircuitRouteGenerations.get(routeKey) || 0;
-  const annotate = (attempt) => ({ ...attempt, circuitAccountGeneration: accountGeneration, circuitRouteGeneration: routeGeneration });
-  if (cooldownMs <= 0) return { ...base, attempts: attempts.map(annotate), retryAfter: null };
-  const ready = [], blocked = [];
-  for (const rawAttempt of attempts) {
-    const attempt = annotate(rawAttempt);
-    if (!attempt.upstream) { ready.push(attempt); continue; }
-    const key = providerCircuitKey(account.id, modelId, attempt.upstream), circuitAttempt = { ...attempt, circuitKey: key }, state = providerCircuitStates.get(key);
-    if (!state) { ready.push(circuitAttempt); continue; }
-    if (state.cooldownUntil > now || state.halfOpen) { blocked.push(state); continue; }
-    ready.push({ ...circuitAttempt, circuitHalfOpen: true });
-  }
-  if (ready.length) return { ...base, attempts: ready, plannedOrder: ready.map((attempt) => attempt.upstream).filter(Boolean), retryAfter: null };
-  const earliest = Math.min(...blocked.map((state) => state.cooldownUntil > now ? state.cooldownUntil : now + 1000));
-  return { ...base, attempts: [], plannedOrder: [], retryAfter: retryAfterSeconds(Math.max(1000, earliest - now)) };
 }
 function providerAttemptGenerationIsCurrent(modelId, account, attempt) {
   const routeKey = providerCircuitRouteKey(account.id, modelId);
@@ -2993,9 +3080,27 @@ function resetDelayForRule(reset, headers, now = Date.now()) {
   if (!Number.isSafeInteger(delay) || delay <= 0) delay = fallback;
   return Math.max(1, Math.min(maximum, delay));
 }
+function failureRuleText(result, sensitiveValues = []) {
+  return normalizeFailureForRules(result?.failureText ?? result?.structuredError ?? result?.out?.error?.message ?? result?.body?.error?.message ?? result?.error ?? result?.netError ?? '', sensitiveValues);
+}
+// 顶层有序 retryRules：status 与 body 条件 AND，body 数组 ANY，首条命中即 stop。
+// 只返回有界 rule ID/decision/命中类型；needle 与匹配片段只在请求内存在。
+function matchRetryRule(result, sensitiveValues = []) {
+  const statusCode = Number(result?.normalizedStatus || result?.status);
+  const body = failureRuleText(result, sensitiveValues).toLowerCase();
+  for (const rule of config.retryRules || []) {
+    if (!rule.when.statuses.includes(statusCode)) continue;
+    const needles = rule.when.body_contains;
+    const matchedBy = ['status'];
+    if (!body || !needles.some((needle) => body.includes(needle.toLowerCase()))) continue;
+    matchedBy.push('body');
+    return { ruleId: rule.id, decision: 'stop', matchedBy, statusCode };
+  }
+  return { ruleId: null, decision: 'continue', matchedBy: [], statusCode };
+}
 function matchErrorRule({ result, classification, modelId, provider, sensitiveValues = [] }) {
   const statusCode = Number(result?.normalizedStatus || result?.status);
-  const body = normalizeFailureForRules(result?.failureText ?? result?.structuredError ?? result?.out?.error?.message ?? result?.body?.error?.message ?? result?.error ?? result?.netError ?? '', sensitiveValues).toLowerCase();
+  const body = failureRuleText(result, sensitiveValues).toLowerCase();
   for (const rule of config.errorRules || []) {
     if (rule.scope === 'provider-model' && !provider) continue;
     if (rule.providers && (!provider || !rule.providers.some((value) => value.toLowerCase() === provider.toLowerCase()))) continue;
@@ -3076,13 +3181,13 @@ function settleAttempt(modelId, attempt, result, account, { clientDisconnected =
   if (clientDisconnected) {
     settleDetail(false, 'client-cancelled');
     const providerCircuitAction = currentGeneration ? settleProviderCircuit(modelId, cfg, account, attempt, { status: 499, normalizedStatus: 499, netError: 'client cancelled', classification: { scope: 'request' } }) : null;
-    return { classification: null, policy: null, accountAction: null, healthAction: 'none', providerCircuitAction };
+    return { classification: null, policy: null, accountAction: null, healthAction: 'none', providerCircuitAction, retryDecision: null };
   }
   if (result.status === 200) {
     settleDetail(false, result.detailCaptureState || 'success');
     const healthAction = updateSuccess && currentGeneration ? updateProviderHealth(modelId, attempt.upstream, { success: true }) : 'none';
     const providerCircuitAction = updateSuccess && currentGeneration ? settleProviderCircuit(modelId, cfg, account, attempt, result) : null;
-    return { classification: null, policy: null, accountAction: null, healthAction, providerCircuitAction };
+    return { classification: null, policy: null, accountAction: null, healthAction, providerCircuitAction, retryDecision: null };
   }
   settleDetail(true);
   const classification = classifyAttemptFailure(result, attempt, account);
@@ -3096,7 +3201,8 @@ function settleAttempt(modelId, attempt, result, account, { clientDisconnected =
   const healthAction = currentGeneration ? (policy.action === 'degrade' ? 'degrade' : policy.action) : 'none';
   if (currentGeneration && policy.scope === 'provider-model' && policy.action === 'degrade') updateProviderHealth(modelId, attempt.upstream, { classification, note: `${classification.evidence}:${classification.failureClass}` });
   const providerCircuitAction = currentGeneration && !removesAccount ? settleProviderCircuit(modelId, cfg, account, attempt, result) : null;
-  return { classification, policy, accountAction, healthAction, providerCircuitAction };
+  const retryDecision = matchRetryRule(result, sensitiveValues);
+  return { classification, policy, accountAction, healthAction, providerCircuitAction, retryDecision };
 }
 function traceAttempt(attempt, result, account, ms, diagnostic) {
   const candidate = result.attemptToken || (result.detailAttempt ? { attemptIndex: result.detailAttempt.attemptIndex, callId: result.detailAttempt.callId } : null);
@@ -3105,6 +3211,7 @@ function traceAttempt(attempt, result, account, ms, diagnostic) {
   const note = boundedReason(diagnostic.policy?.ruleId ? `rule:${diagnostic.policy.ruleId}` : result.ordinaryReason || result.note);
   return {
     upstream: attempt.upstream, status: result.status, upstreamStatus: result.upstreamStatus, normalizedStatus: result.normalizedStatus,
+    providerSelection: PROVIDER_SELECTIONS.has(attempt.selection) ? attempt.selection : null,
     ...(token ? { attemptIndex: token.attemptIndex, callId: token.callId } : {}), ...(detailProfile ? { detailProfile } : {}),
     terminalOrigin: result.terminalOrigin, ms, note: note.reason, reasonTruncated: note.reasonTruncated, account: account.name, accountId: account.id,
     action: diagnostic.policy?.action || null, ruleId: diagnostic.policy?.ruleId || null, ruleScope: diagnostic.policy?.scope || null,
@@ -3113,6 +3220,9 @@ function traceAttempt(attempt, result, account, ms, diagnostic) {
     errorScope: diagnostic.classification?.scope || null,
     scopeEvidence: diagnostic.classification?.evidence || null, failureClass: diagnostic.classification?.failureClass || null,
     healthAction: diagnostic.healthAction || 'none', retryAfterMs: diagnostic.policy?.cooldownMs ?? diagnostic.classification?.retryAfterMs ?? null,
+    retryRuleId: diagnostic.retryDecision?.ruleId || null,
+    retryDecision: diagnostic.retryDecision?.decision || 'continue',
+    retryMatchedBy: Array.isArray(diagnostic.retryDecision?.matchedBy) ? diagnostic.retryDecision.matchedBy.filter((value) => RETRY_MATCH_KINDS.has(value)) : [],
     responseContentType: result.responseContentType || null, responseBytes: Number.isSafeInteger(result.responseBytes) ? result.responseBytes : null,
   };
 }
@@ -3121,14 +3231,17 @@ function traceAttempt(attempt, result, account, ms, diagnostic) {
 // 只有 account-scoped 错误命中 cooldown/hard-quarantine 时，外层 handleChat 才能终止本链并最多换号一次。
 async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream = false, attemptTimeoutMs = 120000, sensitiveValues = [], attemptOwner = null } = {}) {
   const t0 = Date.now();
-  const plan = planProviderAttempts(modelId, cfg, account), attempts = plan.attempts;
-  const trace = [];
-  if (!attempts.length) {
-    const allExcluded = plan.allExcluded === true;
-    return { status: 503, upstreamStatus: null, normalizedStatus: 503,
-      out: { error: { message: allExcluded ? 'no provider available after exclusions' : 'no provider is currently eligible', type: 'upstream_error' } },
-      routing: {}, acc: account, trace, t0, plan, retryAfter: plan.retryAfter || null, netError: null, accountAction: null, clientDisconnected: false };
-  }
+  const plan = buildProviderPlan(modelId, cfg, account), trace = [], attempted = new Set();
+  let retryStop = false;
+  const auto = plan.source === 'auto';
+  const maxAttempts = auto ? 1 : plan.maxAttempts;
+  const nextAttempt = () => auto
+    ? (attempted.size ? { attempt: null, retryAfter: null } : { attempt: autoProviderAttempt(plan), retryAfter: null })
+    : selectProviderAttempt(modelId, plan, account, attempted);
+  const routingFail = (message, retryAfter) => ({ status: 503, upstreamStatus: null, normalizedStatus: 503,
+    out: { error: { message, type: 'upstream_error' } }, routing: {}, acc: account, trace, t0, plan,
+    retryAfter: retryAfter || null, netError: null, accountAction: null, clientDisconnected: false, retryStop: false, routingFailure: true });
+  if (!auto && !plan.available.length) return routingFail(plan.allExcluded ? 'no provider available after exclusions' : 'no provider is currently eligible', plan.retryAfter);
   let last = null;
   let activeReq = null;
   let keepCloseHook = false;
@@ -3138,8 +3251,15 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
   clientSocket?.on('close', onClientClose);
   const cleanupClientClose = () => clientSocket?.off('close', onClientClose);
   try {
-    for (const attempt of attempts) {
+    for (let index = 0; index < maxAttempts; index++) {
       if (clientClosed) break;
+      const selection = nextAttempt();
+      const attempt = selection.attempt;
+      if (!attempt) {
+        if (!trace.length && !clientClosed) return routingFail(plan.available.length ? 'provider half-open probe is already in progress' : 'no provider is currently eligible', selection.retryAfter || plan.retryAfter || (plan.available.length ? 1 : null));
+        break;
+      }
+      attempted.add(attempt.upstream || 'auto');
       if (attempt.circuitHalfOpen) {
         const state = providerCircuitStates.get(attempt.circuitKey);
         if (!state || state.halfOpen) continue;
@@ -3216,6 +3336,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
             trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
             if (!attempt.upstream) learnAvailableProviders(modelId, result.note);
             last = { ...result, accountAction: diagnostic.accountAction, classification: diagnostic.classification };
+            if (diagnostic.retryDecision?.decision === 'stop') { retryStop = true; break; }
             if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine') break;
             continue;
           }
@@ -3225,6 +3346,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
             const diagnostic = settleAttempt(modelId, attempt, result, account, { clientDisconnected: clientClosed, cfg, sensitiveValues });
             trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
             last = { ...result, accountAction: diagnostic.accountAction, classification: diagnostic.classification };
+            if (diagnostic.retryDecision?.decision === 'stop') { retryStop = true; break; }
             if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine') break;
             continue;
           }
@@ -3232,7 +3354,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
           const result = { status: 200, upstreamStatus: 200, normalizedStatus: 200, terminalOrigin: 'success', responseHeaders: up.headers, responseContentType, responseBytes: safeResponseBytes(firstChunk), note: 'stream', attemptToken: up.attemptToken, detailAttempt: up.detailAttempt, detailResponseBody: null, detailCaptureState: 'stream-started' };
           const diagnostic = settleAttempt(modelId, attempt, result, account, { updateSuccess: false, cfg, sensitiveValues });
           trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
-          return { status: 200, streamUp: up, streamHead: firstChunk, streamAttempt: attempt, streamAttemptToken: up.attemptToken, streamDetailAttempt: up.detailAttempt, acc: account, trace, t0, plan, started: true, cleanupClientClose };
+          return { status: 200, streamUp: up, streamHead: firstChunk, streamAttempt: attempt, streamAttemptToken: up.attemptToken, streamDetailAttempt: up.detailAttempt, acc: account, trace, t0, plan, started: true, cleanupClientClose, retryStop: false, routingFailure: false };
         }
         const result = await attemptOnce(modelId, body, attempt, account, forwardedHeaders, ctrl.signal, attemptOwner);
         if (timedOut && result.status !== 200) { result.terminalOrigin = 'timeout'; result.netError = 'upstream timeout'; result.out = { error: { message: 'upstream fetch failed: upstream timeout', type: 'upstream_error' } }; }
@@ -3243,15 +3365,16 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
         if (result.status !== 200 && !attempt.upstream) learnAvailableProviders(modelId, result.note);
         last = { ...result, accountAction: diagnostic.accountAction, classification: diagnostic.classification };
         if (result.status === 200) break;
+        if (diagnostic.retryDecision?.decision === 'stop') { retryStop = true; break; }
         if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine') break;
       } finally { clearTimeout(timer); }
     }
   } finally {
     if (!keepCloseHook) cleanupClientClose();
   }
-  if (!last && !clientClosed) return { status: 503, upstreamStatus: 0, normalizedStatus: 503, out: { error: { message: 'provider half-open probe is already in progress', type: 'upstream_error' } }, routing: {}, acc: account, trace, t0, plan, retryAfter: plan.retryAfter || 1, netError: null, clientDisconnected: false };
+  if (!last && !clientClosed) return routingFail('provider half-open probe is already in progress', plan.retryAfter || 1);
   if (!last) last = { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: 'upstream request aborted', type: 'upstream_error' } }, routing: {}, acc: account, netError: 'upstream request aborted', accountAction: null };
-  return { ...last, trace, t0, plan, netError: last.netError || null, clientDisconnected: clientClosed };
+  return { ...last, trace, t0, plan, netError: last.netError || null, clientDisconnected: clientClosed, retryStop, routingFailure: false };
 }
 
 function statisticsSegments(trace, finalAccountId, usage, clientDisconnect = false) {
@@ -3311,7 +3434,7 @@ async function handleChat(req, res) {
   }
   const initialSelection = { ...selected };
 
-  let chain, cfg, targets = [], targetSource = 'auto', chainLease = selected.lease;
+  let chain, cfg, targets = [], targetSource = 'auto', targetMode = null, chainLease = selected.lease;
   const completedTrace = [];
   const accountActions = [];
   for (let accountAttempt = 0; accountAttempt < 2; accountAttempt++) {
@@ -3326,6 +3449,7 @@ async function handleChat(req, res) {
       cleanupSessionBindingSelection(selected);
       targets = chain.plan?.plannedOrder || [];
       targetSource = chain.plan?.source || 'auto';
+      targetMode = PROVIDER_MODES.has(chain.plan?.mode) ? chain.plan.mode : null;
       if (cfg?.pinMode === 'preferred' && chain.plan?.source === 'configured' && targets.length > 0) providerOrderOverridesSticky = true;
     } catch (e) {
       cleanupSessionBindingSelection(selected);
@@ -3334,7 +3458,7 @@ async function handleChat(req, res) {
     }
     const action = chain.accountAction;
     if (action) accountActions.push({ account: account.name, action: action.action, statusCode: action.statusCode, ruleId: action.ruleId || null, scope: action.scope });
-    if (action && (action.action === 'cooldown' || action.action === 'hard-quarantine') && !chain.started && accountAttempt === 0) {
+    if (action && (action.action === 'cooldown' || action.action === 'hard-quarantine') && !chain.started && accountAttempt === 0 && !chain.retryStop) {
       excluded.add(account.id);
       lease.release();
       chainLease = null;
@@ -3405,7 +3529,7 @@ async function handleChat(req, res) {
       const safeStreamError = requestResult === 'failed' ? (streamError ? safeReason(streamError, sensitiveValues) : 'stream transport error') : null;
       const usage = requestResult === 'success' ? observed.usage : null;
       finalizeStatistics({ globalError: requestResult === 'failed', usage, clientDisconnect: clientCancelled, segments: statisticsSegments(chain.trace, acc.id, usage, clientCancelled) });
-      recordChat({ requestId, requestedModel, resolvedModel: modelId, provider: observed.provider, canonical: observed.canonical, ms: Date.now() - chain.t0, stream: true, result: requestResult, error: safeStreamError, upstreamStatus: providerAttempt?.upstreamStatus ?? null, normalizedStatus, account: acc.name, accountId: acc.id, attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, accountPath, accountActions, ...affinityFacts(usage), strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, appliedHeaderNames: Object.keys(acc.headers || {}), proxyError: !!acc.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues });
+      recordChat({ requestId, requestedModel, resolvedModel: modelId, provider: observed.provider, canonical: observed.canonical, ms: Date.now() - chain.t0, stream: true, result: requestResult, error: safeStreamError, upstreamStatus: providerAttempt?.upstreamStatus ?? null, normalizedStatus, account: acc.name, accountId: acc.id, attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, accountPath, accountActions, ...affinityFacts(usage), strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, providerPlanSource: targetSource, providerMode: targetMode, appliedHeaderNames: Object.keys(acc.headers || {}), proxyError: !!acc.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues });
     };
     const tap = new Transform({ transform(c, enc, cb) { observer.push(c); cb(null, c); }, flush(cb) { finalize(); cb(); } });
     onUpstreamError = (e) => { finalize(e.message, 'upstream'); if (!res.destroyed) res.destroy(e); };
@@ -3422,7 +3546,7 @@ async function handleChat(req, res) {
   if (!out) {
     const result = disconnected ? 'client_cancelled' : 'failed';
     finalizeStatistics({ globalError: !disconnected, clientDisconnect: disconnected, segments: statisticsSegments(chain.trace, null, null, disconnected) });
-    recordChat({ requestId, requestedModel, resolvedModel: modelId, stream: false, result, normalizedStatus: disconnected ? 499 : 502, error: disconnected ? null : 'no upstream response', trace: chain.trace, accountPath, accountActions, ...affinityFacts(), strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, sensitiveValues });
+    recordChat({ requestId, requestedModel, resolvedModel: modelId, stream: false, result, normalizedStatus: disconnected ? 499 : 502, error: disconnected ? null : 'no upstream response', trace: chain.trace, accountPath, accountActions, ...affinityFacts(), strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, providerPlanSource: targetSource, providerMode: targetMode, sensitiveValues });
     if (res.destroyed) return;
     return sendJSON(res, disconnected ? 499 : 502, { error: { message: disconnected ? 'client cancelled request' : 'no upstream response', type: disconnected ? 'client_cancelled' : 'upstream_error' } });
   }
@@ -3434,7 +3558,7 @@ async function handleChat(req, res) {
     requestId, requestedModel, resolvedModel: modelId, provider: routing.finalProvider || null, canonical: routing.canonicalSlug || null, ms: Date.now() - chain.t0, stream: false, result: disconnected ? 'client_cancelled' : status === 200 ? 'success' : 'failed',
     attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, error: disconnected ? null : status !== 200 ? safeOut.error.message : null,
     account: acc?.name || null, accountId: acc?.id || null, accountPath, accountActions, accountAction: chain.accountAction?.action || accountActions.at(-1)?.action || null, upstreamStatus: chain.upstreamStatus, normalizedStatus: chain.normalizedStatus, ...affinityFacts(usage),
-    strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, appliedHeaderNames: Object.keys(acc?.headers || {}), proxyError: !!acc?.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), errorCategory: chain.plan?.attempts?.length === 0 ? 'routing' : null, sensitiveValues,
+    strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, providerPlanSource: targetSource, providerMode: targetMode, appliedHeaderNames: Object.keys(acc?.headers || {}), proxyError: !!acc?.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), errorCategory: chain.routingFailure ? 'routing' : null, sensitiveValues,
   });
   if (res.destroyed) return;
   res.writeHead(disconnected ? 499 : status, {
@@ -3693,7 +3817,7 @@ async function dispatch(req, res) {
       return sendJSON(res, 200, {
         accounts: config.accounts.map((a) => { const recent = projectAggregate(aggregateRange(a.id).aggregate),lifetime=META.statistics.lifetime.accounts[a.id]; return { ...a, state: getAccountState(a.id), activeCount: activeCounts.get(a.id) || 0, health: healthProjection(a), quota: quotaProjection(a.id), cachePoolRole: cacheRoles.get(a.id) ?? null, statistics: { recent24h: recent, lifetimeRequests: lifetime ? lifetime.requests : 0, lifetimeErrors: lifetime ? lifetime.errors : 0 } }; }),
         mode: config.accountMode, active: config.activeAccount, concurrencyWaitMs: config.concurrencyWaitMs,
-        errorRules: config.errorRules, accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline,
+        errorRules: config.errorRules, retryRules: config.retryRules, accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline,
         cachePool: { minSize: configuredCachePoolSize(), maxSize: configuredCachePoolMaxSize(), targetSize: configuredCachePoolTargetSize(), binding: sessionBindingSummary() },
         stats: Object.fromEntries(config.accounts.map((a) => [a.name, { requests: META.statistics.lifetime.accounts[a.id]?.requests ?? 0 }])),
       });
@@ -3704,7 +3828,7 @@ async function dispatch(req, res) {
       if (!ACCOUNT_MODES.has(body.mode)) return sendJSON(res, 400, { error: { message: 'invalid account mode' } });
       const wait = Number(body.concurrencyWaitMs ?? 2000);
       if (!Number.isInteger(wait) || wait < 0 || wait > 30000) return sendJSON(res, 400, { error: { message: 'concurrencyWaitMs must be an integer from 0 to 30000' } });
-      let requestedErrorRules = config.errorRules, requestedPipeline = config.accountPipeline;
+      let requestedErrorRules = config.errorRules, requestedPipeline = config.accountPipeline, requestedRetryRules = config.retryRules;
       try {
         if (body.errorRules !== undefined) requestedErrorRules = normalizeErrorRules(body.errorRules, { strict: true });
         else {
@@ -3715,6 +3839,7 @@ async function dispatch(req, res) {
           }
           if (body.accountContentErrorRules !== undefined && JSON.stringify(normalizeAccountContentErrorRules(body.accountContentErrorRules, { strict: true })) !== JSON.stringify(legacy.accountContentErrorRules)) return sendJSON(res, 409, { error: { message: 'legacy error-rule fields cannot modify canonical errorRules' } });
         }
+        if (body.retryRules !== undefined) requestedRetryRules = normalizeRetryRules(body.retryRules, { strict: true });
         if (body.accountPipeline !== undefined) requestedPipeline = normalizeAccountPipeline(body.accountPipeline, {
           strict: true,
           fallbackOrder: config.accountPipeline.order,
@@ -3752,7 +3877,7 @@ async function dispatch(req, res) {
       const requestedActive = requestedActiveId ? accs.findIndex((a) => a.id === requestedActiveId) : -1;
       const quotaRoutingWasEnabled = quotaRoutingEnabled();
       config.accounts = accs; config.accountMode = body.mode; config.activeAccount = requestedActive >= 0 ? requestedActive : Math.min(Math.max(0, Number(body.active) || 0), accs.length - 1);
-      config.concurrencyWaitMs = wait; config.errorRules = requestedErrorRules; Object.assign(config, legacyRuleProjection(requestedErrorRules)); config.accountPipeline = requestedPipeline;
+      config.concurrencyWaitMs = wait; config.errorRules = requestedErrorRules; config.retryRules = requestedRetryRules; Object.assign(config, legacyRuleProjection(requestedErrorRules)); config.accountPipeline = requestedPipeline;
       normalizeCachePoolTarget(requestedPipeline);
       for (const [id, previous] of previousById) {
         const current = accs.find((a) => a.id === id);
