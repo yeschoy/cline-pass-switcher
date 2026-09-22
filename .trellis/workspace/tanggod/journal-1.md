@@ -535,3 +535,27 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 22: 缓存热池动态扩容与会话命中优先
+<!-- trellis-session: v=2 fp=b7f75a5892861493 -->
+
+**Date**: 2026-09-22
+**Task**: 缓存热池动态扩容与会话命中优先
+**Branch**: `feat/dynamic-cache-pool-growth`
+
+### Summary
+
+在既有缓存活跃池 owner 内实现 grow-only 动态扩容（cachePoolMaxSize + 持久化 cachePoolTargetSize，并发不越 max、unlimited 不触发、压力下降不缩容）与 sticky+healthSort 组合下的有界内存会话绑定（HMAC fingerprint 键、2h/15m 滑动 TTL、50,000 LRU、provisional/generation 安全清理、满载临时溢出不改绑、删除禁用 key 轮换 cooldown quarantine reserve 失效重绑）；仅无身份请求 preferred 语义回归旧行为。独立质量检查修复后全量 187/187 通过，spec 与 README/config 示例同步，未部署。另发现并恢复一次 trellis init --force 对 .trellis/spec/** 与 AGENTS.md 项目内容的模板覆盖。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e6cd568` | feat: 实现缓存热池动态扩容与会话命中优先 |
+| `bb974c4` | docs(spec): 同步缓存池扩容与会话绑定契约 |
+| `a51a187` | chore(trellis): 同步 0.6.17 Codex/Claude 平台集成与模板哈希 |
+
+### Status
+
+[OK] **Completed**
