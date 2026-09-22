@@ -206,7 +206,7 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 
 账号代理支持 `http://`、`https://`、`socks5://`、`socks5h://` 和可选 URL 用户名/密码，只应用于该账号的 Cline 请求；代理失败进入网络/代理错误记录，并且不会回退直连。账号 Header 在客户端协议白名单之后合并，随后由系统强制覆盖 `Content-Type` 和账号 `Authorization`。Authorization、Cookie、逐跳 Header、会话/线程/设备身份及凭据类 Header 均禁止配置。
 
-普通请求日志会保存亲和键类型/置信度、caller/派生上游 key 的安全来源枚举、`provider.order` 是否覆盖 sticky、以及依据最终明确 usage 得出的缓存三态（命中/明确未命中/未知）；Provider cooldown/half-open 动作只作为 bounded attempt 枚举。它不保存实际 prompt/session/thread key、派生 key、HMAC 指纹、账号 Key、代理 URL/认证值、Header 值、备注、消息正文或敏感上游正文。旧日志缺少字段时显示未知，绝不迁移或猜测。
+普通请求日志会保存亲和键类型/置信度、caller/派生上游 key 的安全来源枚举、`provider.order` 是否覆盖 sticky、以及依据最终明确 usage 得出的缓存三态（命中/明确未命中/未知）；Provider cooldown/half-open 动作只作为 bounded attempt 枚举。Provider 选择策略同样只投影有界枚举：`providerPlanSource` 为 `configured`/`discovered`/`auto`（候选来源），`providerMode` 为 `strict`/`preferred`，每次真实 attempt 的 `providerSelection` 为 `strict-first`/`health`/`compat-auto`（`compat-auto` 只属于完全无具名候选的那一次不归因请求）；候选成功率数值、候选表与真实网关顺序不会被记录。请求级重试证据只投影 `retryRuleId`/`retryDecision`（`stop`/`continue`）/`retryMatchedBy`（`status`/`body`），不记录 needle 或匹配片段。它不保存实际 prompt/session/thread key、派生 key、HMAC 指纹、账号 Key、代理 URL/认证值、Header 值、备注、消息正文或敏感上游正文。旧日志缺少字段时显示未知，绝不迁移或猜测。
 
 ### 错误详情与完整详细日志（默认关闭）
 

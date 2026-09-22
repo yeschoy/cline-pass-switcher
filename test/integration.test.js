@@ -2993,3 +2993,228 @@ test('rule actions record exactly the declared direct health sample and disposit
   assert.equal(account.health.degrades, 1, 'account hard-quarantine records exactly one account failure sample');
   assert.equal(account.health.samples, 1, 'provider-model actions and ignore add no account sample');
 });
+
+// --- Parent-task integration: cross-owned combination contracts -------------------------------------
+// These cases exist because the three sub-tasks were verified independently. Each one crosses at least
+// two owners (dynamic pool target, session binding, rule state, retry-stop control flow) and asserts the
+// seam rather than a single-owner behavior already covered above.
+
+test('a promoted cache-pool member owns the retry stop and the pool target grows exactly once', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    if (req.method === 'GET') { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end('{}'); }
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+      const provider = body.provider?.only?.[0] || body.providerOptions?.gateway?.only?.[0] || null;
+      const auth = req.headers.authorization;
+      seen.push({ auth, provider });
+      const reply = () => {
+        if (auth === 'Bearer key-b' && provider === 'first') {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: { message: 'promoted needle', status: 502 } }));
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }));
+      };
+      if (auth === 'Bearer key-a') setTimeout(reply, 160); else reply();
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-combined-grow-stop-'));
+  const accounts = [{ id: 'a', name: 'A', key: 'key-a', enabled: true, priority: 1, maxConcurrent: 1, perModel: {} }, { id: 'b', name: 'B', key: 'key-b', enabled: true, priority: 2, maxConcurrent: 1, perModel: {} }];
+  const running = await startSwitcher({
+    port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts, accountMode: 'sticky', activeAccount: 0, concurrencyWaitMs: 25,
+    knownModels: ['slow'], perModel: { slow: { upstreams: ['first', 'second'], exclude: [], pinMode: 'strict', sort: null, maxRetries: null, providerCooldownMs: 0 } },
+    retryRules: [{ id: 'stop-promoted', decision: 'stop', when: { statuses: [502], body_contains: ['promoted needle'] } }],
+    errorRules: [], accountPipeline: { quotaPool: false, healthSort: false, sticky: false, order: PIPELINE_STEP_ORDER, cachePoolSize: 1, cachePoolMaxSize: 2 },
+  }, dir, { NODE_ENV: 'test' });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  const send = (session) => rawJson(port, '/v1/chat/completions', { model: 'slow', messages: [] }, { 'Session-Id': session });
+  const logFor = (response) => waitUntil(async () => {
+    const page = await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${response.headers['x-cline-request-id']}`)).json();
+    return page.items[0];
+  });
+
+  const holder = send('grow-stop-holder');
+  await waitUntil(() => seen.length === 1);
+  const stopped = await send('grow-stop-promoted');
+  assert.equal(stopped.status, 502);
+  assert.deepEqual(seen.map((row) => row.provider), ['first', 'first'], 'the promoted account runs exactly one real attempt');
+  assert.equal(seen[1].auth, 'Bearer key-b', 'the saturated miss is served by the newly promoted member');
+  const stoppedLog = await logFor(stopped);
+  assert.ok(['cache-pool-active', 'cache-pool-active-overflow'].includes(stoppedLog.selectionReason));
+  assert.equal(stoppedLog.cachePoolTier, 'active');
+  assert.equal(stoppedLog.cachePoolTargetSize, 2, 'the promoted request already observes the grow-one target');
+  assert.equal(stoppedLog.attempts.length, 1, 'the retry stop leaves exactly one attempt on the promoted account');
+  assert.equal(stoppedLog.attempts[0].retryRuleId, 'stop-promoted');
+  assert.equal(stoppedLog.attempts[0].retryDecision, 'stop');
+  const view = await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+  assert.equal(view.cachePool.targetSize, 2);
+  assert.deepEqual(view.accounts.map((account) => account.cachePoolRole), ['active', 'active']);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'metadata.json'))).cachePoolTargetSize, 2, 'the single grow-one decision is durable');
+  assert.equal((await holder).status, 200);
+  assert.equal(seen.filter((row) => row.auth === 'Bearer key-b').length, 1, 'the retry stop never re-rolls a second provider on the promoted account');
+});
+
+test('an account-scope cooldown persists while the paired retry stop suppresses account replacement', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const auth = req.headers.authorization;
+      seen.push(auth);
+      if (auth === 'Bearer key-a') {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: { message: 'priority needle', status: 502 } }));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-combined-priority-'));
+  const running = await startSwitcher({
+    port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 0,
+    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }, { id: 'b', name: 'B', key: 'key-b', enabled: true, perModel: {} }],
+    knownModels: ['prio'], perModel: { prio: { upstreams: ['first', 'second'], exclude: [], pinMode: 'strict', sort: null, maxRetries: null, providerCooldownMs: 0 } },
+    errorRules: [{ id: 'cooldown-prio', scope: 'account', action: 'cooldown', when: { statuses: [502] }, reset: { fallback: '30m0s', max: '1h0m0s' } }],
+    retryRules: [{ id: 'stop-prio', decision: 'stop', when: { statuses: [502], body_contains: ['priority needle'] } }],
+  }, dir, { NODE_ENV: 'test' });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  const call = () => rawJson(port, '/v1/chat/completions', { model: 'prio', messages: [] });
+
+  const response = await call();
+  assert.equal(response.status, 502);
+  assert.deepEqual(seen, ['Bearer key-a'], 'the retry stop blocks account replacement even though the account action allows it');
+  const view = await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+  const account = view.accounts.find((entry) => entry.id === 'a');
+  assert.ok(account.state && account.state.cooldownUntil > Date.now(), 'the account-scope cooldown state is persisted independently of the retry decision');
+  assert.equal(account.health.degrades, 1, 'account-scope cooldown records exactly one account failure sample');
+  assert.equal(account.health.samples, 1);
+  const models = await (await fetch(`http://127.0.0.1:${port}/api/models`)).json();
+  assert.equal(models.subscription.find((row) => row.id === 'prio').meta.upstreamStatus.first.success.samples, 0, 'an account-scope action never writes a provider-model sample');
+  const errors = await waitUntil(async () => { const page = await (await fetch(`http://127.0.0.1:${port}/api/logs/errors?requestedModel=prio&limit=5`)).json(); return page.items[0]; });
+  assert.equal(errors.retryRuleId, 'stop-prio');
+  assert.equal(errors.retryDecision, 'stop');
+  assert.equal(errors.ruleScope, 'account');
+  assert.equal(errors.ruleAction, 'cooldown');
+  assert.equal(errors.healthAction, 'cooldown', 'the account sample and the retry-stop decision stay independent');
+  seen.length = 0;
+  assert.equal((await call()).status, 200);
+  assert.deepEqual(seen, ['Bearer key-b'], 'the persisted cooldown removes account A from the next request');
+});
+
+test('account hard-quarantine invalidates a confirmed session binding and rebinds the session', async (t) => {
+  let quarantineKey = null;
+  const upstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+      if (body.model === 'quarantine' && quarantineKey && req.headers.authorization === quarantineKey) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: { message: 'quarantine now', status: 500 } }));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-combined-binding-quarantine-'));
+  const running = await startSwitcher({
+    port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'sticky', activeAccount: 0, concurrencyWaitMs: 0,
+    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }, { id: 'b', name: 'B', key: 'key-b', enabled: true, perModel: {} }],
+    knownModels: ['ok', 'quarantine'], perModel: {},
+    errorRules: [{ id: 'quarantine-account', scope: 'account', action: 'hard-quarantine', models: ['quarantine'], when: { statuses: [500] } }],
+    retryRules: [], accountPipeline: { quotaPool: false, healthSort: true, sticky: true, order: PIPELINE_STEP_ORDER, cachePoolSize: 0, cachePoolMaxSize: 0 },
+  }, dir, { NODE_ENV: 'test' });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  const view = async () => (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+  const send = (model) => rawJson(port, '/v1/chat/completions', { model, messages: [] }, { 'Session-Id': 'quarantine-binding-session' });
+  const logFor = (response) => waitUntil(async () => {
+    const page = await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${response.headers['x-cline-request-id']}`)).json();
+    return page.items[0];
+  });
+
+  const first = await send('ok');
+  assert.equal((await logFor(first)).bindingResult, 'miss');
+  const boundName = first.headers['x-cline-account'];
+  const bound = (await view()).accounts.find((account) => account.name === boundName);
+  quarantineKey = `Bearer ${bound.key}`;
+  const hit = await send('ok');
+  assert.equal(hit.headers['x-cline-account'], boundName);
+  assert.equal((await logFor(hit)).bindingResult, 'hit', 'the binding gate short-circuits health sorting');
+
+  const quarantined = await send('quarantine');
+  assert.equal(quarantined.status, 200);
+  assert.notEqual(quarantined.headers['x-cline-account'], boundName, 'the hard-quarantined account is replaced as the binding owner');
+  assert.equal((await logFor(quarantined)).bindingResult, 'miss', 'the replacement selection is a fresh miss, not a stale hit');
+  const afterQuarantine = await view();
+  assert.equal(afterQuarantine.accounts.find((account) => account.id === bound.id).state.hardQuarantined, true);
+  assert.equal(afterQuarantine.cachePool.binding.enabled, true);
+  assert.equal(afterQuarantine.cachePool.binding.size, 1, 'the quarantined entry is replaced by exactly one new binding');
+
+  const rebound = await send('ok');
+  assert.equal(rebound.headers['x-cline-account'], quarantined.headers['x-cline-account']);
+  assert.equal((await logFor(rebound)).bindingResult, 'hit', 'the surviving account owns the rebind');
+  const serialized = JSON.stringify(await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?limit=100`)).json()) + fs.readFileSync(path.join(dir, 'metadata.json'), 'utf8');
+  assert.equal(serialized.includes('quarantine-binding-session'), false, 'no binding identity reaches logs or metadata');
+});
+
+test('a stale-generation completion evaluates both rule sets without writing health or account state', async (t) => {
+  let release = null;
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+      const provider = body.provider?.only?.[0] || body.providerOptions?.gateway?.only?.[0] || null;
+      seen.push({ provider, auth: req.headers.authorization });
+      if (body.model === 'stale-rules' && provider === 'first') {
+        release = () => {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: 'stale needle', status: 502 } }));
+        };
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-combined-stale-rules-'));
+  const running = await startSwitcher({
+    port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 0,
+    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }],
+    knownModels: ['stale-rules'], perModel: { 'stale-rules': { upstreams: ['first', 'second'], exclude: [], pinMode: 'strict', sort: null, maxRetries: null, providerCooldownMs: 0 } },
+    errorRules: [{ id: 'cooldown-stale', scope: 'account', action: 'cooldown', models: ['stale-rules'], when: { statuses: [502] }, reset: { fallback: '30m0s', max: '30m0s' } }],
+    retryRules: [{ id: 'stop-stale', decision: 'stop', when: { statuses: [502], body_contains: ['stale needle'] } }],
+  }, dir, { NODE_ENV: 'test' });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+
+  const pending = rawJson(port, '/v1/chat/completions', { model: 'stale-rules', messages: [] });
+  await waitUntil(() => release && seen.length === 1);
+  const view = await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+  const rotated = { accounts: view.accounts.map((account) => ({ ...account, key: `${account.key}-rotated` })), mode: view.mode, active: view.active, concurrencyWaitMs: view.concurrencyWaitMs, errorRules: view.errorRules, retryRules: view.retryRules, accountPipeline: view.accountPipeline };
+  assert.equal((await rawJson(port, '/api/accounts', rotated)).status, 200, 'the identity rotation replaces the running generation');
+  release();
+  const response = await pending;
+  assert.equal(response.status, 502);
+  assert.deepEqual(seen.map((row) => row.provider), ['first'], 'the retry stop still ends the request-local provider chain');
+
+  const after = await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+  const account = after.accounts.find((entry) => entry.id === 'a');
+  assert.equal(account.state, null, 'a stale completion never re-persists account cooldown state');
+  const stats = await (await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();
+  const health = stats.accounts.find((entry) => entry.id === 'a').health;
+  assert.equal(health.degrades, 0, 'a stale account-scope cooldown writes no failure sample');
+  assert.equal(health.samples, 0);
+  const models = await (await fetch(`http://127.0.0.1:${port}/api/models`)).json();
+  assert.equal(models.subscription.find((row) => row.id === 'stale-rules').meta.upstreamStatus.first.success.samples, 0, 'a stale provider-model failure writes no sample');
+  const errorRow = await waitUntil(async () => { const page = await (await fetch(`http://127.0.0.1:${port}/api/logs/errors?requestedModel=stale-rules&limit=5`)).json(); return page.items[0]; });
+  assert.equal(errorRow.retryRuleId, 'stop-stale', 'the bounded retry decision is still evaluated for control flow');
+  assert.equal(errorRow.retryDecision, 'stop');
+  assert.deepEqual(errorRow.retryMatchedBy, ['status', 'body']);
+  assert.equal(errorRow.ruleAction, 'cooldown', 'the matched rule is projected as bounded evidence only');
+  assert.equal(errorRow.healthAction, 'none', 'a stale attempt never claims a health action');
+});
