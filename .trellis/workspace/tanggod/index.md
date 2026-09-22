@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 24
+- **Total Sessions**: 25
 - **Last Active**: 2026-09-23
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~608 | Active |
+| `journal-1.md` | ~631 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 25 | 2026-09-23 | 父任务集成验收：双维度错误规则与动态路由策略 | `37271d3`, `f0852bd` | `main` |
 | 24 | 2026-09-23 | 测试稳定性：消除集成测试时钟/负载依赖 flake | `6cc2393`, `e9d8d8f`, `0ff9aab` | `feat/test-stability-timing-flakes` |
 | 23 | 2026-09-22 | 单渠道健康选择与请求级重试停止 | `c952406`, `f12bd64` | `feat/provider-success-retry-selection` |
 | 22 | 2026-09-22 | 缓存热池动态扩容与会话命中优先 | `e6cd568`, `bb974c4`, `a51a187` | `feat/dynamic-cache-pool-growth` |

@@ -606,3 +606,26 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 25: 父任务集成验收：双维度错误规则与动态路由策略
+<!-- trellis-session: v=2 fp=32c7b68c7e93f94b -->
+
+**Date**: 2026-09-23
+**Task**: 父任务集成验收：双维度错误规则与动态路由策略
+**Branch**: `main`
+
+### Summary
+
+把三个子任务（统一规则与成功率、单渠道健康重试、动态热池与会话绑定）与测试稳定性分支依次合入 main，激活父任务做最终集成验收：跨层数据流逐字段核对、确认账号 healthSort 与 Provider health planner 无交叉读取、retryRules 只控制重试且与健康动作独立；用 4 个新集成测试补证组合边界（grow-one 晋升+retryStop、账号 cooldown 与 stop 并存、hard-quarantine 使绑定失效重绑、stale generation 双规则不写状态），全部经变异实验证明有判别力；修正 README 日志投影枚举缺口。真实 Chrome + CDP 可信输入完成 13/13 交互验收（420px 窄屏、真实键盘/拖拽、配对预设取消与确认、Provider 恢复），未发现产品缺陷。全量 198/198。未部署。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `37271d3` | test: 补强跨子任务组合集成测试并补齐日志投影文档 |
+| `f0852bd` | docs(task): 记录父任务集成验收、跨层审查与浏览器证据 |
+
+### Status
+
+[OK] **Completed**
