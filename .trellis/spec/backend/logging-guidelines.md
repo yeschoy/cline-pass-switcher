@@ -67,7 +67,8 @@ A request record may contain only:
   preferredAccountId, preferredAccountName,
   accountId, accountName, selectionReason, overflow, switched,
   pipelineSteps, selectedQuotaPool, selectedHealthLayer, capacityFallback,
-  cachePoolSize, cachePoolTier, cachePoolFallback,
+  cachePoolSize, cachePoolMaxSize, cachePoolTargetSize, cachePoolTier, cachePoolFallback,
+  bindingSource, bindingResult,
   targetProviders, actualProvider, attempts,
   status, result, upstreamStatus, durationMs,
   accountActions, appliedHeaderNames, errorCategory
@@ -78,7 +79,7 @@ A request record may contain only:
 
 `attempts` is a projection of provider/status/timing/account/action facts. Canonical rule diagnostics are limited to validated `ruleId`, `ruleScope`, `ruleAction`, and `matchedBy` condition-kind enums; they never contain needles, Header values, matched body text, or response bodies. Optional circuit/classification/media/byte facts remain bounded. These fields describe switcher-visible HTTP attempts; target lists and gateway-internal behavior are never promoted into an actual provider path.
 
-Affinity fields are bounded server enums/booleans only: `affinityKeyType` names the winning kind, `affinityConfidence` is `explicit`/`fallback`/`none`, `upstreamPromptCacheKeySource` is caller/derived/none/invalid, and `upstreamPromptCacheKeyApplied` means a valid field was sent, not that a remote router used it. `cacheHit` is true only for explicit cached tokens above zero, false only for explicit zero, and null when unknown. Pipeline fields are server-owned bounded values: `pipelineSteps` contains at most eight `quota-all-unknown` facts; `selectedQuotaPool` is `ordinary`, `hot`, `warm`, `unknown`, or `reserve`; `selectedHealthLayer` is `rated` or `unknown` when the success-rate step or cache-pool projection owns a health grouping, otherwise null; `capacityFallback` is boolean; `cachePoolSize` is the configured bounded integer; `cachePoolTier` is `active`, `standby`, or null; and `cachePoolFallback` is boolean. Selection reasons may additionally be `cache-pool-active`, `cache-pool-active-overflow`, or `cache-pool-standby-overflow`. `errorCategory` distinguishes bounded request outcomes such as `capacity`, `routing`, `proxy`, and `upstream`; in particular a local capacity 429 has no upstream attempt and must never be labelled as an upstream 429. Raw candidate lists, health buckets, quota payloads, percentages, identities, credentials, proxy data, and messages remain forbidden.
+Affinity fields are bounded server enums/booleans only: `affinityKeyType` names the winning kind, `affinityConfidence` is `explicit`/`fallback`/`none`, `upstreamPromptCacheKeySource` is caller/derived/none/invalid, and `upstreamPromptCacheKeyApplied` means a valid field was sent, not that a remote router used it. `cacheHit` is true only for explicit cached tokens above zero, false only for explicit zero, and null when unknown. Pipeline fields are server-owned bounded values: `pipelineSteps` contains at most eight `quota-all-unknown` facts; `selectedQuotaPool` is `ordinary`, `hot`, `warm`, `unknown`, or `reserve`; `selectedHealthLayer` is `rated` or `unknown` when the success-rate step or cache-pool projection owns a health grouping, otherwise null; `capacityFallback` is boolean; `cachePoolSize` is the configured minimum and `cachePoolMaxSize` the configured maximum (both bounded integers), `cachePoolTargetSize` is the current effective grow-only target, `cachePoolTier` is `active` or null, and `cachePoolFallback` is a boolean that is now always `false`. The standby tier and `cache-pool-standby-overflow` reason no longer exist; a saturated miss returns `capacity-unavailable` or grows one member, and a saturated *bound* session temporarily overflows within the active set. `bindingSource` is exactly `explicit`, `fallback`, or `none`; `bindingResult` is exactly `hit`, `miss`, `invalidated`, `temporary-overflow`, `provisional`, or `not-applicable`. Selection reasons may additionally be `cache-pool-active`, `cache-pool-active-overflow`, `pipeline-sticky-primary`, or `pipeline-capacity-fallback`. `errorCategory` distinguishes bounded request outcomes such as `capacity`, `routing`, `proxy`, and `upstream`; in particular a local capacity 429 has no upstream attempt and must never be labelled as an upstream 429. Raw candidate lists, health buckets, quota payloads, percentages, identities, bindings, fingerprints, credentials, proxy data, and messages remain forbidden.
 
 An error record may contain only:
 
@@ -109,7 +110,7 @@ Never persist:
 - raw session/thread/conversation value or HMAC fingerprint;
 - message text, reasoning/content, or upstream response body.
 
-Only bounded identity-source/type/confidence enums, upstream-key source/applied booleans, cache-hit tri-state, provider circuit actions, and applied safe Header names may be recorded. The actual caller/derived key and every raw/HMAC identity remain forbidden, including truncated/hash-prefix correlation tags.
+Only bounded identity-source/type/confidence enums, upstream-key source/applied booleans, cache-hit tri-state, bounded cache-pool min/max/target integers and tier, `bindingSource`/`bindingResult` enums, fixed binding hit/miss/invalidated/overflow/provisional counters, provider circuit actions, and applied safe Header names may be recorded. The actual caller/derived key and every raw/HMAC identity remain forbidden, including truncated/hash-prefix correlation tags. The session-binding map itself is never projected: no fingerprint, bound account ID map, entry list, expiry or `ownerRequestId` may appear in a request/error row, a management response body, or a service log line.
 
 #### Query and cursor
 
@@ -136,7 +137,9 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 | Candidate reason contains a known Key/Header value/message | persisted form contains `[REDACTED]`, never the source value |
 | Upstream returns a long structured error | persist a valid UTF-8 reason of at most 16 KiB with `reasonTruncated=true`; when error detail capture is enabled, retain the bounded sanitized response there |
 | Upstream returns a non-JSON/invalid error body | persist a generic diagnostic plus normalized media type/byte count, never the raw response body |
-| Switcher local capacity 429 | request row has `errorCategory=capacity`, `upstreamStatus=null`, and no attempts |
+| Switcher local capacity 429 | request row has `errorCategory=capacity`, `upstreamStatus=null`, safe `selectionReason`, and no attempts |
+| A saturated bound session overflows to another active account | request row records `bindingResult=temporary-overflow`, `overflow=true`, and still names the bound account as `preferredAccountId`; the binding itself is unchanged |
+| A cache-pool request is projected | persist bounded `cachePoolSize`/`cachePoolMaxSize`/`cachePoolTargetSize` integers, `cachePoolTier=active` (or null) and `cachePoolFallback=false`; never a member list or binding entry |
 | Ambiguous HTML 429 without a matching rule | persist `errorScope=unknown`, bounded evidence and default ignore, with no account action/body or implicit cooldown |
 | Pipeline diagnostics contain a non-owned/raw value | omit it; persist only the bounded enum/boolean projection |
 | Diagnostic JSONL or metadata persistence fails | report only a redacted service error; do not change the chat response |
@@ -162,6 +165,8 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 `test/integration.test.js` must assert:
 
 - request response ID equals the logged request ID;
+- a combined sticky+healthSort session logs `bindingSource` `explicit`/`fallback` and `bindingResult` `miss` then `hit`, a saturated bound session logs `temporary-overflow` with `overflow=true`, sticky-only/healthSort-only logs `not-applicable`, and no raw session, fingerprint, binding account map or entry list appears in any JSONL row, API payload or metadata file;
+- cache-pool rows carry bounded `cachePoolSize`/`cachePoolMaxSize`/`cachePoolTargetSize`, `cachePoolTier` is never `standby`, and `cachePoolFallback` is always `false`;
 - caller/derived/message-fallback affinity produces the exact bounded source/type/confidence/applied facts, final explicit usage produces true/false/null cache hit, and no raw caller key, derived key, session or fingerprint occurs in JSONL/API/UI;
 - requested/resolved models, strategy, selection reason, overflow and account path are present where applicable;
 - one request with multiple failures paginates every error exactly once;

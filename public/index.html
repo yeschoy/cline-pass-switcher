@@ -212,7 +212,11 @@
         <option value="least-connections">最少连接</option><option value="weighted-roundrobin">加权轮询</option><option value="priority-failover">主备优先级</option>
       </select>
       <label class="dim" style="font-size:12px">容量等待(ms) <input id="concurrencyWaitMs" type="number" min="0" max="30000" value="2000" style="width:90px"></label>
-      <label class="dim" style="font-size:12px" for="cachePoolSize">缓存活跃池账号数 <input id="cachePoolSize" type="number" min="0" max="100000" step="1" value="0" aria-describedby="cachePoolHelp" style="width:90px"></label>
+      <label class="dim" style="font-size:12px" for="cachePoolSize">缓存池初始/最小账号数 <input id="cachePoolSize" type="number" min="0" max="100000" step="1" value="0" aria-describedby="cachePoolHelp" style="width:90px"></label>
+      <label class="dim" style="font-size:12px" for="cachePoolMaxSize">动态扩容上限 <input id="cachePoolMaxSize" type="number" min="0" max="100000" step="1" value="0" aria-describedby="cachePoolHelp" style="width:90px"></label>
+      <label class="dim" style="font-size:12px" for="sessionBindingExplicitTtlMs">显式会话 TTL(ms) <input id="sessionBindingExplicitTtlMs" type="number" min="60000" max="604800000" step="1" value="7200000" aria-describedby="cachePoolHelp" style="width:120px"></label>
+      <label class="dim" style="font-size:12px" for="sessionBindingFallbackTtlMs">消息回退 TTL(ms) <input id="sessionBindingFallbackTtlMs" type="number" min="60000" max="604800000" step="1" value="900000" aria-describedby="cachePoolHelp" style="width:120px"></label>
+      <label class="dim" style="font-size:12px" for="sessionBindingMaxEntries">会话绑定上限 <input id="sessionBindingMaxEntries" type="number" min="1" max="100000" step="1" value="50000" aria-describedby="cachePoolHelp" style="width:100px"></label>
       <select id="preset"><option value="">策略预设…</option><option value="cache">缓存命中优先</option><option value="stable">会话稳定</option><option value="throughput">最大吞吐</option><option value="even">均匀分摊</option><option value="quota">按额度分摊</option><option value="failover">主备容灾</option><option value="safe">保守防封</option></select>
       <button class="ghost" onclick="previewPreset()">预览应用</button>
       <input id="accSearch" placeholder="搜索名称或备注" oninput="clearBulkSelection()" style="background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px">
@@ -220,7 +224,8 @@
       <button onclick="saveAccounts()">保存账号配置</button>
       <span class="dim" style="font-size:12px" id="accMsg" aria-live="polite"></span>
     </div>
-    <p id="cachePoolHelp" class="dim" style="font-size:12px;margin-bottom:10px">缓存活跃池 0 = 关闭；仅在 sticky 模式或启用会话粘性步骤时生效。priority 越小越优先；reserve 或明确不健康账号会由下一优先级账号替换；活跃账号全部满载并等待超时后才允许备用溢出。该策略不保证生产缓存命中率。</p>
+    <p id="cachePoolHelp" class="dim" style="font-size:12px;margin-bottom:6px">缓存池最小值 0 = 关闭；仅在 sticky 模式或启用会话粘性步骤时生效。priority 越小越优先；reserve、冷却或硬隔离账号会由下一合格账号替换。只有全部活跃账号都有有限并发且满载、等待超时后仍满载，目标才 grow-one，且不超过上限；压力下降不会自动缩容。max=min 可关闭自动扩容。</p>
+    <p id="cachePoolRuntime" class="dim" aria-live="polite" style="font-size:12px;margin-bottom:10px">当前目标与会话绑定状态加载中…</p>
     <div class="toolbar">
       <label><input id="bulkSelectAll" type="checkbox" onchange="selectAllAccounts(this.checked)"> 选择当前搜索结果全部账号</label>
       <label for="bulkConcurrency">统一并发（0 = 不限）</label><input id="bulkConcurrency" type="number" min="0" max="100000" step="1" style="width:110px">
@@ -248,13 +253,13 @@
         <div class="toolbar" style="margin-top:8px"><button type="button" onclick="applyAdvancedErrorRules()">应用到页面草稿</button><button type="button" class="ghost" onclick="refreshAdvancedErrorRules()">从当前草稿刷新</button></div>
       </details>
     </section>
-    <fieldset style="border:1px solid var(--border);padding:10px;margin-top:12px"><legend class="dim">可排序账号调度流水线（可选）</legend>
+    <fieldset style="border:1px solid var(--border);padding:10px;margin-top:12px"><legend class="dim">会话命中条件门与未命中调度步骤（可选）</legend>
       <ol id="pipelineSteps" class="pipeline-list" aria-describedby="pipelineOrderHelp">
         <li class="pipeline-step" draggable="true" data-pipeline-step="quotaPool" ondragstart="startPipelineDrag(event,'quotaPool')" ondragover="overPipelineDrag(event)" ondrop="dropPipelineDrag(event,'quotaPool')" ondragend="endPipelineDrag()"><span class="pipeline-drag-handle" aria-hidden="true" title="拖动排序">⠿</span><span class="pipeline-position" aria-label="当前位置 1">1</span><label><input id="pipelineQuotaPool" type="checkbox"> Cline 额度热池</label><span class="pipeline-step-actions"><button type="button" class="ghost pipeline-move-up" aria-label="上移 Cline 额度热池" disabled onclick="movePipelineStep('quotaPool',-1,this)">↑</button><button type="button" class="ghost pipeline-move-down" aria-label="下移 Cline 额度热池" onclick="movePipelineStep('quotaPool',1,this)">↓</button></span></li>
         <li class="pipeline-step" draggable="true" data-pipeline-step="healthSort" ondragstart="startPipelineDrag(event,'healthSort')" ondragover="overPipelineDrag(event)" ondrop="dropPipelineDrag(event,'healthSort')" ondragend="endPipelineDrag()"><span class="pipeline-drag-handle" aria-hidden="true" title="拖动排序">⠿</span><span class="pipeline-position" aria-label="当前位置 2">2</span><label><input id="pipelineHealthSort" type="checkbox"> 账号成功率排序</label><span class="pipeline-step-actions"><button type="button" class="ghost pipeline-move-up" aria-label="上移账号成功率排序" onclick="movePipelineStep('healthSort',-1,this)">↑</button><button type="button" class="ghost pipeline-move-down" aria-label="下移账号成功率排序" onclick="movePipelineStep('healthSort',1,this)">↓</button></span></li>
         <li class="pipeline-step" draggable="true" data-pipeline-step="sticky" ondragstart="startPipelineDrag(event,'sticky')" ondragover="overPipelineDrag(event)" ondrop="dropPipelineDrag(event,'sticky')" ondragend="endPipelineDrag()"><span class="pipeline-drag-handle" aria-hidden="true" title="拖动排序">⠿</span><span class="pipeline-position" aria-label="当前位置 3">3</span><label><input id="pipelineSticky" type="checkbox"> 会话粘性</label><span class="pipeline-step-actions"><button type="button" class="ghost pipeline-move-up" aria-label="上移会话粘性" onclick="movePipelineStep('sticky',-1,this)">↑</button><button type="button" class="ghost pipeline-move-down" aria-label="下移会话粘性" disabled onclick="movePipelineStep('sticky',1,this)">↓</button></span></li>
       </ol>
-      <p id="pipelineOrderHelp" class="dim" style="font-size:12px;margin-top:8px">可用鼠标拖动或上移/下移按钮排序；越靠前优先级越高，关闭的步骤仍保留位置。禁用、冷却与硬隔离过滤始终最先执行；成功率无数据置后但不淘汰；额度未知不阻塞；高层满载可跨层回退。sticky 模式在未显式启用粘性步骤时仍会在末尾隐式应用。</p>
+      <p id="pipelineOrderHelp" class="dim" style="font-size:12px;margin-top:8px"><strong>会话命中条件门：</strong>sticky 与成功率同时生效时，已有绑定先命中且不会因成功率变化迁移；绑定账号满载只做临时溢出，不改绑定。<strong>未命中调度步骤：</strong>只按 order 中额度池与成功率的相对顺序处理当前活跃账号；sticky 的保存位置仅为配置兼容，不作为普通线性 miss 步骤。仅启用 sticky 时仍使用无状态 HRW，仅启用成功率时每次排序。禁用、冷却、硬隔离与 reserve 过滤始终更早执行。</p>
       <div id="pipelineOrderStatus" aria-live="polite" class="dim" style="font-size:12px"></div>
     </fieldset>
     <button id="rawSchedulingOpen" type="button" class="ghost" onclick="openRawScheduling(this)">查看/编辑原始配置</button>
@@ -262,7 +267,7 @@
     <div id="rawSchedulingFeedback" aria-live="polite"></div>
     <dialog id="rawSchedulingDialog" aria-labelledby="rawSchedulingTitle" aria-describedby="rawSchedulingHelp" style="width:min(760px,calc(100% - 24px));max-height:90vh;overflow:auto;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:16px">
       <h2 id="rawSchedulingTitle">原始调度配置 · 当前页面草稿</h2>
-      <p id="rawSchedulingHelp" class="dim">策略全局适用于账号池；accountNames 为全部账号的只读参考名称（可重复），不可修改。缓存活跃池按 priority 越小越优先，reserve/明确不健康会替换，满载等待超时后才备用溢出。实际选择仍受启用状态、健康和容量影响。应用不会立即生效；请另行保存账号配置。</p>
+      <p id="rawSchedulingHelp" class="dim">策略全局适用于账号池；accountNames 为全部账号的只读参考名称（可重复），不可修改。缓存池成员按 priority/稳定 ID 派生，reserve/硬状态会替换；全活跃池有限并发满载并等待超时后才 grow-one。sticky+healthSort 是“绑定命中条件门”，未命中才按额度/成功率相对顺序选择。实际选择仍受启用状态、健康和容量影响。应用不会立即生效；请另行保存账号配置。</p>
       <label for="rawSchedulingJson">调度草稿 JSON</label>
       <textarea id="rawSchedulingJson" rows="20" spellcheck="false" style="width:100%;max-width:100%;background:var(--card2);color:var(--text);font-family:Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere"></textarea>
       <div id="rawSchedulingError" aria-live="polite"></div>
@@ -552,7 +557,12 @@ async function loadAll() {
   const modelStatistics=new Map((statistics?.models||[]).map(item=>[item.id,item]));
   DATA = {...models,subscription:(models.subscription||[]).map(item=>({...item,statistics:modelStatistics.get(item.id)||null}))};
   ACCS = accs; ALIASES = aliases;
-  $('#accMode').value = ACCS.mode; $('#concurrencyWaitMs').value = ACCS.concurrencyWaitMs ?? 2000; $('#cachePoolSize').value = ACCS.accountPipeline?.cachePoolSize ?? 0;
+  $('#accMode').value = ACCS.mode; $('#concurrencyWaitMs').value = ACCS.concurrencyWaitMs ?? 2000;
+  const pipeline=ACCS.accountPipeline||{},cacheMin=pipeline.cachePoolSize??0;
+  $('#cachePoolSize').value=cacheMin;$('#cachePoolMaxSize').value=pipeline.cachePoolMaxSize??cacheMin;
+  $('#sessionBindingExplicitTtlMs').value=pipeline.sessionBindingExplicitTtlMs??7200000;$('#sessionBindingFallbackTtlMs').value=pipeline.sessionBindingFallbackTtlMs??900000;$('#sessionBindingMaxEntries').value=pipeline.sessionBindingMaxEntries??50000;
+  const runtime=ACCS.cachePool||{},binding=runtime.binding||{};
+  $('#cachePoolRuntime').textContent=`当前目标 ${runtime.targetSize??cacheMin}（最小 ${runtime.minSize??cacheMin} / 上限 ${runtime.maxSize??pipeline.cachePoolMaxSize??cacheMin}）；会话绑定 ${binding.enabled?'已启用':'未启用'}，当前 ${binding.size??0} / ${binding.maxEntries??pipeline.sessionBindingMaxEntries??50000} 条`;
   hydrateErrorRuleDraft(ACCS.errorRules || []);
   setPipelineOrder(ACCS.accountPipeline?.order || PIPELINE_DEFAULT_ORDER);
   $('#pipelineQuotaPool').checked=!!ACCS.accountPipeline?.quotaPool;$('#pipelineHealthSort').checked=!!ACCS.accountPipeline?.healthSort;$('#pipelineSticky').checked=!!ACCS.accountPipeline?.sticky;
@@ -1057,24 +1067,43 @@ function applyAdvancedErrorRules(){const snapshot=ADVANCED_ERROR_RULES;if(!snaps
 // Editor snapshots detect stale sources; existing controls remain the scheduling draft owner.
 let RAW_SCHEDULING = null;
 const RAW_PIPELINE_CONTROLS = {quotaPool:'pipelineQuotaPool',healthSort:'pipelineHealthSort',sticky:'pipelineSticky'};
+const PIPELINE_NUMBER_CONTROLS = {cachePoolSize:'cachePoolSize',cachePoolMaxSize:'cachePoolMaxSize',sessionBindingExplicitTtlMs:'sessionBindingExplicitTtlMs',sessionBindingFallbackTtlMs:'sessionBindingFallbackTtlMs',sessionBindingMaxEntries:'sessionBindingMaxEntries'};
 function rawSchedulingControls() {
   const accountPipeline=Object.fromEntries(Object.entries(RAW_PIPELINE_CONTROLS).map(([key,id]) => [key,$('#'+id).checked]));
-  accountPipeline.order=pipelineOrder(); accountPipeline.cachePoolSize=$('#cachePoolSize').value;
+  accountPipeline.order=pipelineOrder();
+  for(const [key,id] of Object.entries(PIPELINE_NUMBER_CONTROLS))accountPipeline[key]=$('#'+id).value;
   return {accountMode:$('#accMode').value, concurrencyWaitMs:$('#concurrencyWaitMs').value,errorRules:JSON.stringify(ERROR_RULE_DRAFT),accountPipeline};
 }
-function cachePoolSizeDraft() {
-  const raw=String($('#cachePoolSize').value),value=Number(raw);
-  if (!raw.trim() || !Number.isInteger(value) || value < 0 || value > 100000) throw Error('缓存活跃池账号数必须为 0–100000 的整数');
+function pipelineIntegerDraft(id,label,min,max) {
+  const raw=String($('#'+id).value),value=Number(raw);
+  if (!raw.trim() || !Number.isInteger(value) || value < min || value > max) throw Error(`${label}必须为 ${min}–${max} 的整数`);
   return value;
+}
+function cachePoolSizeDraft() { return pipelineIntegerDraft('cachePoolSize','缓存池最小账号数',0,100000); }
+function pipelineNumberDraft() {
+  const values={
+    cachePoolSize:cachePoolSizeDraft(),
+    cachePoolMaxSize:pipelineIntegerDraft('cachePoolMaxSize','缓存池动态扩容上限',0,100000),
+    sessionBindingExplicitTtlMs:pipelineIntegerDraft('sessionBindingExplicitTtlMs','显式会话 TTL',60000,604800000),
+    sessionBindingFallbackTtlMs:pipelineIntegerDraft('sessionBindingFallbackTtlMs','消息回退 TTL',60000,604800000),
+    sessionBindingMaxEntries:pipelineIntegerDraft('sessionBindingMaxEntries','会话绑定上限',1,100000),
+  };
+  if(values.cachePoolMaxSize<values.cachePoolSize)throw Error('缓存池动态扩容上限不得小于最小账号数');
+  if(values.sessionBindingFallbackTtlMs>values.sessionBindingExplicitTtlMs)throw Error('消息回退 TTL 不得大于显式会话 TTL');
+  return values;
 }
 function validateRawScheduling(value, names) {
   if (!exactRuleObject(value,['accountMode','concurrencyWaitMs','errorRules','accountPipeline','accountNames'])) throw Error('根对象必须且只能包含五个指定字段');
   if (!Array.from($('#accMode').options).some(option => option.value === value.accountMode)) throw Error('accountMode 无效');
   if (!Number.isInteger(value.concurrencyWaitMs) || value.concurrencyWaitMs < 0 || value.concurrencyWaitMs > 30000) throw Error('concurrencyWaitMs 必须为 0–30000 的整数');
-  if (!exactRuleObject(value.accountPipeline,[...Object.keys(RAW_PIPELINE_CONTROLS),'order','cachePoolSize'])) throw Error('accountPipeline 必须包含三个开关、order 和 cachePoolSize');
+  if (!exactRuleObject(value.accountPipeline,[...Object.keys(RAW_PIPELINE_CONTROLS),'order',...Object.keys(PIPELINE_NUMBER_CONTROLS)])) throw Error('accountPipeline 必须包含三个开关、order、缓存池 min/max 与会话绑定边界');
   for (const key of Object.keys(RAW_PIPELINE_CONTROLS)) if (typeof value.accountPipeline[key] !== 'boolean') throw Error(`accountPipeline.${key} 必须为 boolean`);
   if (!validPipelineOrder(value.accountPipeline.order)) throw Error('accountPipeline.order 必须是三个步骤的精确排列');
-  if (!Number.isInteger(value.accountPipeline.cachePoolSize) || value.accountPipeline.cachePoolSize < 0 || value.accountPipeline.cachePoolSize > 100000) throw Error('accountPipeline.cachePoolSize 必须为 0–100000 的整数');
+  for(const key of ['cachePoolSize','cachePoolMaxSize'])if(!Number.isInteger(value.accountPipeline[key])||value.accountPipeline[key]<0||value.accountPipeline[key]>100000)throw Error(`accountPipeline.${key} 必须为 0–100000 的整数`);
+  for(const key of ['sessionBindingExplicitTtlMs','sessionBindingFallbackTtlMs'])if(!Number.isInteger(value.accountPipeline[key])||value.accountPipeline[key]<60000||value.accountPipeline[key]>604800000)throw Error(`accountPipeline.${key} 必须为 60000–604800000 的整数`);
+  if(!Number.isInteger(value.accountPipeline.sessionBindingMaxEntries)||value.accountPipeline.sessionBindingMaxEntries<1||value.accountPipeline.sessionBindingMaxEntries>100000)throw Error('accountPipeline.sessionBindingMaxEntries 必须为 1–100000 的整数');
+  if(value.accountPipeline.cachePoolMaxSize<value.accountPipeline.cachePoolSize)throw Error('accountPipeline.cachePoolMaxSize 不得小于 cachePoolSize');
+  if(value.accountPipeline.sessionBindingFallbackTtlMs>value.accountPipeline.sessionBindingExplicitTtlMs)throw Error('fallback TTL 不得大于 explicit TTL');
   validateErrorRuleDraft(value.errorRules);
   if (!Array.isArray(value.accountNames) || !value.accountNames.every(name => typeof name === 'string') || JSON.stringify(value.accountNames) !== JSON.stringify(names)) throw Error('accountNames 仅供参考，不可修改');
 }
@@ -1084,7 +1113,7 @@ function openRawScheduling(button) {
   let value;
   try {
     if (!controls.concurrencyWaitMs.trim()) throw Error('concurrencyWaitMs 不可为空');
-    value = {accountMode:controls.accountMode,concurrencyWaitMs:Number(controls.concurrencyWaitMs),errorRules:cloneRuleDraft(),accountPipeline:{...controls.accountPipeline,cachePoolSize:cachePoolSizeDraft()},accountNames:names};
+    value = {accountMode:controls.accountMode,concurrencyWaitMs:Number(controls.concurrencyWaitMs),errorRules:cloneRuleDraft(),accountPipeline:{...controls.accountPipeline,...pipelineNumberDraft()},accountNames:names};
     validateRawScheduling(value,names);
   } catch (e) { $('#rawSchedulingFeedback').textContent = e.message; return; }
   const text = JSON.stringify(value,null,2);
@@ -1112,13 +1141,14 @@ function applyRawScheduling() {
   try { validateRawScheduling(value,snapshot.names); }
   catch (e) { $('#rawSchedulingError').textContent = e.message; return; }
   $('#accMode').value = value.accountMode; $('#concurrencyWaitMs').value = String(value.concurrencyWaitMs);
-  commitErrorRuleDraft(value.errorRules,'原始调度 JSON 已应用到错误规则草稿'); $('#cachePoolSize').value = String(value.accountPipeline.cachePoolSize);
+  commitErrorRuleDraft(value.errorRules,'原始调度 JSON 已应用到错误规则草稿');
+  for(const [key,id] of Object.entries(PIPELINE_NUMBER_CONTROLS))$('#'+id).value=String(value.accountPipeline[key]);
   setPipelineOrder(value.accountPipeline.order);
   for (const [key,id] of Object.entries(RAW_PIPELINE_CONTROLS)) $('#'+id).checked = value.accountPipeline[key];
   renderAccounts(); closeRawScheduling(true);
   $('#rawSchedulingFeedback').textContent = '草稿已更新，尚未生效；请保存账号配置';
 }
-function collectAccounts(){validateErrorRuleDraft(ERROR_RULE_DRAFT);const rules=cloneRuleDraft();return {accounts:ACCS.accounts.map(a=>({id:a.id,name:a.name,note:a.note||'',key:a.key||'',enabled:a.enabled!==false,maxConcurrent:Number(a.maxConcurrent)||0,weight:Number(a.weight)||1,priority:Number(a.priority)||100,proxyUrl:a.proxyUrl||'',headers:a.headers||{},perModel:a.perModel||{}})),mode:$('#accMode').value,active:ACCS.active||0,errorRules:rules,accountPipeline:{quotaPool:$('#pipelineQuotaPool').checked,healthSort:$('#pipelineHealthSort').checked,sticky:$('#pipelineSticky').checked,order:pipelineOrder(),cachePoolSize:cachePoolSizeDraft()}};}
+function collectAccounts(){validateErrorRuleDraft(ERROR_RULE_DRAFT);const rules=cloneRuleDraft();return {accounts:ACCS.accounts.map(a=>({id:a.id,name:a.name,note:a.note||'',key:a.key||'',enabled:a.enabled!==false,maxConcurrent:Number(a.maxConcurrent)||0,weight:Number(a.weight)||1,priority:Number(a.priority)||100,proxyUrl:a.proxyUrl||'',headers:a.headers||{},perModel:a.perModel||{}})),mode:$('#accMode').value,active:ACCS.active||0,errorRules:rules,accountPipeline:{quotaPool:$('#pipelineQuotaPool').checked,healthSort:$('#pipelineHealthSort').checked,sticky:$('#pipelineSticky').checked,order:pipelineOrder(),...pipelineNumberDraft()}};}
 async function saveAccounts(payload=null){if(!payload){try{payload=collectAccounts();}catch(e){return accMsg(e.message,true);}}payload.concurrencyWaitMs=Number($('#concurrencyWaitMs').value);if(payload.errorRules===undefined)payload.errorRules=cloneRuleDraft();if(!payload.accounts.some(a=>a.key))return accMsg('至少需要一个 key 非空的账号',true);const r=await api('/api/accounts',payload);if(!r.ok)return accMsg(r.error?.message||'保存失败',true);accMsg(`已保存：${r.accounts} 个账号 · ${r.mode}`);await loadAll();}
 async function recoverAccount(id){const r=await api('/api/accounts/recover',{id});if(r.ok){accMsg('账号已恢复');await loadAll();}}
 async function recoverProvider(model,provider){const r=await api('/api/providers/recover',{model,provider});if(!r.ok){$('#accLive').textContent=r.error?.message||'Provider 恢复失败';return;}$('#accLive').textContent=`已恢复 ${model} / ${provider}`;await loadAll();}
@@ -1132,11 +1162,11 @@ function saveDrawer(){try{const a=ACCS.accounts[DRAWER_INDEX],headers=JSON.parse
 async function testDraftProxy(){const a=ACCS.accounts[DRAWER_INDEX];if(!a.id)return $('#drawerError').textContent='请先保存新账号再测试代理';const r=await api('/api/accounts/proxy-test',{accountId:a.id,proxyUrl:$('#drawerProxy').value.trim()});$('#drawerError').style.color=r.ok?'var(--green)':'var(--red)';$('#drawerError').textContent=r.ok?`代理可达：${r.proxyType} · ${r.ms}ms`:`代理失败：${r.reason||r.error?.message}`;}
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('#accountDrawerBackdrop').style.display==='block')closeAccountDrawer();});
 const accountCooldownRule=(id,duration,statuses=[429])=>({id,scope:'account',action:'cooldown',when:{statuses},reset:{fallback:duration,max:duration}});
-const PRESETS={cache:{mode:'sticky',wait:5000,cachePoolSize:2,editPriorities:true,rules:[accountCooldownRule('preset-account-429','30m0s')]},stable:{mode:'sticky',wait:2000,rules:[accountCooldownRule('preset-account-429','30m0s')]},throughput:{mode:'least-connections',wait:0,rules:[accountCooldownRule('preset-account-429','5m0s')]},even:{mode:'roundrobin',wait:0,weight:1,priority:100,rules:[accountCooldownRule('preset-account-429','30m0s')]},quota:{mode:'weighted-roundrobin',wait:0,weight:1,rules:[accountCooldownRule('preset-account-429','30m0s')]},failover:{mode:'priority-failover',wait:0,priorities:true,rules:[accountCooldownRule('preset-account-429','30m0s')]},safe:{mode:'sticky',wait:5000,maxConcurrent:1,rules:[accountCooldownRule('preset-account-429','1h0m0s')]}};
+const PRESETS={cache:{mode:'sticky',wait:5000,cachePoolSize:2,cachePoolMaxSize:2,editPriorities:true,rules:[accountCooldownRule('preset-account-429','30m0s')]},stable:{mode:'sticky',wait:2000,rules:[accountCooldownRule('preset-account-429','30m0s')]},throughput:{mode:'least-connections',wait:0,rules:[accountCooldownRule('preset-account-429','5m0s')]},even:{mode:'roundrobin',wait:0,weight:1,priority:100,rules:[accountCooldownRule('preset-account-429','30m0s')]},quota:{mode:'weighted-roundrobin',wait:0,weight:1,rules:[accountCooldownRule('preset-account-429','30m0s')]},failover:{mode:'priority-failover',wait:0,priorities:true,rules:[accountCooldownRule('preset-account-429','30m0s')]},safe:{mode:'sticky',wait:5000,maxConcurrent:1,rules:[accountCooldownRule('preset-account-429','1h0m0s')]}};
 function mergeRulesById(current,preset){const byId=new Map(preset.map(rule=>[rule.id,rule])),seen=new Set();const merged=current.map(rule=>{const replacement=byId.get(rule.id);if(replacement){seen.add(rule.id);return cloneRuleDraft(replacement);}return rule;});for(const rule of preset)if(!seen.has(rule.id))merged.push(cloneRuleDraft(rule));return merged;}
-function previewPreset(){const p=PRESETS[$('#preset').value];if(!p)return accMsg('请先选择预设',true);let draft;try{draft=collectAccounts();}catch(e){return accMsg(e.message,true);}const changes=[];if(draft.mode!==p.mode)changes.push(`accountMode: ${draft.mode} → ${p.mode}`);draft.mode=p.mode;draft.concurrencyWaitMs=p.wait;changes.push(`concurrencyWaitMs: ${$('#concurrencyWaitMs').value} → ${p.wait}`);if(p.cachePoolSize!==undefined){changes.push(`accountPipeline.cachePoolSize: ${draft.accountPipeline.cachePoolSize} → ${p.cachePoolSize}`);draft.accountPipeline.cachePoolSize=p.cachePoolSize;}draft.errorRules=mergeRulesById(draft.errorRules,p.rules);draft.accounts=draft.accounts.map((a,i)=>{const n={...a};if(p.weight)n.weight=p.weight;if(p.priority)n.priority=p.priority;if(p.priorities)n.priority=Math.min(100,i===0?1:i*10);if(p.maxConcurrent)n.maxConcurrent=p.maxConcurrent;for(const k of ['maxConcurrent','weight','priority'])if(n[k]!==a[k])changes.push(`${a.name}.${k}: ${a[k]} → ${n[k]}`);return n});for(const rule of p.rules)changes.push(`errorRules.${rule.id}: 合并预设`);PENDING_PRESET=draft;$('#presetDiff').textContent=changes.join('\n')||'没有变化';$('#presetAdjust').innerHTML=p.weight?draft.accounts.map((a,i)=>`<label>${escapeHtml(a.name)} 权重 <input type="number" min="1" max="100" value="${a.weight}" onchange="updatePresetAccount(${i},'weight',this.value)"></label>`).join(''):(p.priorities||p.editPriorities)?draft.accounts.map((a,i)=>`<label>${escapeHtml(a.name)} 优先级 <input type="number" min="1" max="100" value="${a.priority}" onchange="updatePresetAccount(${i},'priority',this.value)"></label>`).join(''):'';$('#presetModal').style.display='flex';}
+function previewPreset(){const p=PRESETS[$('#preset').value];if(!p)return accMsg('请先选择预设',true);let draft;try{draft=collectAccounts();}catch(e){return accMsg(e.message,true);}const changes=[];if(draft.mode!==p.mode)changes.push(`accountMode: ${draft.mode} → ${p.mode}`);draft.mode=p.mode;draft.concurrencyWaitMs=p.wait;changes.push(`concurrencyWaitMs: ${$('#concurrencyWaitMs').value} → ${p.wait}`);if(p.cachePoolSize!==undefined){changes.push(`accountPipeline.cachePoolSize: ${draft.accountPipeline.cachePoolSize} → ${p.cachePoolSize}`);draft.accountPipeline.cachePoolSize=p.cachePoolSize;const nextMax=Math.max(draft.accountPipeline.cachePoolMaxSize,p.cachePoolMaxSize??p.cachePoolSize);if(nextMax!==draft.accountPipeline.cachePoolMaxSize)changes.push(`accountPipeline.cachePoolMaxSize: ${draft.accountPipeline.cachePoolMaxSize} → ${nextMax}`);draft.accountPipeline.cachePoolMaxSize=nextMax;}draft.errorRules=mergeRulesById(draft.errorRules,p.rules);draft.accounts=draft.accounts.map((a,i)=>{const n={...a};if(p.weight)n.weight=p.weight;if(p.priority)n.priority=p.priority;if(p.priorities)n.priority=Math.min(100,i===0?1:i*10);if(p.maxConcurrent)n.maxConcurrent=p.maxConcurrent;for(const k of ['maxConcurrent','weight','priority'])if(n[k]!==a[k])changes.push(`${a.name}.${k}: ${a[k]} → ${n[k]}`);return n});for(const rule of p.rules)changes.push(`errorRules.${rule.id}: 合并预设`);PENDING_PRESET=draft;$('#presetDiff').textContent=changes.join('\n')||'没有变化';$('#presetAdjust').innerHTML=p.weight?draft.accounts.map((a,i)=>`<label>${escapeHtml(a.name)} 权重 <input type="number" min="1" max="100" value="${a.weight}" onchange="updatePresetAccount(${i},'weight',this.value)"></label>`).join(''):(p.priorities||p.editPriorities)?draft.accounts.map((a,i)=>`<label>${escapeHtml(a.name)} 优先级 <input type="number" min="1" max="100" value="${a.priority}" onchange="updatePresetAccount(${i},'priority',this.value)"></label>`).join(''):'';$('#presetModal').style.display='flex';}
 function updatePresetAccount(i,field,value){if(PENDING_PRESET)PENDING_PRESET.accounts[i][field]=Math.min(100,Math.max(1,Number(value)||1));}
-function closePreset(){$('#presetModal').style.display='none';PENDING_PRESET=null;}async function applyPreset(){const p=PENDING_PRESET;$('#presetModal').style.display='none';PENDING_PRESET=null;if(p){$('#accMode').value=p.mode;$('#concurrencyWaitMs').value=p.concurrencyWaitMs;$('#cachePoolSize').value=p.accountPipeline.cachePoolSize;commitErrorRuleDraft(p.errorRules,'预设已应用到 errorRules 草稿');await saveAccounts(p);}}
+function closePreset(){$('#presetModal').style.display='none';PENDING_PRESET=null;}async function applyPreset(){const p=PENDING_PRESET;$('#presetModal').style.display='none';PENDING_PRESET=null;if(p){$('#accMode').value=p.mode;$('#concurrencyWaitMs').value=p.concurrencyWaitMs;for(const [key,id] of Object.entries(PIPELINE_NUMBER_CONTROLS))$('#'+id).value=p.accountPipeline[key];commitErrorRuleDraft(p.errorRules,'预设已应用到 errorRules 草稿');await saveAccounts(p);}}
 const providerDegradeRules=[429,500,502,503,504].map(status=>({id:`preset-provider-${status}`,scope:'provider-model',action:'degrade',when:{statuses:[status]}}));
 const ERROR_RULE_PRESETS={standard:[accountCooldownRule('preset-account-429','30m0s')],fast:[accountCooldownRule('preset-account-429','5m0s'),...providerDegradeRules],conservative:[accountCooldownRule('preset-account-429','1h0m0s'),...providerDegradeRules],observe:[{id:'preset-account-429',scope:'account',action:'ignore',when:{statuses:[429]}},...[429,500,502,503,504].map(status=>({id:`preset-provider-${status}`,scope:'provider-model',action:'ignore',when:{statuses:[status]}}))],clear:[]};
 function previewErrorPreset(){const current=cloneRuleDraft(),name=$('#errorRulePreset').value,preset=ERROR_RULE_PRESETS[name],replace=name==='clear'||$('#errorPresetReplace').checked;if(name==='clear')$('#errorPresetReplace').checked=true;const next=replace?cloneRuleDraft(preset):mergeRulesById(current,preset),before=new Map(current.map(rule=>[rule.id,rule])),after=new Map(next.map(rule=>[rule.id,rule])),groups={保留:[],新增:[],修改:[],删除:[]};for(const id of [...new Set([...before.keys(),...after.keys()])]){if(!before.has(id))groups.新增.push(id);else if(!after.has(id))groups.删除.push(id);else if(JSON.stringify(before.get(id))===JSON.stringify(after.get(id)))groups.保留.push(id);else groups.修改.push(id);}PENDING_ERROR_PRESET=next;$('#errorPresetDiff').textContent=Object.entries(groups).map(([label,items])=>`${label}（${items.length}）\n${items.length?items.join('\n'):'—'}`).join('\n\n');$('#errorPresetModal').style.display='flex';}
@@ -1243,8 +1273,9 @@ function affinityLogLabel(x){
   const keyLabels={parent_session:'父会话',parent_thread:'父线程',parent_conversation:'父对话',parent_agent:'父 Agent',prompt_cache_key:'Codex prompt_cache_key',session_id:'会话 ID',thread_id:'线程 ID',conversation_id:'对话 ID',agent_id:'Agent ID',message_hmac:'消息 HMAC 回退',none:'无'};
   const confidenceLabels={explicit:'显式',fallback:'回退',none:'无'};
   const upstreamLabels={caller_prompt_cache_key:'caller prompt_cache_key',caller_session_id:'caller session_id',caller_invalid:'caller 字段非法',derived_codex:'派生 Codex key',derived_claude:'派生 Claude key',none:'未提供'};
-  const key=keyLabels[x?.affinityKeyType]||'未知',confidence=confidenceLabels[x?.affinityConfidence]||'未知',upstream=upstreamLabels[x?.upstreamPromptCacheKeySource]||'未知';
-  return `亲和 ${key}（${confidence}） · 上游 ${upstream}${x?.upstreamPromptCacheKeyApplied?'（已提供）':''}${x?.providerOrderOverridesSticky?' · provider.order 覆盖 sticky':''}`;
+  const bindingSourceLabels={explicit:'显式绑定源',fallback:'回退绑定源',none:'无绑定源'},bindingResultLabels={hit:'绑定命中',miss:'绑定未命中',invalidated:'旧绑定失效后重选','temporary-overflow':'绑定满载临时溢出',provisional:'命中暂定绑定','not-applicable':'绑定不适用'};
+  const key=keyLabels[x?.affinityKeyType]||'未知',confidence=confidenceLabels[x?.affinityConfidence]||'未知',upstream=upstreamLabels[x?.upstreamPromptCacheKeySource]||'未知',bindingSource=bindingSourceLabels[x?.bindingSource]||'绑定源未知',bindingResult=bindingResultLabels[x?.bindingResult]||'绑定状态未知';
+  return `亲和 ${key}（${confidence}） · 上游 ${upstream}${x?.upstreamPromptCacheKeyApplied?'（已提供）':''} · ${bindingSource} / ${bindingResult}${x?.providerOrderOverridesSticky?' · provider.order 覆盖 sticky':''}`;
 }
 function cacheHitLogLabel(value){return value===true?'缓存命中':value===false?'缓存明确未命中':'缓存未知';}
 async function loadLogs(next=false){

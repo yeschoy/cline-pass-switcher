@@ -82,7 +82,7 @@ test('request and error sections share one log view and reset the selected type 
   assert.match(loadLogs, /affinityLogLabel\(x\)/);
   assert.match(loadLogs, /cacheHitLogLabel\(x\.cacheHit\)/);
   assert.match(html, /function affinityLogLabel/);
-  assert.match(html, /function cacheHitLogLabel/);
+  assert.match(html, /function cacheHitLogLabel/);assert.match(html,/bindingSourceLabels/);assert.match(html,/bindingResultLabels/);
   assert.match(loadLogs, /api\(`\/api\/logs\/\$\{type\}\?\$\{params\}`\)/);
   assert.match(loadLogs, /if\(queryId!==LOG_QUERY_ID\|\|type!==\$\('#logType'\)\.value\)return/);
   const clearLogs = html.slice(html.indexOf('async function clearLogs'), html.indexOf('function accMsg'));
@@ -112,9 +112,9 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   assert.match(html,/<details id="advancedErrorRules"[^>]+ontoggle="if\(this.open\)openAdvancedErrorRules\(\)"/);assert.match(html,/id="advancedErrorRulesJson"[^>]+oninput="markAdvancedErrorRulesDirty\(\)"/);assert.match(html,/function openAdvancedErrorRules\(\).*advancedErrorRulesJson'\)\.focus\(\)/);assert.match(html,/function applyAdvancedErrorRules\(\)/);assert.match(html,/snapshot.generation!==ERROR_RULE_GENERATION/);
   for (const id of ['pipelineQuotaPool','pipelineHealthSort','pipelineSticky']) assert.match(html, new RegExp(`id="${id}"`));
   assert.doesNotMatch(html,/id="pipelineExcludeUnhealthy"/);
-  assert.match(html,/可排序账号调度流水线/); assert.equal((html.match(/class="pipeline-step" draggable="true"/g)||[]).length,3);
+  assert.match(html,/会话命中条件门与未命中调度步骤/); assert.equal((html.match(/class="pipeline-step" draggable="true"/g)||[]).length,3);
   assert.equal((html.match(/class="ghost pipeline-move-up"/g)||[]).length,3); assert.equal((html.match(/class="ghost pipeline-move-down"/g)||[]).length,3);
-  assert.match(html,/id="pipelineOrderStatus" aria-live="polite"/); assert.match(html,/越靠前优先级越高/);
+  assert.match(html,/id="pipelineOrderStatus" aria-live="polite"/); assert.match(html,/已有绑定先命中/);assert.match(html,/sticky 的保存位置仅为配置兼容/);assert.match(html,/未命中调度步骤/);
   for(const handler of ['startPipelineDrag','dropPipelineDrag','movePipelineStep','syncPipelineOrder'])assert.match(html,new RegExp(`function ${handler}\\(`));
   assert.match(html,/onclick="movePipelineStep\('quotaPool',-1,this\)"/,'native move buttons pass their focus target to production reorder logic');
   assert.match(html,/const opposite=row\?\.querySelector\(direction<0\?'\.pipeline-move-down':'\.pipeline-move-up'\)/);
@@ -122,8 +122,10 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   const collect = html.slice(html.indexOf('function collectAccounts'), html.indexOf('async function saveAccounts'));
   for (const field of ['id:a.id','name:a.name',"note:a.note||''","key:a.key||''",'enabled:a.enabled!==false','maxConcurrent:','weight:','priority:',"proxyUrl:a.proxyUrl||''","headers:a.headers||{}","perModel:a.perModel||{}"] ) assert.ok(collect.includes(field), `full account snapshot must preserve ${field}`);
   assert.match(collect,/errorRules:rules/);
-  assert.match(collect, /accountPipeline:\{quotaPool:[^}]+healthSort:[^}]+sticky:[^}]+order:pipelineOrder\(\),cachePoolSize:/);
-  assert.match(html,/id="cachePoolSize" type="number" min="0" max="100000" step="1"/);assert.match(html,/0 = 关闭/);assert.match(html,/仅在 sticky 模式或启用会话粘性步骤时生效/);
+  assert.match(collect, /accountPipeline:\{quotaPool:[^}]+healthSort:[^}]+sticky:[^}]+order:pipelineOrder\(\),\.\.\.pipelineNumberDraft\(\)/);
+  for(const id of ['cachePoolSize','cachePoolMaxSize'])assert.match(html,new RegExp(`id="${id}" type="number" min="0" max="100000" step="1"`));
+  for(const id of ['sessionBindingExplicitTtlMs','sessionBindingFallbackTtlMs'])assert.match(html,new RegExp(`id="${id}" type="number" min="60000" max="604800000" step="1"`));
+  assert.match(html,/id="sessionBindingMaxEntries" type="number" min="1" max="100000" step="1"/);assert.match(html,/最小值 0 = 关闭/);assert.match(html,/max=min 可关闭自动扩容/);assert.match(html,/当前目标与会话绑定状态/);
   assert.match(html,/cachePoolRole==='active'/);assert.match(html,/缓存活跃/);assert.match(html,/缓存备用/);
   assert.match(html, /api\('\/api\/statistics'\)/);
   assert.match(html, /id="statisticsStatus"[^>]+aria-live="polite"/);
@@ -195,9 +197,9 @@ test('raw scheduling editor uses a labelled native modal, draft guidance and ann
   assert.match(html, /id="rawSchedulingJson"[^>]+overflow-wrap:anywhere/);
   for (const id of ['rawSchedulingError','rawSchedulingFeedback']) assert.match(html,new RegExp(`id="${id}" aria-live="polite"`));
   assert.match(html,/accountNames 为全部账号的只读参考名称（可重复），不可修改/);
-  assert.match(html,/策略全局适用于账号池/);assert.match(html,/priority 越小越优先/);assert.match(html,/reserve/);assert.match(html,/备用溢出/);
+  assert.match(html,/策略全局适用于账号池/);assert.match(html,/priority\/稳定 ID/);assert.match(html,/reserve/);assert.match(html,/grow-one/);assert.match(html,/sticky\+healthSort 是“绑定命中条件门”/);
   const raw=html.slice(html.indexOf('const RAW_PIPELINE_CONTROLS'),html.indexOf('function collectAccounts'));
-  assert.match(raw,/accountPipeline\.order=pipelineOrder\(\)/);assert.match(raw,/accountPipeline\.cachePoolSize=/);assert.match(raw,/value\.accountPipeline\.cachePoolSize/); assert.match(raw,/validPipelineOrder\(value\.accountPipeline\.order\)/); assert.match(raw,/setPipelineOrder\(value\.accountPipeline\.order\)/);
+  assert.match(raw,/accountPipeline\.order=pipelineOrder\(\)/);assert.match(raw,/const PIPELINE_NUMBER_CONTROLS/);for(const field of ['cachePoolSize','cachePoolMaxSize','sessionBindingExplicitTtlMs','sessionBindingFallbackTtlMs','sessionBindingMaxEntries'])assert.ok(raw.includes(field),field);assert.match(raw,/value\.accountPipeline\.cachePoolMaxSize/); assert.match(raw,/validPipelineOrder\(value\.accountPipeline\.order\)/); assert.match(raw,/setPipelineOrder\(value\.accountPipeline\.order\)/);
 });
 
 test('detailed logs have independent labelled controls, privacy/retention guidance and safe on-demand text', () => {

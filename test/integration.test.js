@@ -157,7 +157,7 @@ test('API compatibility, message pass-through and request outcomes are explicit'
   });
   const upstreamPort = await listen(mock);
   const switchPort = await new Promise(async (resolve) => { const server = http.createServer(); const port = await listen(server); await close(server); resolve(port); });
-  const config = { port: switchPort, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, maxConcurrent: 1, perModel: {} }], knownModels: ['valid-image', 'valid-tool', 'valid-function-call', 'done-close', 'stream-cancel', 'nonstream-cancel'], perModel: {}, accountErrorRules: { '502': { action: 'ban' } }, accountContentErrorRules: [{ contains: 'upstream fetch failed', action: 'ban' }] };
+  const config = { port: switchPort, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'sticky', accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, maxConcurrent: 1, perModel: {} }], knownModels: ['valid-image', 'valid-tool', 'valid-function-call', 'done-close', 'stream-cancel', 'nonstream-cancel'], perModel: {}, accountErrorRules: { '502': { action: 'ban' } }, accountContentErrorRules: [{ contains: 'upstream fetch failed', action: 'ban' }], accountPipeline: { quotaPool: false, healthSort: true, sticky: false, order: ['quotaPool','healthSort','sticky'], cachePoolSize: 1, cachePoolMaxSize: 1 } };
   const running = await startSwitcher(config);
   t.after(async () => { await stop(running.child); await close(mock); fs.rmSync(running.dir, { recursive: true, force: true }); });
 
@@ -204,6 +204,8 @@ test('API compatibility, message pass-through and request outcomes are explicit'
   assert.equal(byModel.get('done-close')?.status, 200); assert.equal(byModel.get('done-close')?.result, 'success');
   assert.equal(byModel.get('stream-cancel')?.status, 499); assert.equal(byModel.get('stream-cancel')?.result, 'client_cancelled'); assert.equal(byModel.get('stream-cancel')?.errorCategory, null);
   assert.equal(byModel.get('nonstream-cancel')?.status, 499); assert.equal(byModel.get('nonstream-cancel')?.result, 'client_cancelled'); assert.equal(byModel.get('nonstream-cancel')?.errorCategory, null);
+  assert.deepEqual([byModel.get('done-close')?.bindingSource,byModel.get('stream-cancel')?.bindingSource,byModel.get('nonstream-cancel')?.bindingSource],['fallback','fallback','fallback']);
+  assert.deepEqual([byModel.get('done-close')?.bindingResult,byModel.get('stream-cancel')?.bindingResult,byModel.get('nonstream-cancel')?.bindingResult],['miss','miss','hit'],'a committed binding survives stream cancellation without duplicating finalizers');
   assert.equal((await (await fetch(`http://127.0.0.1:${switchPort}/api/logs/requests?result=client_cancelled`)).json()).items.length, 2);
   assert.equal((await (await fetch(`http://127.0.0.1:${switchPort}/api/logs/errors`)).json()).items.length, 0, 'client cancellation must not create attempt errors');
   const statistics = await (await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json();
@@ -988,7 +990,7 @@ test('new scheduling modes, account fields, model aliases and independent logs',
   assert.deepEqual(roundTrip.accounts[0].perModel,draftAccounts[0].perModel);
   assert.deepEqual(roundTrip.accounts[1].perModel,draftAccounts[1].perModel);
   assert.equal(roundTrip.mode,'sticky');assert.equal(roundTrip.active,1);assert.equal(roundTrip.concurrencyWaitMs,987);
-  assert.deepEqual(roundTrip.accountErrorRules,rules);assert.deepEqual(roundTrip.accountPipeline,{quotaPool:false,healthSort:true,sticky:false,order:['healthSort','quotaPool','sticky'],cachePoolSize:0});
+  assert.deepEqual(roundTrip.accountErrorRules,rules);assert.deepEqual(roundTrip.accountPipeline,{quotaPool:false,healthSort:true,sticky:false,order:['healthSort','quotaPool','sticky'],cachePoolSize:0,cachePoolMaxSize:0,sessionBindingExplicitTtlMs:7200000,sessionBindingFallbackTtlMs:900000,sessionBindingMaxEntries:50000});
   const bytes=fs.readFileSync(path.join(running.dir,'config.json'));
   const invalidHeader=await rawJson(switchPort,'/api/accounts',{accounts:[{...accounts[0],headers:{Authorization:'bad'}},accounts[1]],mode:'single',active:0,concurrencyWaitMs:20,accountErrorRules:{}});assert.equal(invalidHeader.status,400);assert.deepEqual(fs.readFileSync(path.join(running.dir,'config.json')),bytes);
   const invalidProxy=await rawJson(switchPort,'/api/accounts',{accounts:[{...accounts[0],proxyUrl:'ftp://user:pass@example.test'},accounts[1]],mode:'single',active:0,concurrencyWaitMs:20,accountErrorRules:{}});assert.equal(invalidProxy.status,400);
@@ -1238,12 +1240,13 @@ test('runtime counter overflow becomes null with an exact marker', async (t) => 
 });
 
 const PIPELINE_STEP_ORDER = ['quotaPool','healthSort','sticky'];
+const PIPELINE_RUNTIME_DEFAULTS = {cachePoolMaxSize:0,sessionBindingExplicitTtlMs:7200000,sessionBindingFallbackTtlMs:900000,sessionBindingMaxEntries:50000};
 const pipelinePermutations = (items) => items.length < 2 ? [items] : items.flatMap((item,index) => pipelinePermutations(items.filter((_,i)=>i!==index)).map(rest=>[item,...rest]));
 
 test('pipeline migrates legacy four-step input into canonical three-step order and validates atomically', async (t) => {
   const port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-pipeline-vnext-'));
   const config={port,accounts:[{id:'a',name:'A',key:'key',enabled:true,perModel:{}}],accountMode:'single',activeAccount:0,accountErrorRules:{},perModel:{},knownModels:['m'],accountPipeline:{quotaPool:false,excludeUnhealthy:true,healthSort:false,sticky:false,order:['sticky','excludeUnhealthy','quotaPool','healthSort'],cachePoolSize:0}};
-  const running=await startSwitcher(config,dir);t.after(async()=>{await stop(running.child);fs.rmSync(dir,{recursive:true,force:true});});let view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.deepEqual(view.accountPipeline,{quotaPool:false,healthSort:true,sticky:false,order:['sticky','healthSort','quotaPool'],cachePoolSize:0});
+  const running=await startSwitcher(config,dir);t.after(async()=>{await stop(running.child);fs.rmSync(dir,{recursive:true,force:true});});let view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.deepEqual(view.accountPipeline,{quotaPool:false,healthSort:true,sticky:false,order:['sticky','healthSort','quotaPool'],cachePoolSize:0,...PIPELINE_RUNTIME_DEFAULTS});
   const bytes=fs.readFileSync(path.join(dir,'config.json'));assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'single',active:0,concurrencyWaitMs:0,errorRules:view.errorRules,accountPipeline:{quotaPool:false,healthSort:true,sticky:false,order:['sticky','sticky','quotaPool'],cachePoolSize:0}})).status,400);assert.deepEqual(fs.readFileSync(path.join(dir,'config.json')),bytes);
   for(const order of [['quotaPool','healthSort','sticky'],['sticky','quotaPool','healthSort'],['healthSort','sticky','quotaPool']]){assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'single',active:0,concurrencyWaitMs:0,errorRules:view.errorRules,accountPipeline:{quotaPool:false,healthSort:true,sticky:false,order,cachePoolSize:0}})).status,200);view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.deepEqual(view.accountPipeline.order,order);}
 });
@@ -1254,27 +1257,39 @@ test('cache pool configuration migrates, validates atomically, preserves old cli
   let running=await startSwitcher({port,accounts:[{id:'a',name:'A',key:'ka',enabled:true,perModel:{}}],accountMode:'sticky',activeAccount:0,concurrencyWaitMs:0,accountErrorRules:{},accountPipeline:pipeline,knownModels:['m'],perModel:{}},dir);
   t.after(async()=>{if(running?.child)await stop(running.child);fs.rmSync(dir,{recursive:true,force:true});});
   let view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
-  assert.equal(view.accountPipeline.cachePoolSize,0,'legacy configuration defaults cache pool off');
-  assert.equal(JSON.parse(fs.readFileSync(configPath)).accountPipeline.cachePoolSize,0,'migration persists the disabled default');
+  assert.equal(view.accountPipeline.cachePoolSize,0,'legacy configuration defaults cache pool off');assert.equal(view.accountPipeline.cachePoolMaxSize,0,'legacy max defaults to min');assert.equal(view.cachePool.targetSize,0);
+  const migratedConfig=JSON.parse(fs.readFileSync(configPath));assert.equal(migratedConfig.accountPipeline.cachePoolSize,0,'migration persists the disabled default');assert.equal(migratedConfig.accountPipeline.cachePoolMaxSize,0);assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'metadata.json'))).cachePoolTargetSize,0);
   assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'sticky',active:0,concurrencyWaitMs:5000,accountErrorRules:{},accountPipeline:{...pipeline,cachePoolSize:2}})).status,200);
-  view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal(view.accountPipeline.cachePoolSize,2);
+  view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal(view.accountPipeline.cachePoolSize,2);assert.equal(view.accountPipeline.cachePoolMaxSize,2,'legacy save that changes min keeps auto-growth inert');assert.equal(view.cachePool.targetSize,2);
   assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'sticky',active:0,concurrencyWaitMs:5000,accountErrorRules:{},accountPipeline:pipeline})).status,200,'old client may omit cachePoolSize');
   view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal(view.accountPipeline.cachePoolSize,2,'old-client save preserves current cache pool size');
-  assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'roundrobin',active:0,concurrencyWaitMs:5000,accountErrorRules:{},accountPipeline:{...pipeline,cachePoolSize:2}})).status,200);
+  const completePipeline={...view.accountPipeline,cachePoolMaxSize:4,sessionBindingExplicitTtlMs:600000,sessionBindingFallbackTtlMs:120000,sessionBindingMaxEntries:1234};
+  assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'sticky',active:0,concurrencyWaitMs:5000,errorRules:view.errorRules,accountPipeline:completePipeline})).status,200);
+  view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.deepEqual({max:view.accountPipeline.cachePoolMaxSize,explicit:view.accountPipeline.sessionBindingExplicitTtlMs,fallback:view.accountPipeline.sessionBindingFallbackTtlMs,entries:view.accountPipeline.sessionBindingMaxEntries},{max:4,explicit:600000,fallback:120000,entries:1234});
+  assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'sticky',active:0,concurrencyWaitMs:5000,errorRules:view.errorRules,accountPipeline:pipeline})).status,200,'old client may omit every new field');
+  view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.deepEqual({min:view.accountPipeline.cachePoolSize,max:view.accountPipeline.cachePoolMaxSize,explicit:view.accountPipeline.sessionBindingExplicitTtlMs,fallback:view.accountPipeline.sessionBindingFallbackTtlMs,entries:view.accountPipeline.sessionBindingMaxEntries},{min:2,max:4,explicit:600000,fallback:120000,entries:1234});
+  assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'roundrobin',active:0,concurrencyWaitMs:5000,accountErrorRules:{},accountPipeline:{...view.accountPipeline,cachePoolSize:2}})).status,200);
   view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal(view.accounts[0].cachePoolRole,null,'cache pool is inactive without sticky mode or step');
-  assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'roundrobin',active:0,concurrencyWaitMs:5000,accountErrorRules:{},accountPipeline:{...pipeline,sticky:true,cachePoolSize:2}})).status,200);
+  assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'roundrobin',active:0,concurrencyWaitMs:5000,accountErrorRules:{},accountPipeline:{...view.accountPipeline,sticky:true,cachePoolSize:2}})).status,200);
   view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal(view.accounts[0].cachePoolRole,'active','explicit sticky step activates the cache pool outside sticky account mode');
-  assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'sticky',active:0,concurrencyWaitMs:5000,accountErrorRules:{},accountPipeline:{...pipeline,cachePoolSize:2}})).status,200);
+  assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'sticky',active:0,concurrencyWaitMs:5000,accountErrorRules:{},accountPipeline:{...view.accountPipeline,sticky:false,cachePoolSize:2}})).status,200);
   view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
   assert.equal(fs.readFileSync(configPath,'utf8').includes('cachePoolRole'),false,'runtime cache roles are never persisted');
-  const before=fs.readFileSync(configPath);
-  for(const cachePoolSize of [-1,100001,1.5,'2',null,true]){
-    const response=await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'sticky',active:0,concurrencyWaitMs:5000,accountErrorRules:{},accountPipeline:{...pipeline,cachePoolSize}});
-    assert.equal(response.status,400,String(cachePoolSize));assert.deepEqual(fs.readFileSync(configPath),before);
-  }
-  const unknown=await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'sticky',active:0,concurrencyWaitMs:5000,accountErrorRules:{},accountPipeline:{...pipeline,cachePoolSize:2,cacheSecret:'forbidden'}});
+  const before=fs.readFileSync(configPath),validPipeline=view.accountPipeline;
+  const invalidPipelines=[
+    null,[],
+    ...['quotaPool','healthSort','sticky'].flatMap(field=>{const missing={...validPipeline};delete missing[field];return[missing,{...validPipeline,[field]:1}];}),
+    ...[-1,100001,1.5,'2',null,true].map(cachePoolSize=>({...validPipeline,cachePoolSize})),
+    ...[-1,100001,1.5,'4',null,true].map(cachePoolMaxSize=>({...validPipeline,cachePoolMaxSize})),
+    ...[59999,604800001,1.5,'60000',null,true].flatMap(value=>[{...validPipeline,sessionBindingExplicitTtlMs:value},{...validPipeline,sessionBindingFallbackTtlMs:value}]),
+    ...[0,100001,1.5,'1',null,true].map(sessionBindingMaxEntries=>({...validPipeline,sessionBindingMaxEntries})),
+    {...validPipeline,cachePoolSize:5,cachePoolMaxSize:4},
+    {...validPipeline,sessionBindingExplicitTtlMs:60000,sessionBindingFallbackTtlMs:60001},
+  ];
+  for(const accountPipeline of invalidPipelines){const response=await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'sticky',active:0,concurrencyWaitMs:5000,accountErrorRules:{},accountPipeline});assert.equal(response.status,400,JSON.stringify(accountPipeline));assert.deepEqual(fs.readFileSync(configPath),before);}
+  const unknown=await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'sticky',active:0,concurrencyWaitMs:5000,accountErrorRules:{},accountPipeline:{...validPipeline,cacheSecret:'forbidden'}});
   assert.equal(unknown.status,400);assert.deepEqual(fs.readFileSync(configPath),before);
-  await stop(running.child);running.child=null;running=await startSwitcher(null,dir);view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal(view.accountPipeline.cachePoolSize,2,'saved cache pool survives restart');
+  await stop(running.child);running.child=null;running=await startSwitcher(null,dir);view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.deepEqual({min:view.accountPipeline.cachePoolSize,max:view.accountPipeline.cachePoolMaxSize,explicit:view.accountPipeline.sessionBindingExplicitTtlMs,fallback:view.accountPipeline.sessionBindingFallbackTtlMs,entries:view.accountPipeline.sessionBindingMaxEntries,target:view.cachePool.targetSize},{min:2,max:4,explicit:600000,fallback:120000,entries:1234,target:2},'saved pool and binding boundaries survive restart');
   await stop(running.child);running.child=null;const persisted=JSON.parse(fs.readFileSync(configPath));persisted.accountPipeline.cachePoolSize=-1;fs.writeFileSync(configPath,JSON.stringify(persisted));running=await startSwitcher(null,dir);view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal(view.accountPipeline.cachePoolSize,0,'invalid startup value safely disables the feature');
 });
 
@@ -1323,45 +1338,216 @@ test('cache pool selects a stable priority/id active set, ignores soft layers an
   assert.equal(seen.includes('Bearer key-d'),false,'reserve standby never receives normal traffic');
 });
 
-test('cache pool immediately uses safe standby when hard state leaves no active candidate', async (t) => {
+test('cache pool refuses reserve standby when hard state leaves no active candidate', async (t) => {
   const upstream=http.createServer((req,res)=>{req.resume();req.on('end',()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));});});
   const upstreamPort=await listen(upstream),port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-cache-pool-hard-fallback-')),now=Date.now();
   const accounts=['a','b'].map((id,index)=>({id,name:id.toUpperCase(),key:`key-${id}`,enabled:true,priority:index+1,maxConcurrent:1,perModel:{}}));
   const reserve={snapshot:{limits:{five_hour:{percentUsed:95},weekly:{percentUsed:95},monthly:{percentUsed:95}},fetchedAt:now},lastAttemptAt:now,lastSuccessAt:now,errorCategory:null};
   fs.writeFileSync(path.join(dir,'metadata.json'),JSON.stringify({models:{},history:[],accountStates:{},routingSecret:'hard-fallback-secret',stats:{},accountQuotas:{a:reserve,b:reserve}}));
-  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts,accountMode:'sticky',activeAccount:0,concurrencyWaitMs:300,knownModels:['m'],perModel:{},accountErrorRules:{},accountPipeline:{quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:false,order:PIPELINE_STEP_ORDER,cachePoolSize:2}},dir,{NODE_ENV:'test',CLINE_PASS_TEST_QUOTA_SUCCESS_MS:'1000'});
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts,accountMode:'sticky',activeAccount:0,concurrencyWaitMs:300,knownModels:['m'],perModel:{},accountErrorRules:{},accountPipeline:{quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:false,order:PIPELINE_STEP_ORDER,cachePoolSize:2,cachePoolMaxSize:2}},dir,{NODE_ENV:'test',CLINE_PASS_TEST_QUOTA_SUCCESS_MS:'1000'});
   t.after(async()=>{await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
   const roles=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.deepEqual(roles.accounts.map(account=>account.cachePoolRole),['standby','standby']);
   const started=Date.now(),response=await rawJson(port,'/v1/chat/completions',{model:'m',messages:[]},{'Session-Id':'all-reserve'}),elapsed=Date.now()-started;
-  assert.equal(response.status,200);assert.ok(elapsed<200,`hard-state fallback waited ${elapsed}ms instead of bypassing the ${300}ms capacity wait`);
+  assert.equal(response.status,429);assert.ok(elapsed<200,`ineligible reserve candidates waited ${elapsed}ms instead of failing safely`);
   const log=await waitUntil(async()=>{const page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestedModel=m&limit=1`)).json();return page.items[0];});
-  assert.equal(log.selectionReason,'cache-pool-standby-overflow');assert.equal(log.preferredAccountId,null);assert.equal(log.cachePoolTier,'standby');assert.equal(log.cachePoolFallback,true);
+  assert.equal(log.selectionReason,'capacity-unavailable');assert.equal(log.cachePoolTier,null);assert.equal(log.cachePoolFallback,false);
 });
 
-test('cache pool waits for all active accounts, overflows to standby safely and returns 429 without standby', async (t) => {
+test('cache pool waits, grows one active member, persists target and returns 429 at max', async (t) => {
   const seen=[];const upstream=http.createServer((req,res)=>{if(req.method==='GET'){res.writeHead(500,{'Content-Type':'application/json'});return res.end('{}');}req.resume();req.on('end',()=>{seen.push({authorization:req.headers.authorization,at:Date.now()});setTimeout(()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));},140);});});
   const upstreamPort=await listen(upstream),port=await unusedPort(),accounts=[{id:'a',name:'A',key:'key-a',enabled:true,priority:1,maxConcurrent:1,perModel:{}},{id:'b',name:'B',key:'key-b',enabled:true,priority:2,maxConcurrent:1,perModel:{}},{id:'c',name:'C',key:'key-c',enabled:true,priority:3,maxConcurrent:1,perModel:{}}];
-  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts,accountMode:'sticky',activeAccount:0,concurrencyWaitMs:40,knownModels:['slow'],perModel:{},accountErrorRules:{},accountPipeline:{quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:false,order:PIPELINE_STEP_ORDER,cachePoolSize:2}},null,{NODE_ENV:'test'});
-  t.after(async()=>{await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  let running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts,accountMode:'sticky',activeAccount:0,concurrencyWaitMs:40,knownModels:['slow'],perModel:{},accountErrorRules:{},accountPipeline:{quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:false,order:PIPELINE_STEP_ORDER,cachePoolSize:2,cachePoolMaxSize:3}},null,{NODE_ENV:'test'});
+  t.after(async()=>{if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
   const headers={'Session-Id':'cache-capacity-session'},body={model:'slow',messages:[]};
   const first=rawJson(port,'/v1/chat/completions',body,headers);await waitUntil(()=>seen.length===1);
   const second=rawJson(port,'/v1/chat/completions',body,headers);await waitUntil(()=>seen.length===2);
   const overflowStarted=Date.now(),third=rawJson(port,'/v1/chat/completions',body,headers);await waitUntil(()=>seen.length===3);assert.ok(seen[2].at-overflowStarted>=25,'standby must not be used before the active wait expires');
   const responses=await Promise.all([first,second,third]);assert.ok(responses.every(response=>response.status===200));assert.deepEqual(new Set(responses.slice(0,2).map(response=>response.headers['x-cline-account'])),new Set(['A','B']));assert.equal(responses[2].headers['x-cline-account'],'C');
   const logs=await waitUntil(async()=>{const page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestedModel=slow&limit=20`)).json();return page.items.length>=3&&page.items;});
-  const byReason=Object.fromEntries(logs.map(item=>[item.selectionReason,item]));assert.equal(byReason['cache-pool-active']?.cachePoolTier,'active');assert.equal(byReason['cache-pool-active-overflow']?.cachePoolTier,'active');assert.equal(byReason['cache-pool-standby-overflow']?.cachePoolTier,'standby');assert.equal(byReason['cache-pool-standby-overflow']?.cachePoolFallback,true);assert.equal(byReason['cache-pool-standby-overflow']?.cachePoolSize,2);
+  const byReason=Object.fromEntries(logs.map(item=>[item.selectionReason,item])),grownLog=logs.find(item=>item.accountName==='C');assert.equal(byReason['cache-pool-active']?.cachePoolTier,'active');assert.ok(['cache-pool-active','cache-pool-active-overflow'].includes(grownLog?.selectionReason));assert.equal(grownLog?.cachePoolTier,'active');assert.equal(grownLog?.cachePoolFallback,false);assert.equal(grownLog?.cachePoolSize,2);assert.equal(grownLog?.cachePoolMaxSize,3);assert.equal(grownLog?.cachePoolTargetSize,3);
   const serialized=JSON.stringify(logs);assert.equal(serialized.includes('cache-capacity-session'),false);for(const secret of ['key-a','key-b','key-c'])assert.equal(serialized.includes(secret),false);
-  let view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();view.accounts.find(account=>account.id==='c').enabled=false;
+  let view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal(view.cachePool.targetSize,3);assert.equal(JSON.parse(fs.readFileSync(path.join(running.dir,'metadata.json'))).cachePoolTargetSize,3);
+  const runtimeDir=running.dir;await stop(running.child);running.child=null;running=await startSwitcher(null,runtimeDir,{NODE_ENV:'test'});view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal(view.cachePool.targetSize,3,'grown target survives restart');assert.deepEqual(view.accounts.map(account=>account.cachePoolRole),['active','active','active']);
+  view.accounts.find(account=>account.id==='c').enabled=false;
   assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'sticky',active:0,concurrencyWaitMs:40,accountErrorRules:{},accountPipeline:view.accountPipeline})).status,200);
   seen.length=0;const heldA=rawJson(port,'/v1/chat/completions',body,headers);await waitUntil(()=>seen.length===1);const heldB=rawJson(port,'/v1/chat/completions',body,headers);await waitUntil(()=>seen.length===2);const blocked=await rawJson(port,'/v1/chat/completions',body,headers);assert.equal(blocked.status,429);assert.equal(blocked.headers['retry-after'],'1');await Promise.all([heldA,heldB]);
   view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.deepEqual(view.accounts.map(account=>account.activeCount),[0,0,0]);
+  assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'sticky',active:0,concurrencyWaitMs:40,errorRules:view.errorRules,accountPipeline:{...view.accountPipeline,cachePoolMaxSize:2}})).status,200);view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal(view.cachePool.targetSize,2,'operator max clamp is explicit and durable');assert.equal(JSON.parse(fs.readFileSync(path.join(running.dir,'metadata.json'))).cachePoolTargetSize,2);
+});
+
+test('concurrent saturation grows only to max while unlimited active capacity never grows', async (t) => {
+  const seen=[];const upstream=http.createServer((req,res)=>{if(req.method==='GET'){res.writeHead(500);return res.end('{}');}req.resume();req.on('end',()=>{seen.push(req.headers.authorization);setTimeout(()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));},140);});});
+  const upstreamPort=await listen(upstream),port=await unusedPort(),accounts=['a','b','c','d'].map((id,index)=>({id,name:id.toUpperCase(),key:`key-${id}`,enabled:true,priority:index+1,maxConcurrent:1,perModel:{}}));
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts,accountMode:'sticky',concurrencyWaitMs:25,knownModels:['slow'],perModel:{},errorRules:[],accountPipeline:{quotaPool:false,healthSort:false,sticky:false,order:PIPELINE_STEP_ORDER,cachePoolSize:1,cachePoolMaxSize:3}},null,{NODE_ENV:'test'});t.after(async()=>{await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  const body={model:'slow',messages:[]},first=rawJson(port,'/v1/chat/completions',body,{'Session-Id':'grow-1'});await waitUntil(()=>seen.length===1);
+  const concurrent=['grow-2','grow-3','grow-4'].map(session=>rawJson(port,'/v1/chat/completions',body,{'Session-Id':session}));
+  await waitUntil(()=>seen.length===3);const responses=await Promise.all([first,...concurrent]);assert.equal(responses.filter(response=>response.status===200).length,3);assert.equal(responses.filter(response=>response.status===429).length,1);assert.equal(new Set(seen).size,3);assert.equal(seen.includes('Bearer key-d'),false);
+  let view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal(view.cachePool.targetSize,3);assert.deepEqual(view.accounts.map(account=>account.activeCount),[0,0,0,0]);
+  view.accounts[0].maxConcurrent=0;
+  assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'sticky',active:0,concurrencyWaitMs:25,errorRules:view.errorRules,accountPipeline:{...view.accountPipeline,cachePoolSize:1,cachePoolMaxSize:1}})).status,200);
+  view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'sticky',active:0,concurrencyWaitMs:25,errorRules:view.errorRules,accountPipeline:{...view.accountPipeline,cachePoolMaxSize:3}})).status,200);
+  seen.length=0;const unlimited=await Promise.all(['unlimited-1','unlimited-2','unlimited-3'].map(session=>rawJson(port,'/v1/chat/completions',body,{'Session-Id':session})));assert.ok(unlimited.every(response=>response.status===200));assert.deepEqual(new Set(seen),new Set(['Bearer key-a']));view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal(view.cachePool.targetSize,1,'unlimited active account never emits saturation growth');
+});
+
+test('one saturation deadline grows at most one member when the promoted standby is already full', async (t) => {
+  const seen=[];
+  const upstream=http.createServer((req,res)=>{if(req.method==='GET'){res.writeHead(500);return res.end('{}');}req.resume();req.on('end',()=>{seen.push(req.headers.authorization);setTimeout(()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));},160);});});
+  const upstreamPort=await listen(upstream),port=await unusedPort(),accounts=['a','b','c'].map((id,index)=>({id,name:id.toUpperCase(),key:`key-${id}`,enabled:true,priority:index+1,maxConcurrent:1,perModel:{}}));
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts,accountMode:'sticky',concurrencyWaitMs:25,knownModels:['slow'],perModel:{},errorRules:[],accountPipeline:{quotaPool:false,healthSort:false,sticky:false,order:PIPELINE_STEP_ORDER,cachePoolSize:1,cachePoolMaxSize:3}},null,{NODE_ENV:'test'});
+  t.after(async()=>{await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  const forcedStandby=rawJson(port,'/api/test',{model:'slow',accountId:'b'});await waitUntil(()=>seen.includes('Bearer key-b'));
+  const heldActive=rawJson(port,'/v1/chat/completions',{model:'slow',messages:[]},{'Session-Id':'held-active'});await waitUntil(()=>seen.includes('Bearer key-a'));
+  const blocked=await rawJson(port,'/v1/chat/completions',{model:'slow',messages:[]},{'Session-Id':'single-growth-deadline'});
+  assert.equal(blocked.status,429,'one elapsed deadline must not chain through multiple target increments');
+  const view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal(view.cachePool.targetSize,2,'the one synchronous growth decision is still durable');assert.equal(seen.includes('Bearer key-c'),false,'only the newly promoted, still-full account may be attempted after this deadline');
+  await Promise.all([forcedStandby,heldActive]);
+});
+
+test('cache pool growth rolls back the runtime target when atomic metadata persistence fails', async (t) => {
+  const seen=[];const upstream=http.createServer((req,res)=>{if(req.method==='GET'){res.writeHead(500);return res.end('{}');}req.resume();req.on('end',()=>{seen.push(req.headers.authorization);setTimeout(()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));},120);});});
+  const upstreamPort=await listen(upstream),port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-cache-growth-atomic-')),fault=path.join(dir,'metadata-fault'),loader=path.join(dir,'metadata-loader.mjs');
+  fs.writeFileSync(loader,`import fs from 'node:fs';const rename=fs.renameSync;fs.renameSync=(a,b)=>{if(String(b).endsWith('/metadata.json')&&fs.existsSync(${JSON.stringify(fault)}))throw Error('fixture metadata growth failure');return rename(a,b);};`);
+  const accounts=['a','b'].map((id,index)=>({id,name:id.toUpperCase(),key:`key-${id}`,enabled:true,priority:index+1,maxConcurrent:1,perModel:{}}));
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts,accountMode:'sticky',concurrencyWaitMs:20,knownModels:['slow'],perModel:{},errorRules:[],accountPipeline:{quotaPool:false,healthSort:false,sticky:false,order:PIPELINE_STEP_ORDER,cachePoolSize:1,cachePoolMaxSize:2}},dir,{NODE_ENV:'test',NODE_OPTIONS:`--import=${loader}`});
+  t.after(async()=>{await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
+  const held=rawJson(port,'/v1/chat/completions',{model:'slow',messages:[]},{'Session-Id':'atomic-growth-holder'});await waitUntil(()=>seen.length===1);fs.writeFileSync(fault,'');
+  const blocked=await rawJson(port,'/v1/chat/completions',{model:'slow',messages:[]},{'Session-Id':'atomic-growth-blocked'});assert.equal(blocked.status,429);fs.unlinkSync(fault);
+  const view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal(view.cachePool.targetSize,1);assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'metadata.json'))).cachePoolTargetSize,1);assert.equal(fs.readdirSync(dir).some(name=>/^metadata\.json\..*\.tmp$/.test(name)),false,'failed atomic writes remove their temporary file');
+  assert.match(running.output(),/扩容目标持久化失败/);assert.equal((await held).status,200);
+});
+
+test('sticky plus healthSort binds misses by health, preserves hits, overflows temporarily and replaces removed accounts', async (t) => {
+  const seen=[];
+  const upstream=http.createServer((req,res)=>{if(req.method==='GET'){res.writeHead(500,{'Content-Type':'application/json'});return res.end('{}');}const chunks=[];req.on('data',chunk=>chunks.push(chunk));req.on('end',()=>{const body=JSON.parse(Buffer.concat(chunks).toString()||'{}'),authorization=req.headers.authorization;seen.push({model:body.model,authorization,at:Date.now()});const reply=()=>{if(body.model==='fail'){res.writeHead(500,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:'trained account failure'}}));}if(body.model==='remove'&&authorization==='Bearer key-b'){res.writeHead(429,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:'account quota exhausted'}}));}res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));};body.model==='slow'?setTimeout(reply,120):reply();});});
+  const upstreamPort=await listen(upstream),port=await unusedPort(),accounts=[{id:'a',name:'A',key:'key-a',enabled:true,priority:1,maxConcurrent:1,perModel:{}},{id:'b',name:'B',key:'key-b',enabled:true,priority:2,maxConcurrent:1,perModel:{}}];
+  const rules=[{id:'train-degrade',scope:'account',action:'degrade',when:{statuses:[500]}},{id:'remove-account',scope:'account',action:'cooldown',when:{statuses:[429]},reset:{fallback:'1h0m0s',max:'1h0m0s'}}];
+  let running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts,accountMode:'single',activeAccount:0,concurrencyWaitMs:20,knownModels:['ok','fail','slow','remove','blocked'],perModel:{blocked:{upstreams:['only'],exclude:['only'],pinMode:'strict'}},errorRules:rules,accountPipeline:{quotaPool:false,healthSort:false,sticky:false,order:PIPELINE_STEP_ORDER,cachePoolSize:0}},null,{NODE_ENV:'test'});
+  t.after(async()=>{if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  for(let i=0;i<4;i++)assert.equal((await rawJson(port,'/v1/chat/completions',{model:'ok',messages:[]})).status,200);
+  assert.equal((await rawJson(port,'/v1/chat/completions',{model:'fail',messages:[]})).status,500);
+  let view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+  assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'single',active:1,concurrencyWaitMs:20,errorRules:view.errorRules,accountPipeline:view.accountPipeline})).status,200);
+  assert.equal((await rawJson(port,'/v1/chat/completions',{model:'ok',messages:[]})).headers['x-cline-account'],'B');
+  view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+  const bindingPipeline={...view.accountPipeline,healthSort:true,cachePoolSize:2,cachePoolMaxSize:2,sessionBindingExplicitTtlMs:7200000,sessionBindingFallbackTtlMs:900000,sessionBindingMaxEntries:50000};
+  assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'sticky',active:0,concurrencyWaitMs:20,errorRules:view.errorRules,accountPipeline:bindingPipeline})).status,200);
+  const noAttemptHeaders={'Session-Id':'no-attempt-binding'};assert.equal((await rawJson(port,'/v1/chat/completions',{model:'blocked',messages:[]},noAttemptHeaders)).status,503);const afterNoAttempt=await rawJson(port,'/v1/chat/completions',{model:'ok',messages:[]},noAttemptHeaders);const afterNoAttemptLog=await waitUntil(async()=>{const page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${afterNoAttempt.headers['x-cline-request-id']}`)).json();return page.items[0];});assert.equal(afterNoAttemptLog.bindingResult,'miss','a provisional binding with no native attempt is owner-safely removed');
+  const boundHeaders={'Session-Id':'stateful-binding-secret'};
+  const first=await rawJson(port,'/v1/chat/completions',{model:'ok',messages:[]},boundHeaders);assert.equal(first.headers['x-cline-account'],'B','health miss chooses the higher direct success rate');
+  const firstLog=await waitUntil(async()=>{const page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${first.headers['x-cline-request-id']}`)).json();return page.items[0];});assert.equal(firstLog.bindingSource,'explicit');assert.equal(firstLog.bindingResult,'miss');
+  view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'sticky',active:0,concurrencyWaitMs:200,errorRules:view.errorRules,accountPipeline:view.accountPipeline})).status,200);
+  const beforeHolders=seen.length,heldBound=rawJson(port,'/v1/chat/completions',{model:'slow',messages:[]},boundHeaders);await waitUntil(()=>seen.length===beforeHolders+1);
+  const heldOther=rawJson(port,'/v1/chat/completions',{model:'slow',messages:[]},{'Session-Id':'fill-other-active'});await waitUntil(()=>seen.length===beforeHolders+2);assert.deepEqual(new Set(seen.slice(-2).map(item=>item.authorization)),new Set(['Bearer key-a','Bearer key-b']));
+  const provisionalOne=rawJson(port,'/v1/chat/completions',{model:'ok',messages:[]},{'Session-Id':'provisional-convergence'}),provisionalTwo=rawJson(port,'/v1/chat/completions',{model:'ok',messages:[]},{'Session-Id':'provisional-convergence'});
+  await Promise.all([heldBound,heldOther]);const provisionalResponses=await Promise.all([provisionalOne,provisionalTwo]);assert.equal(provisionalResponses[0].headers['x-cline-account'],provisionalResponses[1].headers['x-cline-account'],'concurrent first requests converge through the provisional binding');
+  const provisionalLogs=await waitUntil(async()=>{const ids=new Set(provisionalResponses.map(response=>response.headers['x-cline-request-id'])),page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?limit=100`)).json(),items=page.items.filter(item=>ids.has(item.requestId));return items.length===2&&items;});assert.deepEqual(new Set(provisionalLogs.map(item=>item.bindingResult)),new Set(['miss','provisional']));
+  view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'sticky',active:0,concurrencyWaitMs:20,errorRules:view.errorRules,accountPipeline:view.accountPipeline})).status,200);
+  assert.equal((await rawJson(port,'/v1/chat/completions',{model:'fail',messages:[]},boundHeaders)).headers['x-cline-account'],'B');
+  assert.equal((await rawJson(port,'/v1/chat/completions',{model:'fail',messages:[]},boundHeaders)).headers['x-cline-account'],'B');
+  const retained=await rawJson(port,'/v1/chat/completions',{model:'ok',messages:[]},boundHeaders);assert.equal(retained.headers['x-cline-account'],'B','success-rate changes do not migrate an existing binding');
+  const fresh=await rawJson(port,'/v1/chat/completions',{model:'ok',messages:[]},{'Session-Id':'health-miss-new'});assert.equal(fresh.headers['x-cline-account'],'A','a new miss observes the updated health order');
+  const heldSeen=seen.length,held=rawJson(port,'/v1/chat/completions',{model:'slow',messages:[]},boundHeaders);await waitUntil(()=>seen.length>heldSeen&&seen.at(-1).model==='slow');
+  const overflow=await rawJson(port,'/v1/chat/completions',{model:'ok',messages:[]},boundHeaders);assert.equal(overflow.headers['x-cline-account'],'A');assert.equal((await held).headers['x-cline-account'],'B');
+  const overflowLog=await waitUntil(async()=>{const page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${overflow.headers['x-cline-request-id']}`)).json();return page.items[0];});assert.equal(overflowLog.bindingResult,'temporary-overflow');assert.equal(overflowLog.overflow,true);
+  assert.equal((await rawJson(port,'/v1/chat/completions',{model:'ok',messages:[]},boundHeaders)).headers['x-cline-account'],'B','temporary overflow never rewrites the binding');
+  const removed=await rawJson(port,'/v1/chat/completions',{model:'remove',messages:[]},boundHeaders);assert.equal(removed.status,200);assert.equal(removed.headers['x-cline-account'],'A');
+  assert.equal((await rawJson(port,'/v1/chat/completions',{model:'ok',messages:[]},boundHeaders)).headers['x-cline-account'],'A','account removal replacement owns the next confirmed binding');
+  view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal(view.cachePool.binding.enabled,true);assert.ok(view.cachePool.binding.size>=2);assert.equal(Object.hasOwn(view.cachePool.binding,'entries'),false);
+  const serialized=JSON.stringify(await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?limit=100`)).json())+fs.readFileSync(path.join(running.dir,'metadata.json'),'utf8');assert.equal(serialized.includes('stateful-binding-secret'),false);assert.equal(serialized.includes('health-miss-new'),false);assert.equal(serialized.includes('no-attempt-binding'),false);
+});
+
+test('binding TTL, LRU and process restart remain bounded and non-persistent', async (t) => {
+  const upstream=http.createServer((req,res)=>{if(req.method==='GET'){res.writeHead(500);return res.end('{}');}req.resume();req.on('end',()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));});}),upstreamPort=await listen(upstream),port=await unusedPort(),accounts=[{id:'a',name:'A',key:'key-a',enabled:true,perModel:{}},{id:'b',name:'B',key:'key-b',enabled:true,perModel:{}}];
+  let running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts,accountMode:'sticky',concurrencyWaitMs:0,knownModels:['ok'],perModel:{},errorRules:[],accountPipeline:{quotaPool:false,healthSort:true,sticky:false,order:PIPELINE_STEP_ORDER,cachePoolSize:2,cachePoolMaxSize:2,sessionBindingExplicitTtlMs:300000,sessionBindingFallbackTtlMs:60000,sessionBindingMaxEntries:1}},null,{NODE_ENV:'test',CLINE_PASS_TEST_BINDING_TTL_SCALE:'0.001'});
+  t.after(async()=>{if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  const send=async(session,messages=[])=>rawJson(port,'/v1/chat/completions',{model:'ok',messages},{...(session?{'Session-Id':session}:{})});
+  const one=await send('ttl-one');await new Promise(resolve=>setTimeout(resolve,180));const oneHit=await send('ttl-one');
+  const oneHitLog=await waitUntil(async()=>{const page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${oneHit.headers['x-cline-request-id']}`)).json();return page.items[0];});assert.equal(oneHitLog.bindingResult,'hit');
+  await new Promise(resolve=>setTimeout(resolve,180));const slidingHit=await send('ttl-one');const slidingHitLog=await waitUntil(async()=>{const page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${slidingHit.headers['x-cline-request-id']}`)).json();return page.items[0];});assert.equal(slidingHitLog.bindingResult,'hit','explicit binding TTL slides from the latest hit');
+  await new Promise(resolve=>setTimeout(resolve,330));const expired=await send('ttl-one');const expiredLog=await waitUntil(async()=>{const page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${expired.headers['x-cline-request-id']}`)).json();return page.items[0];});assert.equal(expiredLog.bindingResult,'invalidated');
+  await send('lru-two');const evicted=await send('ttl-one');const evictedLog=await waitUntil(async()=>{const page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${evicted.headers['x-cline-request-id']}`)).json();return page.items[0];});assert.equal(evictedLog.bindingResult,'miss');
+  const fallback=await send(null,[{role:'user',content:'stable fallback opening'}]);const fallbackLog=await waitUntil(async()=>{const page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${fallback.headers['x-cline-request-id']}`)).json();return page.items[0];});assert.equal(fallbackLog.bindingSource,'fallback');
+  await new Promise(resolve=>setTimeout(resolve,80));const fallbackExpired=await send(null,[{role:'user',content:'stable fallback opening'}]);const fallbackExpiredLog=await waitUntil(async()=>{const page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${fallbackExpired.headers['x-cline-request-id']}`)).json();return page.items[0];});assert.equal(fallbackExpiredLog.bindingResult,'invalidated','fallback binding uses its shorter configured TTL');
+  let view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal(view.cachePool.binding.size,1);assert.equal(view.cachePool.binding.maxEntries,1);assert.equal(JSON.stringify(JSON.parse(fs.readFileSync(path.join(running.dir,'metadata.json')))).includes('stable fallback opening'),false);
+  const restart=await send('restart-session');const restartHit=await send('restart-session');assert.equal((await waitUntil(async()=>{const page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${restartHit.headers['x-cline-request-id']}`)).json();return page.items[0];})).bindingResult,'hit');
+  const dir=running.dir;await stop(running.child);running.child=null;running=await startSwitcher(null,dir,{NODE_ENV:'test',CLINE_PASS_TEST_BINDING_TTL_SCALE:'0.001'});const afterRestart=await send('restart-session');const restartLog=await waitUntil(async()=>{const page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${afterRestart.headers['x-cline-request-id']}`)).json();return page.items[0];});assert.equal(restartLog.bindingResult,'miss');
+  view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal(view.cachePool.binding.size,1);assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(path.join(dir,'metadata.json'))),'sessionBindings'),false);assert.equal(one.status,200);assert.equal(restart.status,200);
+});
+
+test('combined binding works without a cache pool and clears on credential rotation, disable and quota reserve', async (t) => {
+  const seen=[];let reserveKey=null;
+  const upstream=http.createServer((req,res)=>{
+    if(req.method==='GET'){
+      if(req.url.endsWith('/users/me/plan/usage-limits')){
+        const percentUsed=reserveKey!==null&&req.headers.authorization===reserveKey?95:10;
+        res.writeHead(200,{'Content-Type':'application/json'});
+        return res.end(JSON.stringify({success:true,data:{limits:[{type:'five_hour',percentUsed},{type:'weekly',percentUsed},{type:'monthly',percentUsed}]}}));
+      }
+      res.writeHead(500,{'Content-Type':'application/json'});return res.end('{}');
+    }
+    req.resume();req.on('end',()=>{seen.push(req.headers.authorization);res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));});
+  });
+  const upstreamPort=await listen(upstream),port=await unusedPort(),accounts=[{id:'a',name:'A',key:'key-a',enabled:true,priority:1,maxConcurrent:1,perModel:{}},{id:'b',name:'B',key:'key-b',enabled:true,priority:2,maxConcurrent:1,perModel:{}}];
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts,accountMode:'single',activeAccount:0,concurrencyWaitMs:0,knownModels:['ok'],perModel:{},errorRules:[],accountPipeline:{quotaPool:false,healthSort:true,sticky:true,order:PIPELINE_STEP_ORDER,cachePoolSize:0,cachePoolMaxSize:0}},null,{NODE_ENV:'test'});
+  t.after(async()=>{await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  const view=async()=>(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+  const logFor=async(response)=>{const id=response.headers['x-cline-request-id'];return waitUntil(async()=>{const page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${id}`)).json();return page.items[0];});};
+  const send=(session)=>rawJson(port,'/v1/chat/completions',{model:'ok',messages:[]},{'Session-Id':session});
+  const save=async(patch,mapAccounts=null)=>{const state=await view();const response=await rawJson(port,'/api/accounts',{accounts:mapAccounts?mapAccounts(state.accounts):state.accounts,mode:state.mode,active:state.active,concurrencyWaitMs:0,errorRules:state.errorRules,accountPipeline:{...state.accountPipeline,...patch}});assert.equal(response.status,200);return view();};
+  assert.equal((await view()).cachePool.targetSize,0,'combined binding is independent of a cache pool');
+  const first=await send('no-pool-binding');assert.equal((await logFor(first)).bindingResult,'miss');
+  const boundName=first.headers['x-cline-account'];let state=await view();assert.equal(state.cachePool.binding.enabled,true);assert.equal(state.cachePool.binding.size,1,'a miss builds a binding without any cache pool');
+  const hit=await send('no-pool-binding');assert.equal(hit.headers['x-cline-account'],boundName);assert.equal((await logFor(hit)).bindingResult,'hit');
+  state=await save({sticky:false});
+  assert.equal(state.cachePool.binding.enabled,false);assert.equal(state.cachePool.binding.size,0,'healthSort-only never keeps a binding table');
+  assert.equal((await logFor(await send('health-only-session'))).bindingResult,'not-applicable');assert.equal((await view()).cachePool.binding.size,0);
+  state=await save({sticky:true,healthSort:false});
+  assert.equal(state.cachePool.binding.enabled,false);
+  assert.equal((await logFor(await send('sticky-only-session'))).bindingResult,'not-applicable');assert.equal((await view()).cachePool.binding.size,0,'sticky-only HRW stays stateless');
+  state=await save({healthSort:true});
+  const rotated=await send('rotate-binding');assert.equal((await logFor(rotated)).bindingResult,'miss');
+  const rotatedName=rotated.headers['x-cline-account'],rotatedId=state.accounts.find(account=>account.name===rotatedName).id;assert.equal((await view()).cachePool.binding.size,1);
+  state=await save({},(list)=>list.map(account=>account.id===rotatedId?{...account,key:`${account.key}-rotated`}:account));
+  assert.equal(state.cachePool.binding.size,0,'credential rotation invalidates the bound session');
+  assert.equal((await logFor(await send('rotate-binding'))).bindingResult,'miss');
+  const disabled=await send('disable-binding');const disabledName=disabled.headers['x-cline-account'],remainingName=disabledName==='A'?'B':'A',disabledId=(await view()).accounts.find(account=>account.name===disabledName).id;
+  state=await save({},(list)=>list.map(account=>account.id===disabledId?{...account,enabled:false}:account));
+  const rehomed=await send('disable-binding');assert.equal(rehomed.headers['x-cline-account'],remainingName,'the remaining account replaces the disabled binding');assert.ok(['miss','invalidated'].includes((await logFor(rehomed)).bindingResult));
+  const reserved=await send('reserve-binding');const reservedName=reserved.headers['x-cline-account'],reservedKey=state.accounts.find(account=>account.name===reservedName).key;assert.equal(reservedName,remainingName);assert.equal((await logFor(reserved)).bindingResult,'miss');
+  assert.ok((await view()).cachePool.binding.size>=1,'the only eligible account owns the session binding');
+  reserveKey=`Bearer ${reservedKey}`;
+  assert.equal((await rawJson(port,'/api/statistics/quota-refresh',{force:true})).status,200);
+  await waitUntil(async()=>{const snapshot=await view();return snapshot.cachePool.binding.size===0&&snapshot.accounts.find(account=>account.name===reservedName).quota.pool==='reserve';});
+  state=await save({},(list)=>list.map(account=>account.id===disabledId?{...account,enabled:true}:account));
+  const rebind=await send('reserve-binding');assert.notEqual(rebind.headers['x-cline-account'],reservedName,'a reserve account is replaced by the next eligible account');assert.ok(['miss','invalidated'].includes((await logFor(rebind)).bindingResult),'a reserve account never keeps its binding');
+  assert.equal(seen.includes(`Bearer ${reservedKey}`),true,'the pre-reserve binding still served real traffic');
+});
+
+test('a saturated combined-mode miss grows one standby, promotes it and only then binds the session', async (t) => {
+  const seen=[];
+  const upstream=http.createServer((req,res)=>{if(req.method==='GET'){res.writeHead(500);return res.end('{}');}req.resume();req.on('end',()=>{seen.push(req.headers.authorization);setTimeout(()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));},140);});});
+  const upstreamPort=await listen(upstream),port=await unusedPort(),accounts=[{id:'a',name:'A',key:'key-a',enabled:true,priority:1,maxConcurrent:1,perModel:{}},{id:'b',name:'B',key:'key-b',enabled:true,priority:2,maxConcurrent:1,perModel:{}}];
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts,accountMode:'sticky',concurrencyWaitMs:30,knownModels:['slow'],perModel:{},errorRules:[],accountPipeline:{quotaPool:false,healthSort:true,sticky:true,order:PIPELINE_STEP_ORDER,cachePoolSize:1,cachePoolMaxSize:2}},null,{NODE_ENV:'test'});
+  t.after(async()=>{await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  const view=async()=>(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+  const logFor=async(response)=>{const id=response.headers['x-cline-request-id'];return waitUntil(async()=>{const page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${id}`)).json();return page.items[0];});};
+  const send=(session)=>rawJson(port,'/v1/chat/completions',{model:'slow',messages:[]},{'Session-Id':session});
+  let state=await view();assert.equal(state.cachePool.targetSize,1);assert.deepEqual(state.accounts.map(account=>account.cachePoolRole),['active','standby']);
+  const holder=send('binding-holder');await waitUntil(()=>seen.length===1);
+  const promoted=send('binding-promoted');await waitUntil(()=>seen.length===2);
+  const responses=await Promise.all([holder,promoted]);assert.ok(responses.every(response=>response.status===200));
+  assert.equal(responses[0].headers['x-cline-account'],'A');assert.equal(responses[1].headers['x-cline-account'],'B','the saturated miss uses the promoted account, not a permanent standby');
+  const promotedLog=await logFor(responses[1]);assert.equal(promotedLog.bindingResult,'miss');assert.equal(promotedLog.bindingSource,'explicit');assert.equal(promotedLog.cachePoolTargetSize,2);
+  state=await view();assert.equal(state.cachePool.targetSize,2,'promotion is durable');assert.equal(JSON.parse(fs.readFileSync(path.join(running.dir,'metadata.json'))).cachePoolTargetSize,2);assert.deepEqual(state.accounts.map(account=>account.cachePoolRole),['active','active']);assert.equal(state.cachePool.binding.size,2);
+  const promotedHit=await send('binding-promoted');assert.equal(promotedHit.headers['x-cline-account'],'B');assert.equal((await logFor(promotedHit)).bindingResult,'hit','the promoted account owns the session binding');
+  const holderHit=await send('binding-holder');assert.equal(holderHit.headers['x-cline-account'],'A');assert.equal((await logFor(holderHit)).bindingResult,'hit');
 });
 
 test('missing and explicit all-false pipelines preserve all six mode sequences, reasons, capacity and lease release', async (t) => {
   let slowStarted=0;
   const upstream=http.createServer((req,res)=>{const chunks=[];req.on('data',c=>chunks.push(c));req.on('end',()=>{const body=JSON.parse(Buffer.concat(chunks).toString()||'{}');const reply=()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));};if(body.model==='slow'){slowStarted++;setTimeout(reply,80);}else reply();});}),upstreamPort=await listen(upstream);t.after(()=>close(upstream));
   const run=async(mode,explicit)=>{const port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-legacy-equivalence-')),accounts=[{id:'a',name:'A',key:'ka',enabled:true,maxConcurrent:1,weight:1,priority:1,perModel:{}},{id:'b',name:'B',key:'kb',enabled:true,maxConcurrent:1,weight:3,priority:10,perModel:{}}],cfg={port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:mode,activeAccount:0,concurrencyWaitMs:0,accounts,knownModels:['fast','slow'],perModel:{},accountErrorRules:{}};if(explicit)cfg.accountPipeline={quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:false};fs.writeFileSync(path.join(dir,'metadata.json'),JSON.stringify({models:{},history:[],accountStates:{},routingSecret:'fixed-equivalence-secret',stats:{}}));const running=await startSwitcher(cfg,dir);try{const sequence=[];for(let i=0;i<8;i++){const r=await rawJson(port,'/v1/chat/completions',{model:'fast',messages:[]});sequence.push(r.headers['x-cline-account']);}let expectedSlowStarts=slowStarted+1;const p1=rawJson(port,'/v1/chat/completions',{model:'slow',messages:[]});await waitUntil(()=>slowStarted>=expectedSlowStarts);expectedSlowStarts++;const p2=rawJson(port,'/v1/chat/completions',{model:'slow',messages:[]});if(mode!=='single')await waitUntil(()=>slowStarted>=expectedSlowStarts);const p3=rawJson(port,'/v1/chat/completions',{model:'slow',messages:[]});const capacity=(await Promise.all([p1,p2,p3])).map(r=>({status:r.status,retry:r.headers['retry-after']||null}));const view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json(),logs=await waitUntil(async()=>{const page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestedModel=fast&limit=20`)).json();return page.items.length>=8&&page;});return{sequence,capacity,reasons:logs.items.map(x=>x.selectionReason).sort(),active:view.accounts.map(x=>x.activeCount),pipeline:view.accountPipeline};}finally{await stop(running.child);fs.rmSync(dir,{recursive:true,force:true});}};
-  for(const mode of ['single','roundrobin','sticky','least-connections','weighted-roundrobin','priority-failover']){const legacy=await run(mode,false),allFalse=await run(mode,true);assert.deepEqual(allFalse.sequence,legacy.sequence,`${mode} selection sequence changed`);assert.deepEqual(allFalse.capacity,legacy.capacity,`${mode} wait/429 behavior changed`);assert.deepEqual(allFalse.reasons,legacy.reasons,`${mode} diagnostic reason changed`);assert.deepEqual(allFalse.active,[0,0]);assert.deepEqual(legacy.active,[0,0]);assert.deepEqual(legacy.pipeline,{quotaPool:false,healthSort:false,sticky:false,order:['quotaPool','healthSort','sticky'],cachePoolSize:0});}
+  for(const mode of ['single','roundrobin','sticky','least-connections','weighted-roundrobin','priority-failover']){const legacy=await run(mode,false),allFalse=await run(mode,true);assert.deepEqual(allFalse.sequence,legacy.sequence,`${mode} selection sequence changed`);assert.deepEqual(allFalse.capacity,legacy.capacity,`${mode} wait/429 behavior changed`);assert.deepEqual(allFalse.reasons,legacy.reasons,`${mode} diagnostic reason changed`);assert.deepEqual(allFalse.active,[0,0]);assert.deepEqual(legacy.active,[0,0]);assert.deepEqual(legacy.pipeline,{quotaPool:false,healthSort:false,sticky:false,order:['quotaPool','healthSort','sticky'],cachePoolSize:0,...PIPELINE_RUNTIME_DEFAULTS});}
 });
 
 test('enabled quota layers honor 80/95 boundaries, unknown ordering and immediate capacity fallback', async (t) => {

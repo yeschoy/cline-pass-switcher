@@ -46,6 +46,10 @@ const DEFAULT_CONFIG = {
     sticky: false,
     order: ['quotaPool', 'healthSort', 'sticky'],
     cachePoolSize: 0,
+    cachePoolMaxSize: 0,
+    sessionBindingExplicitTtlMs: 7_200_000,
+    sessionBindingFallbackTtlMs: 900_000,
+    sessionBindingMaxEntries: 50_000,
   },
   modelAliases: {},        // client alias -> cline-pass/* model
   knownModels: [
@@ -514,6 +518,11 @@ function validateAccountErrorRulesInput(rules = {}) {
 const PIPELINE_KEYS = ['quotaPool', 'healthSort', 'sticky'];
 const PIPELINE_DEFAULT_ORDER = ['quotaPool', 'healthSort', 'sticky'];
 const LEGACY_PIPELINE_ORDER = ['excludeUnhealthy', 'quotaPool', 'healthSort', 'sticky'];
+const SESSION_BINDING_EXPLICIT_TTL_MS = 7_200_000;
+const SESSION_BINDING_FALLBACK_TTL_MS = 900_000;
+const SESSION_BINDING_MAX_ENTRIES = 50_000;
+const SESSION_BINDING_TTL_MIN_MS = 60_000;
+const SESSION_BINDING_TTL_MAX_MS = 604_800_000;
 function validPipelineOrder(value) {
   return Array.isArray(value) && value.length === PIPELINE_DEFAULT_ORDER.length && new Set(value).size === PIPELINE_DEFAULT_ORDER.length && value.every((step) => PIPELINE_DEFAULT_ORDER.includes(step));
 }
@@ -530,13 +539,21 @@ function canonicalPipelineOrder(value, fallback = PIPELINE_DEFAULT_ORDER) {
   for (const step of PIPELINE_DEFAULT_ORDER) if (!out.includes(step)) out.push(step);
   return out;
 }
-function normalizeAccountPipeline(value, { strict = false, fallbackOrder = PIPELINE_DEFAULT_ORDER, fallbackCachePoolSize = 0 } = {}) {
+function normalizeAccountPipeline(value, {
+  strict = false,
+  fallbackOrder = PIPELINE_DEFAULT_ORDER,
+  fallbackCachePoolSize = 0,
+  fallbackCachePoolMaxSize,
+  fallbackSessionBindingExplicitTtlMs = SESSION_BINDING_EXPLICIT_TTL_MS,
+  fallbackSessionBindingFallbackTtlMs = SESSION_BINDING_FALLBACK_TTL_MS,
+  fallbackSessionBindingMaxEntries = SESSION_BINDING_MAX_ENTRIES,
+} = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     if (strict) throw new Error('accountPipeline must be an object');
     value = {};
   }
   const legacy = Object.hasOwn(value, 'excludeUnhealthy');
-  const allowed = [...PIPELINE_KEYS, ...(legacy ? ['excludeUnhealthy'] : []), 'order', 'cachePoolSize'];
+  const allowed = [...PIPELINE_KEYS, ...(legacy ? ['excludeUnhealthy'] : []), 'order', 'cachePoolSize', 'cachePoolMaxSize', 'sessionBindingExplicitTtlMs', 'sessionBindingFallbackTtlMs', 'sessionBindingMaxEntries'];
   if (strict && Object.keys(value).some((key) => !allowed.includes(key))) throw new Error('accountPipeline contains an unknown field');
   if (strict) {
     for (const key of PIPELINE_KEYS) if (typeof value[key] !== 'boolean') throw new Error(`accountPipeline.${key} must be boolean`);
@@ -555,6 +572,29 @@ function normalizeAccountPipeline(value, { strict = false, fallbackOrder = PIPEL
   else if (Number.isInteger(value.cachePoolSize) && value.cachePoolSize >= 0 && value.cachePoolSize <= 100000) out.cachePoolSize = value.cachePoolSize;
   else if (strict) throw new Error('accountPipeline.cachePoolSize must be an integer from 0 to 100000');
   else out.cachePoolSize = 0;
+  const fallbackMax = Number.isInteger(fallbackCachePoolMaxSize) ? fallbackCachePoolMaxSize : out.cachePoolSize;
+  if (value.cachePoolMaxSize === undefined) out.cachePoolMaxSize = fallbackMax >= 0 && fallbackMax <= 100000 ? Math.max(out.cachePoolSize, fallbackMax) : out.cachePoolSize;
+  else if (Number.isInteger(value.cachePoolMaxSize) && value.cachePoolMaxSize >= 0 && value.cachePoolMaxSize <= 100000) out.cachePoolMaxSize = value.cachePoolMaxSize;
+  else if (strict) throw new Error('accountPipeline.cachePoolMaxSize must be an integer from 0 to 100000');
+  else out.cachePoolMaxSize = out.cachePoolSize;
+  const bindingDefaults = { sessionBindingExplicitTtlMs: SESSION_BINDING_EXPLICIT_TTL_MS, sessionBindingFallbackTtlMs: SESSION_BINDING_FALLBACK_TTL_MS, sessionBindingMaxEntries: SESSION_BINDING_MAX_ENTRIES };
+  const boundedInteger = (field, fallback, min, max) => {
+    if (value[field] === undefined) return Number.isInteger(fallback) && fallback >= min && fallback <= max ? fallback : bindingDefaults[field];
+    if (Number.isInteger(value[field]) && value[field] >= min && value[field] <= max) return value[field];
+    if (strict) throw new Error(`accountPipeline.${field} must be an integer from ${min} to ${max}`);
+    return bindingDefaults[field];
+  };
+  out.sessionBindingExplicitTtlMs = boundedInteger('sessionBindingExplicitTtlMs', fallbackSessionBindingExplicitTtlMs, SESSION_BINDING_TTL_MIN_MS, SESSION_BINDING_TTL_MAX_MS);
+  out.sessionBindingFallbackTtlMs = boundedInteger('sessionBindingFallbackTtlMs', fallbackSessionBindingFallbackTtlMs, SESSION_BINDING_TTL_MIN_MS, SESSION_BINDING_TTL_MAX_MS);
+  out.sessionBindingMaxEntries = boundedInteger('sessionBindingMaxEntries', fallbackSessionBindingMaxEntries, 1, 100000);
+  if (out.cachePoolMaxSize < out.cachePoolSize) {
+    if (strict) throw new Error('accountPipeline.cachePoolMaxSize must be greater than or equal to cachePoolSize');
+    out.cachePoolMaxSize = out.cachePoolSize;
+  }
+  if (out.sessionBindingFallbackTtlMs > out.sessionBindingExplicitTtlMs) {
+    if (strict) throw new Error('accountPipeline.sessionBindingFallbackTtlMs must not exceed sessionBindingExplicitTtlMs');
+    out.sessionBindingFallbackTtlMs = Math.min(SESSION_BINDING_FALLBACK_TTL_MS, out.sessionBindingExplicitTtlMs);
+  }
   return out;
 }
 const LEGACY_AGG_FIELDS = ['requests','errors','usageRequests','inputKnownRequests','inputTokens','outputKnownRequests','outputTokens','totalKnownRequests','totalTokens','cacheKnownRequests','cacheHitRequests','cachedTokens','cacheInputKnownRequests','cacheInputTokens','cacheInputCachedTokens'];
@@ -740,6 +780,19 @@ function normalizeAccountQuotas() {
   }
   return false;
 }
+function cachePoolTargetFor(pipeline = config.accountPipeline, value = META.cachePoolTargetSize) {
+  const min = Number.isInteger(pipeline?.cachePoolSize) ? pipeline.cachePoolSize : 0;
+  const max = Number.isInteger(pipeline?.cachePoolMaxSize) ? pipeline.cachePoolMaxSize : min;
+  if (min === 0) return 0;
+  const target = Number.isInteger(value) ? value : min;
+  return Math.min(max, Math.max(min, target));
+}
+function normalizeCachePoolTarget(pipeline = config.accountPipeline) {
+  const target = cachePoolTargetFor(pipeline);
+  if (META.cachePoolTargetSize === target) return false;
+  META.cachePoolTargetSize = target;
+  return true;
+}
 function normalizeConfigAndMeta({ persist = false } = {}) {
   let dirty = false;
   for (const field of ['detailedLogging', 'errorDetailLogging']) if (config[field] !== true && config[field] !== false) { config[field] = false; dirty = true; }
@@ -766,6 +819,7 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   if (JSON.stringify(legacyRules.accountContentErrorRules) !== JSON.stringify(config.accountContentErrorRules || [])) { config.accountContentErrorRules = legacyRules.accountContentErrorRules; dirty = true; }
   const pipeline = normalizeAccountPipeline(config.accountPipeline);
   if (JSON.stringify(pipeline) !== JSON.stringify(config.accountPipeline)) { config.accountPipeline = pipeline; dirty = true; }
+  if (normalizeCachePoolTarget(pipeline)) dirty = true;
   const old = Array.isArray(config.accounts) ? config.accounts : [];
   const byId = new Map(old.filter((a) => a?.id).map((a) => [String(a.id), a]));
   const byName = new Map(old.filter((a) => a?.name).map((a) => [String(a.name).slice(0, 50), a]));
@@ -818,7 +872,110 @@ const providerCircuitAccountGenerations = new Map();
 const providerCircuitRouteGenerations = new Map();
 const PROVIDER_CIRCUIT_LIMIT = 50000;
 const waiters = new Set();
+const sessionBindings = new Map();
+const sessionBindingCounters = { hits: 0, misses: 0, invalidated: 0, temporaryOverflows: 0, provisionalHits: 0 };
+let sessionBindingGeneration = 0n;
+const SESSION_BINDING_TTL_SCALE = process.env.NODE_ENV === 'test' ? Math.max(0.0001, Math.min(1, Number(process.env.CLINE_PASS_TEST_BINDING_TTL_SCALE) || 1)) : 1;
 function notifyCapacityWaiters() { for (const resolve of [...waiters]) resolve(); }
+function incrementBindingCounter(key) { sessionBindingCounters[key] = Math.min(Number.MAX_SAFE_INTEGER, (sessionBindingCounters[key] || 0) + 1); }
+function sessionBindingSource(identity) { return identity?.confidence === 'explicit' ? 'explicit' : identity?.confidence === 'fallback' ? 'fallback' : 'none'; }
+function sessionBindingTtlMs(source) {
+  const configured = source === 'fallback' ? config.accountPipeline?.sessionBindingFallbackTtlMs : config.accountPipeline?.sessionBindingExplicitTtlMs;
+  const fallback = source === 'fallback' ? SESSION_BINDING_FALLBACK_TTL_MS : SESSION_BINDING_EXPLICIT_TTL_MS;
+  return Math.max(1, Math.floor((Number.isInteger(configured) ? configured : fallback) * SESSION_BINDING_TTL_SCALE));
+}
+function nextSessionBindingGeneration() {
+  sessionBindingGeneration += 1n;
+  return sessionBindingGeneration;
+}
+function deleteSessionBinding(fingerprint, entry, { count = true } = {}) {
+  if (sessionBindings.get(fingerprint) !== entry) return false;
+  sessionBindings.delete(fingerprint);
+  if (count) incrementBindingCounter('invalidated');
+  return true;
+}
+function pruneSessionBindings(now = Date.now(), { full = false } = {}) {
+  let scanned = 0;
+  for (const [fingerprint, entry] of sessionBindings) {
+    if (entry.expiresAt <= now) deleteSessionBinding(fingerprint, entry);
+    if (!full && ++scanned >= 256) break;
+  }
+  const limit = config.accountPipeline?.sessionBindingMaxEntries || SESSION_BINDING_MAX_ENTRIES;
+  while (sessionBindings.size > limit) {
+    const oldest = sessionBindings.entries().next().value;
+    if (!oldest) break;
+    deleteSessionBinding(oldest[0], oldest[1]);
+  }
+}
+function touchSessionBinding(fingerprint, entry, now = Date.now()) {
+  entry.lastUsedAt = now;
+  entry.expiresAt = now + sessionBindingTtlMs(entry.source);
+  sessionBindings.delete(fingerprint);
+  sessionBindings.set(fingerprint, entry);
+}
+function findSessionBinding(identity, validIds, now = Date.now()) {
+  const fingerprint = identity?.fingerprint;
+  if (!fingerprint) return { entry: null, result: 'miss' };
+  const entry = sessionBindings.get(fingerprint);
+  if (!entry) return { entry: null, result: 'miss' };
+  if (entry.expiresAt <= now || !validIds.has(entry.accountId)) {
+    deleteSessionBinding(fingerprint, entry);
+    return { entry: null, result: 'invalidated' };
+  }
+  touchSessionBinding(fingerprint, entry, now);
+  if (entry.state === 'provisional') incrementBindingCounter('provisionalHits');
+  else incrementBindingCounter('hits');
+  return { entry, result: entry.state === 'provisional' ? 'provisional' : 'hit' };
+}
+function createProvisionalSessionBinding(identity, accountId, ownerRequestId) {
+  const source = sessionBindingSource(identity);
+  if (!identity?.fingerprint || source === 'none' || !ownerRequestId) return null;
+  pruneSessionBindings();
+  const now = Date.now(), generation = nextSessionBindingGeneration();
+  const entry = { accountId, source, expiresAt: now + sessionBindingTtlMs(source), lastUsedAt: now, state: 'provisional', generation, ownerRequestId };
+  sessionBindings.delete(identity.fingerprint);
+  sessionBindings.set(identity.fingerprint, entry);
+  incrementBindingCounter('misses');
+  pruneSessionBindings(now);
+  return { fingerprint: identity.fingerprint, accountId, generation, ownerRequestId, owned: true, committed: false };
+}
+function sessionBindingHitToken(identity, entry) {
+  return { fingerprint: identity.fingerprint, accountId: entry.accountId, generation: entry.generation, ownerRequestId: entry.ownerRequestId, owned: false, committed: entry.state === 'confirmed' };
+}
+function commitSessionBindingSelection(selected) {
+  const token = selected?.bindingToken;
+  if (!token) return;
+  const entry = sessionBindings.get(token.fingerprint);
+  if (!entry || entry.generation !== token.generation || entry.accountId !== token.accountId) return;
+  entry.state = 'confirmed';
+  token.committed = true;
+  touchSessionBinding(token.fingerprint, entry);
+}
+function cleanupSessionBindingSelection(selected) {
+  const token = selected?.bindingToken;
+  if (!token?.owned || token.committed) return;
+  const entry = sessionBindings.get(token.fingerprint);
+  if (entry?.state === 'provisional' && entry.generation === token.generation && entry.ownerRequestId === token.ownerRequestId) deleteSessionBinding(token.fingerprint, entry);
+}
+function invalidateSessionBindingsForAccount(accountId) {
+  let changed = false;
+  for (const [fingerprint, entry] of sessionBindings) if (entry.accountId === accountId) changed = deleteSessionBinding(fingerprint, entry) || changed;
+  if (changed) notifyCapacityWaiters();
+}
+function invalidateSessionBindingsOutside(validIds) {
+  let changed = false;
+  for (const [fingerprint, entry] of sessionBindings) if (!validIds.has(entry.accountId)) changed = deleteSessionBinding(fingerprint, entry) || changed;
+  if (changed) notifyCapacityWaiters();
+}
+function reconcileSessionBindings() {
+  pruneSessionBindings(Date.now(), { full: true });
+  if (!sessionBindingConfigured()) return invalidateSessionBindingsOutside(new Set());
+  invalidateSessionBindingsOutside(bindingSelectionContext(new Set()).activeIds);
+}
+function sessionBindingSummary() {
+  reconcileSessionBindings();
+  return { enabled: sessionBindingConfigured(), size: sessionBindings.size, maxEntries: config.accountPipeline?.sessionBindingMaxEntries || SESSION_BINDING_MAX_ENTRIES, counters: { ...sessionBindingCounters } };
+}
 function getAccountState(id) { return (META.accountStates ||= {})[id] || null; }
 function safeReason(s, extraSecrets = []) {
   let reason = redactSecrets(String(s || '').replace(/[\r\n\t]+/g, ' '));
@@ -978,7 +1135,12 @@ async function acquireLegacyAccountLease(identity, { excludeIds = new Set(), all
   }
 }
 function configuredCachePoolSize() { return Number.isInteger(config.accountPipeline?.cachePoolSize) ? config.accountPipeline.cachePoolSize : 0; }
-function cachePoolEnabled() { return configuredCachePoolSize() > 0 && (config.accountMode === 'sticky' || config.accountPipeline?.sticky === true); }
+function configuredCachePoolMaxSize() { return Number.isInteger(config.accountPipeline?.cachePoolMaxSize) ? config.accountPipeline.cachePoolMaxSize : configuredCachePoolSize(); }
+function configuredCachePoolTargetSize() { return cachePoolTargetFor(config.accountPipeline); }
+function stickyEffective() { return config.accountMode === 'sticky' || config.accountPipeline?.sticky === true; }
+function cachePoolEnabled() { return configuredCachePoolSize() > 0 && stickyEffective(); }
+function sessionBindingConfigured() { return stickyEffective() && config.accountPipeline?.healthSort === true; }
+function sessionBindingEnabled(identity, ownerRequestId) { return sessionBindingConfigured() && !!identity?.fingerprint && !!ownerRequestId; }
 function pipelineEnabled() { return cachePoolEnabled() || PIPELINE_KEYS.some((key) => config.accountPipeline?.[key]); }
 function quotaRoutingEnabled() { return config.accountPipeline?.quotaPool === true || cachePoolEnabled(); }
 function quotaProjection(accountId, now = Date.now()) {
@@ -1001,7 +1163,7 @@ function statisticsQuotaProjection(account, now = Date.now()) {
 function pipelineCandidates(list) {
   return list.map((account) => ({ account, health: successHealthProjection('account', account.id), quota: quotaProjection(account.id) }));
 }
-function buildPipelineGroups(list, identity, candidates = pipelineCandidates(list)) {
+function buildPipelineGroups(list, identity, candidates = pipelineCandidates(list), { skipSticky = false } = {}) {
   const diagnostics = [];
   let groups = [{ candidates, quota: 'ordinary', health: 'ordinary' }];
   let stickyApplied = false;
@@ -1025,20 +1187,20 @@ function buildPipelineGroups(list, identity, candidates = pipelineCandidates(lis
         const unknown = group.candidates.filter((candidate) => candidate.health.successRate === null);
         return [...rated, ...(unknown.length ? [{ ...group, candidates: unknown, health: 'unknown' }] : [])];
       });
-    } else if (step === 'sticky') applySticky();
+    } else if (step === 'sticky' && !skipSticky) applySticky();
   }
-  if (config.accountMode === 'sticky' && !config.accountPipeline.sticky) applySticky();
+  if (!skipSticky && config.accountMode === 'sticky' && !config.accountPipeline.sticky) applySticky();
   return { groups: groups.map((group) => ({ accounts: group.candidates.map((candidate) => candidate.account), quota: group.quota, health: group.health })), diagnostics, stickyApplied };
 }
 function cachePoolMembership(list, candidates = null) {
   if (!cachePoolEnabled()) return null;
   candidates ||= pipelineCandidates(list);
-  const size = configuredCachePoolSize();
-  const activeCandidates = candidates.filter((candidate) => candidate.quota.pool !== 'reserve')
-    .sort((left, right) => (left.account.priority || 100) - (right.account.priority || 100) || (left.account.id < right.account.id ? -1 : left.account.id > right.account.id ? 1 : 0))
-    .slice(0, size);
+  const size = configuredCachePoolSize(), maxSize = configuredCachePoolMaxSize(), targetSize = configuredCachePoolTargetSize();
+  const eligibleCandidates = candidates.filter((candidate) => candidate.quota.pool !== 'reserve')
+    .sort((left, right) => (left.account.priority || 100) - (right.account.priority || 100) || (left.account.id < right.account.id ? -1 : left.account.id > right.account.id ? 1 : 0));
+  const activeCandidates = eligibleCandidates.slice(0, targetSize);
   const activeIds = new Set(activeCandidates.map((candidate) => candidate.account.id));
-  return { size, activeIds, activeCandidates, candidates, byId: new Map(candidates.map((candidate) => [candidate.account.id, candidate])) };
+  return { size, maxSize, targetSize, activeIds, activeCandidates, eligibleCandidates, candidates, byId: new Map(candidates.map((candidate) => [candidate.account.id, candidate])) };
 }
 function cachePoolRoles() {
   const list = enabledAccounts(), membership = cachePoolMembership(list), eligibleIds = new Set(list.map((account) => account.id));
@@ -1063,49 +1225,201 @@ function cachePipelineFacts(plan, membership, candidate, tier, capacityFallback)
     selectedHealth: cacheHealthLayer(candidate?.health),
     capacityFallback,
     cachePoolSize: membership.size,
+    cachePoolMaxSize: membership.maxSize,
+    cachePoolTargetSize: membership.targetSize,
     cachePoolTier: tier,
-    cachePoolFallback: tier === 'standby',
+    cachePoolFallback: false,
   };
 }
-function tryCachePoolStandbyLease(plan, membership, identity, mode, preferred) {
-  for (const group of plan.groups) {
-    const available = group.accounts.filter((account) => !membership.activeIds.has(account.id) && accountHasCapacity(account));
-    if (!available.length) continue;
-    const ranked = plan.stickyApplied ? available : cachePoolRank(available, identity, mode);
-    const account = ranked[0], lease = tryLease(account); if (!lease) continue;
-    const result = selectionResult(lease, mode, preferred, 'cache-pool-standby-overflow', identity, true);
-    result.pipeline = cachePipelineFacts(plan, membership, membership.byId.get(account.id), 'standby', true);
-    return result;
+function rankPipelineGroup(group, plan, identity, mode) {
+  if (plan.stickyApplied) return [...group.accounts];
+  return cachePoolRank(group.accounts, identity, mode);
+}
+function tryPipelinePlanLease(plan, identity, mode, { excludeId = null } = {}) {
+  // Only a sticky fingerprint gives the ranked head a stable meaning. Without one the
+  // mode rank is per-request (round-robin/least-connections), so the capacity-eligible
+  // account chosen here is the bounded "preferred" fact instead of a full account.
+  const rankedPreferred = !!identity?.fingerprint;
+  let preferred = null, capacityPreferred = null;
+  for (let groupIndex = 0; groupIndex < plan.groups.length; groupIndex++) {
+    const group = plan.groups[groupIndex], ranked = rankPipelineGroup(group, plan, identity, mode);
+    preferred ||= ranked[0] || null;
+    for (const account of ranked) {
+      if (account.id === excludeId || !accountHasCapacity(account)) continue;
+      capacityPreferred ||= account;
+      const lease = tryLease(account);
+      if (lease) return { lease, account, group, groupIndex, preferred: (rankedPreferred ? preferred : capacityPreferred) || account };
+    }
   }
-  return null;
+  return { lease: null, preferred };
+}
+function growCachePoolOne(membership) {
+  const active = membership.activeCandidates.map((candidate) => candidate.account);
+  if (!active.length || active.some((account) => !account.maxConcurrent || accountHasCapacity(account))) return null;
+  const current = configuredCachePoolTargetSize();
+  if (current >= membership.maxSize || membership.eligibleCandidates.length <= membership.activeCandidates.length) return null;
+  const growth = { previousActiveIds: new Set(membership.activeIds), targetSize: current + 1 };
+  META.cachePoolTargetSize = growth.targetSize;
+  try { saveMeta(); }
+  catch (error) {
+    META.cachePoolTargetSize = current;
+    console.error(`[缓存池] 扩容目标持久化失败：${safeReason(error.message)}`);
+    return null;
+  }
+  return growth;
+}
+function bindingSelectionContext(excludeIds) {
+  const list = enabledAccounts({ excludeIds });
+  const candidates = pipelineCandidates(list), membership = cachePoolMembership(list, candidates);
+  const activeCandidates = membership ? membership.activeCandidates : candidates.filter((candidate) => candidate.quota.pool !== 'reserve');
+  return { list, candidates, membership, activeCandidates, activeIds: new Set(activeCandidates.map((candidate) => candidate.account.id)) };
+}
+function growAndLeaseCachePoolOne(membership, identity, mode, excludeIds, { skipSticky = false } = {}) {
+  const growth = growCachePoolOne(membership);
+  if (!growth) return null;
+  const context = bindingSelectionContext(excludeIds);
+  const plan = buildPipelineGroups(context.activeCandidates.map((candidate) => candidate.account), identity, context.activeCandidates, { skipSticky });
+  const candidate = context.activeCandidates.find((item) => !growth.previousActiveIds.has(item.account.id)) || null;
+  let preferred = null, groupIndex = -1;
+  for (let index = 0; index < plan.groups.length; index++) {
+    const ranked = rankPipelineGroup(plan.groups[index], plan, identity, mode);
+    preferred ||= ranked[0] || null;
+    if (candidate && plan.groups[index].accounts.some((account) => account.id === candidate.account.id)) groupIndex = index;
+  }
+  const lease = candidate ? tryLease(candidate.account) : null;
+  return { growth, context, plan, candidate, lease, preferred: preferred || candidate?.account || null, groupIndex };
+}
+function bindingPipelineFacts(plan, context, candidate, capacityFallback = false) {
+  if (context.membership) return cachePipelineFacts(plan, context.membership, candidate, 'active', capacityFallback);
+  const group = plan.groups.find((item) => item.accounts.some((account) => account.id === candidate?.account.id));
+  return { diagnostics: plan.diagnostics, selectedQuota: candidate?.quota.pool || group?.quota || 'unknown', selectedHealth: cacheHealthLayer(candidate?.health), capacityFallback };
+}
+function attachBindingHit(result, identity, entry, bindingResult) {
+  result.bindingSource = entry.source;
+  result.bindingResult = bindingResult;
+  result.bindingToken = sessionBindingHitToken(identity, entry);
+  return result;
+}
+function attachBindingMiss(result, identity, ownerRequestId, missResult) {
+  result.bindingSource = sessionBindingSource(identity);
+  result.bindingResult = missResult;
+  result.bindingToken = createProvisionalSessionBinding(identity, result.lease.account.id, ownerRequestId);
+  return result;
+}
+async function acquireStatefulBindingAccountLease(identity, { excludeIds = new Set(), allowOverflow = true, ownerRequestId, bindingDeadline = null } = {}) {
+  const mode = config.accountMode, waitMs = Math.min(30000, Math.max(0, Number(config.concurrencyWaitMs) || 0));
+  const deadline = bindingDeadline ?? Date.now() + waitMs;
+  let context = bindingSelectionContext(excludeIds);
+  if (!context.list.length) return { error: 'no available upstream account', strategy: mode, bindingSource: sessionBindingSource(identity), bindingResult: 'miss' };
+  let lookup = findSessionBinding(identity, context.activeIds);
+  if (lookup.entry) {
+    const entry = lookup.entry;
+    while (true) {
+      context = bindingSelectionContext(excludeIds);
+      const current = sessionBindings.get(identity.fingerprint);
+      if (!current || current.generation !== entry.generation || !context.activeIds.has(entry.accountId)) {
+        if (current === entry) deleteSessionBinding(identity.fingerprint, entry);
+        lookup = { entry: null, result: 'invalidated' };
+        break;
+      }
+      const bound = context.activeCandidates.find((candidate) => candidate.account.id === entry.accountId);
+      const lease = tryLease(bound?.account);
+      if (lease) {
+        const reason = context.membership ? 'cache-pool-active' : 'pipeline-sticky-primary';
+        const result = selectionResult(lease, mode, bound.account, reason, identity);
+        const plan = buildPipelineGroups(context.activeCandidates.map((candidate) => candidate.account), identity, context.activeCandidates, { skipSticky: true });
+        result.pipeline = bindingPipelineFacts(plan, context, bound);
+        return attachBindingHit(result, identity, entry, lookup.result);
+      }
+      const remaining = deadline - Date.now();
+      if (remaining > 0) { await waitForCapacity(remaining); continue; }
+      const plan = buildPipelineGroups(context.activeCandidates.map((candidate) => candidate.account), identity, context.activeCandidates, { skipSticky: true });
+      const fallback = allowOverflow ? tryPipelinePlanLease(plan, identity, mode, { excludeId: entry.accountId }) : { lease: null, preferred: bound.account };
+      if (fallback.lease) {
+        incrementBindingCounter('temporaryOverflows');
+        const reason = context.membership ? 'cache-pool-active-overflow' : 'pipeline-capacity-fallback';
+        const result = selectionResult(fallback.lease, mode, bound.account, reason, identity, true);
+        result.pipeline = bindingPipelineFacts(plan, context, context.activeCandidates.find((candidate) => candidate.account.id === fallback.account.id), true);
+        return attachBindingHit(result, identity, entry, 'temporary-overflow');
+      }
+      if (allowOverflow && context.membership) {
+        const grown = growAndLeaseCachePoolOne(context.membership, identity, mode, excludeIds, { skipSticky: true });
+        if (grown?.lease) {
+          incrementBindingCounter('temporaryOverflows');
+          const result = selectionResult(grown.lease, mode, bound.account, 'cache-pool-active-overflow', identity, true);
+          result.pipeline = bindingPipelineFacts(grown.plan, grown.context, grown.candidate, true);
+          return attachBindingHit(result, identity, entry, 'temporary-overflow');
+        }
+        if (grown) return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode, bindingSource: entry.source, bindingResult: lookup.result };
+      }
+      return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode, bindingSource: entry.source, bindingResult: lookup.result };
+    }
+  }
+  while (true) {
+    context = bindingSelectionContext(excludeIds);
+    if (!context.list.length) return { error: 'no available upstream account', strategy: mode, bindingSource: sessionBindingSource(identity), bindingResult: lookup.result };
+    const concurrentEntry = sessionBindings.get(identity.fingerprint);
+    if (concurrentEntry && concurrentEntry.expiresAt > Date.now() && context.activeIds.has(concurrentEntry.accountId)) return acquireStatefulBindingAccountLease(identity, { excludeIds, allowOverflow, ownerRequestId, bindingDeadline: deadline });
+    if (concurrentEntry) { deleteSessionBinding(identity.fingerprint, concurrentEntry); lookup = { entry: null, result: 'invalidated' }; }
+    const plan = buildPipelineGroups(context.activeCandidates.map((candidate) => candidate.account), identity, context.activeCandidates, { skipSticky: true });
+    const chosen = tryPipelinePlanLease(plan, identity, mode);
+    if (chosen.lease) {
+      const fallback = chosen.groupIndex > 0 || chosen.preferred?.id !== chosen.account.id;
+      const reason = context.membership ? (fallback ? 'cache-pool-active-overflow' : 'cache-pool-active') : (fallback ? 'pipeline-capacity-fallback' : 'pipeline-sticky-primary');
+      const result = selectionResult(chosen.lease, mode, chosen.preferred || chosen.account, reason, identity, fallback);
+      result.pipeline = bindingPipelineFacts(plan, context, context.activeCandidates.find((candidate) => candidate.account.id === chosen.account.id), fallback);
+      return attachBindingMiss(result, identity, ownerRequestId, lookup.result);
+    }
+    if (!context.activeCandidates.length) return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode, bindingSource: sessionBindingSource(identity), bindingResult: lookup.result };
+    const remaining = deadline - Date.now();
+    if (remaining > 0) { await waitForCapacity(remaining); continue; }
+    if (allowOverflow && context.membership) {
+      const grown = growAndLeaseCachePoolOne(context.membership, identity, mode, excludeIds, { skipSticky: true });
+      if (grown?.lease) {
+        const fallback = grown.groupIndex > 0 || grown.preferred?.id !== grown.lease.account.id;
+        const reason = fallback ? 'cache-pool-active-overflow' : 'cache-pool-active';
+        const result = selectionResult(grown.lease, mode, grown.preferred, reason, identity, fallback);
+        result.pipeline = bindingPipelineFacts(grown.plan, grown.context, grown.candidate, fallback);
+        return attachBindingMiss(result, identity, ownerRequestId, lookup.result);
+      }
+      if (grown) return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode, bindingSource: sessionBindingSource(identity), bindingResult: lookup.result };
+    }
+    return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode, bindingSource: sessionBindingSource(identity), bindingResult: lookup.result };
+  }
 }
 async function acquireCachePoolAccountLease(identity, { excludeIds = new Set(), allowOverflow = true } = {}) {
   const mode = config.accountMode, waitMs = Math.min(30000, Math.max(0, Number(config.concurrencyWaitMs) || 0)), deadline = Date.now() + waitMs;
   while (true) {
     const list = enabledAccounts({ excludeIds });
     if (!list.length) return { error: 'no available upstream account', strategy: mode };
-    const candidates = pipelineCandidates(list), membership = cachePoolMembership(list, candidates), plan = buildPipelineGroups(list, identity, candidates);
-    const active = membership.activeCandidates.map((candidate) => candidate.account);
-    const rankedActive = identity?.fingerprint ? cachePoolRank(active, identity, mode) : cachePoolRank(active.filter(accountHasCapacity), identity, mode);
-    const preferred = rankedActive[0] || (identity?.fingerprint ? null : cachePoolRank(active, identity, mode)[0]) || null;
-    for (const account of rankedActive) {
-      const lease = tryLease(account); if (!lease) continue;
-      const overflow = !!preferred && account.id !== preferred.id;
-      const result = selectionResult(lease, mode, preferred || account, overflow ? 'cache-pool-active-overflow' : 'cache-pool-active', identity, overflow);
-      result.pipeline = cachePipelineFacts(plan, membership, membership.byId.get(account.id), 'active', overflow);
+    const candidates = pipelineCandidates(list), membership = cachePoolMembership(list, candidates);
+    const activeCandidates = membership.activeCandidates, active = activeCandidates.map((candidate) => candidate.account);
+    const plan = buildPipelineGroups(active, identity, activeCandidates);
+    const chosen = tryPipelinePlanLease(plan, identity, mode);
+    if (chosen.lease) {
+      const overflow = !!chosen.preferred && chosen.account.id !== chosen.preferred.id;
+      const result = selectionResult(chosen.lease, mode, chosen.preferred || chosen.account, overflow ? 'cache-pool-active-overflow' : 'cache-pool-active', identity, overflow);
+      result.pipeline = cachePipelineFacts(plan, membership, membership.byId.get(chosen.account.id), 'active', overflow);
       return result;
     }
-    if (!active.length) {
-      const fallback = allowOverflow ? tryCachePoolStandbyLease(plan, membership, identity, mode, preferred) : null;
-      return fallback || { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
-    }
+    if (!active.length) return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
     const remaining = deadline - Date.now();
     if (remaining > 0) { await waitForCapacity(remaining); continue; }
-    if (!allowOverflow) return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
-    return tryCachePoolStandbyLease(plan, membership, identity, mode, preferred) || { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
+    if (allowOverflow) {
+      const grown = growAndLeaseCachePoolOne(membership, identity, mode, excludeIds);
+      if (grown?.lease) {
+        const overflow = !!grown.preferred && grown.preferred.id !== grown.lease.account.id;
+        const result = selectionResult(grown.lease, mode, grown.preferred, overflow ? 'cache-pool-active-overflow' : 'cache-pool-active', identity, overflow);
+        result.pipeline = cachePipelineFacts(grown.plan, grown.context.membership, grown.candidate, 'active', overflow);
+        return result;
+      }
+      if (grown) return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
+    }
+    return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
   }
 }
 async function acquirePipelineAccountLease(identity, options = {}) {
+  if (sessionBindingEnabled(identity, options.ownerRequestId)) return acquireStatefulBindingAccountLease(identity, options);
   if (cachePoolEnabled()) return acquireCachePoolAccountLease(identity, options);
   const { excludeIds = new Set(), allowOverflow = true } = options;
   const mode = config.accountMode, waitMs = Math.min(30000, Math.max(0, Number(config.concurrencyWaitMs) || 0)), deadline = Date.now() + waitMs;
@@ -1720,6 +2034,8 @@ const UPSTREAM_PROMPT_KEY_SOURCES = new Set(['caller_prompt_cache_key','caller_s
 const PIPELINE_DIAGNOSTICS = new Set(['quota-all-unknown']);
 const PIPELINE_QUOTA_POOLS = new Set(['ordinary','hot','warm','unknown','reserve']);
 const PIPELINE_HEALTH_LAYERS = new Set(['rated','unknown']);
+const BINDING_SOURCES = new Set(['explicit','fallback','none']);
+const BINDING_RESULTS = new Set(['hit','miss','invalidated','temporary-overflow','provisional','not-applicable']);
 const ORDINARY_REASON_BYTES = 16 * 1024;
 const DETAIL_CALL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 function boundedReason(value, sensitiveValues = []) {
@@ -1753,6 +2069,8 @@ function record(modelId, info, detail = detailContext.getStore()) {
     upstreamPromptCacheKeyApplied: info.upstreamPromptCacheKeyApplied === true,
     providerOrderOverridesSticky: info.providerOrderOverridesSticky === true,
     cacheHit: typeof info.cacheHit === 'boolean' ? info.cacheHit : null,
+    bindingSource: BINDING_SOURCES.has(info.bindingSource) ? info.bindingSource : 'none',
+    bindingResult: BINDING_RESULTS.has(info.bindingResult) ? info.bindingResult : 'not-applicable',
     preferredAccountId: info.preferredAccountId || null,
     preferredAccountName: info.preferredAccountName || null, accountId: info.accountId || null, accountName: info.account || null,
     selectionReason: info.selectionReason || null, overflow: !!info.overflow,
@@ -1760,7 +2078,10 @@ function record(modelId, info, detail = detailContext.getStore()) {
     selectedQuotaPool: PIPELINE_QUOTA_POOLS.has(info.pipeline?.selectedQuota) ? info.pipeline.selectedQuota : null,
     selectedHealthLayer: PIPELINE_HEALTH_LAYERS.has(info.pipeline?.selectedHealth) ? info.pipeline.selectedHealth : null,
     capacityFallback: !!info.pipeline?.capacityFallback,
-    cachePoolSize: Number.isInteger(info.pipeline?.cachePoolSize) ? info.pipeline.cachePoolSize : configuredCachePoolSize(), cachePoolTier: ['active','standby'].includes(info.pipeline?.cachePoolTier) ? info.pipeline.cachePoolTier : null, cachePoolFallback: info.pipeline?.cachePoolFallback === true,
+    cachePoolSize: Number.isInteger(info.pipeline?.cachePoolSize) ? info.pipeline.cachePoolSize : configuredCachePoolSize(),
+    cachePoolMaxSize: Number.isInteger(info.pipeline?.cachePoolMaxSize) ? info.pipeline.cachePoolMaxSize : configuredCachePoolMaxSize(),
+    cachePoolTargetSize: Number.isInteger(info.pipeline?.cachePoolTargetSize) ? info.pipeline.cachePoolTargetSize : configuredCachePoolTargetSize(),
+    cachePoolTier: ['active','standby'].includes(info.pipeline?.cachePoolTier) ? info.pipeline.cachePoolTier : null, cachePoolFallback: info.pipeline?.cachePoolFallback === true,
     targetProviders: Array.isArray(info.targets) ? info.targets : [], actualProvider: info.provider || null,
     attempts: Array.isArray(info.trace) ? info.trace.map((t) => ({
       provider: t.upstream || 'auto', status: t.status, upstreamStatus: t.upstreamStatus, ms: t.ms, account: t.account, action: ERROR_RULE_ACTIONS.has(t.action) ? t.action : null,
@@ -2006,6 +2327,7 @@ function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, acc
       req.end(method === 'GET' ? undefined : data);
       if (nativeChat) {
         if (attemptOwner) attemptToken = { attemptIndex: attemptOwner.nextAttemptIndex++, callId: crypto.randomUUID() };
+        try { attemptOwner?.onAttemptCommit?.(); } catch {}
         try {
           detailAttempt = root?.attempt({ token: attemptToken, url, method, headers: req.getHeaders(), body: body || '', account, proxyUrl, model: attemptMeta?.model || '', provider: attemptMeta?.provider ?? null }) || null;
           if (!attemptToken && detailAttempt) attemptToken = { attemptIndex: detailAttempt.attemptIndex, callId: detailAttempt.callId };
@@ -2165,8 +2487,14 @@ async function runQuotaJob(job, account) {
   if (!quotaJobAccount(job) || !quotaJobHasOwner(job)) return 'cancelled';
   const state = (META.accountQuotas[job.id] ||= { snapshot: null, lastAttemptAt: 0, lastSuccessAt: 0, errorCategory: null });
   state.lastAttemptAt = attemptedAt;
-  if (snapshot) { state.snapshot = snapshot; state.lastSuccessAt = snapshot.fetchedAt; state.errorCategory = null; quotaFailureCounts.delete(job.id); quotaSuccessVersions.set(job.id, (quotaSuccessVersions.get(job.id) || 0) + 1); }
-  else { state.errorCategory = errorCategory || 'schema'; quotaFailureCounts.set(job.id, Math.min(4, (quotaFailureCounts.get(job.id) || 0) + 1)); }
+  if (snapshot) {
+    state.snapshot = snapshot; state.lastSuccessAt = snapshot.fetchedAt; state.errorCategory = null; quotaFailureCounts.delete(job.id); quotaSuccessVersions.set(job.id, (quotaSuccessVersions.get(job.id) || 0) + 1);
+    if (quotaProjection(job.id).pool === 'reserve') invalidateSessionBindingsForAccount(job.id);
+    else reconcileSessionBindings();
+  } else {
+    state.errorCategory = errorCategory || 'schema'; quotaFailureCounts.set(job.id, Math.min(4, (quotaFailureCounts.get(job.id) || 0) + 1));
+    reconcileSessionBindings();
+  }
   try { saveMeta(); } catch (error) { console.error(`[额度] 持久化失败：${safeReason(error.message)}`); }
   return snapshot ? 'refreshed' : 'failed';
 }
@@ -2698,6 +3026,7 @@ function persistAccountAction(account, action) {
   const state = { banned: action.action === 'hard-quarantine', hardQuarantined: action.action === 'hard-quarantine', cooldownUntil: action.action === 'cooldown' ? now + action.cooldownMs : 0, statusCode: action.statusCode, reason: action.ruleId ? `rule:${action.ruleId}` : 'rule', ruleId: action.ruleId, updatedAt: now };
   META.accountStates ||= {}; META.accountStates[account.id] = state;
   clearProviderCircuitForAccount(account.id);
+  invalidateSessionBindingsForAccount(account.id);
   try { saveMeta(); } catch (error) { console.error(`[账号] 状态持久化失败：${safeReason(error.message)}`); }
 }
 function persistProviderAction(modelId, provider, action) {
@@ -2957,9 +3286,10 @@ async function handleChat(req, res) {
   const isStream = body.stream === true;
   const excluded = new Set();
   const accountPath = [];
-  const attemptOwner = { nextAttemptIndex: 0 };
+  const attemptOwner = { nextAttemptIndex: 0, bindingSelection: null, onAttemptCommit() { commitSessionBindingSelection(this.bindingSelection); } };
   let upstreamAffinitySent = false;
   let providerOrderOverridesSticky = false;
+  let selected;
   const affinityFacts = (usage = null) => ({
     sessionSource: identity.source,
     affinityKeyType: identity.keyType,
@@ -2968,8 +3298,11 @@ async function handleChat(req, res) {
     upstreamPromptCacheKeyApplied: upstreamAffinitySent && affinity.usable,
     providerOrderOverridesSticky,
     cacheHit: cacheHitOf(usage),
+    bindingSource: selected?.bindingSource || sessionBindingSource(identity),
+    bindingResult: selected?.bindingResult || 'not-applicable',
   });
-  let selected = await acquireAccountLease(identity, { excludeIds: excluded });
+  selected = await acquireAccountLease(identity, { excludeIds: excluded, ownerRequestId: requestId });
+  attemptOwner.bindingSelection = selected;
   if (!selected.lease) {
     const status = enabledAccounts().length ? 429 : 503;
     finalizeStatistics({ globalError: true, segments: [] });
@@ -2990,10 +3323,12 @@ async function handleChat(req, res) {
     try {
       upstreamAffinitySent = true;
       chain = await runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream: isStream, sensitiveValues, attemptOwner });
+      cleanupSessionBindingSelection(selected);
       targets = chain.plan?.plannedOrder || [];
       targetSource = chain.plan?.source || 'auto';
       if (cfg?.pinMode === 'preferred' && chain.plan?.source === 'configured' && targets.length > 0) providerOrderOverridesSticky = true;
     } catch (e) {
+      cleanupSessionBindingSelection(selected);
       lease.release();
       throw e;
     }
@@ -3003,7 +3338,8 @@ async function handleChat(req, res) {
       excluded.add(account.id);
       lease.release();
       chainLease = null;
-      selected = await acquireAccountLease(identity, { excludeIds: excluded });
+      selected = await acquireAccountLease(identity, { excludeIds: excluded, ownerRequestId: requestId });
+      attemptOwner.bindingSelection = selected;
       if (selected.lease) {
         selected.reason = 'replacement-after-account-action';
         completedTrace.push(...chain.trace);
@@ -3358,6 +3694,7 @@ async function dispatch(req, res) {
         accounts: config.accounts.map((a) => { const recent = projectAggregate(aggregateRange(a.id).aggregate),lifetime=META.statistics.lifetime.accounts[a.id]; return { ...a, state: getAccountState(a.id), activeCount: activeCounts.get(a.id) || 0, health: healthProjection(a), quota: quotaProjection(a.id), cachePoolRole: cacheRoles.get(a.id) ?? null, statistics: { recent24h: recent, lifetimeRequests: lifetime ? lifetime.requests : 0, lifetimeErrors: lifetime ? lifetime.errors : 0 } }; }),
         mode: config.accountMode, active: config.activeAccount, concurrencyWaitMs: config.concurrencyWaitMs,
         errorRules: config.errorRules, accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline,
+        cachePool: { minSize: configuredCachePoolSize(), maxSize: configuredCachePoolMaxSize(), targetSize: configuredCachePoolTargetSize(), binding: sessionBindingSummary() },
         stats: Object.fromEntries(config.accounts.map((a) => [a.name, { requests: META.statistics.lifetime.accounts[a.id]?.requests ?? 0 }])),
       });
     }
@@ -3378,7 +3715,15 @@ async function dispatch(req, res) {
           }
           if (body.accountContentErrorRules !== undefined && JSON.stringify(normalizeAccountContentErrorRules(body.accountContentErrorRules, { strict: true })) !== JSON.stringify(legacy.accountContentErrorRules)) return sendJSON(res, 409, { error: { message: 'legacy error-rule fields cannot modify canonical errorRules' } });
         }
-        if (body.accountPipeline !== undefined) requestedPipeline = normalizeAccountPipeline(body.accountPipeline, { strict: true, fallbackOrder: config.accountPipeline.order, fallbackCachePoolSize: configuredCachePoolSize() });
+        if (body.accountPipeline !== undefined) requestedPipeline = normalizeAccountPipeline(body.accountPipeline, {
+          strict: true,
+          fallbackOrder: config.accountPipeline.order,
+          fallbackCachePoolSize: configuredCachePoolSize(),
+          fallbackCachePoolMaxSize: configuredCachePoolMaxSize(),
+          fallbackSessionBindingExplicitTtlMs: config.accountPipeline.sessionBindingExplicitTtlMs,
+          fallbackSessionBindingFallbackTtlMs: config.accountPipeline.sessionBindingFallbackTtlMs,
+          fallbackSessionBindingMaxEntries: config.accountPipeline.sessionBindingMaxEntries,
+        });
       } catch (e) { return sendJSON(res, 400, { error: { message: e.message } }); }
       if (!Number.isInteger(Number(body.active ?? 0)) || Number(body.active ?? 0) < 0 || Number(body.active ?? 0) >= body.accounts.length) return sendJSON(res, 400, { error: { message: 'active account index is out of range' } });
       const existingIds = new Set(config.accounts.map((a) => a.id));
@@ -3408,11 +3753,12 @@ async function dispatch(req, res) {
       const quotaRoutingWasEnabled = quotaRoutingEnabled();
       config.accounts = accs; config.accountMode = body.mode; config.activeAccount = requestedActive >= 0 ? requestedActive : Math.min(Math.max(0, Number(body.active) || 0), accs.length - 1);
       config.concurrencyWaitMs = wait; config.errorRules = requestedErrorRules; Object.assign(config, legacyRuleProjection(requestedErrorRules)); config.accountPipeline = requestedPipeline;
+      normalizeCachePoolTarget(requestedPipeline);
       for (const [id, previous] of previousById) {
         const current = accs.find((a) => a.id === id);
-        if (!current) { invalidateQuotaAccount(id, { clearSnapshot: true, deleted: true }); clearProviderCircuitForAccount(id); }
-        else if (current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) { invalidateQuotaAccount(id, { clearSnapshot: true }); clearProviderCircuitForAccount(id); delete META.accountStates[id]; }
-        else if (previous.enabled !== false && current.enabled === false) { invalidateQuotaAccount(id); clearProviderCircuitForAccount(id); }
+        if (!current) { invalidateQuotaAccount(id, { clearSnapshot: true, deleted: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); }
+        else if (current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) { invalidateQuotaAccount(id, { clearSnapshot: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); delete META.accountStates[id]; }
+        else if (previous.enabled !== false && current.enabled === false) { invalidateQuotaAccount(id); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); }
         else for (const model of new Set([...Object.keys(previous.perModel || {}), ...Object.keys(current.perModel || {})])) if (JSON.stringify(previous.perModel?.[model]) !== JSON.stringify(current.perModel?.[model])) clearProviderCircuitForRoute(id, model);
       }
       if (quotaRoutingWasEnabled !== quotaRoutingEnabled()) advanceQuotaRoutingEpoch();
@@ -3423,6 +3769,7 @@ async function dispatch(req, res) {
       for (const id of Object.keys(META.statistics.recentCoverage.accountHealthIncompleteAt)) if (!seen.has(id)) delete META.statistics.recentCoverage.accountHealthIncompleteAt[id];
       for (const id of activeCounts.keys()) if (!seen.has(id)) activeCounts.delete(id);
       pruneOrphanProviderStates();
+      reconcileSessionBindings();
       saveConfig(); saveMeta(); RR_COUNTER = 0; strategyCounters.clear(); proxyAgents.clear(); scheduleQuotaRefresh();
       return sendJSON(res, 200, { ok: true, accounts: accs.length, mode: config.accountMode, active: config.activeAccount });
     }
@@ -3430,7 +3777,7 @@ async function dispatch(req, res) {
       const body = await readJsonBody(req);
       const id = String(body?.id || '');
       if (!config.accounts.some((a) => a.id === id)) return sendJSON(res, 400, { error: { message: 'unknown account id' } });
-      delete META.accountStates[id]; saveMeta();
+      delete META.accountStates[id]; reconcileSessionBindings(); saveMeta();
       return sendJSON(res, 200, { ok: true });
     }
     if (req.method === 'POST' && p === '/api/providers/recover') {

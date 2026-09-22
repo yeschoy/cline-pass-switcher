@@ -104,7 +104,7 @@ location / {
 | `concurrencyWaitMs` | 容量等待时间，0～30000 ms，默认 2000 |
 | `errorRules` | 唯一权威的有序错误规则数组；每条含稳定 `id`、`account`/`provider-model` 维度、动作、可选 Provider/model 范围，以及 status/body/Header AND 条件。`cooldown.reset` 使用显式格式与严格 `d/h/m/s` fallback/max；最多 100 条/64 KiB |
 | `accountErrorRules` / `accountContentErrorRules` | 只读兼容镜像。旧配置启动时按“内容规则在前、状态规则在后”迁移；旧客户端不提交 `errorRules` 时只能原样回传镜像，试图修改会得到 409 |
-| `accountPipeline` | 可选叠加层：`{ quotaPool, healthSort, sticky, order, cachePoolSize }`；`order` 是三步骤的精确排列；旧 `excludeUnhealthy:true` 迁移为 `healthSort:true`，不再按阈值淘汰账号 |
+| `accountPipeline` | 可选叠加层：三个开关与 `order`，缓存池 min/max，以及显式/消息回退会话绑定 TTL 和 LRU 上限。`0 <= cachePoolSize <= cachePoolMaxSize <= 100000`；默认 TTL 为 2h/15m、上限 50,000。旧配置缺 max 时自动取 min，不会升级后自动扩容 |
 | `proxyKey` | 下游代理密钥；空 = 不鉴权 |
 | `publicBaseUrl` | 公网代理地址（控制台展示用） |
 | `detailedLogging` | 默认 `false`；完整详细捕获，也可在“详细日志”页面即时保存 |
@@ -185,9 +185,11 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 
 `errorRules` 按数组顺序首条命中（包括 `ignore`）。`statuses` 内部 OR，`body_contains` 字符串数组为 ANY；Provider/model 范围、状态、正文和 Header 条件之间为 AND，均使用大小写不敏感普通文本而非正则。无显式命中时，明确账号认证/额度/代理错误只记录账号 `degrade`，明确具名 Provider 的 429/5xx/网络/超时/不可用只记录该模型×Provider 的 `degrade`，不自动冷却。账号 cooldown/hard-quarantine 可在首包前最多换号一次；Provider 动作只影响当前 Provider；首包后只更新未来状态，不重放当前请求。账号通过现有恢复按钮清理状态，Provider 通过控制台恢复按钮或认证的 `POST /api/providers/recover` 精确恢复 `{ model, provider }`。
 
-调度流水线固定先执行禁用、账号冷却和硬隔离等硬过滤，再按 `accountPipeline.order` 执行额度池、账号成功率、会话粘性三个可选步骤。成功率按 `success / (success + degrade)` 降序，有数据优先、无数据置后，同率保持进入步骤前顺序；它不读取 Provider 成功率，也不淘汰低成功率账号。
+调度固定先执行禁用、账号冷却、硬隔离和 reserve 等资格过滤。只有 success-rate 时，每次请求按 `success / (success + degrade)` 降序，有数据优先、无数据置后；只有 sticky 时继续使用无状态 HRW。sticky 与 healthSort 同时生效时，sticky 变为“已有会话绑定命中门”：hit 直接使用绑定账号，miss 才按 `order` 中 quotaPool/healthSort 的相对顺序处理当前活跃候选，并用 HRW 做同层稳定 tie-break。成功率变化不会迁移已有绑定。
 
-`cachePoolSize > 0` 仅在 sticky 模式或显式启用会话粘性步骤时生效；否则配置保持休眠。活跃成员仍只按硬资格、额度 reserve、priority 和稳定账号 ID 决定，成功率变化不会提升或逐出成员；成功率步骤只排序当前候选。正常请求只在活跃池内做 HRW，全部满载时先等待 `concurrencyWaitMs`，超时才允许备用溢出。
+`cachePoolSize > 0` 仅在 sticky 模式或显式启用会话粘性步骤时生效；它是初始/最小大小，`cachePoolMaxSize` 是扩容上限。成员始终按硬资格、非 reserve、priority 和稳定账号 ID 从当前 target 派生，不持久化成员 ID。只有全部活跃账号都设置了有限 `maxConcurrent` 且满载，等待 `concurrencyWaitMs` 后重算仍满载，target 才同步 grow-one 并持久化到 `metadata.json`；多个并发超时不会越过 max，压力下降不自动缩容，`max=min` 可关闭自动扩容。备用账号必须先正式晋升为 active 才能承载请求或建立绑定；无合格成员/达到 max 时返回容量错误，unlimited 活跃账号不会触发增长。
+
+组合模式的 session binding 只存在内存，复用已有 HMAC fingerprint：显式 Codex/Claude/session 身份使用 2 小时滑动 TTL，`message_hmac` 使用 15 分钟，默认最多 50,000 条并按 LRU 淘汰，重启即清空。首次 miss 在取得 lease 后建立 provisional binding，真实 native attempt 提交后确认；同会话并发可命中 provisional。绑定账号满载时先等待，再临时使用其他 active，但不会改绑。删除/禁用、Key/代理变化、账号 cooldown/hard-quarantine、退出 active 或进入 reserve 会失效并重新选择；Provider 失败、普通失败、成功率或 hot/warm/unknown 变化不改绑。管理 API/普通日志仅显示安全计数及 `bindingSource`/`bindingResult` 枚举，不输出 session、fingerprint、候选表或绑定明细。
 
 额度通过账号 Bearer 后台读取半公开的 `GET /users/me/plan/usage-limits`，15 分钟后过期；失败、缺窗或接口变化均归为未知并回退普通调度，聊天请求不会等待额度刷新。账号成功率按请求/账号去重，模型×Provider 按每个具名真实 attempt 记录；无样本为 null，冷却、硬隔离和禁用作为独立状态展示。
 
