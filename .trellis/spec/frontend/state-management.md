@@ -80,7 +80,8 @@ API signatures:
 
 ```text
 GET /api/accounts
-  -> { accounts: [{ ..., health, cachePoolRole, statistics: { recent24h, lifetimeRequests, lifetimeErrors } }],
+  -> { accounts: [{ ..., health, cachePoolRole, rpm: { limit, used, reserved, retryAt },
+                    statistics: { recent24h, lifetimeRequests, lifetimeErrors } }],
        mode, active, concurrencyWaitMs, errorRules,
        accountErrorRules, accountContentErrorRules, accountPipeline,
        cachePool: { minSize, maxSize, targetSize,
@@ -198,14 +199,16 @@ Probe/validation/setup use the explicit route-scope account ID when present. One
 ```js
 {
   id, name, note, key, enabled,
-  maxConcurrent, weight, priority,
+  maxConcurrent, maxRpm, weight, priority,
   proxyUrl, headers, perModel
 }
 ```
 
-`id` preserves runtime-state identity. `perModel` preserves all account-specific model routes even though the account table does not edit those routes inline. Omitting `perModel` would normalize it to `{}` and erase that account's overrides. The same payload also carries the top-level scheduling draft: `errorRules` plus `retryRules` from their generation-owning drafts and the canonical `accountPipeline`; `collectAccounts()` validates both rule drafts before returning, so an invalid visual/no longer current retry rule blocks the destructive full save instead of silently dropping it.
+`id` preserves runtime-state identity. `maxRpm` is the canonical per-account rolling-RPM limit (integer 0-100000, `0` = unlimited). `collectAccounts()` emits `maxRpm: Number(a.maxRpm) || 0`, and an older client that omits the field is preserved server-side by stable `id`; the browser must never drop or default it to `0` for an existing account. `perModel` preserves all account-specific model routes even though the account table does not edit those routes inline. Omitting `perModel` would normalize it to `{}` and erase that account's overrides. The same payload also carries the top-level scheduling draft: `errorRules` plus `retryRules` from their generation-owning drafts and the canonical `accountPipeline`; `collectAccounts()` validates both rule drafts before returning, so an invalid visual/no longer current retry rule blocks the destructive full save instead of silently dropping it.
 
 The active radio is an array index in the submitted list. The server resolves the selected account ID before filtering empty-key rows, so a blank row before the selected row must not shift the active account.
+
+The account drawer owns one labelled native number input `#drawerRpm` (`<input id="drawerRpm" type="number" min="0" max="100000">`). `openAccountDrawer()` hydrates it from `a.maxRpm || 0`, a new row created by `addAccountRow()` starts with `maxRpm: 0`, and `drawerValue()` includes it so editing marks the draft dirty. `saveDrawer()` **silently clamps** the draft with `Math.max(0, Math.min(100000, Math.floor(Number(value) || 0)))` instead of deferring an out-of-range value to a server `400`; this intentionally differs from `maxConcurrent`, which is submitted unclamped and rejected by the server. Bulk concurrency, scheduling presets and the raw scheduling editor must not rewrite an account's `maxRpm`.
 
 `ACCS.accountPipeline` is a complete canonical snapshot with `quotaPool`, `healthSort`, `sticky`, an exact three-step `order`, integer `cachePoolSize` (minimum) and `cachePoolMaxSize` (maximum) 0-100000, integer `sessionBindingExplicitTtlMs`/`sessionBindingFallbackTtlMs` 60000-604800000, and integer `sessionBindingMaxEntries` 1-100000. The ordered DOM, the five bounded number inputs, and the runtime read-only `#cachePoolRuntime` region are live projections; `#cachePoolRuntime` is written with `textContent` and shows `当前目标 <targetSize>（最小 <minSize> / 上限 <maxSize>）；会话绑定 <已启用|未启用>，当前 <binding.size> / <binding.maxEntries> 条`. The server also recognizes complete legacy four-step input, folds `excludeUnhealthy:true` into health sorting, and returns only canonical three-step state.
 
@@ -279,7 +282,7 @@ Raw sessions and message content must never be added to account, model, history 
 
 #### Preset, alias, and log state
 
-Preset selection owns a temporary draft only. Confirm submits the complete ordinary account payload; cancel discards it. Presets may not mutate Key, proxy, Header, note, enablement, or `perModel`. The cache-hit preset drafts sticky mode, `cachePoolSize: 2`, `cachePoolMaxSize: 2` (auto-growth stays inert) and a 5000 ms wait while exposing priorities for review. `applyPreset()` writes every `PIPELINE_NUMBER_CONTROLS` input from the draft; `previewPreset()` raises `cachePoolMaxSize` to `max(currentMax, presetMax ?? presetMin)` so the cache preset never leaves max below min and records that change in the preview diff.
+Preset selection owns a temporary draft only. Confirm submits the complete ordinary account payload; cancel discards it. Presets may not mutate Key, proxy, Header, note, enablement, `maxRpm`, or `perModel`. The cache-hit preset drafts sticky mode, `cachePoolSize: 2`, `cachePoolMaxSize: 2` (auto-growth stays inert) and a 5000 ms wait while exposing priorities for review. `applyPreset()` writes every `PIPELINE_NUMBER_CONTROLS` input from the draft; `previewPreset()` raises `cachePoolMaxSize` to `max(currentMax, presetMax ?? presetMin)` so the cache preset never leaves max below min and records that change in the preview diff.
 
 `ALIASES` owns the `/api/model-aliases` snapshot. Batch generation edits text locally; successful save reloads aliases and models. Alias targets are server-provided known `cline-pass/*` models.
 
@@ -302,7 +305,7 @@ The top-level section is projected by `consolePanel.hidden`, `statisticsPanel.hi
 - `loadStatistics()` renders the forecast only after its existing query/visit/visibility checks accept the snapshot. The forecast adds no request, timer, cursor, persistence, or generic store, and uses `textContent` for bounded numeric output.
 - Statistics navigation/refresh never calls `loadAll()` or mutates `ACCS`, `BULK_SELECTION`, raw JSON, live scheduling controls or detailed-log state. It does not enable quota routing or persist account/configuration changes.
 
-Request-log rows additionally render only bounded affinity type/confidence, caller/derived upstream-key source/applied state, provider-order override, provider-circuit attempt action and cache-hit true/false/unknown. Missing historical fields render unknown. Actual caller/derived keys, raw sessions and fingerprints never enter ordinary frontend state or markup.
+Request-log rows additionally render only bounded affinity type/confidence, caller/derived upstream-key source/applied state, provider-order override, provider-circuit attempt action and cache-hit true/false/unknown, plus the bounded capacity-block enum `blockedBy` (`concurrency`/`rpm`/`mixed`) and a bounded integer `retryAfter` when present. Missing historical fields render unknown. Actual caller/derived keys, raw sessions and fingerprints never enter ordinary frontend state or markup.
 
 `LOG_CURSOR` belongs to the current log type plus filter set. Starting a new query or changing filters resets it; “next” sends the opaque server cursor unchanged. The request type alone owns the `result` filter and renders `status / result`; missing historical results derive only the display label `success` or `legacy_failed` without mutating storage. The shared description distinguishes one-row-per-final-request from potentially-many-upstream-attempts. `LOG_QUERY_ID` is a generation counter: every section switch and query invalidates earlier reads, and a response may render only when both its generation and captured type still match. Clearing logs captures the selected type before the asynchronous delete and reloads only when that same log section remains visible.
 
@@ -373,6 +376,8 @@ DETAIL_LIST_ID++; DETAIL_CURSOR = null; resetDetailSelection();
 | Account mode is not one of the six supported scheduling modes | server `400`; retain/reload prior state |
 | `concurrencyWaitMs` is not an integer in 0-30000 | server `400` |
 | Account `maxConcurrent` is not an integer in 0-100000 | server `400` |
+| Drawer `#drawerRpm` is empty, fractional, negative or over 100000 | clamp silently to `0..100000` in `saveDrawer()` before the draft is stored; the server independently rejects a non-integer/out-of-range `maxRpm` |
+| Account `maxRpm` is not a real integer 0-100000 in a direct API payload | server `400`; a browser save always sends a clamped integer |
 | Weight/priority is outside integer 1-100, note invalid, proxy malformed, or Header map unsafe | server `400`; retain/reload prior state |
 | Existing account ID is unknown/changed or duplicated | server `400` |
 | Alias text is malformed/duplicated or server target invalid | block locally when possible; server `400` remains authoritative |
@@ -393,6 +398,8 @@ Browser-side validation improves feedback but never replaces the server matrix.
 ### 5. Good / Base / Bad Cases
 
 - **Good:** edit account A's name and capacity; `collectAccounts()` submits A's unchanged `id` and `perModel`, so its routes and cooldown/ban join key survive.
+- **Good:** set `#drawerRpm` to `45`, save the draft, then run bulk concurrency, a scheduling preset and the raw editor; each account keeps its own `maxRpm` and the destructive save carries it.
+- **Base:** a new account row starts with `maxRpm: 0` (unlimited) and the account table renders `RPM 不限`.
 - **Good:** select account A, copy a global model route, edit it, observe `configSource: "account"`, then restore inheritance and observe `"inherited"` after reload.
 - **Good:** merge a built-in error preset into a live custom `418` rule; preview marks `418` preserved and confirmation round-trips both through the normal save.
 - **Good:** leave the statistics panel before its request completes; the stale generation never renders, and a covered token value of zero remains distinguishable from no covered requests.
@@ -414,6 +421,7 @@ Cross-layer changes must assert:
 - provider attempts use the selected account route, while an account without an own entry uses the global route;
 - preferred-mode copy says fallback is switcher-managed with singleton `only`, and health/cooldown labels render escaped without reordering configured or discovered provider lists;
 - posting `/api/accounts` with the full account snapshot preserves stable IDs, `perModel`, notes, proxy/Header fields, weight/priority, mode, active account, wait, and rules;
+- the full account draft carries each account's own `maxRpm` (`test/account-draft.test.js`: `account drawer, bulk, preset and full save preserve each account maxRpm draft`): editing `#drawerRpm` marks the drawer dirty, `saveDrawer()` clamps 100001→100000 and -3→0, bulk/preset/raw-editor operations never rewrite it, and `collectAccounts()` emits `[45, 0, 10]` for three accounts; `test/integration.test.js` covers the strict API round-trip, old-client omission preservation and byte-preserving rejection;
 - filtering/searching account rows or a blank-key row does not change which account is active;
 - scheduling preset preview/cancel/apply changes only allowed fields and round-trips through the normal save; the cache-hit preset drafts sticky/2/5000, exposes priorities, and cancellation changes nothing;
 - visual add/edit/delete/reorder and advanced JSON apply share one generation-controlled canonical rule array; invalid/stale text cannot overwrite it, and presets preview stable-ID merge/replace/clear;
