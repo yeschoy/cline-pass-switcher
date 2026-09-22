@@ -20,6 +20,19 @@ prepareChatAffinity(body, identity)
 forwardHeadersFor(req, body)
 acquireAccountLease(identity, { excludeIds = new Set(), allowOverflow = true, ownerRequestId })
 strategyRank(mode, accounts)
+tryLeaseResult(a, now = Date.now())       // { lease, blockedBy, retryAt }
+tryLease(a, now = Date.now())
+createLease(account, firstPermit)         // lease.takeRpmPermit() / lease.release()
+rpmLimit(account)
+rpmProjection(account, now = Date.now())
+rpmAvailable(account, now = Date.now())
+rpmBlockedRetryAt(account, now = Date.now())
+clearRpmState(accountId)
+reserveRpmPermit(account, now = Date.now())
+selectionBlockFacts(accounts, now = Date.now())
+blockedByRetryAfter(blockedBy, retryAt, waitMs)
+waitForLease(accounts, waitMs)
+claimManagementPermit(lease)              // lease.takeRpmPermit(), or a no-op permit without a lease
 resolveModelAlias(requestedModel)
 resolveModelConfig(account, resolvedModel)
 buildProviderPlan(modelId, cfg, account, now)
@@ -95,6 +108,7 @@ Runtime environment keys are `DATA_DIR`, `CLINE_PASS_KEY`, `PROXY_KEY`, `PUBLIC_
 
 - An available account has a non-empty `key`, `enabled !== false`, no active ban, and no unexpired cooldown.
 - `maxConcurrent: 0` means unlimited. Otherwise `tryLease()` increments `activeCounts` synchronously and returns an idempotent `release()`.
+- `tryLeaseResult()` returns a structured `{ lease, blockedBy, retryAt }` instead of only a lease. Admission order is fixed: **hard eligibility (caller) → `maxConcurrent` → RPM**. A concurrency block returns `blockedBy: 'concurrency'` without touching RPM; an RPM block returns `blockedBy: 'rpm'` without incrementing `activeCounts`. `blockedBy` is exactly `concurrency` | `rpm` | `mixed` | `unavailable` (`BLOCKED_BY_REASONS`); an account that is simultaneously concurrency-full and RPM-exhausted is `mixed`.
 - `single` waits only for the configured active account (or the first statically available fallback).
 - `roundrobin` ranks once, skips full accounts, waits up to `concurrencyWaitMs`, and advances `RR_COUNTER` per selection.
 - `sticky` with a session fingerprint ranks available accounts by HRW over stable `account.id`. It waits for the first-ranked account, then may use an immediately available lower-ranked account for this request only. It does not store a session-to-account table.
@@ -113,6 +127,35 @@ Runtime environment keys are `DATA_DIR`, `CLINE_PASS_KEY`, `PROXY_KEY`, `PUBLIC_
 Session identity values are validated, HMACed with `META.routingSecret`, and never logged or persisted. The request-local identity also carries only bounded `keyType` and `confidence` enums. Trusted parent identifiers precede child identifiers. Codex checks parent thread metadata/header before `prompt_cache_key`, session, and thread values; Claude checks parent-agent information before session/agent values. Generic parent headers precede generic current-session fields. `X-Client-Request-Id` alone never establishes affinity. The fallback HMAC input contains only the first system/developer message and first user message (each capped at 4096 characters); if neither is extractable, selection falls back to round-robin.
 
 For Chat Completions, a valid caller `prompt_cache_key` or `session_id` is preserved byte-for-byte. When an explicit Codex/Claude identity reached the Switcher but neither body field exists, `prepareChatAffinity()` injects a domain-separated 64-hex `prompt_cache_key` derived from the local fingerprint. A `message_hmac` fallback is never promoted into an explicit upstream key. The derived value is reused across account/provider attempts but never enters ordinary logs, metadata, responses or management projections. A `preferred` route with an explicit singleton-provider plan is diagnosed as overriding remote sticky provider selection; this is a bounded fact, not proof that a remote provider used the key.
+
+#### Account-level RPM admission and callers
+
+`maxRpm` is the canonical per-account limit (integer 0-100000, `0` = unlimited; see `database-guidelines.md`). Protection is one process-local rolling 60-second window per account plus uncommitted reservations. It is never persisted, clears on restart, is independent per replica, and explicitly is **not** a cross-process hard cap. The owner is `rpmWindows` keyed by stable `account.id`; `RPM_WINDOW_MS` is 60 s (only the test environment may shrink it through `CLINE_PASS_TEST_RPM_WINDOW_MS`).
+
+Admission and permit lifecycle:
+
+- `reserveRpmPermit(account)` increments `reservations`, prunes expired committed start times (`<= now - RPM_WINDOW_MS`), then rejects when the live count (`committed + reservations`) exceeds the finite limit, returning `{ ok: false, retryAt }` with the oldest committed start time plus the window.
+- A successful `tryLeaseResult()` lease holds the **first** permit. Every subsequent real Provider attempt takes an independent permit through `lease.takeRpmPermit()`; `reserveRpmPermit()` is the only other source. `claimManagementPermit(lease)` is the management-call alias and returns a no-op `{ ok: true, permit: null }` when there is no lease.
+- `commit()` turns the reservation into a committed timestamp at the exact point the native transport calls `req.end(data)`; `clineRequest()` calls `permit?.commit()` immediately after `req.end()`, at the same seam as `attemptOwner.onAttemptCommit()`. Once `req.end()` is reached **nothing refunds it**: DNS/connect/proxy/TLS failure, success, HTTP error, timeout and client cancellation all keep the commit.
+- A synchronous failure before `req.end()` (URL/agent/request construction, or an already-aborted signal handled before send) calls `permit.release()`: the reservation is returned and `notifyCapacityWaiters()` wakes capacity waiters. `release()` is idempotent and `commit()`/`release()` settle at most once. Releasing the lease also returns any still-pending first reservation.
+- Permit bookkeeping fails closed to that account: an exception must not leak `activeCounts` or a reservation.
+
+Counting coverage (exactly one permit per native `POST <upstreamBase>/chat/completions`):
+
+- Counted: the three chat aliases (`/chat/completions`, `/v1/chat/completions`, `/api/v1/chat/completions`), `/api/test`, `/api/probe`, `/api/validate-upstreams`, `/api/accounts/test` **only when it binds a saved `accountId`**, and `/api/accounts/proxy-test` for a saved account (counted once the request reaches the transport, even if the proxy connect then fails).
+- Not counted: `/api/models` and other catalog/document traffic, quota `/users/me/plan/usage-limits` refreshes, and any management request that sends no native chat call. `/api/accounts/test` with a temporary credential and no saved `accountId` has no `maxRpm` owner and is explicitly neither limited nor counted.
+- `/api/validate-upstreams` shares one lease across its concurrent batch, but each batched native call atomically claims its own permit. When a permit is unavailable the implemented semantics keep the existing summary shape: that single slug becomes `{ status: 'unknown', localRpm: true, ms: 0, note: 'local account rpm limit' }` and no request is sent — the whole validation request is not converted into a `429`. `harvestAvailableProviders()` behaves the same way and returns `null` when it cannot claim a permit.
+
+Selection, waiting and Provider retries:
+
+- Candidate ranking filters out accounts whose window is exhausted (`rpmAvailable()`); `waitForLease()` and the pipeline selectors recompute after every capacity notification and reuse the existing global `waiters`/`notifyCapacityWaiters` and the `concurrencyWaitMs` deadline. No refill timer, queue or per-account waiter is created. The wait target is `min(deadline, earliest retryAt)` through `waitDurationForBlock()`.
+- Initial selection skips an RPM-exhausted candidate in favour of another eligible account, and only when every candidate is blocked returns `busyFailure(blockedBy, retryAt, ...)` with a truthful `blockedBy`/`retryAfter`. `selectionResult()`/`busyFailure()` never expose candidate internals.
+- Inside one leased account a Provider retry that cannot claim a permit does **not** wait, does not send an attempt, and does not switch accounts: `runChatChain()` sets `localRpm` and breaks immediately, returning a local `429` whose `Retry-After` comes from `localRpmRetryAt`. Any earlier real failed attempt keeps its original `upstreamStatus`/error row; the local block fabricates no upstream attempt, error rule or account replacement. Only the existing explicit pre-stream account-removal outcome may replace the account.
+
+Projection:
+
+- `GET /api/accounts` projects `rpm: { limit, used, reserved, retryAt }` from `rpmProjection()`. It contains only finite numbers or `null` and never exposes the timestamps array, `head`, candidate state or a reservation list. `used`/`reserved` are `0` when the limit is `0`.
+- Request records project `blockedBy` as the bounded enum (`concurrency`/`rpm`/`mixed`) and `retryAfter` as a bounded non-negative integer (`record()` clamps it to 3600), never window timestamps.
 
 #### Account-level model routing
 
@@ -226,7 +269,10 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 | `POST /v1/responses` | authenticated `501 unsupported_api`; no account/upstream request |
 | Request body exceeds 50 MiB | Reject promptly with `413` as soon as the limit is crossed, even if the client pauses before request end; discard/drain the remaining body without buffering or destroying the socket |
 | No statically available account | `503` with a redacted error |
-| Accounts exist but required capacity is unavailable after waiting | `429`, `Retry-After` integer clamped to 1-30 seconds |
+| Accounts exist but required capacity is unavailable after waiting | `429`, `Retry-After` integer clamped to 1-30 seconds; the RPM-blocked path is the documented exception — `sendBusy()` clamps it to 1-3600 seconds derived from the earliest rolling-window recovery |
+| The RPM window is exhausted for the selected/only candidate | local `429` with `blockedBy: 'rpm'`/`'mixed'` and `Retry-After` from the earliest window recovery (bounded 1-3600 s); no upstream attempt, no `activeCounts` change, and no fabricated upstream 429 |
+| A same-account Provider retry cannot claim an RPM permit | stop locally with `429`, preserve the earlier real attempt's `upstreamStatus`/error row, and never switch accounts |
+| A management chat caller cannot claim a permit | `/api/validate-upstreams` and provider harvest record that slug as `unknown`+`localRpm` and send no request; `/api/test`, `/api/probe`, and saved-account `/api/accounts/test`/`/api/accounts/proxy-test` return the bounded local `429` |
 | Explicit `/api/test.accountId` is unknown / unavailable | `400` / `409` |
 | Forwardable client header is blank, over 2048 characters, or contains a control byte | omit it |
 | Account custom Header is forbidden or violates count/name/value/total bounds | management save `400`; no write |
@@ -285,6 +331,10 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - **Base:** a tool result containing only `"\n"` is forwarded unchanged instead of becoming a Switcher-generated `400`.
 - **Good:** a cold `strict` route tries the configured first provider, then excludes it and retries the highest Provider-model 24-hour success rate among the remaining candidates; a cold `preferred` route uses that health order from the first attempt.
 - **Good:** an operator confirms the manual preset; a `502` whose body contains `system message must have content` sends exactly one real attempt, performs no account replacement, and the paired provider-model `ignore` rule keeps the channel rate unchanged.
+- **Good:** account A is concurrency-full, so a request waits/overflows without consuming A's RPM; after concurrency frees, A still has its full RPM budget.
+- **Good:** account A's Provider `first` fails `502`, the retry cannot claim an RPM permit, and the request ends as a local `429` with `Retry-After` from A's window while the error log still retains the real `502` for `first`.
+- **Bad:** consuming or reserving RPM before the concurrency check, incrementing `activeCounts` for an RPM-only block, or refunding a permit after `req.end()`.
+- **Bad:** fabricating an upstream `429` attempt (or an error rule/account switch) for a local RPM block, or using a capacity-wait `Retry-After` instead of the earliest window recovery.
 - **Bad:** calling account selection inside the provider-attempt loop; this breaks request-level account affinity.
 - **Bad:** forwarding the downstream Authorization or relying on `fetch` for chat transport; either leaks proxy credentials or creates synthetic client headers.
 - **Bad:** treating `preferred` as a gateway-side multi-provider `order`, or projecting the static configuration list or `plan.plannedOrder` as the actual runtime provider path.
@@ -314,6 +364,7 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - aliases rewrite outbound model/routing lookup, reject conflicts, preserve originals in `/v1/models`, and log requested/resolved names;
 - log API request IDs, strict filters, bounded reasons/rows/queues, optional validated error-detail tokens, projections and sensitive-value absence satisfy `logging-guidelines.md`;
 - sticky capacity overflows temporarily, all-full returns `429` plus `Retry-After`, and all `activeCount` values return to zero;
+- account-level RPM is pinned by `test/integration.test.js`: `account maxRpm round-trips through config and API, preserves old-client omission and rejects invalid values without writing bytes`, `concurrency saturation never consumes RPM while the rolling window and its Retry-After stay exact`, `provider retries commit one permit per real req.end and stop locally with a truthful local 429`, `a pre-send failure releases the RPM reservation while a post-send failure never refunds`, `every account-bound chat caller commits one permit per real native call while catalog, quota and temporary credential tests do not`, `initial selection skips an RPM-exhausted candidate in favour of another account`, `a client cancellation after the attempt started never refunds RPM`, and `RPM windows clear on restart and credential rotation but survive disable/re-enable; zero means unlimited`;
 - fragmented first-event SSE errors are normalized before output; valid SSE contains data and `[DONE]`;
 - a wrapped error after SSE output starts updates the existing provider trace and future account state without replaying or adding a pseudo-attempt;
 - a downstream close after observed `[DONE]` is `200 / success`; a close before `[DONE]` and a non-streaming cancellation are `499 / client_cancelled`, abort upstream work, stop failover, release capacity, and add no error attempt, usage, error/health result, or account action;
@@ -430,7 +481,7 @@ The paired `errorRules` entry, not the retry rule, decides whether a sample or d
 
 Use this contract when changing pipeline schema/validation, `cachePoolMembership()`, the persisted grow-only pool target, `growCachePoolOne()`/`growAndLeaseCachePoolOne()`, `acquireCachePoolAccountLease()`, `acquireStatefulBindingAccountLease()`, `acquirePipelineAccountLease()`, the process-local session-binding owner, or the `GET /api/accounts.cachePool` projection.
 
-This scenario owns one pool target, one grow-one decision, and the only session-to-account binding table. A dependent quota-role task may extend membership eligibility inside `cachePoolMembership()`, but it must reuse this target, capacity waiter, `tryLease`/`release`, routing epoch, identity fingerprint and binding-invalidation seam. Do not add a second account selector, member list, waiter, queue, target, binding map or persistent session store.
+This scenario owns one pool target, one grow-one decision, and the only session-to-account binding table. A dependent quota-role task may extend membership eligibility inside `cachePoolMembership()`, but it must reuse this target, capacity waiter, `tryLease`/`release`, `rpmAvailable()` (an RPM-blocked active set never grows), routing epoch, identity fingerprint and binding-invalidation seam. Do not add a second account selector, member list, waiter, queue, target, binding map or persistent session store.
 
 ### 2. Signatures
 
@@ -519,7 +570,7 @@ POST /api/accounts
 
 #### Grow-one timing and atomicity
 
-- `growCachePoolOne(membership)` returns `null` unless **all** active candidates have a finite `maxConcurrent` and none has capacity, **and** the current target is below `maxSize`, **and** at least one eligible candidate is available beyond the active set.
+- `growCachePoolOne(membership)` returns `null` unless **all** active candidates have a finite `maxConcurrent`, none has capacity, **and** every active candidate still has RPM available (`rpmAvailable()`), **and** the current target is below `maxSize`, **and** at least one eligible candidate is available beyond the active set, **and** the first candidate that would be promoted also still has RPM available. Any RPM-only or `mixed` block, an unlimited-concurrency candidate, or an RPM-exhausted promotion target therefore never grows the pool.
 - A successful growth sets `META.cachePoolTargetSize = current + 1`, calls `saveMeta()` synchronously, and returns `{ previousActiveIds, targetSize }`. If `saveMeta()` throws, the runtime target is rolled back to `current`, a redacted `[缓存池] 扩容目标持久化失败：` service error is logged, and the caller treats the deadline as exhausted (`429`). No growth is claimed and no temporary file survives.
 - Growth is `+1` only and never exceeds `maxSize`. Multiple concurrent waiters each recompute from the current target after waking, so the first committed growth is observed by later waiters and they cannot blindly add a second increment within the same observed capacity. One elapsed deadline therefore produces at most one target increment.
 - `maxConcurrent: 0` means unlimited and can never satisfy the saturation precondition, so an unlimited active set never grows the pool.
@@ -569,6 +620,8 @@ POST /api/accounts
 | Pool target 0, or a configured positive minimum outside sticky mode/step | feature dormant; legacy selection unchanged; no binding table |
 | All active accounts have finite `maxConcurrent` and are full at deadline, target < max | one atomic grow-one + persistence, recompute, promote, lease |
 | Any active account has `maxConcurrent: 0` | never grow |
+| All active accounts are concurrency-full but at least one is RPM-exhausted | never grow; report `blockedBy: 'rpm'`/`'mixed'` with the earliest window recovery |
+| The candidate that would be promoted is RPM-exhausted | never grow and persist no target; keep the existing all-active blocked facts |
 | Target already equals max, or no eligible candidate remains | `429` `capacity-unavailable`; no attempt; no growth |
 | `saveMeta()` fails during growth | roll back the runtime target, redacted service error, `429`; no temporary file left behind |
 | Concurrent waiters reach the deadline together | at most one increment per observed capacity; no double lease, no count leak |
@@ -582,6 +635,8 @@ POST /api/accounts
 ### 5. Good / Base / Bad Cases
 
 - **Good:** a 2-account pool with `cachePoolMaxSize: 3` serves two concurrent sessions on A/B, the third concurrent request waits `concurrencyWaitMs`, observes both active accounts full, grows the target to 3, promotes C and leases C; `metadata.json.cachePoolTargetSize` is 3, and a restart keeps C active.
+- **Good:** every active account is finite-max and concurrency-full while their RPM budgets remain, so one grow-one promotes a standby whose RPM window is still usable.
+- **Bad:** growing the pool because every active account is "full" when the real block is RPM, or persisting a target for an RPM-exhausted standby.
 - **Good:** a saturated miss in sticky+healthSort mode grows/promotes one member and only then binds the session to it; a later hit returns that member without re-sorting by success rate.
 - **Good:** a bound session's account is full; the request waits, then temporarily overflows to another active account with `bindingResult: 'temporary-overflow'`; the next request returns to the bound account.
 - **Good:** key rotation clears only the rotated account's bindings; the affected session misses and rebinds, while other sessions keep their entries.
@@ -599,6 +654,7 @@ POST /api/accounts
 
 - legacy config defaults `cachePoolMaxSize` to `cachePoolSize` and persists both min and max; `cachePool.targetSize` and `metadata.json.cachePoolTargetSize` are 0; an old-client save that omits every new field preserves the current min/max/TTLs/entry cap; invalid/partial/unknown pipeline payloads return `400` without changing file bytes; values survive restart.
 - all-active saturation waits `concurrencyWaitMs`, grows one member, leases the promoted account, persists the target, and survives restart; concurrent saturation grows only to max with one `429` and no lease leak; a single elapsed deadline cannot chain through multiple increments; an unlimited active account never grows; `max=min` leaves growth inert; the operator can clamp the persisted target down; a forced `saveMeta` failure rolls back the target and leaves no temporary file.
+- an RPM-only or `mixed` block never grows, and an RPM-exhausted standby is never promoted by growth; only pure all-active concurrency saturation with a usable promotion target grows one member (`test/integration.test.js`: `RPM-only and mixed blocking never grow the cache pool`, `an RPM-exhausted standby is never promoted by cache-pool growth`).
 - `reserve`/hard-ineligible candidates never receive normal traffic or a replacement lease, and a full pool with no eligible standby returns `429` rather than using standby.
 - sticky+healthSort: the first request for a session is a `miss` chosen by active success rate, later requests are `hit` and do not migrate when rates or quota hot/warm/unknown change; a full bound account temporarily overflows and then returns to the binding; a saturated miss grows/promotes before binding; explicit and `message_hmac` sessions produce `bindingSource` `explicit`/`fallback`; concurrent first requests converge through the provisional entry; a selection with no native attempt is cleaned up owner-safely.
 - sticky-only keeps stateless HRW and never builds a table; healthSort-only sorts every request and never builds a table; `bindingResult` is `not-applicable` and `cachePool.binding.size` stays 0 in both.

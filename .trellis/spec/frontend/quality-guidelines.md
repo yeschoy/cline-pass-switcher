@@ -88,6 +88,7 @@ The drawer:
 - masks account Key and proxy URL by default;
 - resets the Key visibility control and input type on every open, while excluding visibility-only state from the dirty-draft snapshot;
 - keeps proxy/error feedback in an `aria-live` region;
+- exposes the per-minute RPM limit as a labelled native number input `#drawerRpm` (`<label for="drawerRpm">` plus `type="number" min="0" max="100000"`), hydrates it from the account's `maxRpm || 0`, and clamps any out-of-range/fractional draft silently to `0..100000` in `saveDrawer()`;
 - saves into the local complete account snapshot, then requires the explicit account-config save for persistence.
 
 `collectAccounts()` must preserve every hidden field:
@@ -95,7 +96,7 @@ The drawer:
 ```js
 {
   id, name, note, key, enabled,
-  maxConcurrent, weight, priority,
+  maxConcurrent, maxRpm, weight, priority,
   proxyUrl, headers, perModel
 }
 ```
@@ -190,6 +191,8 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 |---|---|
 | Drawer Header JSON is malformed | keep drawer open, show error, do not mutate account draft |
 | Name/note/number/proxy/Header fails server validation | keep/reload prior server state and show safe error |
+| Drawer `#drawerRpm` draft is empty, fractional, negative or above 100000 | Clamp silently to a `0..100000` integer in `saveDrawer()`; do not send the out-of-range value to the server |
+| Server-provided account `rpm` projection is missing/partial | Render `RPM 不限` or the safe numeric fields only; never render a timestamp array or window internals |
 | Drawer is dirty and user presses Escape/backdrop/Close | ask before discarding |
 | Proxy test on unsaved account | explain that the account must be saved first |
 | Scheduling or error-rule preset is cancelled | no account, rule, pipeline, or global field changes |
@@ -235,11 +238,14 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 - **Good:** forecast cards wrap with `auto-fit/minmax`, expose a labelled region/live update, and show `available / maximum account quota points` plus the percentage and assumptions in text.
 - **Base:** a disabled account shows retained quota/time or unknown and is never queried by page refresh.
 - **Base:** an old account shows weight 1, priority 100, direct proxy status, and empty note/Header fields.
+- **Base:** a new account row shows `maxRpm: 0` and the table renders `RPM 不限` from the server projection.
+- **Good:** an account with `rpm: { limit: 10, used: 3, reserved: 1, retryAt: null }` renders `RPM 10 · 窗口内 3+1待发` through `escapeHtml` and never renders `timestamps`/`head`.
 - **Base:** no log records renders an empty-state row and disables next page.
 - **Bad:** rebuild account objects from visible table cells; hidden routes/proxy/Header fields will be erased.
 - **Bad:** put raw server JSON into a log `<pre>`; future fields could expose secrets.
 - **Bad:** encode preset logic in the backend and UI independently; values will drift.
 - **Bad:** render a retry needle as raw HTML, or project a needle/matched fragment/provider success-rate into ordinary logs, metadata or UI state.
+- **Bad:** render RPM window internals (`timestamps`, `head`, reservation lists) or reuse the server-projected `rpm` fields as editable account configuration.
 - **Bad:** describe summed percentages as Token/request/money capacity, or make a future card look exact when reset timestamps are incomplete.
 
 ### 6. Tests Required
@@ -251,6 +257,7 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 - account-scoped one-click provider setup modal/strategy/proposal/test/confirm/cancel boundaries, stale scope rejection, and bounded provider cooldown input;
 - labelled modal/drawer semantics, Escape handling, focus return, dirty confirmation, and `aria-live` feedback;
 - account snapshot preservation for hidden fields, canonical `errorRules`, all three pipeline booleans, the three-step order, and every bounded pipeline integer (`cachePoolSize`, `cachePoolMaxSize`, both TTLs, `sessionBindingMaxEntries`);
+- the labelled bounded `#drawerRpm` input (`min=0`/`max=100000`), `maxRpm` in the account snapshot, new-row/`collectAccounts()` default `0`, drawer clamping and the safe `rpm` summary rendered only through `escapeHtml` without any `rpm.timestamps`/`rpm.head` access — `test/ui-contract.test.js` asserts the label/bounds/snapshot/clamp/escape markers and `test/account-draft.test.js` executes the clamping and draft-preservation behavior;
 - cache-pool help/runtime text: the gate/miss-pipeline legend and help wording, the `aria-live` runtime line showing target/min/max and binding size/cap, native bounds on all five number inputs, and the absence of the removed “越靠前优先级越高” claim;
 - five mutually exclusive top sections with one statistics panel, one shared ordinary-log DOM, one independent details panel, explicit active state, and no anchor/scroll shortcut;
 - statistics stale-response guards, escaped server text, unknown/known-zero rendering, table wrapping, and forbidden sensitive fields;

@@ -67,7 +67,7 @@ metadata.json   DATA_DIR/metadata.json
   knownModels,
   accounts: [{
     id, name, note, key, enabled,
-    maxConcurrent, weight, priority,
+    maxConcurrent, maxRpm, weight, priority,
     proxyUrl, headers,
     perModel: { [modelId]: RouteConfig }
   }],
@@ -121,7 +121,8 @@ Account `id` is the stable join key for runtime state; names are editable and ke
 Startup normalization preserves legacy behavior while making the schema explicit:
 
 - if the account list is empty and legacy `apiKey` is set, create a default single account;
-- add and persist stable account IDs, `maxConcurrent: 0`, `weight: 1`, `priority: 100`, empty `note/proxyUrl/headers`, and `perModel: {}`;
+- add and persist stable account IDs, `maxConcurrent: 0`, `maxRpm: 0`, `weight: 1`, `priority: 100`, empty `note/proxyUrl/headers`, and `perModel: {}`;
+- normalize account-level `maxRpm` to a canonical integer `0..100000` where `0` means unlimited (`MAX_RPM_LIMIT`, `rpmLimit()`). A legacy or absent field becomes `0`; a complete account save that omits `maxRpm` for an existing stable `id` preserves the previous value (`normalizeAccount()` reads `previous.maxRpm`); a genuinely new account without it becomes `0`. Non-strict normalization (`normalizeMaxRpm()`) maps `undefined`/`null`/negative/non-numeric/non-integral values to `0` (a numeric string such as `"10"` becomes `10` through `Number()`) and truncates a value above the cap; the strict management save accepts only a real JavaScript number satisfying `Number.isInteger(a.maxRpm) && a.maxRpm >= 0 && a.maxRpm <= 100000`, so a numeric string such as `"10"` is rejected. **This strictness is deliberate**: it intentionally differs from `maxConcurrent`/`weight`/`priority`, which string-coerce through `Number()`. Do not "unify" it by adding `Number()` coercion. An invalid value returns `400` before any write and leaves the exact `config.json` bytes unchanged;
 - accept all six account modes; old `single/roundrobin/sticky` retain their previous behavior;
 - normalize `proxyUrl` only to HTTP, HTTPS, SOCKS5, or SOCKS5H and normalize account Header names/values through the shared security validator;
 - normalize `modelAliases` only to known `cline-pass/*` targets without alias/original-name collisions;
@@ -136,6 +137,8 @@ Startup normalization preserves legacy behavior while making the schema explicit
 - normalize a missing/invalid `accountPipeline.cachePoolSize` to `0`; strict management saves accept only integer values from 0 through 100000, while an older client that omits only this field preserves the current server value. Legacy four-step input that omits it defaults the pool off.
 - normalize `cachePoolMaxSize` as an integer 0-100000 with `cachePoolMaxSize >= cachePoolSize`. A missing field (legacy file or older client) falls back to the current server value, or to `cachePoolSize` when there is none, so an upgrade never enables automatic growth. Non-strict normalization clamps an explicit max below the minimum up to the minimum; strict saves return `400` instead.
 - normalize `sessionBindingExplicitTtlMs`/`sessionBindingFallbackTtlMs` as integers 60000-604800000 and `sessionBindingMaxEntries` as an integer 1-100000. A missing/invalid value falls back to the current in-range server value, then to `7200000`/`900000`/`50000`; non-strict normalization caps a fallback TTL above the explicit TTL at `Math.min(900000, explicitTtlMs)`.
+
+Account-level RPM runtime state is deliberately process-local and is never persisted. `server.js` keeps one rolling-window owner per account (`rpmWindows`, `RPM_WINDOW_MS` = 60 s; only the test environment may shrink it through `CLINE_PASS_TEST_RPM_WINDOW_MS`) holding committed native chat start times plus uncommitted reservations. It clears on restart, is independent per process/replica, and is explicitly not a cross-process hard cap. Account deletion and key/proxy identity rotation clear that account's window, and `maxRpm: 0` disables the limit and drops the state; ordinary disable/re-enable keeps already-committed in-window facts (POST `/api/accounts` calls `clearRpmState()` only on deletion, key/proxy rotation, or a limit that becomes `0`). `metadata.json` must never contain the timestamps array, the `head` cursor, the reservation count, or the `rpmWindows` map.
 
 #### Dynamic `metadata.json`
 
@@ -261,6 +264,8 @@ Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/
 | `concurrencyWaitMs` outside 0-30000 at startup | normalize to 2000 |
 | Management API wait outside 0-30000 | `400`; no write |
 | `maxConcurrent` outside 0-100000 through management API | `400`; no write |
+| `maxRpm` is not a real JavaScript integer 0-100000 (numeric string such as `"10"`, fraction, negative, `null`) through the management API | `400`; no write; an older-client omission instead preserves the stable-`id` value, and a new account missing it becomes `0` |
+| Account is deleted or its key/proxy identity rotates | clear that account's in-process RPM window; `maxRpm = 0` also drops it; ordinary disable/re-enable keeps committed in-window facts |
 | `weight` or `priority` outside integer 1-100 | `400`; no write |
 | Note exceeds 500 characters or contains forbidden controls | `400`; no write |
 | Proxy URL has an unsupported scheme/host/port/path/query/hash | `400`; no write |
@@ -295,11 +300,14 @@ Startup normalization is permissive for legacy files; management APIs validate s
 - **Good:** an account route and global route both pass through `normalizeRouteConfig()`, so their persisted shapes stay identical.
 - **Good:** a known counter overflow persists as `null` plus one matching `overflowFields` entry, and the statistics API renders it as unknown.
 - **Good:** changing an account key invalidates its quota generation/state while retaining that stable ID's local usage history.
+- **Good:** a config with `maxRpm: 7` round-trips through `GET/POST /api/accounts`; a complete save from an older client that omits the field keeps `7`, a new account without it becomes `0`, and the rolling window never appears in `metadata.json`.
+- **Base:** `maxRpm: 0` means unlimited and keeps no window state.
 - **Base:** `errorRules: []`, `retryRules: []`, all-false canonical `accountPipeline` with `cachePoolSize: 0`, and `maxConcurrent: 0` preserve no-action/continue-retry/legacy-routing/unlimited behavior.
 - **Base:** a missing metadata file creates a routing secret and owner-only metadata on first migration save.
 - **Bad:** catching JSON parse failure and saving defaults; this destroys operator configuration.
 - **Bad:** using account name or key as the state-map key; renaming or credential rotation would orphan state.
 - **Bad:** assuming all existing JSON files are mode `0600`; only new files get that default.
+- **Bad:** validating `maxRpm` with `Number(a.maxRpm)` like `maxConcurrent`, which would silently accept the numeric string `"10"`; or persisting `rpmWindows`/reservations into `metadata.json`.
 
 ### 6. Tests Required
 
@@ -311,6 +319,7 @@ Persistence changes must use a temporary `DATA_DIR` and assert:
 - missing legacy pipeline order and cache-pool size migrate to the compatibility defaults, `cachePoolMaxSize` defaults to `cachePoolSize`, old-client saves preserve the current order/size/max/TTLs/entry cap, valid new values survive restart, and malformed explicit values fail without changing file bytes;
 - a stored `cachePoolTargetSize` survives restart, is clamped into `[cachePoolSize, cachePoolMaxSize]`, is reset by an explicit operator save, and is the only pool fact written to `metadata.json`; no member IDs or `sessionBindings` key appear in the persisted bytes;
 - invalid proxy/Header/note/weight/priority/alias payloads return `400` and preserve the previous file bytes;
+- `maxRpm` strict validation rejects numeric strings, fractions, negatives, `null` and values over 100000 with `400` while preserving the exact `config.json` bytes; a persisted value round-trips through save/restart, an old-client omission preserves the stable-`id` value, a legacy/absent value normalizes to `0`, and no window/reservation state ever appears in `metadata.json`; regression owner is `test/integration.test.js` (`account maxRpm round-trips through config and API, preserves old-client omission and rejects invalid values without writing bytes`, `RPM windows clear on restart and credential rotation but survive disable/re-enable; zero means unlimited`);
 - `routingSecret`, account cooldown state, and model/provider health cooldowns survive restart; routing skips only still-cooling providers and keeps model isolation;
 - legacy provider status rows gain bounded timestamps/count/class/cooldown fields without leaking secrets, while successful half-open attempts persist immediate recovery;
 - newly created `metadata.json` has mode `0600` on POSIX;

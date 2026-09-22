@@ -120,7 +120,7 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   assert.match(html,/const opposite=row\?\.querySelector\(direction<0\?'\.pipeline-move-down':'\.pipeline-move-up'\)/);
   assert.match(html,/const target=button\.disabled\?opposite:button/,'boundary moves transfer focus to the enabled opposite-direction button');
   const collect = html.slice(html.indexOf('function collectAccounts'), html.indexOf('async function saveAccounts'));
-  for (const field of ['id:a.id','name:a.name',"note:a.note||''","key:a.key||''",'enabled:a.enabled!==false','maxConcurrent:','weight:','priority:',"proxyUrl:a.proxyUrl||''","headers:a.headers||{}","perModel:a.perModel||{}"] ) assert.ok(collect.includes(field), `full account snapshot must preserve ${field}`);
+  for (const field of ['id:a.id','name:a.name',"note:a.note||''","key:a.key||''",'enabled:a.enabled!==false','maxConcurrent:','maxRpm:','weight:','priority:',"proxyUrl:a.proxyUrl||''","headers:a.headers||{}","perModel:a.perModel||{}"] ) assert.ok(collect.includes(field), `full account snapshot must preserve ${field}`);
   assert.match(collect,/errorRules:rules/);
   assert.match(collect, /accountPipeline:\{quotaPool:[^}]+healthSort:[^}]+sticky:[^}]+order:pipelineOrder\(\),\.\.\.pipelineNumberDraft\(\)/);
   for(const id of ['cachePoolSize','cachePoolMaxSize'])assert.match(html,new RegExp(`id="${id}" type="number" min="0" max="100000" step="1"`));
@@ -241,4 +241,22 @@ test('retry rule editor, provider mode wording and paired preset expose bounded 
   assert.match(html, /Switcher 健康自动选择/);
   assert.doesNotMatch(html, /严格钉住/);
   assert.doesNotMatch(html, /优先\+回退/);
+});
+
+test('account maxRpm control is a bounded labelled input and renders only safe numbers', () => {
+  assert.match(html, /<label for="drawerRpm">每分钟真实上游请求上限 RPM（0=不限，按实际发往 Cline 的 chat attempt 计数）<\/label><input id="drawerRpm" type="number" min="0" max="100000">/);
+  const collect = html.slice(html.indexOf('function collectAccounts'), html.indexOf('async function saveAccounts'));
+  assert.match(collect, /maxRpm:Number\(a\.maxRpm\)\|\|0/, 'the account snapshot must preserve maxRpm');
+  const drawer = html.slice(html.indexOf('function openAccountDrawer'), html.indexOf('function closeAccountDrawer'));
+  assert.match(drawer, /\['drawerRpm',a\.maxRpm\|\|0\]/);
+  const saveDrawer = html.slice(html.indexOf('function saveDrawer'), html.indexOf('const PRESETS='));
+  assert.match(saveDrawer, /maxRpm:Math\.max\(0,Math\.min\(100000,/, 'the drawer clamps the draft to the canonical range');
+  assert.match(html, /function addAccountRow\(\)\{ACCS\.accounts\.push\(\{[^;]*?maxRpm:0/);
+  const render = html.slice(html.indexOf('function renderAccounts'), html.indexOf('function cloneRuleDraft'));
+  assert.match(render, /const rpm=a\.rpm\|\|\{\}/);
+  assert.match(render, /Number\.isSafeInteger\(rpm\.retryAt\)/);
+  assert.match(render, /escapeHtml\(rpmSummary\)/, 'server numerics still render through escaped text');
+  assert.doesNotMatch(render, /rpm\.timestamps|rpm\.head/, 'the frontend never renders window internals');
+  const log = html.slice(html.indexOf('async function loadLogs'), html.indexOf('async function clearLogs'));
+  assert.match(log, /\['concurrency','rpm','mixed'\]\.includes\(x\.blockedBy\)/, 'ordinary request rows project only the bounded blockedBy enum');
 });

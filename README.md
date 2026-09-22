@@ -98,7 +98,8 @@ location / {
 
 | 字段 | 说明 |
 |---|---|
-| `accounts` | 账号池：`[{ id, name, note, key, enabled, maxConcurrent, weight, priority, proxyUrl, headers, perModel }]`；备注不进入上游/日志，`maxConcurrent: 0` 表示不限 |
+| `accounts` | 账号池：`[{ id, name, note, key, enabled, maxConcurrent, maxRpm, weight, priority, proxyUrl, headers, perModel }]`；备注不进入上游/日志，`maxConcurrent: 0` 表示不限 |
+| `maxRpm` | 账号级每分钟真实上游请求上限（整数 0～100000，`0` 表示不限）。按每个实际发往 Cline `/chat/completions` 的 native attempt 计数（含 Provider retry；`/api/test`、`/api/probe`、`/api/validate-upstreams`、绑定已保存 accountId 的 `/api/accounts/test` 与 `/api/accounts/proxy-test` 均计数；models/catalog/quota 与无持久 accountId 的临时 credential 测试不计）。使用单进程精确滚动 60 秒窗口：重启清空、多副本各自独立，不是跨进程硬上限 |
 | `accountMode` | `single` / `roundrobin` / `sticky` / `least-connections` / `weighted-roundrobin` / `priority-failover` |
 | `activeAccount` | 单账号模式下使用的下标 |
 | `concurrencyWaitMs` | 容量等待时间，0～30000 ms，默认 2000 |
@@ -191,6 +192,8 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 调度固定先执行禁用、账号冷却、硬隔离和 reserve 等资格过滤。只有 success-rate 时，每次请求按 `success / (success + degrade)` 降序，有数据优先、无数据置后；只有 sticky 时继续使用无状态 HRW。sticky 与 healthSort 同时生效时，sticky 变为“已有会话绑定命中门”：hit 直接使用绑定账号，miss 才按 `order` 中 quotaPool/healthSort 的相对顺序处理当前活跃候选，并用 HRW 做同层稳定 tie-break。成功率变化不会迁移已有绑定。
 
 `cachePoolSize > 0` 仅在 sticky 模式或显式启用会话粘性步骤时生效；它是初始/最小大小，`cachePoolMaxSize` 是扩容上限。成员始终按硬资格、非 reserve、priority 和稳定账号 ID 从当前 target 派生，不持久化成员 ID。只有全部活跃账号都设置了有限 `maxConcurrent` 且满载，等待 `concurrencyWaitMs` 后重算仍满载，target 才同步 grow-one 并持久化到 `metadata.json`；多个并发超时不会越过 max，压力下降不自动缩容，`max=min` 可关闭自动扩容。备用账号必须先正式晋升为 active 才能承载请求或建立绑定；无合格成员/达到 max 时返回容量错误，unlimited 活跃账号不会触发增长。
+
+账号级 **RPM 限流**（`maxRpm`）与 `maxConcurrent` 共存，准入顺序固定为硬资格 → `maxConcurrent` → RPM：并发已满时不会读取或预留 RPM。账号 `lease` 在准入时原子预留第一个 RPM permit，只有真正把请求交给 Node transport（`req.end()`）才提交为窗口内事实；发送前的同步失败或未发出会立即退还预留并唤醒等待者，发送后的 DNS/连接/代理/TLS/成功/错误/超时/取消都不退款。同一账号内的 Provider retry 每次独立预留；无 permit 时不等待、不发请求、不换号，直接返回本地 429 + 精确 `Retry-After`，此前真实失败 attempt 的原始 upstream 状态与错误行仍保留，请求行以 `errorCategory: "rpm"` 记录本地限流而不是伪造 upstream 429。初始选择会跳过“有并发但 RPM 耗尽”的候选，全部不可用时 `Retry-After` 来自最早滚动窗口恢复时间；等待复用现有容量 waiter 与 `concurrencyWaitMs` 上限，不新增 refill 定时器或队列。RPM 阻塞（含混合阻塞）不会触发缓存池动态扩容，只有全部活跃候选都有限并发满载且 RPM 仍有容量时才允许既有的 grow-one。删除账号或替换 Key/代理会清理该账号窗口，普通 disable/re-enable 不会绕过窗口内已提交事实，`maxRpm: 0` 立即关闭限制并清理无用状态。`GET /api/accounts` 只投影 `rpm: { limit, used, reserved, retryAt }` 这样的安全数值，普通日志只投影 `blockedBy` 枚举与有界 `retryAfter`。
 
 组合模式的 session binding 只存在内存，复用已有 HMAC fingerprint：显式 Codex/Claude/session 身份使用 2 小时滑动 TTL，`message_hmac` 使用 15 分钟，默认最多 50,000 条并按 LRU 淘汰，重启即清空。首次 miss 在取得 lease 后建立 provisional binding，真实 native attempt 提交后确认；同会话并发可命中 provisional。绑定账号满载时先等待，再临时使用其他 active，但不会改绑。删除/禁用、Key/代理变化、账号 cooldown/hard-quarantine、退出 active 或进入 reserve 会失效并重新选择；Provider 失败、普通失败、成功率或 hot/warm/unknown 变化不改绑。管理 API/普通日志仅显示安全计数及 `bindingSource`/`bindingResult` 枚举，不输出 session、fingerprint、候选表或绑定明细。
 

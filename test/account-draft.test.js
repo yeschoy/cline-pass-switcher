@@ -6,7 +6,7 @@ import vm from 'node:vm';
 const script = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8').match(/<script>([\s\S]*?)<\/script>/)[1];
 const DEFAULT_PIPELINE_ORDER = ['quotaPool','healthSort','sticky'];
 const DEFAULT_PIPELINE = {quotaPool:false,healthSort:false,sticky:false,order:[...DEFAULT_PIPELINE_ORDER],cachePoolSize:0,cachePoolMaxSize:0,sessionBindingExplicitTtlMs:7200000,sessionBindingFallbackTtlMs:900000,sessionBindingMaxEntries:50000};
-const fixture = () => ({mode:'single', active:1, concurrencyWaitMs:2000, errorRules:[], accountPipeline:{...DEFAULT_PIPELINE,order:[...DEFAULT_PIPELINE_ORDER]}, cachePool:{minSize:0,maxSize:0,targetSize:0,binding:{enabled:false,size:0,maxEntries:50000}}, accounts:[0,1,2].map(i => ({id:`id${i}`, name:i < 2 ? 'duplicate <name>' : 'other', note:`note${i}`, key:`fake${i}`, enabled:i !== 1, maxConcurrent:i+1, weight:i+1, priority:10+i, proxyUrl:'http://localhost:1234', headers:{'X-Test':'fixture'}, perModel:{model:{upstreams:['mock']}}, activeCount:0, cachePoolRole:i===0?'active':i===1?'standby':null}))});
+const fixture = () => ({mode:'single', active:1, concurrencyWaitMs:2000, errorRules:[], accountPipeline:{...DEFAULT_PIPELINE,order:[...DEFAULT_PIPELINE_ORDER]}, cachePool:{minSize:0,maxSize:0,targetSize:0,binding:{enabled:false,size:0,maxEntries:50000}}, accounts:[0,1,2].map(i => ({id:`id${i}`, name:i < 2 ? 'duplicate <name>' : 'other', note:`note${i}`, key:`fake${i}`, enabled:i !== 1, maxConcurrent:i+1, maxRpm:i*5, weight:i+1, priority:10+i, proxyUrl:'http://localhost:1234', headers:{'X-Test':'fixture'}, perModel:{model:{upstreams:['mock']}}, activeCount:0, cachePoolRole:i===0?'active':i===1?'standby':null}))});
 function harness() {
   const elements = new Map(), calls = [], timers = new Map(), windowListeners = {};
   let timerId = 0;
@@ -523,4 +523,36 @@ test('raw scheduling editor round-trips retryRules, rejects invalid retry drafts
   assert.equal(h.el('#rawSchedulingJson').value,text);
   assert.match(h.el('#rawSchedulingError').textContent,/重新打开/);
   assert.equal(h.calls.length,0);
+});
+
+test('account drawer, bulk, preset and full save preserve each account maxRpm draft', async () => {
+  const h = harness();
+  assert.deepEqual(h.snapshot().accounts.map((a) => a.maxRpm), [0, 5, 10], 'the canonical fixture carries maxRpm');
+  h.run('openAccountDrawer(0)');
+  assert.equal(h.el('#drawerRpm').value, 0, 'the drawer hydrates the account maxRpm');
+  h.el('#drawerRpm').value = '45';
+  assert.notEqual(h.run('drawerValue()'), h.run('DRAWER_SNAPSHOT'), 'editing maxRpm marks the drawer draft dirty');
+  h.run('saveDrawer()');
+  assert.equal(h.snapshot().accounts[0].maxRpm, 45);
+  assert.deepEqual(h.snapshot().accounts.map((a) => a.maxRpm), [45, 5, 10], 'other accounts keep their own value');
+
+  // 超出 canonical 范围的输入在写入草稿前被夹紧。
+  h.run('openAccountDrawer(1)'); h.el('#drawerRpm').value = '100001'; h.run('saveDrawer()');
+  assert.equal(h.snapshot().accounts[1].maxRpm, 100000);
+  h.run('openAccountDrawer(1)'); h.el('#drawerRpm').value = '-3'; h.run('saveDrawer()');
+  assert.equal(h.snapshot().accounts[1].maxRpm, 0);
+
+  // 批量并发、预设与 raw editor 都不得改写 maxRpm。
+  h.run('clearBulkSelection(); selectAllAccounts(true)'); h.el('#bulkConcurrency').value = '1'; h.run('applyBulkConcurrency()');
+  assert.deepEqual(h.snapshot().accounts.map((a) => a.maxRpm), [45, 0, 10]);
+  h.el('#preset').value = 'even'; h.run('previewPreset()');
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(PENDING_PRESET.accounts.map((a) => a.maxRpm))')), [45, 0, 10]);
+  h.run('closePreset()');
+
+  // 完整保存 payload 必须带回每个账号自己的 maxRpm。
+  h.context.sent = [];
+  h.run("api = async (path, body) => { sent.push({path, body}); return {ok:false,error:{message:'fixture rejection'}}; }");
+  await h.run('saveAccounts()');
+  const payload = JSON.parse(h.run('JSON.stringify(sent[0].body)'));
+  assert.deepEqual(payload.accounts.map((a) => a.maxRpm), [45, 0, 10], 'the destructive full save carries maxRpm');
 });

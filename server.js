@@ -33,7 +33,7 @@ const DEFAULT_CONFIG = {
   errorDetailLogging: false,
   exposeCatalog: false,    // true 时 /v1/models 合并完整目录模型（默认仅订阅模型）
   upstreamBase: 'https://api.cline.bot/api/v1',
-  accounts: [],            // { id, name, key, enabled, maxConcurrent, perModel } —— Cline Pass 账号池
+  accounts: [],            // { id, name, key, enabled, maxConcurrent, maxRpm, perModel } —— Cline Pass 账号池（maxRpm：0=不限）
   accountMode: 'single',   // single=手动指定 | roundrobin=轮询 | sticky=会话 HRW 粘性
   activeAccount: 0,        // single 模式下使用的账号下标
   concurrencyWaitMs: 2000,
@@ -527,6 +527,108 @@ function normalizeModelAliases(value) {
   return Object.fromEntries(Object.entries(value || {}).map(([a, t]) => [a.trim(), t.trim()]));
 }
 function resolveModelAlias(model) { return config.modelAliases?.[model] || model; }
+// 账号级 RPM：每账号一个进程内精确滚动窗口（默认 60 秒）加未提交预留。
+// 重启清空、多副本各自独立；这是软保护，不是跨进程硬上限。
+const RPM_WINDOW_MS = process.env.NODE_ENV === 'test'
+  ? Math.max(20, Math.min(60_000, Number(process.env.CLINE_PASS_TEST_RPM_WINDOW_MS) || 60_000))
+  : 60_000;
+const MAX_RPM_LIMIT = 100000;
+const rpmWindows = new Map();
+const BLOCKED_BY_REASONS = new Set(['concurrency', 'rpm', 'mixed']);
+function rpmLimit(account) {
+  const value = account?.maxRpm;
+  return Number.isInteger(value) && value > 0 && value <= MAX_RPM_LIMIT ? value : 0;
+}
+// 旧配置/旧客户端兼容：非整数或负数归 0，超上限截断到上限（绝不静默变成不限）。
+function normalizeMaxRpm(value) {
+  if (value === undefined || value === null) return 0;
+  const numeric = Number(value);
+  if (!Number.isInteger(numeric) || numeric < 0) return 0;
+  return Math.min(MAX_RPM_LIMIT, numeric);
+}
+function rpmWindowState(accountId, { create = false } = {}) {
+  let state = rpmWindows.get(accountId);
+  if (!state && create) { state = { timestamps: [], head: 0, reservations: 0 }; rpmWindows.set(accountId, state); }
+  return state || null;
+}
+function rpmLiveCount(state) { return state.timestamps.length - state.head + state.reservations; }
+function pruneRpmWindow(accountId, state, now = Date.now()) {
+  if (!state) return null;
+  const cutoff = now - RPM_WINDOW_MS;
+  while (state.head < state.timestamps.length && state.timestamps[state.head] <= cutoff) state.head++;
+  if (state.head && (state.head === state.timestamps.length || state.head * 2 >= state.timestamps.length)) {
+    state.timestamps = state.head === state.timestamps.length ? [] : state.timestamps.slice(state.head);
+    state.head = 0;
+  }
+  if (!state.timestamps.length && !state.reservations && rpmWindows.get(accountId) === state) rpmWindows.delete(accountId);
+  return state;
+}
+function rpmBlockedRetryAt(account, now = Date.now()) {
+  const limit = rpmLimit(account);
+  if (!limit) return { blocked: false, retryAt: null };
+  const state = rpmWindowState(account.id);
+  if (!state) return { blocked: false, retryAt: null };
+  pruneRpmWindow(account.id, state, now);
+  if (rpmLiveCount(state) < limit) return { blocked: false, retryAt: null };
+  const oldest = state.timestamps[state.head];
+  return { blocked: true, retryAt: Number.isSafeInteger(oldest) ? oldest + RPM_WINDOW_MS : null };
+}
+function rpmAvailable(account, now = Date.now()) { return !account ? true : !rpmBlockedRetryAt(account, now).blocked; }
+function rpmRetryAt(account, now = Date.now()) { return account ? rpmBlockedRetryAt(account, now).retryAt : null; }
+function clearRpmState(accountId) { rpmWindows.delete(accountId); }
+// 预留：reservation 在 req.end() 处变成窗口内已提交时间戳；未提交即失败必须 release 并唤醒等待者。
+function reserveRpmPermit(account, now = Date.now()) {
+  const limit = rpmLimit(account);
+  if (!limit) return { ok: true, permit: null };
+  const state = rpmWindowState(account.id, { create: true });
+  state.reservations++;
+  pruneRpmWindow(account.id, state, now);
+  if (rpmLiveCount(state) > limit) {
+    state.reservations--;
+    return { ok: false, retryAt: rpmRetryAt(account, now) };
+  }
+  let settled = false;
+  const settle = () => { if (settled) return false; settled = true; state.reservations = Math.max(0, state.reservations - 1); return true; };
+  return {
+    ok: true,
+    permit: {
+      commit() { if (settle()) state.timestamps.push(Date.now()); },
+      release() { if (settle()) notifyCapacityWaiters(); },
+    },
+  };
+}
+function selectionBlockFacts(accounts, now = Date.now()) {
+  const reasons = new Set();
+  let retryAt = null;
+  for (const account of accounts) {
+    // 分别记录两个维度：一个账号可以同时是并发满和 RPM 耗尽，"mixed" 必须可诊断。
+    if (!accountHasCapacity(account)) reasons.add('concurrency');
+    const blocked = rpmBlockedRetryAt(account, now);
+    if (!blocked.blocked) continue;
+    reasons.add('rpm');
+    if (Number.isSafeInteger(blocked.retryAt) && (retryAt === null || blocked.retryAt < retryAt)) retryAt = blocked.retryAt;
+  }
+  const blockedBy = reasons.size > 1 ? 'mixed' : reasons.has('concurrency') ? 'concurrency' : reasons.has('rpm') ? 'rpm' : 'unavailable';
+  return { blockedBy, retryAt };
+}
+function blockedByRetryAfter(blockedBy, retryAt, waitMs) {
+  if ((blockedBy === 'rpm' || blockedBy === 'mixed') && Number.isSafeInteger(retryAt)) return Math.max(1, Math.ceil((retryAt - Date.now()) / 1000));
+  return retryAfterSeconds(waitMs);
+}
+function blockedByMessage(blockedBy, fallback) {
+  if (blockedBy === 'rpm') return 'upstream account rpm limit reached';
+  if (blockedBy === 'mixed') return 'upstream accounts are busy or rpm limited';
+  return fallback;
+}
+function busyFailure(blockedBy, retryAt, mode, waitMs, fallback, extra = {}) {
+  return { error: blockedByMessage(blockedBy, fallback), strategy: mode, blockedBy, retryAfter: blockedByRetryAfter(blockedBy, retryAt, waitMs), ...extra };
+}
+function waitDurationForBlock(deadline, facts) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return 0;
+  if (!Number.isSafeInteger(facts?.retryAt)) return remaining;
+  return Math.max(1, Math.min(remaining, facts.retryAt - Date.now()));
+}
 function normalizeAccount(a, i, prevById = new Map(), prevByName = new Map()) {
   const suppliedId = String(a?.id || '').trim();
   const id = (/^[A-Za-z0-9_-]{1,100}$/.test(suppliedId) ? suppliedId : '') || prevByName.get(String(a?.name || '').slice(0, 50))?.id || randomId();
@@ -538,6 +640,8 @@ function normalizeAccount(a, i, prevById = new Map(), prevByName = new Map()) {
     key: String(a?.key || '').trim(),
     enabled: a?.enabled !== false,
     maxConcurrent: Math.max(0, Math.floor(Number(a?.maxConcurrent) || 0)),
+    // maxRpm: 0 = 不限。旧客户端完整保存但省略该字段时按 stable id 保留旧值，新账号缺失为 0。
+    maxRpm: normalizeMaxRpm(a?.maxRpm === undefined ? previous.maxRpm : a.maxRpm),
     weight: Number.isInteger(Number(a?.weight)) && Number(a.weight) >= 1 && Number(a.weight) <= 100 ? Number(a.weight) : 1,
     priority: Number.isInteger(Number(a?.priority)) && Number(a.priority) >= 1 && Number(a.priority) <= 100 ? Number(a.priority) : 100,
     proxyUrl: normalizeProxyUrl(a?.proxyUrl),
@@ -1067,20 +1171,36 @@ function enabledAccounts({ excludeIds = new Set() } = {}) {
 function accountHasCapacity(a) {
   return !a?.maxConcurrent || (activeCounts.get(a.id) || 0) < a.maxConcurrent;
 }
-function tryLease(a) {
-  if (!a || !accountHasCapacity(a)) return null;
-  activeCounts.set(a.id, (activeCounts.get(a.id) || 0) + 1);
-  let released = false;
+// lease 持有首个 RPM permit；后续每个真实 attempt 通过 takeRpmPermit() 独立预留。
+function createLease(account, firstPermit) {
+  let released = false, pending = firstPermit || null;
   return {
-    account: a,
+    account,
+    takeRpmPermit() {
+      if (released) return { ok: false, retryAt: null };
+      if (pending) { const permit = pending; pending = null; return { ok: true, permit }; }
+      return reserveRpmPermit(account);
+    },
     release() {
       if (released) return;
       released = true;
-      activeCounts.set(a.id, Math.max(0, (activeCounts.get(a.id) || 1) - 1));
+      const permit = pending; pending = null;
+      permit?.release();
+      activeCounts.set(account.id, Math.max(0, (activeCounts.get(account.id) || 1) - 1));
       notifyCapacityWaiters();
     },
   };
 }
+// 固定准入顺序：hard eligibility（上层）→ maxConcurrent → RPM。并发失败绝不消费或预留 RPM。
+function tryLeaseResult(a, now = Date.now()) {
+  if (!a) return { lease: null, blockedBy: 'unavailable', retryAt: null };
+  if (!accountHasCapacity(a)) return { lease: null, blockedBy: 'concurrency', retryAt: null };
+  const reserved = reserveRpmPermit(a, now);
+  if (!reserved.ok) return { lease: null, blockedBy: 'rpm', retryAt: reserved.retryAt ?? null };
+  activeCounts.set(a.id, (activeCounts.get(a.id) || 0) + 1);
+  return { lease: createLease(a, reserved.permit), blockedBy: null, retryAt: null };
+}
+function tryLease(a, now = Date.now()) { return tryLeaseResult(a, now).lease; }
 async function waitForCapacity(ms) {
   if (ms <= 0) return;
   let wake;
@@ -1090,16 +1210,19 @@ async function waitForCapacity(ms) {
   try { await Promise.race([timeout, capacity]); }
   finally { clearTimeout(timer); waiters.delete(wake); }
 }
+// 复用现有全局 waiter 和 deadline；等待目标取"最早 RPM 窗口恢复"与剩余预算的较小值，不新增 refill 定时器。
 async function waitForLease(accounts, waitMs) {
   const deadline = Date.now() + waitMs;
+  let facts = selectionBlockFacts(accounts);
   while (true) {
     for (const account of accounts) {
-      const lease = tryLease(account);
-      if (lease) return lease;
+      const result = tryLeaseResult(account);
+      if (result.lease) return { lease: result.lease, blockedBy: null, retryAt: null };
     }
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) return null;
-    await waitForCapacity(remaining);
+    facts = selectionBlockFacts(accounts);
+    const wait = waitDurationForBlock(deadline, facts);
+    if (wait <= 0) return { lease: null, ...facts };
+    await waitForCapacity(wait);
   }
 }
 function hmacHex(value) { return crypto.createHmac('sha256', META.routingSecret).update(String(value)).digest('hex'); }
@@ -1149,36 +1272,39 @@ async function acquireLegacyAccountLease(identity, { excludeIds = new Set(), all
   if (mode === 'sticky' && identity?.fingerprint) {
     const ranked = hrwRank(list, identity.fingerprint);
     const primary = ranked[0];
-    let lease = tryLease(primary);
-    if (lease) return selectionResult(lease, mode, primary, 'sticky-primary', identity);
-    lease = await waitForLease([primary], waitMs);
-    if (lease) return selectionResult(lease, mode, primary, 'sticky-primary', identity);
+    let waited = tryLeaseResult(primary);
+    if (waited.lease) return selectionResult(waited.lease, mode, primary, 'sticky-primary', identity);
+    waited = await waitForLease([primary], waitMs);
+    if (waited.lease) return selectionResult(waited.lease, mode, primary, 'sticky-primary', identity);
     if (allowOverflow) {
-      lease = await waitForLease(ranked.slice(1), 0);
-      if (lease) return selectionResult(lease, mode, primary, 'sticky-overflow', identity, true);
+      const overflow = await waitForLease(ranked.slice(1), 0);
+      if (overflow.lease) return selectionResult(overflow.lease, mode, primary, 'sticky-overflow', identity, true);
     }
-    return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
+    return busyFailure(waited.blockedBy, waited.retryAt, mode, waitMs, 'all upstream accounts are busy');
   }
   if (mode === 'single') {
     const preferred = singlePreferred(list);
-    const lease = await waitForLease([preferred], waitMs);
-    if (lease) return selectionResult(lease, mode, preferred, 'single-selected', identity);
-    return { error: 'upstream account is busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
+    const waited = await waitForLease([preferred], waitMs);
+    if (waited.lease) return selectionResult(waited.lease, mode, preferred, 'single-selected', identity);
+    return busyFailure(waited.blockedBy, waited.retryAt, mode, waitMs, 'upstream account is busy');
   }
   const reasons = { roundrobin: 'roundrobin-next', sticky: 'sticky-no-identity-roundrobin', 'least-connections': 'least-active', 'weighted-roundrobin': 'weighted-slot', 'priority-failover': 'priority-tier' };
   const deadline = Date.now() + waitMs;
+  let facts = selectionBlockFacts(list);
   while (true) {
     const current = enabledAccounts({ excludeIds });
     if (!current.length) return { error: 'no available upstream account', strategy: mode };
-    const available = current.filter(accountHasCapacity);
+    // 先跳过并发或 RPM 耗尽的候选；只有全部当前候选不可准入时才等待。
+    const available = current.filter((account) => accountHasCapacity(account) && rpmAvailable(account));
     if (available.length) {
       const ranked = strategyRank(mode, available);
-      const lease = tryLease(ranked[0]);
-      if (lease) return selectionResult(lease, mode, ranked[0], reasons[mode], identity);
+      const result = tryLeaseResult(ranked[0]);
+      if (result.lease) return selectionResult(result.lease, mode, ranked[0], reasons[mode], identity);
     }
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
-    await waitForCapacity(remaining);
+    facts = selectionBlockFacts(current);
+    const wait = waitDurationForBlock(deadline, facts);
+    if (wait <= 0) return busyFailure(facts.blockedBy, facts.retryAt, mode, waitMs, 'all upstream accounts are busy');
+    await waitForCapacity(wait);
   }
 }
 function configuredCachePoolSize() { return Number.isInteger(config.accountPipeline?.cachePoolSize) ? config.accountPipeline.cachePoolSize : 0; }
@@ -1249,6 +1375,15 @@ function cachePoolMembership(list, candidates = null) {
   const activeIds = new Set(activeCandidates.map((candidate) => candidate.account.id));
   return { size, maxSize, targetSize, activeIds, activeCandidates, eligibleCandidates, candidates, byId: new Map(candidates.map((candidate) => [candidate.account.id, candidate])) };
 }
+function rpmProjection(account, now = Date.now()) {
+  const limit = rpmLimit(account), state = rpmWindowState(account.id);
+  // 先 prune 再读取，保证 used/reserved 与 retryAt 来自同一个已裁剪窗口。
+  if (state) pruneRpmWindow(account.id, state, now);
+  const used = state ? state.timestamps.length - state.head : 0;
+  const reserved = state ? state.reservations : 0;
+  const retryAt = limit ? rpmBlockedRetryAt(account, now).retryAt : null;
+  return { limit, used: limit ? used : 0, reserved: limit ? reserved : 0, retryAt: limit && Number.isSafeInteger(retryAt) ? retryAt : null };
+}
 function cachePoolRoles() {
   const list = enabledAccounts(), membership = cachePoolMembership(list), eligibleIds = new Set(list.map((account) => account.id));
   if (!membership) return new Map();
@@ -1292,19 +1427,29 @@ function tryPipelinePlanLease(plan, identity, mode, { excludeId = null } = {}) {
     const group = plan.groups[groupIndex], ranked = rankPipelineGroup(group, plan, identity, mode);
     preferred ||= ranked[0] || null;
     for (const account of ranked) {
-      if (account.id === excludeId || !accountHasCapacity(account)) continue;
+      if (account.id === excludeId || !accountHasCapacity(account) || !rpmAvailable(account)) continue;
       capacityPreferred ||= account;
-      const lease = tryLease(account);
-      if (lease) return { lease, account, group, groupIndex, preferred: (rankedPreferred ? preferred : capacityPreferred) || account };
+      const result = tryLeaseResult(account);
+      if (result.lease) return { lease: result.lease, account, group, groupIndex, preferred: (rankedPreferred ? preferred : capacityPreferred) || account };
     }
   }
   return { lease: null, preferred };
 }
 function growCachePoolOne(membership) {
+  // 只有"所有当前活跃 hard-eligible 候选都有有限 maxConcurrent、并发满载且 RPM 仍有容量"才是纯并发阻塞。
+  // 任何 unlimited-concurrency、RPM 耗尽或混合阻塞都不允许扩容。
   const active = membership.activeCandidates.map((candidate) => candidate.account);
-  if (!active.length || active.some((account) => !account.maxConcurrent || accountHasCapacity(account))) return null;
+  if (!active.length) return null;
+  for (const account of active) {
+    if (!account.maxConcurrent) return null;
+    if (accountHasCapacity(account)) return null;
+    if (!rpmAvailable(account)) return null;
+  }
   const current = configuredCachePoolTargetSize();
   if (current >= membership.maxSize || membership.eligibleCandidates.length <= membership.activeCandidates.length) return null;
+  // 即将被晋升的第一个备用候选也必须仍有 RPM 名额：否则扩容只会持久化一个无法服务、且掩盖 RPM 阻塞原因的 target。
+  const promoted = membership.eligibleCandidates.find((candidate) => !membership.activeIds.has(candidate.account.id));
+  if (!promoted || !rpmAvailable(promoted.account)) return null;
   const growth = { previousActiveIds: new Set(membership.activeIds), targetSize: current + 1 };
   META.cachePoolTargetSize = growth.targetSize;
   try { saveMeta(); }
@@ -1370,16 +1515,17 @@ async function acquireStatefulBindingAccountLease(identity, { excludeIds = new S
         break;
       }
       const bound = context.activeCandidates.find((candidate) => candidate.account.id === entry.accountId);
-      const lease = tryLease(bound?.account);
-      if (lease) {
+      const boundLease = tryLease(bound?.account);
+      if (boundLease) {
         const reason = context.membership ? 'cache-pool-active' : 'pipeline-sticky-primary';
-        const result = selectionResult(lease, mode, bound.account, reason, identity);
+        const result = selectionResult(boundLease, mode, bound.account, reason, identity);
         const plan = buildPipelineGroups(context.activeCandidates.map((candidate) => candidate.account), identity, context.activeCandidates, { skipSticky: true });
         result.pipeline = bindingPipelineFacts(plan, context, bound);
         return attachBindingHit(result, identity, entry, lookup.result);
       }
-      const remaining = deadline - Date.now();
-      if (remaining > 0) { await waitForCapacity(remaining); continue; }
+      const boundFacts = selectionBlockFacts(bound ? [bound.account] : []);
+      const wait = waitDurationForBlock(deadline, boundFacts);
+      if (wait > 0) { await waitForCapacity(wait); continue; }
       const plan = buildPipelineGroups(context.activeCandidates.map((candidate) => candidate.account), identity, context.activeCandidates, { skipSticky: true });
       const fallback = allowOverflow ? tryPipelinePlanLease(plan, identity, mode, { excludeId: entry.accountId }) : { lease: null, preferred: bound.account };
       if (fallback.lease) {
@@ -1397,9 +1543,9 @@ async function acquireStatefulBindingAccountLease(identity, { excludeIds = new S
           result.pipeline = bindingPipelineFacts(grown.plan, grown.context, grown.candidate, true);
           return attachBindingHit(result, identity, entry, 'temporary-overflow');
         }
-        if (grown) return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode, bindingSource: entry.source, bindingResult: lookup.result };
+        if (grown) return busyFailure('concurrency', null, mode, waitMs, 'all upstream accounts are busy', { bindingSource: entry.source, bindingResult: lookup.result });
       }
-      return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode, bindingSource: entry.source, bindingResult: lookup.result };
+      return busyFailure(boundFacts.blockedBy, boundFacts.retryAt, mode, waitMs, 'all upstream accounts are busy', { bindingSource: entry.source, bindingResult: lookup.result });
     }
   }
   while (true) {
@@ -1417,9 +1563,10 @@ async function acquireStatefulBindingAccountLease(identity, { excludeIds = new S
       result.pipeline = bindingPipelineFacts(plan, context, context.activeCandidates.find((candidate) => candidate.account.id === chosen.account.id), fallback);
       return attachBindingMiss(result, identity, ownerRequestId, lookup.result);
     }
-    if (!context.activeCandidates.length) return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode, bindingSource: sessionBindingSource(identity), bindingResult: lookup.result };
-    const remaining = deadline - Date.now();
-    if (remaining > 0) { await waitForCapacity(remaining); continue; }
+    if (!context.activeCandidates.length) return busyFailure('concurrency', null, mode, waitMs, 'all upstream accounts are busy', { bindingSource: sessionBindingSource(identity), bindingResult: lookup.result });
+    const missFacts = selectionBlockFacts(context.activeCandidates.map((candidate) => candidate.account));
+    const wait = waitDurationForBlock(deadline, missFacts);
+    if (wait > 0) { await waitForCapacity(wait); continue; }
     if (allowOverflow && context.membership) {
       const grown = growAndLeaseCachePoolOne(context.membership, identity, mode, excludeIds, { skipSticky: true });
       if (grown?.lease) {
@@ -1429,9 +1576,9 @@ async function acquireStatefulBindingAccountLease(identity, { excludeIds = new S
         result.pipeline = bindingPipelineFacts(grown.plan, grown.context, grown.candidate, fallback);
         return attachBindingMiss(result, identity, ownerRequestId, lookup.result);
       }
-      if (grown) return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode, bindingSource: sessionBindingSource(identity), bindingResult: lookup.result };
+      if (grown) return busyFailure('concurrency', null, mode, waitMs, 'all upstream accounts are busy', { bindingSource: sessionBindingSource(identity), bindingResult: lookup.result });
     }
-    return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode, bindingSource: sessionBindingSource(identity), bindingResult: lookup.result };
+    return busyFailure(missFacts.blockedBy, missFacts.retryAt, mode, waitMs, 'all upstream accounts are busy', { bindingSource: sessionBindingSource(identity), bindingResult: lookup.result });
   }
 }
 async function acquireCachePoolAccountLease(identity, { excludeIds = new Set(), allowOverflow = true } = {}) {
@@ -1449,9 +1596,10 @@ async function acquireCachePoolAccountLease(identity, { excludeIds = new Set(), 
       result.pipeline = cachePipelineFacts(plan, membership, membership.byId.get(chosen.account.id), 'active', overflow);
       return result;
     }
-    if (!active.length) return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
-    const remaining = deadline - Date.now();
-    if (remaining > 0) { await waitForCapacity(remaining); continue; }
+    if (!active.length) return busyFailure('concurrency', null, mode, waitMs, 'all upstream accounts are busy');
+    const activeFacts = selectionBlockFacts(active);
+    const wait = waitDurationForBlock(deadline, activeFacts);
+    if (wait > 0) { await waitForCapacity(wait); continue; }
     if (allowOverflow) {
       const grown = growAndLeaseCachePoolOne(membership, identity, mode, excludeIds);
       if (grown?.lease) {
@@ -1460,9 +1608,9 @@ async function acquireCachePoolAccountLease(identity, { excludeIds = new Set(), 
         result.pipeline = cachePipelineFacts(grown.plan, grown.context.membership, grown.candidate, 'active', overflow);
         return result;
       }
-      if (grown) return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
+      if (grown) return busyFailure('concurrency', null, mode, waitMs, 'all upstream accounts are busy');
     }
-    return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
+    return busyFailure(activeFacts.blockedBy, activeFacts.retryAt, mode, waitMs, 'all upstream accounts are busy');
   }
 }
 async function acquirePipelineAccountLease(identity, options = {}) {
@@ -1476,25 +1624,27 @@ async function acquirePipelineAccountLease(identity, options = {}) {
     const plan = buildPipelineGroups(list, identity);
     const primary = plan.stickyApplied ? plan.groups[0].accounts[0] : null;
     if (primary) {
-      const lease = tryLease(primary);
-      if (lease) { const result = selectionResult(lease, mode, primary, 'pipeline-sticky-primary', identity); result.pipeline = { ...plan, groups: undefined, selectedQuota: plan.groups[0].quota, selectedHealth: plan.groups[0].health }; return result; }
+      const result = tryLeaseResult(primary);
+      if (result.lease) { const selected = selectionResult(result.lease, mode, primary, 'pipeline-sticky-primary', identity); selected.pipeline = { ...plan, groups: undefined, selectedQuota: plan.groups[0].quota, selectedHealth: plan.groups[0].health }; return selected; }
       if (mode === 'single' || mode === 'sticky') {
-        const remaining = deadline - Date.now();
-        if (remaining > 0) { await waitForCapacity(remaining); continue; }
-        if (mode === 'single') return { error: 'upstream account is busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
-        if (!allowOverflow) return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
+        const primaryFacts = selectionBlockFacts([primary]);
+        const wait = waitDurationForBlock(deadline, primaryFacts);
+        if (wait > 0) { await waitForCapacity(wait); continue; }
+        if (mode === 'single') return busyFailure(primaryFacts.blockedBy, primaryFacts.retryAt, mode, waitMs, 'upstream account is busy');
+        if (!allowOverflow) return busyFailure(primaryFacts.blockedBy, primaryFacts.retryAt, mode, waitMs, 'all upstream accounts are busy');
       }
     }
     if (mode === 'single' && !primary) {
       const chosen = singlePreferred(plan.groups[0].accounts) || plan.groups[0].accounts[0];
-      const lease = tryLease(chosen);
-      if (lease) return { ...selectionResult(lease, mode, chosen, 'single-selected', identity), pipeline: { diagnostics: plan.diagnostics, selectedQuota: plan.groups[0].quota, selectedHealth: plan.groups[0].health } };
-      const remaining = deadline - Date.now();
-      if (remaining > 0) { await waitForCapacity(remaining); continue; }
-      return { error: 'upstream account is busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
+      const chosenLease = tryLease(chosen);
+      if (chosenLease) return { ...selectionResult(chosenLease, mode, chosen, 'single-selected', identity), pipeline: { diagnostics: plan.diagnostics, selectedQuota: plan.groups[0].quota, selectedHealth: plan.groups[0].health } };
+      const chosenFacts = selectionBlockFacts(chosen ? [chosen] : []);
+      const wait = waitDurationForBlock(deadline, chosenFacts);
+      if (wait > 0) { await waitForCapacity(wait); continue; }
+      return busyFailure(chosenFacts.blockedBy, chosenFacts.retryAt, mode, waitMs, 'upstream account is busy');
     }
     for (let groupIndex = 0; groupIndex < plan.groups.length; groupIndex++) {
-      const group = plan.groups[groupIndex], available = group.accounts.filter((account) => account.id !== primary?.id && accountHasCapacity(account));
+      const group = plan.groups[groupIndex], available = group.accounts.filter((account) => account.id !== primary?.id && accountHasCapacity(account) && rpmAvailable(account));
       if (!available.length) continue;
       let ranked;
       if (mode === 'single') { const preferred = singlePreferred(group.accounts); ranked = available.includes(preferred) ? [preferred] : [available[0]]; }
@@ -1506,8 +1656,10 @@ async function acquirePipelineAccountLease(identity, options = {}) {
       result.pipeline = { diagnostics: plan.diagnostics, selectedQuota: group.quota, selectedHealth: group.health, capacityFallback: fallback };
       return result;
     }
-    const remaining = deadline - Date.now(); if (remaining <= 0) return { error: 'all upstream accounts are busy', retryAfter: retryAfterSeconds(waitMs), strategy: mode };
-    await waitForCapacity(remaining);
+    const planFacts = selectionBlockFacts(plan.groups.flatMap((group) => group.accounts));
+    const wait = waitDurationForBlock(deadline, planFacts);
+    if (wait <= 0) return busyFailure(planFacts.blockedBy, planFacts.retryAt, mode, waitMs, 'all upstream accounts are busy');
+    await waitForCapacity(wait);
   }
 }
 async function acquireAccountLease(identity, options = {}) { return pipelineEnabled() ? acquirePipelineAccountLease(identity, options) : acquireLegacyAccountLease(identity, options); }
@@ -1524,11 +1676,11 @@ async function acquireManagementAccount(accountId, source) {
     const account = config.accounts.find((candidate) => candidate.id === requested);
     if (!account) return { status: 400, error: 'unknown accountId' };
     if (!enabledAccounts().some((candidate) => candidate.id === account.id)) return { status: 409, error: 'selected account is unavailable' };
-    const lease = tryLease(account);
-    return lease ? { lease } : { status: 429, error: 'selected account is busy', retryAfter: retryAfterSeconds(config.concurrencyWaitMs) };
+    const result = tryLeaseResult(account);
+    return result.lease ? { lease: result.lease } : { status: 429, error: blockedByMessage(result.blockedBy, 'selected account is busy'), retryAfter: blockedByRetryAfter(result.blockedBy, result.retryAt, config.concurrencyWaitMs), blockedBy: result.blockedBy };
   }
   const selected = await acquireAccountLease({ source, keyType: 'none', confidence: 'none', fingerprint: hmacHex(`management\0${source}`) });
-  return selected.lease ? { lease: selected.lease } : { status: enabledAccounts().length ? 429 : 503, error: selected.error, retryAfter: selected.retryAfter };
+  return selected.lease ? { lease: selected.lease } : { status: enabledAccounts().length ? 429 : 503, error: selected.error, retryAfter: selected.retryAfter, blockedBy: selected.blockedBy || null };
 }
 const chatHeaders = (key) => ({
   'Content-Type': 'application/json',
@@ -1558,9 +1710,16 @@ const OR_API = 'https://openrouter.ai/api/v1';
 
 async function accountFetchJSON(url, opts = {}, timeoutMs = 60000, account = null) {
   const headers = account ? responseHeadersFor(account, opts.headers || {}) : (opts.headers || {});
-  const result = await clineRequestJSON(url, { headers, body: opts.body || '', timeoutMs, account, attemptMeta: opts.attemptMeta || null });
-  let json = null; try { json = JSON.parse(result.text); } catch { json = { raw: result.text }; }
-  return { status: result.status, json };
+  // 管理面 chat attempt 一旦预留 permit 就绝不能泄漏：已发出的请求由 clineRequest 在提交后保持不变，
+  // 这里只兜底“尚未进入 transport 的异常”，release 幂等。
+  try {
+    const result = await clineRequestJSON(url, { headers, body: opts.body || '', timeoutMs, account, attemptMeta: opts.attemptMeta || null, permit: opts.permit || null });
+    let json = null; try { json = JSON.parse(result.text); } catch { json = { raw: result.text }; }
+    return { status: result.status, json };
+  } catch (error) {
+    try { opts.permit?.release(); } catch {}
+    throw error;
+  }
 }
 async function fetchJSON(url, opts = {}, timeoutMs = 60000, account = null) {
   const root = detailContext.getStore();
@@ -1661,12 +1820,16 @@ function providersFromError(value, depth = 0) {
   if (start >= 0) try { return providersFromError(JSON.parse(value.slice(start)), depth + 1); } catch {}
   return null;
 }
-async function harvestAvailableProviders(modelId, pipeline, acc) {
+// 管理面 chat 调用：每个真实 native 请求独立 claim 一个 permit；无 permit 时明确跳过而不是静默发出。
+function claimManagementPermit(lease) { return lease ? lease.takeRpmPermit() : { ok: true, permit: null }; }
+async function harvestAvailableProviders(modelId, pipeline, acc, lease = null) {
+  const claim = claimManagementPermit(lease);
+  if (!claim.ok) return null;
   const base = { model: modelId, messages: [{ role: 'user', content: 'hi' }], max_tokens: 16 };
   const body = pipeline === 'planner'
     ? { ...base, providerOptions: { gateway: { only: ['__probe__'] } } }
     : { ...base, provider: { only: ['__probe__'] } };
-  const { json } = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, { headers: chatHeaders(acc.key), body: JSON.stringify(body), attemptMeta: { model: modelId, provider: ['__probe__'] } }, 60000, acc);
+  const { json } = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, { headers: chatHeaders(acc.key), body: JSON.stringify(body), attemptMeta: { model: modelId, provider: ['__probe__'] }, permit: claim.permit }, 60000, acc);
   return providersFromError(upstreamErrorOf(json));
 }
 function parseTier0(plan) {
@@ -1675,11 +1838,13 @@ function parseTier0(plan) {
   return [...new Set([m[1], ...m[2].split(/,\s*|\s+and\s+/).map((s) => s.trim()).filter(Boolean)])];
 }
 
-async function probeModel(modelId, acc) {
+async function probeModel(modelId, acc, lease = null) {
   const t0 = Date.now();
+  const claim = claimManagementPermit(lease);
+  if (!claim.ok) return { ok: false, localRpm: true, error: 'account rpm limit reached' };
   const body = { model: modelId, messages: [{ role: 'user', content: 'Reply with the word OK' }], max_tokens: 256 };
   const { json } = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, {
-    headers: chatHeaders(acc.key), body: JSON.stringify(body), attemptMeta: { model: modelId, provider: [] },
+    headers: chatHeaders(acc.key), body: JSON.stringify(body), attemptMeta: { model: modelId, provider: [] }, permit: claim.permit,
   }, 180000, acc);
   const ms = Date.now() - t0;
   if (json?.error && !json?.data) {
@@ -1687,7 +1852,7 @@ async function probeModel(modelId, acc) {
   }
   const r = parseRouting(json);
   let harvest = null;
-  if (r.pipeline) harvest = await harvestAvailableProviders(modelId, r.pipeline, acc);
+  if (r.pipeline) harvest = await harvestAvailableProviders(modelId, r.pipeline, acc, lease);
   let endpoints = [];
   let orSlug = null;
   if (r.pipeline !== 'planner' && r.canonicalSlug) {
@@ -1783,7 +1948,7 @@ function learnAvailableProviders(modelId, errMsg) {
 }
 
 // 批量校验：把模型的每个上游渠道用最小请求各钉一次，标记真实可用性
-async function validateUpstreams(modelId, acc) {
+async function validateUpstreams(modelId, acc, lease = null) {
   const meta = META.models[modelId] || {};
   const list = meta.upstreams || [];
   const pipeline = meta.pipeline;
@@ -1796,9 +1961,12 @@ async function validateUpstreams(modelId, acc) {
       const body = pipeline === 'planner'
         ? { ...base, providerOptions: { gateway: { only: [slug] } } }
         : { ...base, provider: { only: [slug] } };
+      // 并发 batch 共享一个 lease，但每个 native call 原子 claim 自己的 permit。
+      const claim = claimManagementPermit(lease);
+      if (!claim.ok) { results[slug] = { status: 'unknown', localRpm: true, ms: 0, note: 'local account rpm limit' }; return; }
       let response;
       try {
-        response = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, { headers: chatHeaders(acc.key), body: JSON.stringify(body), attemptMeta: { model: modelId, provider: [slug] } }, 60000, acc);
+        response = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, { headers: chatHeaders(acc.key), body: JSON.stringify(body), attemptMeta: { model: modelId, provider: [slug] }, permit: claim.permit }, 60000, acc);
       } catch (error) {
         results[slug] = { status: 'unknown', accountFault: acc.proxyUrl ? 'proxy' : 'network', ms: Date.now() - t0, note: safeReason(error.message) };
         return;
@@ -2152,6 +2320,9 @@ function record(modelId, info, detail = detailContext.getStore()) {
     })) : [],
     status: result === 'client_cancelled' ? 499 : result === 'success' ? 200 : (info.normalizedStatus || 502), result, upstreamStatus: info.upstreamStatus ?? null,
     durationMs: Number(info.ms) || 0, accountActions: info.accountActions || [], switched: (info.accountPath || []).length > 1, appliedHeaderNames: info.appliedHeaderNames || [],
+    // 准确锁定阻塞维度：只投影 bounded 枚举和 bounded Retry-After 秒数，不写候选表或窗口时间戳。
+    blockedBy: BLOCKED_BY_REASONS.has(info.blockedBy) ? info.blockedBy : null,
+    retryAfter: Number.isSafeInteger(info.retryAfter) && info.retryAfter >= 0 ? Math.min(3600, info.retryAfter) : null,
     errorCategory: info.errorCategory || (result === 'failed' && info.error ? (info.proxyError ? 'proxy' : 'upstream') : null),
   };
   if (detail?.requestId === request.requestId) { detail.result = result; if (detail.profile === 'error' && detail.status === null) detail.status = request.status; }
@@ -2343,23 +2514,22 @@ function proxyAgentFor(proxyUrl) {
   proxyAgents.set(proxyUrl, agent);
   return agent;
 }
-function clineRequestJSON(url, { headers = {}, body, signal, timeoutMs = 120000, account = null, proxyUrl = '', method = 'POST', maxResponseBytes = Infinity, attemptOwner = null, attemptMeta = null } = {}) {
-  return clineRequest(url, { headers, body, signal, timeoutMs, account, proxyUrl, method, attemptOwner, attemptMeta }).then(async (res) => ({ ...res, text: await streamToString(res.body, maxResponseBytes) }));
+function clineRequestJSON(url, { headers = {}, body, signal, timeoutMs = 120000, account = null, proxyUrl = '', method = 'POST', maxResponseBytes = Infinity, attemptOwner = null, attemptMeta = null, permit = null } = {}) {
+  return clineRequest(url, { headers, body, signal, timeoutMs, account, proxyUrl, method, attemptOwner, attemptMeta, permit }).then(async (res) => ({ ...res, text: await streamToString(res.body, maxResponseBytes) }));
 }
-function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, account = null, proxyUrl = '', method = 'POST', attemptOwner = null, attemptMeta = null } = {}) {
+function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, account = null, proxyUrl = '', method = 'POST', attemptOwner = null, attemptMeta = null, permit = null } = {}) {
   const root = detailContext.getStore();
   const nativeChat = method === 'POST' && url === `${config.upstreamBase}/chat/completions`;
   let detailAttempt = null, attemptToken = null, req = null;
   return new Promise((resolve, reject) => {
-    const u = new URL(url);
-    const lib = u.protocol === 'https:' ? https : http;
-    const data = Buffer.isBuffer(body) ? body : Buffer.from(String(body || ''));
     let settled = false;
     let response = null;
+    let cleanup = () => {};
     const onAbort = () => { response?.destroy(new Error('aborted')); req?.destroy(new Error('aborted')); };
-    const cleanup = () => signal?.removeEventListener('abort', onAbort);
     const fail = (error) => {
       cleanup();
+      // 未调用 req.end() 就结束的 attempt 不是真实上游请求：立即退还预留并唤醒等待者。
+      try { permit?.release(); } catch {}
       if (!settled) {
         settled = true;
         if (attemptToken) error.attemptToken = attemptToken;
@@ -2367,16 +2537,24 @@ function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, acc
         reject(error);
       }
     };
-    const agent = proxyAgentFor(proxyUrl || account?.proxyUrl || '');
-    const requestHeaders = { ...headers }; if (method !== 'GET') requestHeaders['Content-Length'] = data.length;
-    req = lib.request({ protocol: u.protocol, hostname: u.hostname, port: u.port, path: `${u.pathname}${u.search}`, method, headers: requestHeaders, ...(agent ? { agent } : {}) }, (res) => {
-      response = res;
-      res.once('end', cleanup);
-      res.once('close', cleanup);
-      if (detailAttempt) { detailAttempt.status = res.statusCode || 502; detailAttempt.responseHeaders = res.headers; }
-      const responseBody = detailAttempt?.output ? observeStream(res, detailAttempt.output) : res;
-      if (!settled) { settled = true; resolve({ status: res.statusCode || 502, headers: res.headers, body: responseBody, attemptToken, detailAttempt }); }
-    });
+    // 创建 request / 解析 URL / 构造 agent 的同步失败都属于"未发出"，必须退还预留。
+    let u, lib, data, agent, requestHeaders;
+    try {
+      u = new URL(url);
+      lib = u.protocol === 'https:' ? https : http;
+      data = Buffer.isBuffer(body) ? body : Buffer.from(String(body || ''));
+      cleanup = () => signal?.removeEventListener('abort', onAbort);
+      agent = proxyAgentFor(proxyUrl || account?.proxyUrl || '');
+      requestHeaders = { ...headers }; if (method !== 'GET') requestHeaders['Content-Length'] = data.length;
+      req = lib.request({ protocol: u.protocol, hostname: u.hostname, port: u.port, path: `${u.pathname}${u.search}`, method, headers: requestHeaders, ...(agent ? { agent } : {}) }, (res) => {
+        response = res;
+        res.once('end', cleanup);
+        res.once('close', cleanup);
+        if (detailAttempt) { detailAttempt.status = res.statusCode || 502; detailAttempt.responseHeaders = res.headers; }
+        const responseBody = detailAttempt?.output ? observeStream(res, detailAttempt.output) : res;
+        if (!settled) { settled = true; resolve({ status: res.statusCode || 502, headers: res.headers, body: responseBody, attemptToken, detailAttempt }); }
+      });
+    } catch (error) { fail(error); return; }
     req.on('error', fail);
     req.setTimeout(timeoutMs, () => req.destroy(new Error('upstream timeout')));
     if (signal) {
@@ -2385,6 +2563,8 @@ function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, acc
     }
     try {
       req.end(method === 'GET' ? undefined : data);
+      // 已把请求交给 Node transport：此后 DNS/connect/proxy/TLS/成功/错误/超时/取消都不退还 RPM。
+      permit?.commit();
       if (nativeChat) {
         if (attemptOwner) attemptToken = { attemptIndex: attemptOwner.nextAttemptIndex++, callId: crypto.randomUUID() };
         try { attemptOwner?.onAttemptCommit?.(); } catch {}
@@ -3143,11 +3323,11 @@ function persistProviderAction(modelId, provider, action) {
 function responseHeadersFor(account, forwardedHeaders) {
   return { ...forwardedHeaders, ...(account?.headers || {}), 'Content-Type': 'application/json', Authorization: `Bearer ${account.key}` };
 }
-async function attemptOnce(modelId, body, attempt, account, forwardedHeaders, signal, attemptOwner) {
+async function attemptOnce(modelId, body, attempt, account, forwardedHeaders, signal, attemptOwner, permit = null) {
   const send = injectPrefs(body, modelId, attempt), requestBody = JSON.stringify(send);
   try {
     const res = await clineRequestJSON(`${config.upstreamBase}/chat/completions`, {
-      headers: responseHeadersFor(account, forwardedHeaders), body: requestBody, signal, account, attemptOwner,
+      headers: responseHeadersFor(account, forwardedHeaders), body: requestBody, signal, account, attemptOwner, permit,
       attemptMeta: { model: modelId, provider: attempt.upstream ? [attempt.upstream] : [] },
     });
     const responseContentType = normalizeResponseContentType(res.headers);
@@ -3232,7 +3412,10 @@ function traceAttempt(attempt, result, account, ms, diagnostic) {
 async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream = false, attemptTimeoutMs = 120000, sensitiveValues = [], attemptOwner = null } = {}) {
   const t0 = Date.now();
   const plan = buildProviderPlan(modelId, cfg, account), trace = [], attempted = new Set();
-  let retryStop = false;
+  let retryStop = false, localRpm = false, localRpmRetryAt = null;
+  const lease = attemptOwner?.lease || null;
+  // 上一个真实上游尝试的终态；本地 RPM 阻塞时保留它作为历史事实，不被伪造成 upstream 429。
+  let rpmBlockedAfter = null;
   const auto = plan.source === 'auto';
   const maxAttempts = auto ? 1 : plan.maxAttempts;
   const nextAttempt = () => auto
@@ -3265,6 +3448,13 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
         if (!state || state.halfOpen) continue;
         state.halfOpen = true; state.updatedAt = Date.now();
       }
+      // 每个真实 attempt 独立预留 RPM permit；无 permit 时不等待、不发请求、不换号。
+      let permit = null;
+      if (lease) {
+        const claim = lease.takeRpmPermit();
+        if (!claim.ok) { localRpm = true; localRpmRetryAt = claim.retryAt ?? null; rpmBlockedAfter = last; break; }
+        permit = claim.permit;
+      }
       const t1 = Date.now();
       const ctrl = new AbortController();
       let timedOut = false;
@@ -3275,7 +3465,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
           const send = injectPrefs(body, modelId, attempt), requestBody = JSON.stringify(send);
           let up = null, netError = null, transportOrigin = null, failedAttemptToken = null, failedDetailAttempt = null;
           try {
-            up = await clineRequest(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, forwardedHeaders), body: requestBody, signal: ctrl.signal, timeoutMs: attemptTimeoutMs, account, attemptOwner, attemptMeta: { model: modelId, provider: attempt.upstream ? [attempt.upstream] : [] } });
+            up = await clineRequest(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, forwardedHeaders), body: requestBody, signal: ctrl.signal, timeoutMs: attemptTimeoutMs, account, attemptOwner, permit, attemptMeta: { model: modelId, provider: attempt.upstream ? [attempt.upstream] : [] } });
           } catch (e) { netError = timedOut ? 'upstream timeout' : errText(e.message); failedAttemptToken = e.attemptToken || null; failedDetailAttempt = e.detailAttempt || null; }
           const responseContentType = normalizeResponseContentType(up?.headers);
           let isSSE = !!up && up.status === 200 && responseContentType === 'text/event-stream';
@@ -3356,7 +3546,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
           trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
           return { status: 200, streamUp: up, streamHead: firstChunk, streamAttempt: attempt, streamAttemptToken: up.attemptToken, streamDetailAttempt: up.detailAttempt, acc: account, trace, t0, plan, started: true, cleanupClientClose, retryStop: false, routingFailure: false };
         }
-        const result = await attemptOnce(modelId, body, attempt, account, forwardedHeaders, ctrl.signal, attemptOwner);
+        const result = await attemptOnce(modelId, body, attempt, account, forwardedHeaders, ctrl.signal, attemptOwner, permit);
         if (timedOut && result.status !== 200) { result.terminalOrigin = 'timeout'; result.netError = 'upstream timeout'; result.out = { error: { message: 'upstream fetch failed: upstream timeout', type: 'upstream_error' } }; }
         const ms = Date.now() - t1;
         result.note = result.netError || (result.status !== 200 ? errText(result.out?.error?.message) : 'ok');
@@ -3367,10 +3557,17 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
         if (result.status === 200) break;
         if (diagnostic.retryDecision?.decision === 'stop') { retryStop = true; break; }
         if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine') break;
-      } finally { clearTimeout(timer); }
+      } catch (error) { permit?.release(); throw error; } finally { clearTimeout(timer); }
     }
   } finally {
     if (!keepCloseHook) cleanupClientClose();
+  }
+  if (localRpm) {
+    // 本地 RPM 终态：不创建 upstream attempt、不评估 error rule、不换号；保留此前真实失败的原始 status/error row。
+    const retryAfter = Number.isSafeInteger(localRpmRetryAt) ? Math.max(1, Math.ceil((localRpmRetryAt - Date.now()) / 1000)) : null;
+    return { status: 429, upstreamStatus: rpmBlockedAfter?.upstreamStatus ?? null, normalizedStatus: 429, out: { error: { message: 'account rpm limit reached; retry after the rolling window recovers', type: 'rate_limit_error' } },
+      routing: {}, acc: account, trace, t0, plan, retryAfter, netError: null, accountAction: null, clientDisconnected: false,
+      retryStop: false, routingFailure: false, localRpm: true, lastUpstreamFailure: !!rpmBlockedAfter };
   }
   if (!last && !clientClosed) return routingFail('provider half-open probe is already in progress', plan.retryAfter || 1);
   if (!last) last = { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: 'upstream request aborted', type: 'upstream_error' } }, routing: {}, acc: account, netError: 'upstream request aborted', accountAction: null };
@@ -3409,7 +3606,7 @@ async function handleChat(req, res) {
   const isStream = body.stream === true;
   const excluded = new Set();
   const accountPath = [];
-  const attemptOwner = { nextAttemptIndex: 0, bindingSelection: null, onAttemptCommit() { commitSessionBindingSelection(this.bindingSelection); } };
+  const attemptOwner = { nextAttemptIndex: 0, bindingSelection: null, lease: null, onAttemptCommit() { commitSessionBindingSelection(this.bindingSelection); } };
   let upstreamAffinitySent = false;
   let providerOrderOverridesSticky = false;
   let selected;
@@ -3428,10 +3625,12 @@ async function handleChat(req, res) {
   attemptOwner.bindingSelection = selected;
   if (!selected.lease) {
     const status = enabledAccounts().length ? 429 : 503;
+    const rpmBlocked = selected.blockedBy === 'rpm' || selected.blockedBy === 'mixed';
     finalizeStatistics({ globalError: true, segments: [] });
-    recordChat({ requestId, requestedModel, resolvedModel: modelId, stream: isStream, strategy: selected.strategy, ...affinityFacts(), selectionReason: 'capacity-unavailable', normalizedStatus: status, upstreamStatus: null, errorCategory: 'capacity', error: selected.error, ms: 0 });
+    recordChat({ requestId, requestedModel, resolvedModel: modelId, stream: isStream, strategy: selected.strategy, ...affinityFacts(), selectionReason: rpmBlocked ? 'rpm-unavailable' : 'capacity-unavailable', normalizedStatus: status, upstreamStatus: null, blockedBy: selected.blockedBy || null, retryAfter: Number.isSafeInteger(selected.retryAfter) ? selected.retryAfter : null, errorCategory: rpmBlocked ? 'rpm' : 'capacity', error: selected.error, ms: 0 });
     return sendBusy(res, selected.error, selected.retryAfter, status);
   }
+  attemptOwner.lease = selected.lease;
   const initialSelection = { ...selected };
 
   let chain, cfg, targets = [], targetSource = 'auto', targetMode = null, chainLease = selected.lease;
@@ -3440,6 +3639,7 @@ async function handleChat(req, res) {
   for (let accountAttempt = 0; accountAttempt < 2; accountAttempt++) {
     const lease = selected.lease;
     chainLease = lease;
+    attemptOwner.lease = lease;
     const account = lease.account;
     accountPath.push(account.name);
     cfg = resolveModelConfig(account, modelId);
@@ -3464,6 +3664,7 @@ async function handleChat(req, res) {
       chainLease = null;
       selected = await acquireAccountLease(identity, { excludeIds: excluded, ownerRequestId: requestId });
       attemptOwner.bindingSelection = selected;
+      attemptOwner.lease = selected.lease || null;
       if (selected.lease) {
         selected.reason = 'replacement-after-account-action';
         completedTrace.push(...chain.trace);
@@ -3558,7 +3759,7 @@ async function handleChat(req, res) {
     requestId, requestedModel, resolvedModel: modelId, provider: routing.finalProvider || null, canonical: routing.canonicalSlug || null, ms: Date.now() - chain.t0, stream: false, result: disconnected ? 'client_cancelled' : status === 200 ? 'success' : 'failed',
     attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, error: disconnected ? null : status !== 200 ? safeOut.error.message : null,
     account: acc?.name || null, accountId: acc?.id || null, accountPath, accountActions, accountAction: chain.accountAction?.action || accountActions.at(-1)?.action || null, upstreamStatus: chain.upstreamStatus, normalizedStatus: chain.normalizedStatus, ...affinityFacts(usage),
-    strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, providerPlanSource: targetSource, providerMode: targetMode, appliedHeaderNames: Object.keys(acc?.headers || {}), proxyError: !!acc?.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), errorCategory: chain.routingFailure ? 'routing' : null, sensitiveValues,
+    strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, providerPlanSource: targetSource, providerMode: targetMode, appliedHeaderNames: Object.keys(acc?.headers || {}), proxyError: !!acc?.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), errorCategory: chain.routingFailure ? 'routing' : chain.localRpm ? 'rpm' : null, blockedBy: chain.localRpm ? 'rpm' : null, retryAfter: chain.localRpm && Number.isSafeInteger(chain.retryAfter) ? chain.retryAfter : null, sensitiveValues,
   });
   if (res.destroyed) return;
   res.writeHead(disconnected ? 499 : status, {
@@ -3575,7 +3776,9 @@ function sendJSON(res, status, obj) {
   res.end(JSON.stringify(obj));
 }
 function sendBusy(res, message, retryAfter = 1, status = 429) {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Retry-After': String(retryAfterSeconds((retryAfter || 1) * 1000)) });
+  // retryAfter 为秒；RPM 阻塞时来自最早滚动窗口恢复时间，容量阻塞仍为 bounded 1-30s。
+  const seconds = Math.min(3600, Math.max(1, Math.ceil(Number(retryAfter) || 1)));
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Retry-After': String(seconds) });
   res.end(JSON.stringify({ error: { message: safeReason(message || 'upstream accounts unavailable'), type: status === 429 ? 'rate_limit_error' : 'upstream_error' } }));
 }
 
@@ -3664,7 +3867,7 @@ async function dispatch(req, res) {
         ? sendBusy(res, selected.error, selected.retryAfter, selected.status)
         : sendJSON(res, selected.status, { error: { message: selected.error } });
       let r;
-      try { r = await probeModel(model, selected.lease.account); }
+      try { r = await probeModel(model, selected.lease.account, selected.lease); }
       finally { selected.lease.release(); }
       return sendJSON(res, r.ok ? 200 : 502, { ...r, accountId: selected.lease.account.id });
     }
@@ -3676,8 +3879,9 @@ async function dispatch(req, res) {
       const forced = accountId ? config.accounts.find((a) => a.id === String(accountId)) : null;
       if (accountId && !forced) return sendJSON(res, 400, { error: { message: 'unknown accountId' } });
       if (forced && !enabledAccounts().some((a) => a.id === forced.id)) return sendJSON(res, 409, { error: { message: 'selected account is unavailable' } });
-      const selected = forced ? { lease: tryLease(forced) } : await acquireAccountLease({ source: 'test', fingerprint: hmacHex(`test\0${model}`) });
-      if (!selected.lease) return sendBusy(res, 'selected account is busy', retryAfterSeconds(config.concurrencyWaitMs));
+      const forcedLease = forced ? tryLeaseResult(forced) : null;
+      const selected = forced ? { lease: forcedLease.lease } : await acquireAccountLease({ source: 'test', fingerprint: hmacHex(`test\0${model}`) });
+      if (!selected.lease) return sendBusy(res, forcedLease ? blockedByMessage(forcedLease.blockedBy, 'selected account is busy') : 'selected account is busy', forcedLease ? blockedByRetryAfter(forcedLease.blockedBy, forcedLease.retryAt, config.concurrencyWaitMs) : (selected.retryAfter || retryAfterSeconds(config.concurrencyWaitMs)));
       const t0 = Date.now();
       const cfg = { ...resolveModelConfig(selected.lease.account, model) };
       if (upstreams !== undefined) cfg.upstreams = upstreams;
@@ -3691,7 +3895,8 @@ async function dispatch(req, res) {
       if (routeError) { selected.lease.release(); return sendJSON(res, 400, { error: { message: routeError } }); }
       const body = { model, messages: [{ role: 'user', content: 'Reply with the word OK' }], max_tokens: 256 };
       let chain;
-      try { chain = await runChatChain(req, body, model, normalizeRouteConfig(cfg), selected.lease.account, {}, { stream: false, attemptTimeoutMs: 180000 }); }
+      const testOwner = { nextAttemptIndex: 0, lease: selected.lease, onAttemptCommit() {} };
+      try { chain = await runChatChain(req, body, model, normalizeRouteConfig(cfg), selected.lease.account, {}, { stream: false, attemptTimeoutMs: 180000, attemptOwner: testOwner }); }
       finally { selected.lease.release(); }
       const trace = chain.trace || [];
       if (chain.status !== 200) { try { saveMeta(); } catch (error) { console.error(`[测试] provider 健康持久化失败：${safeReason(error.message)}`); } return sendJSON(res, 200, { ok: false, error: safeReason(chain.out?.error?.message || 'upstream error'), targets: cfg.upstreams || [], exclude: cfg.exclude || [], trace }); }
@@ -3768,16 +3973,21 @@ async function dispatch(req, res) {
       try { proxyUrl = body.proxyUrl === undefined ? account.proxyUrl : normalizeProxyUrl(body.proxyUrl, { strict: true }); }
       catch (e) { return sendJSON(res, 400, { error: { message: e.message } }); }
       if (!proxyUrl) return sendJSON(res, 400, { error: { message: 'proxyUrl is required' } });
+      // 已保存 accountId 的 proxy 测试是绑定该账号的真实 chat attempt，受同一 permit broker 约束。
+      const leased = tryLeaseResult(account);
+      if (!leased.lease) return sendBusy(res, blockedByMessage(leased.blockedBy, 'selected account is busy'), blockedByRetryAfter(leased.blockedBy, leased.retryAt, config.concurrencyWaitMs));
       const t0 = Date.now();
       try {
         const model = config.knownModels[0];
-        const result = await clineRequestJSON(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, {}), body: JSON.stringify({ model, messages: [], max_tokens: 1 }), proxyUrl, account, timeoutMs: 15000, attemptMeta: { model, provider: [] } });
+        const claim = leased.lease.takeRpmPermit();
+        if (!claim.ok) return sendBusy(res, 'account rpm limit reached', blockedByRetryAfter('rpm', claim.retryAt, config.concurrencyWaitMs));
+        const result = await clineRequestJSON(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, {}), body: JSON.stringify({ model, messages: [], max_tokens: 1 }), proxyUrl, account, timeoutMs: 15000, attemptMeta: { model, provider: [] }, permit: claim.permit });
         return sendJSON(res, 200, { ok: result.status > 0, proxyType: new URL(proxyUrl).protocol.replace(':', ''), ms: Date.now() - t0, status: result.status });
       } catch (e) {
         let reason = String(e.message || 'proxy error');
         try { const u = new URL(proxyUrl); for (const secret of [proxyUrl, decodeURIComponent(u.username), decodeURIComponent(u.password)].filter(Boolean)) reason = reason.split(secret).join('[REDACTED]'); } catch {}
         return sendJSON(res, 200, { ok: false, proxyType: new URL(proxyUrl).protocol.replace(':', ''), ms: Date.now() - t0, errorCategory: 'proxy', reason: safeReason(reason) });
-      }
+      } finally { leased.lease.release(); }
     }
     if (req.method === 'POST' && p === '/api/statistics/quota-refresh') {
       if (url.search) return sendJSON(res, 400, { error: { message: 'quota refresh does not accept query parameters' } });
@@ -3815,7 +4025,7 @@ async function dispatch(req, res) {
       clearExpiredCooldowns();
       const cacheRoles = cachePoolRoles();
       return sendJSON(res, 200, {
-        accounts: config.accounts.map((a) => { const recent = projectAggregate(aggregateRange(a.id).aggregate),lifetime=META.statistics.lifetime.accounts[a.id]; return { ...a, state: getAccountState(a.id), activeCount: activeCounts.get(a.id) || 0, health: healthProjection(a), quota: quotaProjection(a.id), cachePoolRole: cacheRoles.get(a.id) ?? null, statistics: { recent24h: recent, lifetimeRequests: lifetime ? lifetime.requests : 0, lifetimeErrors: lifetime ? lifetime.errors : 0 } }; }),
+        accounts: config.accounts.map((a) => { const recent = projectAggregate(aggregateRange(a.id).aggregate),lifetime=META.statistics.lifetime.accounts[a.id]; return { ...a, state: getAccountState(a.id), activeCount: activeCounts.get(a.id) || 0, rpm: rpmProjection(a), health: healthProjection(a), quota: quotaProjection(a.id), cachePoolRole: cacheRoles.get(a.id) ?? null, statistics: { recent24h: recent, lifetimeRequests: lifetime ? lifetime.requests : 0, lifetimeErrors: lifetime ? lifetime.errors : 0 } }; }),
         mode: config.accountMode, active: config.activeAccount, concurrencyWaitMs: config.concurrencyWaitMs,
         errorRules: config.errorRules, retryRules: config.retryRules, accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline,
         cachePool: { minSize: configuredCachePoolSize(), maxSize: configuredCachePoolMaxSize(), targetSize: configuredCachePoolTargetSize(), binding: sessionBindingSummary() },
@@ -3860,6 +4070,8 @@ async function dispatch(req, res) {
         if (a.key !== undefined && (typeof a.key !== 'string' || a.key.length > 4096 || /[\r\n\x00]/.test(a.key))) return sendJSON(res, 400, { error: { message: `invalid account key at index ${i}` } });
         const max = Number(a.maxConcurrent ?? 0);
         if (!Number.isInteger(max) || max < 0 || max > 100000) return sendJSON(res, 400, { error: { message: `invalid maxConcurrent at index ${i}` } });
+        // maxRpm 是 canonical 严格整数 0..100000；省略该字段（旧客户端）在 normalizeAccount 中按 stable id 保留。
+        if (a.maxRpm !== undefined && (!Number.isInteger(a.maxRpm) || a.maxRpm < 0 || a.maxRpm > 100000)) return sendJSON(res, 400, { error: { message: `invalid maxRpm at index ${i}` } });
         for (const field of ['weight', 'priority']) if (a[field] !== undefined && (!Number.isInteger(Number(a[field])) || Number(a[field]) < 1 || Number(a[field]) > 100)) return sendJSON(res, 400, { error: { message: `invalid ${field} at index ${i}` } });
         try { normalizeProxyUrl(a.proxyUrl, { strict: true }); validateAndNormalizeHeaders(a.headers, { strict: true }); }
         catch (e) { return sendJSON(res, 400, { error: { message: `account ${i}: ${e.message}` } }); }
@@ -3881,8 +4093,8 @@ async function dispatch(req, res) {
       normalizeCachePoolTarget(requestedPipeline);
       for (const [id, previous] of previousById) {
         const current = accs.find((a) => a.id === id);
-        if (!current) { invalidateQuotaAccount(id, { clearSnapshot: true, deleted: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); }
-        else if (current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) { invalidateQuotaAccount(id, { clearSnapshot: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); delete META.accountStates[id]; }
+        if (!current) { invalidateQuotaAccount(id, { clearSnapshot: true, deleted: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); clearRpmState(id); }
+        else if (current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) { invalidateQuotaAccount(id, { clearSnapshot: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); delete META.accountStates[id]; clearRpmState(id); }
         else if (previous.enabled !== false && current.enabled === false) { invalidateQuotaAccount(id); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); }
         else for (const model of new Set([...Object.keys(previous.perModel || {}), ...Object.keys(current.perModel || {})])) if (JSON.stringify(previous.perModel?.[model]) !== JSON.stringify(current.perModel?.[model])) clearProviderCircuitForRoute(id, model);
       }
@@ -3893,6 +4105,8 @@ async function dispatch(req, res) {
       for (const id of Object.keys(META.statistics.recentCoverage.accountIncompleteAt)) if (!seen.has(id)) delete META.statistics.recentCoverage.accountIncompleteAt[id];
       for (const id of Object.keys(META.statistics.recentCoverage.accountHealthIncompleteAt)) if (!seen.has(id)) delete META.statistics.recentCoverage.accountHealthIncompleteAt[id];
       for (const id of activeCounts.keys()) if (!seen.has(id)) activeCounts.delete(id);
+      // maxRpm=0 即时关闭限制并清理无用状态；disable/re-enable 保留窗口内已提交事实。
+      for (const id of [...rpmWindows.keys()]) if (!seen.has(id) || !rpmLimit(accs.find((a) => a.id === id))) clearRpmState(id);
       pruneOrphanProviderStates();
       reconcileSessionBindings();
       saveConfig(); saveMeta(); RR_COUNTER = 0; strategyCounters.clear(); proxyAgents.clear(); scheduleQuotaRefresh();
@@ -3925,14 +4139,20 @@ async function dispatch(req, res) {
       try { if (input?.proxyUrl !== undefined) proxyUrl = normalizeProxyUrl(input.proxyUrl, { strict: true }); }
       catch (e) { return sendJSON(res, 400, { error: { message: e.message } }); }
       const account = { ...(saved || {}), key: k, proxyUrl };
+      // 只有绑定已保存账号的测试才受账号 maxRpm 约束；临时 credential 测试没有配置 owner，明确不计。
+      const leased = saved ? tryLeaseResult(saved) : null;
+      if (leased && !leased.lease) return sendBusy(res, blockedByMessage(leased.blockedBy, 'selected account is busy'), blockedByRetryAfter(leased.blockedBy, leased.retryAt, config.concurrencyWaitMs));
       const t0 = Date.now();
       const model = config.knownModels[0] || 'cline-pass/glm-5.3-flash';
       let json;
       try {
+        const claim = claimManagementPermit(leased?.lease || null);
+        if (!claim.ok) return sendBusy(res, 'account rpm limit reached', blockedByRetryAfter('rpm', claim.retryAt, config.concurrencyWaitMs));
         ({ json } = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, {
-          headers: chatHeaders(k), body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Say OK' }], max_tokens: 512 }), attemptMeta: { model, provider: [] },
+          headers: chatHeaders(k), body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Say OK' }], max_tokens: 512 }), attemptMeta: { model, provider: [] }, permit: claim.permit,
         }, 120000, account));
       } catch (e) { return sendJSON(res, 200, { ok: false, ms: Date.now() - t0, error: safeReason(e.message), errorCategory: proxyUrl ? 'proxy' : 'network' }); }
+      finally { leased?.lease.release(); }
       if (json?.error && !json?.data) {
         const rawMsg = typeof json.error === 'string' ? json.error : JSON.stringify(json.error);
         const msg = errText(rawMsg).split(k).join('[REDACTED]');
@@ -3966,7 +4186,7 @@ async function dispatch(req, res) {
         ? sendBusy(res, selected.error, selected.retryAfter, selected.status)
         : sendJSON(res, selected.status, { error: { message: selected.error } });
       let results;
-      try { results = await validateUpstreams(model, selected.lease.account); }
+      try { results = await validateUpstreams(model, selected.lease.account, selected.lease); }
       finally { selected.lease.release(); }
       const summary = { ok: 0, limited: 0, bad: 0, auth: 0, unknown: 0, accountFaults: 0 };
       for (const fact of Object.values(results)) { summary[fact.status] = (summary[fact.status] || 0) + 1; if (fact.accountFault) summary.accountFaults++; }
