@@ -22,14 +22,16 @@ acquireAccountLease(identity, { excludeIds = new Set(), allowOverflow = true, ow
 strategyRank(mode, accounts)
 resolveModelAlias(requestedModel)
 resolveModelConfig(account, resolvedModel)
-buildProviderAttempts(modelId, routeConfig, now)
+buildProviderPlan(modelId, cfg, account, now)
+healthOrderedProviders(plan, providers)
+selectProviderAttempt(modelId, plan, account, attempted, now)
 injectPrefs(body, modelId, attempt)
 classifyAttemptFailure(result, attempt, account, now)
 updateProviderHealth(modelId, upstream, outcome, now)
 responseHeadersFor(account, forwardedHeaders)
 proxyAgentFor(proxyUrl)
 runChatChain(req, body, modelId, cfg, account, forwardedHeaders,
-  { stream = false, attemptTimeoutMs = 120000 })
+  { stream = false, attemptTimeoutMs = 120000, sensitiveValues = [], attemptOwner = null })
 clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000,
   account = null, proxyUrl = "" })
 normalizeUsage(raw)
@@ -46,9 +48,10 @@ scheduleQuotaRefresh()
 buildPipelineGroups(accounts)
 acquirePipelineAccountLease(identity, options)
 normalizeErrorRules(value, { strict = false })
+normalizeRetryRules(value, { strict = false })
 normalizeFailureForRules(errorValue, sensitiveValues)
 matchErrorRule({ result, classification, modelId, provider, sensitiveValues })
-planProviderAttempts(modelId, route, account)
+matchRetryRule(result, sensitiveValues)
 settleProviderCircuit(modelId, route, account, attempt, outcome)
 ```
 
@@ -133,14 +136,24 @@ A successful model probe builds its known provider set from the observed `finalP
 
 #### Single-provider attempt planning and health
 
-- Configured `upstreams` are the authoritative provider order. Without a configured order, the stable discovered `META.models[modelId].upstreams` order is used.
-- Exclusions are applied before health routing. A known list that becomes empty after exclusion returns a safe no-provider error and never falls back to auto.
-- Providers with durable hard quarantine or `cooldownUntil > now` are skipped. Other Providers retain source order in this child scope; success-rate Provider retry ordering is owned by the dependent Provider-selection task. An expired cooldown returns to eligibility, and a positive per-account circuit still admits at most one concurrent half-open owner.
-- If every named Provider is explicitly cooling or hard-quarantined, routing fails safely with bounded retry information rather than bypassing state. If no Provider is known at all, exactly one `auto`/unattributed attempt is allowed.
-- Every named attempt injects exactly one provider through `providerOptions.gateway.only` (planner), `provider.only` (direct), or the same singleton in both shapes for an unknown pipeline. `order` is removed even if supplied downstream. `preferred` remains a persisted UI/config mode but its fallback is switcher-managed outer retry.
+- Configured `upstreams` are the authoritative candidate source and source order. A non-empty configured list always overrides the stable discovered `META.models[modelId].upstreams` order; discovered order is used only when nothing is configured; a source that is completely empty is `auto`.
+- `buildProviderPlan()` builds one stable per-request candidate snapshot: static `exclude`, durable `hardQuarantined`, and `cooldownUntil > now` are filtered before selection, in that order. `plan.rates` snapshots the Provider-model 24-hour direct success rate and `plan.plannedOrder` is a bounded diagnostic order, not a promise about gateway behavior. An expired cooldown returns to eligibility, and a positive per-account circuit still admits at most one concurrent half-open owner.
+- `strict` selects source order on the first real attempt (`providerSelection: "strict-first"`), then excludes every provider already attempted in this request and orders the remainder by Provider-model 24-hour direct success rate descending. `preferred` uses that same health order from the first attempt onward (`providerSelection: "health"`). Unknown rates (`null`) sort after known rates; ties and all-unknown keep source-index order. `selectProviderAttempt()` recomputes the remaining candidate set before every attempt.
+- `maxRetries` caps real outer attempts: `maxRetries: null` allows every built attempt, an integer `n` permits the first attempt plus at most `n` more (`plan.maxAttempts = n + 1`), and `attempted` exclusion prevents any candidate from being retried twice in one request.
+- Exclusions are applied before health routing. A known source that becomes empty after exclusion returns a safe `503` no-provider error and never falls back to `auto`. If candidates exist but every one is durably cooling or hard-quarantined, routing fails safely with bounded retry information instead of bypassing state. Only a completely empty candidate source allows exactly one unattributed `auto` attempt (`plan.maxAttempts = 1`, `providerSelection: "compat-auto"`).
+- Every named attempt injects exactly one provider through `providerOptions.gateway.only` (planner), `provider.only` (direct), or the same singleton in both shapes for an unknown pipeline. `injectPrefs()` deletes any incoming `provider.order`/`gateway.order` and never emits one. `sort` is applied only inside the already-selected Provider (`gateway.sort`/`provider.sort`), never as a cross-provider order.
 - A 429 is account-scoped only with a fresh complete 100%-used quota snapshot or explicit structured account/subscription/plan quota-exhaustion semantics. Routing/final-provider or structured provider fields make it provider-scoped. HTML and other ambiguous 429 responses are unknown.
 - Unmatched Provider failures no longer create implicit durable cooldowns. Explicit provider-model cooldown/hard-quarantine rules own durable state; the existing positive per-account `providerCooldownMs` circuit remains a separate process-local compatibility mechanism.
-- Provider-model state is keyed by `(resolvedModel, provider)` and shared across accounts. Hard quarantine survives restart and success and clears only through exact `POST /api/providers/recover` or identity cleanup. Unattributed auto never creates named state or success samples.
+- Provider-model state is keyed by `(resolvedModel, provider)` and shared across accounts. Hard quarantine survives restart and success and clears only through exact `POST /api/providers/recover` or identity cleanup. A named real attempt is the only source of provider-model samples; an unattributed `auto` attempt creates no named state or provider-model sample.
+
+#### Request-level retry stop rules
+
+- Canonical top-level `retryRules` is an ordered array of `{ id, decision: "stop", when: { statuses, body_contains } }`. Every entry requires a stable unique ID (the `ERROR_RULE_ID` grammar), an exact `decision: "stop"`, and both `when.statuses` and `when.body_contains`; a missing condition, unknown field, non-`stop` decision, or duplicate ID is rejected.
+- `statuses` is a non-empty array of unique safe integers 100-599 (at most 500). `body_contains` is a non-empty string or a 1-20 element array; each needle is trimmed, non-empty, at most 500 characters, control-byte-free, and unique case-insensitively. The array form matches ANY needle and the string form is one needle. Matching is case-insensitive plain substring matching against the same bounded/redacted failure text used by `errorRules`; regular expressions and Header conditions are not supported.
+- `matchRetryRule()` ANDs the two condition kinds: a rule matches only when the normalized status is in `statuses` and at least one needle occurs in the failure text. The first matching rule wins and returns `{ ruleId, decision: "stop", matchedBy: ["status", "body"], statusCode }`; otherwise it returns `{ ruleId: null, decision: "continue", matchedBy: [], statusCode }`. A status-only or body-only hit is a miss.
+- `settleAttempt()` evaluates the retry rule after attempt settlement, in parallel with `errorRules`. Retry decision is independent from health action: a custom retry rule never changes health by itself, and a paired `errorRules` entry (such as provider-model `ignore`) decides the sample/disposition. The manual console preset writes both atomically.
+- A `stop` decision sets `chain.retryStop = true` and breaks the in-account attempt loop, so no further Provider attempt is made on that account and the outer account-replacement branch is skipped. The original terminal status/body is preserved. A pre-stream SSE error event settles through the same path and also stops. After a valid SSE response is exposed (`started: true`) no retry decision is evaluated and nothing is replayed; client cancellation and an exhausted candidate set add no replay either.
+- Missing persisted `retryRules` normalizes to `[]` at startup and preserves the earlier continue-on-failure behavior; the paired preset is never auto-seeded or auto-migrated.
 
 #### Header and credential boundary
 
@@ -185,7 +198,8 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - Only explicit normalized upstream usage counts. `0` is known; a missing/invalid field is `null`; input, output, total, cache, or cache ratios are never inferred from another field. Model cache Token ratio is likewise computed only from explicit input/cache pairs.
 - Non-stream JSON reads its terminal usage object. Streaming retains only the last cumulative usage snapshot while incrementally observing SSE events. Each event is bounded to 64 KiB; an oversized event is discarded through its CRLF/LF boundary, then observation resumes for later events.
 - Management, probe, model-catalog, and quota traffic never enters chat statistics or health.
-- Account health is request/account-deduplicated: any account-scope `degrade` wins for that account in the request; otherwise only an account that obtains final success receives one success. Provider-model health records each named real attempt as success or provider-model `degrade`. Ignore/cooldown/hard-quarantine, management traffic, auto attempts, and cancellation add no sample.
+- Rule actions map to direct health samples exactly (`SAMPLE_FAILURE_ACTIONS = {degrade, cooldown, hard-quarantine}`): `ignore` writes 0 samples and no disposition; `degrade` writes 1 failure sample; `cooldown` writes 1 failure sample plus a temporary skip; `hard-quarantine` writes 1 failure sample plus durable quarantine. An account-scope action writes the account sample and a provider-model-scope action writes the `(resolvedModel, provider)` sample.
+- Account health is request/account-deduplicated with failure precedence: any account-scope `degrade`/`cooldown`/`hard-quarantine` sample wins for that account in the request; otherwise only an account that obtains final success receives one success. Provider-model health records at most one sample per named real attempt. Stale-generation completions, management traffic, an unattributed `auto` provider attempt, and client cancellation write no sample. An `auto` request that succeeds still records one account success sample, because the account dimension has no named provider attribution.
 - Both dimensions expose the rolling 24-hour direct rate `successes / (successes + degrades)`, counts, sample count, and coverage. One sample is sufficient; zero samples is `null`, never numeric zero. Disabled, cooling, and hard-quarantined are independent disposition fields; there are no available/degraded/unhealthy thresholds.
 - `GET /api/statistics` is authenticated and returns projected global/account lifetime and 1,440-minute aggregates, plus per-resolved-model rolling aggregates with model tracking/cell-loss coverage, health, quota, and a separately labelled legacy migration baseline. Fixed aggregates also count explicit/fallback affinity, provider fallback, circuit cooldown and half-open requests; `routingCoverage` labels the migration/start minute so pre-tracking history is not fabricated as zero. They never store identity values or high-cardinality provider/session keys. `GET /api/accounts` embeds a stable-ID account statistics summary for the main table while retaining the legacy name-keyed `stats` projection only for old clients. Neither endpoint returns credentials, raw events, messages, sessions, or raw quota responses.
 
@@ -236,7 +250,13 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 | Usage field is absent/invalid while another usage field is valid | keep the absent field unknown; count only explicit valid fields |
 | A streaming SSE event exceeds 64 KiB | discard that event only; resume at its CRLF/LF terminator and observe later usage |
 | A fixed statistics counter exceeds `Number.MAX_SAFE_INTEGER` | persist `null` plus the exact `overflowFields` marker; never wrap or clamp |
-| Rule/default outcome is ignore/cooldown/hard-quarantine, traffic is management/auto, or client disconnects | no success/degrade sample is recorded |
+| Rule/default outcome is `ignore`, traffic is management or an unattributed `auto` provider attempt, a completion is stale-generation, or the client disconnects | no success/degrade sample is recorded; `degrade`/`cooldown`/`hard-quarantine` each record exactly one failure sample in their scope |
+| A `retryRules` entry is missing `id`/`decision`/`when`, has an unknown field, a non-`stop` decision, a duplicate ID, empty/oversized/out-of-range/duplicate status, or a missing/empty/oversized/control-byte/case-insensitively duplicate body needle | management save `400`; persisted canonical invalidity fails startup without rewriting bytes |
+| A `retryRules` entry matches only `status` or only `body` | the rule does not match; the compatible continue-retry default applies |
+| The first matching retry rule is `stop` | stop the remaining same-account Provider attempts and account replacement before the first byte; preserve the original terminal status/body |
+| A retry stop would fire after SSE output started or during client cancellation | no retry decision, no replay, and no additional health effect |
+| A retry stop has no paired `errorRules` entry | health stays independent; the provider-model default or configured rule still decides the sample |
+| Capacity rejection happens before any lease/provider plan | `providerPlanSource`/`providerMode` are `null`; routing rejection from `runChatChain()` still reports its source/mode with an empty attempt list |
 | Quota body exceeds 256 KiB, times out, or its schema/time/percentage is invalid | Safe failure category/backoff; retain last-good diagnostics, make routing quota unknown, and persist no raw payload |
 | Quota reset time uses valid 1–9 digit fractional RFC3339 precision | Normalize to millisecond UTC; publish the accepted snapshot without changing refresh timing |
 | Quota completion belongs to an old key/proxy/account generation or has no live page/routing owner | Cancel/discard without mutating snapshot, attempt time, failure count or backoff |
@@ -263,8 +283,11 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - **Base:** no account-specific `perModel[model]` exists, so the global route is used unchanged.
 - **Base:** no identity is extractable, so sticky deliberately behaves as round-robin.
 - **Base:** a tool result containing only `"\n"` is forwarded unchanged instead of becoming a Switcher-generated `400`.
+- **Good:** a cold `strict` route tries the configured first provider, then excludes it and retries the highest Provider-model 24-hour success rate among the remaining candidates; a cold `preferred` route uses that health order from the first attempt.
+- **Good:** an operator confirms the manual preset; a `502` whose body contains `system message must have content` sends exactly one real attempt, performs no account replacement, and the paired provider-model `ignore` rule keeps the channel rate unchanged.
 - **Bad:** calling account selection inside the provider-attempt loop; this breaks request-level account affinity.
 - **Bad:** forwarding the downstream Authorization or relying on `fetch` for chat transport; either leaks proxy credentials or creates synthetic client headers.
+- **Bad:** treating `preferred` as a gateway-side multi-provider `order`, or projecting the static configuration list or `plan.plannedOrder` as the actual runtime provider path.
 - **Bad:** replaying an SSE request after the first valid event has been written.
 
 ### 6. Tests Required
@@ -274,8 +297,12 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - repeated session, parent/child identities, and stable opening messages select the same account; request-id-only requests use round-robin;
 - caller prompt/session keys are preserved; explicit Codex/Claude header/metadata identities derive one stable upstream key across retries/account replacement; message fallback derives none; ordinary logs contain only safe source/confidence/applied/cache-hit facts;
 - HRW rank is independent of account input order, and removing one account remaps only sessions that ranked that account first;
-- planner/direct/unknown-pipeline named attempts use singleton `only`, contain no `order`, keep identical Authorization, preserve configured order among non-cooling providers, and apply `maxRetries` after health planning;
-- discovered providers become named attempts, no-known-provider uses one unattributed auto attempt, all-excluded sends none, active durable cooldowns are skipped, expired cooldowns recover in place, and all-cooling fails open only the earliest provider;
+- planner/direct/unknown-pipeline named attempts use singleton `only`, contain no `order`, keep identical Authorization, and apply `maxRetries` as a real outer-attempt cap after health planning and candidate exclusion;
+- `strict first follows source order, retries and preferred follow provider-model success rate, singleton-only and safe failures` covers cold strict source order, strict retry and preferred health order, `maxRetries` capping, unknown-rate null-last ordering, model isolation, excluded/all-hard/cooling/auto/discovered candidate sources, and the bounded `providerPlanSource`/`providerMode`/`providerSelection` projection;
+- `retry rules stop deterministic request errors before remaining providers or account replacement and stay independent from health` covers the exact `502 + system message must have content` stop, case-insensitive body ANY, HTTP-200 envelope and pre-stream SSE forms, status-only/body-only misses, first-match ordering, compatible continue default, account-replacement blocking, paired-ignore independence, and needle/rate absence from logs and metadata;
+- `retryRules management API validates strictly, preserves old-client omission and keeps config bytes on rejection` covers strict schema/size/ID/condition rejection, old-client omission preservation, and byte-preserving rejection;
+- `rule actions record exactly the declared direct health sample and disposition per scope` covers the 0/1/1/1 sample matrix together with cooldown/hard-quarantine dispositions;
+- discovered providers become named attempts, a completely empty candidate source uses one unattributed auto attempt, all-excluded sends none, active durable cooldowns are skipped, expired cooldowns recover in place, and all-cooling fails safely instead of bypassing state;
 - a positive `providerCooldownMs` additionally skips repeated allowed failures and admits one concurrent half-open owner; zero disables only that per-account circuit, while parameter/auth/proxy/cancel outcomes do not poison shared provider health;
 - unknown/provider 429 continues within A, while explicit account 429 can switch A to B without provider penalty; a second removal action cannot select C, and banned accounts leave the candidate set;
 - ordered content rules prove first-match/range/ignore/status-fallback behavior for nested HTTP-200 errors, non-stream, pre-stream SSE, post-start SSE and provider retry; current messages/keys/Header values are absent from metadata and ordinary logs;
@@ -373,6 +400,25 @@ await requestQuota(account.id, pageToken
 ```
 
 The slot and ID lock are released only when the underlying transport settles, not when one requesting source leaves.
+
+A retry rule must never be approximated with an implicit health side effect or a replay.
+
+#### Wrong
+
+```js
+// A matched retry rule silently mutates provider health and continues the loop.
+if (matchRetryRule(result)) updateProviderHealth(modelId, attempt.upstream, { classification });
+```
+
+#### Correct
+
+```js
+const diagnostic = settleAttempt(modelId, attempt, result, account, { cfg, sensitiveValues });
+trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
+if (diagnostic.retryDecision?.decision === 'stop') { retryStop = true; break; }
+```
+
+The paired `errorRules` entry, not the retry rule, decides whether a sample or disposition is written.
 
 ---
 

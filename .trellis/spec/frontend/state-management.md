@@ -48,6 +48,20 @@ applyAdvancedErrorRules()
 refreshAdvancedErrorRules()
 previewErrorPreset()
 applyErrorPreset()
+hydrateRetryRuleDraft(rules)
+renderRetryRules()
+addRetryRule()
+updateRetryRule(index, field, value)
+moveRetryRule(index, direction, button)
+deleteRetryRule(index)
+commitRetryRuleDraft(next, message)
+openAdvancedRetryRules()
+applyAdvancedRetryRules()
+refreshAdvancedRetryRules(force)
+markAdvancedRetryRulesDirty()
+previewRetryPreset()
+applyRetryPreset()
+closeRetryPreset()
 loadStatistics(visitId, announce)
 statisticsQuotaForecast(data)
 renderStatisticsQuotaForecast(data)
@@ -189,7 +203,7 @@ Probe/validation/setup use the explicit route-scope account ID when present. One
 }
 ```
 
-`id` preserves runtime-state identity. `perModel` preserves all account-specific model routes even though the account table does not edit those routes inline. Omitting `perModel` would normalize it to `{}` and erase that account's overrides.
+`id` preserves runtime-state identity. `perModel` preserves all account-specific model routes even though the account table does not edit those routes inline. Omitting `perModel` would normalize it to `{}` and erase that account's overrides. The same payload also carries the top-level scheduling draft: `errorRules` plus `retryRules` from their generation-owning drafts and the canonical `accountPipeline`; `collectAccounts()` validates both rule drafts before returning, so an invalid visual/no longer current retry rule blocks the destructive full save instead of silently dropping it.
 
 The active radio is an array index in the submitted list. The server resolves the selected account ID before filtering empty-key rows, so a blank row before the selected row must not shift the active account.
 
@@ -199,7 +213,7 @@ The pipeline fieldset and raw editor must describe conditional semantics, not a 
 
 #### Local account drafts and bulk concurrency
 
-`loadAll()` hydrates mode, wait, one complete ordered `ERROR_RULE_DRAFT = errorRules`, and pipeline controls (`#pipelineQuotaPool`/`#pipelineHealthSort`/`#pipelineSticky`, `#cachePoolSize`, `#cachePoolMaxSize`, `#sessionBindingExplicitTtlMs`, `#sessionBindingFallbackTtlMs`, `#sessionBindingMaxEntries`, plus `#cachePoolRuntime`) from the server snapshot. A missing new field falls back to its documented default (`cachePoolMaxSize` to the minimum, `7200000`/`900000`/`50000`), so an older server snapshot still hydrates. `renderAccounts()` and `renderErrorRules()` only project existing drafts: search, add/delete/reorder, drawer apply, mode changes, bulk redraw and navigation preserve the complete rule array plus temporarily invalid advanced-JSON text. The active radio reads live mode without resetting `ACCS.active`.
+`loadAll()` hydrates mode, wait, one complete ordered `ERROR_RULE_DRAFT = errorRules`, one complete ordered `RETRY_RULE_DRAFT = retryRules`, and pipeline controls (`#pipelineQuotaPool`/`#pipelineHealthSort`/`#pipelineSticky`, `#cachePoolSize`, `#cachePoolMaxSize`, `#sessionBindingExplicitTtlMs`, `#sessionBindingFallbackTtlMs`, `#sessionBindingMaxEntries`, plus `#cachePoolRuntime`) from the server snapshot. A missing new field falls back to its documented default (`cachePoolMaxSize` to the minimum, `7200000`/`900000`/`50000`, `retryRules` to `[]`), so an older server snapshot still hydrates. `renderAccounts()`, `renderErrorRules()` and `renderRetryRules()` only project existing drafts: search, add/delete/reorder, drawer apply, mode changes, bulk redraw and navigation preserve both complete rule arrays plus temporarily invalid advanced-JSON text. `RETRY_RULE_DRAFT`, `RETRY_RULE_GENERATION`, `ADVANCED_RETRY_RULES` and `PENDING_RETRY_PRESET` are the retry feature's own draft/generation owner, not a second generic store; `hydrateRetryRuleDraft()` rejects invalid server rules without loading them and increments the generation exactly like `hydrateErrorRuleDraft()`. The active radio reads live mode without resetting `ACCS.active`.
 
 `BULK_SELECTION` is a transient `Set` of account object references, not names or filtered indexes. `visibleAccountRows()` retains original indexes; `updateBulkSelection()` intersects selection with current visible objects and uses that same set for names/count and application. Search changes and reload clear selection; redraw prunes hidden/deleted objects; new rows begin unselected. Duplicate names and unsaved rows must never transfer selection to another object.
 
@@ -220,9 +234,9 @@ for (const account of updateBulkSelection()) account.maxConcurrent = value;
 
 #### Raw scheduling draft editor
 
-`openRawScheduling(button)`, `validateRawScheduling(value, names)`, `applyRawScheduling()`, and `closeRawScheduling(force=false)` reuse the live scheduling controls and the unified rule draft; `RAW_SCHEDULING` is only an editor snapshot, never a second account/rule store. The complete JSON has exactly `accountMode`, `concurrencyWaitMs`, `errorRules`, `accountPipeline`, and `accountNames`; `accountPipeline` contains the three canonical booleans, the same exact order shown by visual controls, and the five bounded integers `cachePoolSize`, `cachePoolMaxSize`, `sessionBindingExplicitTtlMs`, `sessionBindingFallbackTtlMs`, `sessionBindingMaxEntries`. `PIPELINE_NUMBER_CONTROLS` maps each integer field to its control ID so `rawSchedulingControls()`/`pipelineNumberDraft()`/`applyRawScheduling()`/`applyPreset()` share one owner. `accountMode` maps to the existing mode control; ordered names include all accounts, duplicates and unsaved rows regardless of search. Names are reference-only, not identities. Never project IDs, Keys, notes, proxies, Headers, account parameters, runtime state or `perModel` into this editor.
+`openRawScheduling(button)`, `validateRawScheduling(value, names)`, `applyRawScheduling()`, and `closeRawScheduling(force=false)` reuse the live scheduling controls and the two unified rule drafts; `RAW_SCHEDULING` is only an editor snapshot, never a second account/rule store. The complete JSON has exactly `accountMode`, `concurrencyWaitMs`, `errorRules`, `retryRules`, `accountPipeline`, and `accountNames`; `accountPipeline` contains the three canonical booleans, the same exact order shown by visual controls, and the five bounded integers `cachePoolSize`, `cachePoolMaxSize`, `sessionBindingExplicitTtlMs`, `sessionBindingFallbackTtlMs`, `sessionBindingMaxEntries`. `rawSchedulingControls()` serializes `RETRY_RULE_DRAFT` alongside `ERROR_RULE_DRAFT`, `applyRawScheduling()` writes it back through `commitRetryRuleDraft()`, and `PIPELINE_NUMBER_CONTROLS` maps each integer field to its control ID so `rawSchedulingControls()`/`pipelineNumberDraft()`/`applyRawScheduling()`/`applyPreset()` share one owner. `accountMode` maps to the existing mode control; ordered names include all accounts, duplicates and unsaved rows regardless of search. Names are reference-only, not identities. Never project IDs, Keys, notes, proxies, Headers, account parameters, runtime state or `perModel` into this editor.
 
-Validation precedes every control write: six modes; integer wait 0–30000; exactly three boolean pipeline keys and order permutation; `cachePoolSize`/`cachePoolMaxSize` integers 0–100000; `sessionBindingExplicitTtlMs`/`sessionBindingFallbackTtlMs` integers 60000–604800000; `sessionBindingMaxEntries` integer 1–100000; `cachePoolMaxSize >= cachePoolSize`; `sessionBindingFallbackTtlMs <= sessionBindingExplicitTtlMs`; and the complete canonical ordered rule schema (IDs, scopes, actions, applicability, statuses, body ANY, Header, and strict reset). Unknown/missing/duplicate fields, invalid JSON numeric types, prototype-like keys, unsafe text, and changed reference names are rejected without coercion.
+Validation precedes every control write: six modes; integer wait 0–30000; exactly three boolean pipeline keys and order permutation; `cachePoolSize`/`cachePoolMaxSize` integers 0–100000; `sessionBindingExplicitTtlMs`/`sessionBindingFallbackTtlMs` integers 60000–604800000; `sessionBindingMaxEntries` integer 1–100000; `cachePoolMaxSize >= cachePoolSize`; `sessionBindingFallbackTtlMs <= sessionBindingExplicitTtlMs`; the complete canonical ordered error-rule schema (IDs, scopes, actions, applicability, statuses, body ANY, Header, and strict reset); and `validateRetryRuleDraft(value.retryRules)` (stable unique IDs, `decision: "stop"`, both `statuses` and `body_contains`, bounded values). Unknown/missing/duplicate fields, invalid JSON numeric types, prototype-like keys, unsafe text, and changed reference names are rejected without coercion.
 
 | Condition | Local result |
 |---|---|
@@ -244,6 +258,16 @@ Validation precedes every control write: six modes; integer wait 0–30000; exac
 ```
 
 `test/account-draft.test.js` executes production projection/apply/cancel/stale and validation logic, combined bulk/raw payload preservation, and existing preset compatibility. `test/integration.test.js` covers the ordinary combined API round trip. VM/static checks are not browser keyboard/focus/responsive verification.
+
+#### Request-level retry rule editor
+
+`RETRY_RULE_DRAFT`/`RETRY_RULE_GENERATION`/`ADVANCED_RETRY_RULES`/`PENDING_RETRY_PRESET` own the retry rules; the visual table (`#retryRuleBody`), advanced JSON (`#advancedRetryRulesJson`) and raw scheduling editor all project that one draft and never create a second store. `validateRetryRuleDraft()` mirrors the server schema: array ≤ 100 entries / 64 KiB, each entry exactly `{ id, decision, when }`, a unique `ERROR_RULE_ID`-grammar ID, `decision === 'stop'`, `when` exactly `{ statuses, body_contains }`, 1–500 unique integer statuses 100–599, and a non-empty string or 1–20 needle array where each trimmed needle is ≤ 500 characters, control-byte-free and case-insensitively unique. `commitRetryRuleDraft()` validates before mutating and increments the generation; an invalid visual edit leaves the previous draft unchanged and sends no request.
+
+The advanced JSON snapshot is generation-checked exactly like the error-rule editor: visual edits or a reload make an open snapshot stale, and `applyAdvancedRetryRules()` refuses to overwrite the newer draft. All server-driven values render through `escapeHtml()`; a needle such as `<unsafe needle>` must appear as escaped text and never as markup.
+
+The manual “invalid system message stops retry” preset is the only retry preset. `previewRetryPreset()` computes `PENDING_RETRY_PRESET` by merging the stable preset IDs into both `RETRY_RULE_DRAFT` and `ERROR_RULE_DRAFT` (so custom rules are preserved), shows preserve/add/modify/delete groups for both in `#retryPresetModal`, and writes nothing. `closeRetryPreset()` discards the pending object with no draft/API change. `applyRetryPreset()` validates both drafts, commits both through `commitRetryRuleDraft()`/`commitErrorRuleDraft()`, then calls the ordinary `saveAccounts()` so the retry stop and its paired provider-model `ignore` persist atomically. The preset is never auto-enabled, never hydrated during `loadAll()`, and creates no change on cancel.
+
+`test/account-draft.test.js` executes production retry-draft add/update/escape, invalid-edit and duplicate-needle rejection, stale advanced-JSON rejection, paired-preset cancel atomicity, confirmed-save payload (retry stop plus paired ignore, custom rules preserved) and raw-editor round-trip/stale logic. `test/ui-contract.test.js` checks the retry editor/live-region/escape/preset markers and the `首选固定+健康回退`/`Switcher 健康自动选择` wording. Neither proves browser focus or keyboard behavior.
 
 #### Rendering and sensitive values
 
@@ -328,6 +352,11 @@ DETAIL_LIST_ID++; DETAIL_CURSOR = null; resetDetailSelection();
 | Advanced JSON is invalid | Preserve its text for correction; do not mutate the unified draft or call the API |
 | Advanced JSON generation is stale after a visual edit/reload | Reject apply and require explicit refresh from the current draft; never overwrite newer rules |
 | Error-rule preset is cancelled | discard `PENDING_ERROR_PRESET`; do not mutate the unified draft/server state |
+| Visual retry-rule edit or advanced retry JSON is invalid/duplicate/out of bounds | Announce the error; keep `RETRY_RULE_DRAFT` unchanged; do not call the API |
+| Advanced retry JSON generation is stale after a visual edit/reload | Reject apply and require explicit refresh from the current draft; never overwrite newer retry rules |
+| Paired retry preset is cancelled | discard `PENDING_RETRY_PRESET`; change neither `RETRY_RULE_DRAFT` nor `ERROR_RULE_DRAFT` and send no request |
+| Paired retry preset is confirmed | validate both drafts, merge by stable ID (custom rules preserved), commit both drafts, then send the ordinary full-account save; server validation remains authoritative |
+| Raw scheduling JSON omits/alters `retryRules` | treat it as part of the six-field editor schema; invalid values keep the dialog open and the draft unchanged |
 | Rule preset merge/replace/clear is confirmed | update only status rules, preserve content order, and send the computed unified draft through `saveAccounts()`; server validation remains authoritative |
 | Visual `cachePoolSize`/`cachePoolMaxSize` is empty, fractional, nonnumeric, or outside 0-100000 | Announce a field error; do not construct/send a request or change the draft |
 | Visual `sessionBindingExplicitTtlMs`/`sessionBindingFallbackTtlMs` is outside 60000-604800000, or `sessionBindingMaxEntries` is outside 1-100000 | Announce a field error; do not construct/send a request or change the draft |

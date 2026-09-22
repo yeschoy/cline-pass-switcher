@@ -28,6 +28,16 @@ previewPreset()
 applyPreset()
 previewErrorPreset()
 applyErrorPreset()
+previewRetryPreset()
+applyRetryPreset()
+closeRetryPreset()
+addRetryRule()
+updateRetryRule(index, field, value)
+moveRetryRule(index, direction, button)
+deleteRetryRule(index)
+openAdvancedRetryRules()
+applyAdvancedRetryRules()
+refreshAdvancedRetryRules(force)
 loadStatistics(visitId, announce)
 statisticsQuotaForecast(data)
 renderStatisticsQuotaForecast(data)
@@ -116,6 +126,10 @@ The error-rule panel owns one complete ordered `ERROR_RULE_DRAFT` array and rend
 
 The five error-rule presets are `standard`, `fast`, `conservative`, `observe`, and `clear`. They read the complete current array and show preserve/add/modify/delete groups. Merge replaces only matching stable IDs and preserves custom rules; replace may delete them; clear forces replacement.
 
+The request-level retry editor owns `RETRY_RULE_DRAFT` and renders a native table (`#retryRuleBody`) of stable ID, fixed `stop` badge, status-code input, body-ANY textarea and up/down/delete buttons with a labelled `#retryRuleFeedback` `aria-live="polite"` region. A labelled advanced-JSON `<details>` (`#advancedRetryRulesJson`) snapshots the draft and exposes apply/refresh. Every server- or operator-provided value (ID, statuses, needles) renders through `escapeHtml()`. The only retry preset is the manual “invalid system message stops retry” preview (`#retryPresetModal`), which merges the stable retry ID and the paired provider-model `ignore` rule into both drafts and persists atomically through the ordinary account save; cancel changes nothing.
+
+The paired preset and retry rules never render a needle, matched fragment, candidate rate or raw rule condition into any exported/logged projection. The provider mode select labels are `首选固定+健康回退` (strict) and `Switcher 健康自动选择` (preferred); the removed `严格钉住`/`优先+回退` wording must not return, and the option `title` must explain that strict pins the source-order first attempt then falls back by Provider-model 24-hour success rate, while preferred uses that health order from the first attempt.
+
 Cancel discards the relevant draft. Confirm submits through the ordinary complete account save, so the server applies the same validation as manual edits. No persistent selected-preset state exists. Pipeline controls submit the three canonical booleans plus the exact DOM order and the five bounded integer fields (`cachePoolSize`, `cachePoolMaxSize`, both session-binding TTLs and `sessionBindingMaxEntries`). Empty, fractional, nonnumeric, or out-of-range drafts — including `cachePoolMaxSize < cachePoolSize` and `sessionBindingFallbackTtlMs > sessionBindingExplicitTtlMs` — block visual save and preset preview without coercion or a request. Authenticated account rows may display only the safe runtime `cachePoolRole` labels active/standby; that field is never submitted as static account configuration.
 
 The fieldset legend is “会话命中条件门与未命中调度步骤（可选）” and the help paragraph explains that sticky + healthSort is a binding gate (“已有绑定先命中”) while the remaining sorted steps only order the current active set; it must not claim that 越靠前优先级越高 or read the gate’s position as a linear priority. A persistent read-only runtime line (default `#cachePoolRuntime`, `aria-live="polite"`) reports `当前目标 <targetSize>（最小 <minSize> / 上限 <maxSize>）` and `会话绑定 <已启用|未启用>，当前 <size> / <maxEntries> 条`, written only with `textContent` from `ACCS.cachePool`; it is display-only state and never enters `collectAccounts()`. The raw scheduling modal’s help text must likewise mention `priority/稳定 ID` membership, `grow-one`, the binding gate for `sticky+healthSort`, and that the saved sticky position is compatibility-only. New number controls carry native `min`/`max`/`step` attributes: `cachePoolSize`/`cachePoolMaxSize` 0-100000, `sessionBindingExplicitTtlMs`/`sessionBindingFallbackTtlMs` 60000-604800000, `sessionBindingMaxEntries` 1-100000; each is associated with a `<label for=...>` and the shared `cachePoolHelp` description.
@@ -128,7 +142,7 @@ The model route controls also expose bounded `providerCooldownMs` 0-300000. Zero
 
 #### Provider routing status
 
-The model table preserves discovered/operator Provider order. It displays direct Provider-model success rate/sample/coverage and separate cooling/hard-quarantine state, with a native exact recovery button for actionable state. These labels do not sort the list in this child scope. All Provider text remains escaped before HTML insertion.
+The model table preserves discovered/operator Provider order. It displays direct Provider-model success rate/sample/coverage and separate cooling/hard-quarantine state, with a native exact recovery button for actionable state. These labels and the static configuration list never sort or reorder to claim the runtime selection; ordering belongs to the Switcher (strict health retry or preferred health selection) and is only projected as bounded strategy evidence. All Provider text remains escaped before HTML insertion.
 
 #### Model aliases
 
@@ -184,6 +198,10 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 | Binding TTL is outside 60000-604800000, or entries cap is outside 1-100000 | Block visual save/preset preview without coercion or a request |
 | Visual rule edit is invalid or duplicate | Announce the error and keep the unified draft unchanged |
 | Advanced rule JSON is invalid or stale | Preserve the text; reject apply without mutating the current draft or sending a request |
+| Visual retry-rule edit or advanced retry JSON is invalid or stale | Announce the error and keep `RETRY_RULE_DRAFT` unchanged; reject stale apply without a request |
+| A retry needle contains markup/control bytes | Render it escaped (and reject control bytes); never inject it as HTML |
+| Paired retry preset is cancelled | change neither `RETRY_RULE_DRAFT` nor `ERROR_RULE_DRAFT` and send no request |
+| Paired retry preset is confirmed | validate both drafts, merge stable IDs (custom rules preserved), then submit the ordinary full-account save |
 | Rule preset merge/replace/clear is confirmed | Submit the live computed status draft plus unchanged ordered content rules through the normal complete API |
 | Scheduling preset is confirmed | submit a complete account snapshot without changing pipeline flags |
 | Statistics request resolves after section change | ignore it by generation/visibility check |
@@ -211,6 +229,7 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 - **Good:** open an account by its original table index after filtering, edit proxy/Header values, save the draft and full list, then reload without losing `id` or `perModel`.
 - **Good:** preview “保守防封”, inspect the capacity/rule changes, cancel, and observe an unchanged account snapshot.
 - **Good:** merge a rule preset into a live custom status, observe the custom status in “preserved,” then cancel without changing the textarea.
+- **Good:** preview the “无效 system 消息停止重试” preset, confirm, and observe exactly one retry stop plus one paired provider-model `ignore` saved while custom rules remain.
 - **Good:** switch rapidly from statistics to request logs, errors, and console; only the current section remains visible and stale responses cannot replace its state.
 - **Good:** keyboard entry/manual refresh announces progress and preserves a pending account note, bulk selection and invalid scheduling-rule draft; a 500px viewport scrolls the wide table without document overflow.
 - **Good:** forecast cards wrap with `auto-fit/minmax`, expose a labelled region/live update, and show `available / maximum account quota points` plus the percentage and assumptions in text.
@@ -220,6 +239,7 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 - **Bad:** rebuild account objects from visible table cells; hidden routes/proxy/Header fields will be erased.
 - **Bad:** put raw server JSON into a log `<pre>`; future fields could expose secrets.
 - **Bad:** encode preset logic in the backend and UI independently; values will drift.
+- **Bad:** render a retry needle as raw HTML, or project a needle/matched fragment/provider success-rate into ordinary logs, metadata or UI state.
 - **Bad:** describe summed percentages as Token/request/money capacity, or make a future card look exact when reset timestamps are incomplete.
 
 ### 6. Tests Required
@@ -227,7 +247,7 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 `test/ui-contract.test.js` provides static executable checks for:
 
 - 1800px responsive container, table wrappers, and account-name width;
-- seven bounded scheduling presets plus five unified-draft error-rule presets, native status/content rows, ordered keyboard buttons, generation-checked advanced JSON, cache-pool input/role/help contracts, merge/replace/clear diffs, cancel behavior, and forbidden-field absence;
+- seven bounded scheduling presets plus five unified-draft error-rule presets and one manual paired retry-stop preset, native status/content rows, ordered keyboard buttons, generation-checked advanced JSON, retry-editor `aria-live`/escaping, cache-pool input/role/help contracts, merge/replace/clear diffs, cancel behavior, and forbidden-field absence;
 - account-scoped one-click provider setup modal/strategy/proposal/test/confirm/cancel boundaries, stale scope rejection, and bounded provider cooldown input;
 - labelled modal/drawer semantics, Escape handling, focus return, dirty confirmation, and `aria-live` feedback;
 - account snapshot preservation for hidden fields, canonical `errorRules`, all three pipeline booleans, the three-step order, and every bounded pipeline integer (`cachePoolSize`, `cachePoolMaxSize`, both TTLs, `sessionBindingMaxEntries`);
@@ -239,6 +259,8 @@ Every server-controlled value inserted via `innerHTML` passes through `escapeHtm
 - the labelled responsive four-card quota forecast, truthful account-point units/assumptions, `textContent` rendering, exact fixed-time calculations, eligibility/exclusion counts, reset boundaries, lower-bound fallback, invalid snapshot time, and no-data state;
 - log query invalidation, filters/pagination, captured-type clear controls, request-only result filtering, safe historical fallback, bounded affinity/cache/circuit/health labels, explicit final-request versus failed-attempt wording, and model-alias batch controls;
 - preferred-mode singleton-attempt wording, stable provider ordering, escaped `degraded`/cooling/half-open health labels, and no health-rank sort;
+- the request-level retry editor/preview contract: labelled `#retryRuleBody` rows and `aria-live` feedback, escaped needles, generation-checked advanced JSON, and the `首选固定+健康回退`/`Switcher 健康自动选择` mode labels with the removed `严格钉住`/`优先+回退` wording absent;
+- `test/account-draft.test.js` production-VM cases `retry rule visual/advanced drafts are bounded, escaped and preserve a paired preset on cancel` and `raw scheduling editor round-trips retryRules, rejects invalid retry drafts and detects stale retry edits`; `test/integration.test.js` covers the strict retryRules API/omission/restart round trip and retry-stop behavior;
 - independent full/error-only detailed settings, precedence/privacy/retention/auth warnings, safe metadata/text and on-demand copy/clear controls; production VM tests must verify stale reads, cursor reset, exact double-token matching, honest missing/transport states and no account-draft mutation.
 
 Manual browser review remains required for visual width, narrow-screen scrolling, focus order, keyboard-only drawer use, password masking, preview readability, and log/alias interaction. Static string tests must not be reported as visual browser automation.
