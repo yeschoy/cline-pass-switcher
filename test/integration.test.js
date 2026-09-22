@@ -3218,3 +3218,445 @@ test('a stale-generation completion evaluates both rule sets without writing hea
   assert.equal(errorRow.ruleAction, 'cooldown', 'the matched rule is projected as bounded evidence only');
   assert.equal(errorRow.healthAction, 'none', 'a stale attempt never claims a health action');
 });
+
+// ---------------------------- 账号级 RPM 限流 ----------------------------
+
+// 可控上游：记录每个 native POST 的 provider 钉住信息，由测试决定何时响应。
+function controllableUpstream() {
+  const seen = [], pending = [];
+  const server = http.createServer((req, res) => {
+    if (req.method === 'GET') { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end('{}'); }
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      let body = null;
+      try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch {}
+      const provider = body?.provider?.only?.[0] || body?.providerOptions?.gateway?.only?.[0] || null;
+      seen.push({ provider, at: Date.now(), authorization: req.headers.authorization, body });
+      pending.push({ res, provider, body });
+    });
+  });
+  const drain = (responder) => {
+    while (pending.length) {
+      const entry = pending.shift();
+      const outcome = responder ? responder(entry) : null;
+      entry.res.writeHead(outcome?.status || 200, { 'Content-Type': 'application/json' });
+      entry.res.end(JSON.stringify(outcome?.body ?? { choices: [{ message: { content: 'OK' } }] }));
+    }
+  };
+  return { server, seen, pending, drain };
+}
+const rpmView = async (port) => (await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json());
+const accountSave = (view, mutate) => ({ accounts: view.accounts.map(mutate), mode: view.mode, active: view.active, concurrencyWaitMs: view.concurrencyWaitMs, errorRules: view.errorRules, retryRules: view.retryRules, accountPipeline: view.accountPipeline });
+
+test('account maxRpm round-trips through config and API, preserves old-client omission and rejects invalid values without writing bytes', async (t) => {
+  const upstream = controllableUpstream();
+  const upstreamPort = await listen(upstream.server), port = await unusedPort();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-rpm-config-'));
+  const accounts = [
+    { id: 'a', name: 'A', key: 'key-a', enabled: true, maxConcurrent: 0, maxRpm: 7, weight: 1, priority: 1, perModel: {} },
+    { id: 'b', name: 'B', key: 'key-b', enabled: true, maxConcurrent: 0, weight: 1, priority: 2, perModel: {} },
+  ];
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts, accountMode: 'roundrobin', activeAccount: 0, concurrencyWaitMs: 0, knownModels: ['m'], perModel: {}, errorRules: [] }, dir, { NODE_ENV: 'test' });
+  t.after(async () => { await stop(running.child); await close(upstream.server); fs.rmSync(dir, { recursive: true, force: true }); });
+
+  let view = await rpmView(port);
+  assert.equal(view.accounts.find((a) => a.id === 'a').maxRpm, 7, 'a persisted maxRpm is projected');
+  assert.equal(view.accounts.find((a) => a.id === 'b').maxRpm, 0, 'a legacy account without maxRpm means unlimited');
+  assert.deepEqual(view.accounts.find((a) => a.id === 'a').rpm, { limit: 7, used: 0, reserved: 0, retryAt: null }, 'the rpm projection exposes only safe numbers');
+
+  // 旧客户端完整保存但省略 maxRpm：必须按 stable id 保留旧值，不能静默清零。
+  assert.equal((await rawJson(port, '/api/accounts', accountSave(view, ({ maxRpm, ...rest }) => rest))).status, 200);
+  view = await rpmView(port);
+  assert.equal(view.accounts.find((a) => a.id === 'a').maxRpm, 7, 'an old client omitting maxRpm must not silently clear it');
+  assert.equal(view.accounts.find((a) => a.id === 'b').maxRpm, 0);
+
+  const configPath = path.join(dir, 'config.json');
+  const bytes = fs.readFileSync(configPath, 'utf8');
+  for (const bad of [-1, 1.5, 100001, '7', null, true, {}]) {
+    const rejected = await rawJson(port, '/api/accounts', accountSave(view, (account) => ({ ...account, maxRpm: bad })));
+    assert.equal(rejected.status, 400, `maxRpm ${JSON.stringify(bad)} must be rejected`);
+    assert.equal(fs.readFileSync(configPath, 'utf8'), bytes, 'a rejected maxRpm must not rewrite config bytes');
+  }
+  for (const value of [0, 100000]) {
+    assert.equal((await rawJson(port, '/api/accounts', accountSave(view, (account) => ({ ...account, maxRpm: value })))).status, 200);
+    view = await rpmView(port);
+    assert.equal(view.accounts.find((a) => a.id === 'a').maxRpm, value);
+    assert.equal(view.accounts.find((a) => a.id === 'a').rpm.limit, value);
+    assert.equal(JSON.parse(fs.readFileSync(configPath, 'utf8')).accounts.find((a) => a.id === 'a').maxRpm, value, 'the canonical value is durable');
+  }
+});
+
+test('concurrency saturation never consumes RPM while the rolling window and its Retry-After stay exact', async (t) => {
+  const upstream = controllableUpstream();
+  const upstreamPort = await listen(upstream.server), port = await unusedPort();
+  const running = await startSwitcher({
+    port, upstreamBase: `http://127.0.0.1:${upstreamPort}`,
+    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, maxConcurrent: 1, maxRpm: 2, weight: 1, priority: 1, perModel: {} }],
+    accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 30, knownModels: ['m'], perModel: {}, errorRules: [],
+  }, null, { NODE_ENV: 'test', CLINE_PASS_TEST_RPM_WINDOW_MS: '4000' });
+  t.after(async () => { await stop(running.child); await close(upstream.server); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const body = { model: 'm', messages: [] };
+
+  const held = rawJson(port, '/v1/chat/completions', body);
+  await waitUntil(() => upstream.seen.length === 1, 3000, 'the first attempt reaches upstream');
+  const blocked = await Promise.all([rawJson(port, '/v1/chat/completions', body), rawJson(port, '/v1/chat/completions', body), rawJson(port, '/v1/chat/completions', body)]);
+  assert.ok(blocked.every((response) => response.status === 429), 'concurrency saturation still returns a bounded 429');
+  assert.ok(blocked.every((response) => Number(response.headers['retry-after']) >= 1 && Number(response.headers['retry-after']) <= 30), 'the capacity path keeps the bounded 1-30s Retry-After');
+  let account = (await rpmView(port)).accounts[0];
+  assert.equal(account.activeCount, 1, 'a concurrency-blocked request never leases the account');
+  assert.equal(account.rpm.used, 1, 'only the one real committed attempt counts against RPM');
+  assert.equal(account.rpm.reserved, 0, 'a concurrency block must not hold an RPM reservation');
+  assert.equal(upstream.seen.length, 1, 'a concurrency block creates no upstream attempt');
+
+  upstream.drain();
+  assert.equal((await held).status, 200);
+  // 释放并发后，此前被并发挡住的请求没有消费 RPM，因此仍可使用完整名额。
+  const second = rawJson(port, '/v1/chat/completions', body);
+  await waitUntil(() => upstream.seen.length === 2, 3000, 'the retained RPM budget is still usable');
+  upstream.drain();
+  assert.equal((await second).status, 200);
+  account = (await rpmView(port)).accounts[0];
+  assert.equal(account.rpm.used, 2);
+
+  // 现在 RPM 才真正耗尽：Retry-After 必须来自最早滚动窗口恢复（4s 窗口），而不是容量等待值（30ms → 1s）。
+  const third = await rawJson(port, '/v1/chat/completions', body);
+  assert.equal(third.status, 429);
+  const retryAfter = Number(third.headers['retry-after']);
+  assert.ok(retryAfter >= 3 && retryAfter <= 4, `Retry-After must come from the rolling window, got ${retryAfter}`);
+  assert.equal(upstream.seen.length, 2, 'an RPM block never creates an upstream attempt');
+  assert.equal((await rpmView(port)).accounts[0].activeCount, 0, 'an RPM-only block must not lease or increment activeCount');
+  const rpmRow = await waitUntil(async () => { const page = await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?limit=20`)).json(); return (page.items || []).find((row) => row.errorCategory === 'rpm'); }, 3000, 'local rpm request row');
+  assert.equal(rpmRow.blockedBy, 'rpm');
+  assert.equal(rpmRow.status, 429);
+  assert.equal(rpmRow.result, 'failed');
+  assert.equal(rpmRow.upstreamStatus, null, 'selection-time RPM block never fakes an upstream status');
+  assert.ok(rpmRow.retryAfter >= 3 && rpmRow.retryAfter <= 4, 'the bounded projection keeps the exact wait');
+
+  await new Promise((resolve) => setTimeout(resolve, 4200));
+  const recovered = rawJson(port, '/v1/chat/completions', body);
+  await waitUntil(() => upstream.seen.length === 3, 3000, 'the rolling window recovers');
+  upstream.drain();
+  assert.equal((await recovered).status, 200, 'a 60s-style rolling window recovers without a refill timer');
+});
+
+test('provider retries commit one permit per real req.end and stop locally with a truthful local 429', async (t) => {
+  const upstream = controllableUpstream();
+  const upstreamPort = await listen(upstream.server), port = await unusedPort();
+  const route = { upstream: null, upstreams: ['first', 'second', 'third'], exclude: [], pinMode: 'strict', sort: null, maxRetries: null, providerCooldownMs: 0 };
+  const running = await startSwitcher({
+    port, upstreamBase: `http://127.0.0.1:${upstreamPort}`,
+    accounts: [
+      { id: 'a', name: 'A', key: 'key-a', enabled: true, maxConcurrent: 0, maxRpm: 1, weight: 1, priority: 1, perModel: {} },
+      { id: 'b', name: 'B', key: 'key-b', enabled: true, maxConcurrent: 0, maxRpm: 1, weight: 1, priority: 2, perModel: {} },
+    ],
+    accountMode: 'roundrobin', activeAccount: 0, concurrencyWaitMs: 0, knownModels: ['m'], perModel: { m: route }, errorRules: [],
+  }, null, { NODE_ENV: 'test', CLINE_PASS_TEST_RPM_WINDOW_MS: '4000' });
+  t.after(async () => { await stop(running.child); await close(upstream.server); fs.rmSync(running.dir, { recursive: true, force: true }); });
+
+  const pending = rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] });
+  await waitUntil(() => upstream.pending.length === 1, 3000, 'the first provider attempt is a real request');
+  assert.equal(upstream.pending[0].provider, 'first');
+  upstream.drain(() => ({ status: 502, body: { error: { message: 'boom first' } } }));
+  const response = await pending;
+  assert.equal(response.status, 429, 'the second attempt has no permit and must stop locally');
+  const retryAfter = Number(response.headers['retry-after']);
+  assert.ok(retryAfter >= 3 && retryAfter <= 4, `the local Retry-After must come from the rolling window, got ${retryAfter}`);
+  assert.equal(upstream.seen.length, 1, 'no upstream attempt is fabricated for the local RPM block');
+  assert.equal(upstream.seen[0].provider, 'first');
+
+  const log = await waitUntil(async () => { const page = await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?limit=20`)).json(); return (page.items || []).find((row) => row.resolvedModel === 'm' && row.status === 429); }, 3000, 'local rpm request row');
+  assert.equal(log.errorCategory, 'rpm', 'the terminal state is local RPM rather than a fake upstream 429');
+  assert.equal(log.blockedBy, 'rpm');
+  assert.equal(log.upstreamStatus, 502, 'the earlier real upstream failure is preserved as history');
+  assert.equal(log.switched, false, 'a local RPM block never switches accounts');
+  assert.equal(log.attempts.length, 1);
+  assert.equal(log.attempts[0].provider, 'first');
+  assert.equal(log.attempts[0].status, 502);
+
+  const errors = await waitUntil(async () => { const page = await (await fetch(`http://127.0.0.1:${port}/api/logs/errors?limit=20`)).json(); return (page.items || []).length ? page : null; }, 3000, 'the real failed attempt keeps its error row');
+  assert.equal(errors.items.length, 1, 'only the real upstream attempt produces an error row');
+  assert.equal(errors.items[0].targetProvider, 'first');
+  assert.equal(errors.items[0].status, 502);
+
+  const view = await rpmView(port);
+  assert.deepEqual(view.accounts.map((account) => account.rpm.used).sort(), [0, 1], 'exactly one committed attempt on the leased account');
+});
+
+test('a pre-send failure releases the RPM reservation while a post-send failure never refunds', async (t) => {
+  const account = { id: 'a', name: 'A', key: 'key-a', enabled: true, maxConcurrent: 0, maxRpm: 1, weight: 1, priority: 1, perModel: {} };
+  const config = (upstreamBase) => ({ upstreamBase, accounts: [account], accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 3000, knownModels: ['m'], perModel: {}, errorRules: [] });
+  const env = { NODE_ENV: 'test', CLINE_PASS_TEST_RPM_WINDOW_MS: '60000' };
+
+  // 1) 同步失败（URL 非法）：请求从未交给 Node transport，必须立即退还预留并唤醒等待者。
+  const port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-rpm-presend-'));
+  let running = await startSwitcher({ port, ...config('http://127.0.0.1:99999') }, dir, env);
+  t.after(async () => { if (running?.child) await stop(running.child); fs.rmSync(dir, { recursive: true, force: true }); });
+
+  const first = await rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] });
+  assert.equal(first.status, 502, 'an unroutable transport target is an upstream failure');
+  let view = await rpmView(port);
+  assert.equal(view.accounts[0].rpm.used, 0, 'a request that never reached req.end must not be committed');
+  assert.equal(view.accounts[0].rpm.reserved, 0, 'its reservation is returned');
+  const started = Date.now();
+  const second = await rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] });
+  assert.equal(second.status, 502, 'the released RPM slot is immediately reusable');
+  assert.ok(Date.now() - started < 1500, 'the release notifies waiters instead of burning the full capacity deadline');
+  await stop(running.child); running.child = null;
+
+  // 2) 发送后的传输失败（connect refused）：请求已交给 transport，绝不退款。
+  const deadPort = await unusedPort();
+  running = await startSwitcher({ port, ...config(`http://127.0.0.1:${deadPort}`) }, dir, env);
+  const sent = await rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] });
+  assert.equal(sent.status, 502, 'a connect failure after req.end is a real attempt failure');
+  view = await rpmView(port);
+  assert.equal(view.accounts[0].rpm.used, 1, 'a post-send failure is never refunded');
+  const refused = await rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] });
+  assert.equal(refused.status, 429, 'the committed window really blocks the next request');
+  assert.equal((await rpmView(port)).accounts[0].rpm.used, 1);
+});
+
+test('every account-bound chat caller commits one permit per real native call while catalog, quota and temporary credential tests do not', async (t) => {
+  const upstream = controllableUpstream();
+  const upstreamPort = await listen(upstream.server), port = await unusedPort(), deadProxyPort = await unusedPort();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-rpm-callers-'));
+  fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({ models: { 'validate-target': { upstreams: ['v1', 'v2', 'v3'] } }, history: [], accountStates: {}, routingSecret: 'rpm-caller-matrix-secret' }));
+  const account = { id: 'a', name: 'A', key: 'key-a', enabled: true, maxConcurrent: 0, maxRpm: 100, weight: 1, priority: 1, perModel: {} };
+  const running = await startSwitcher({
+    port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [account], accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 0,
+    knownModels: ['m', 'validate-target'], perModel: { m: { upstream: 'p1', upstreams: ['p1'], exclude: [], pinMode: 'strict', sort: null, maxRetries: 0, providerCooldownMs: 0 } }, errorRules: [],
+  }, dir, { NODE_ENV: 'test', CLINE_PASS_TEST_RPM_WINDOW_MS: '60000' });
+  t.after(async () => { await stop(running.child); await close(upstream.server); fs.rmSync(dir, { recursive: true, force: true }); });
+
+  const used = async () => (await rpmView(port)).accounts[0].rpm.used;
+  const settle = async (count) => { await waitUntil(() => upstream.pending.length >= count, 3000, `upstream attempts >= ${count}`); upstream.drain(); };
+  assert.equal(await used(), 0);
+
+  // 非 chat 请求不计：目录（GET /models）与 quota refresh（GET usage-limits）都不持有 chat permit。
+  assert.equal((await (await fetch(`http://127.0.0.1:${port}/api/models`)).json()).subscription.length > 0, true);
+  assert.equal((await rawJson(port, '/api/statistics/quota-refresh', { force: true })).status, 200);
+  assert.equal(await used(), 0, 'catalog and quota traffic never counts against maxRpm');
+
+  // 无持久 accountId 的临时 credential 测试会真实发出请求，但没有配置 owner，因此明确不计。
+  const temporary = rawJson(port, '/api/accounts/test', { key: 'temporary-key' });
+  await settle(1);
+  assert.equal((await temporary).status, 200);
+  assert.equal(await used(), 0, 'a temporary credential test reaches upstream yet owns no maxRpm');
+
+  // 绑定已保存 accountId 的 /api/accounts/test 计数。
+  const saved = rawJson(port, '/api/accounts/test', { accountId: 'a', key: 'key-a' });
+  await settle(1);
+  assert.equal((await saved).status, 200);
+  assert.equal(await used(), 1, 'a saved-account credential test is a real chat attempt');
+
+  // /api/accounts/proxy-test 计数（即使代理连接失败，请求已交给 transport）。
+  assert.equal((await rawJson(port, '/api/accounts/proxy-test', { accountId: 'a', proxyUrl: `http://127.0.0.1:${deadProxyPort}` })).status, 200);
+  assert.equal(await used(), 2, 'a saved-account proxy test is a real chat attempt');
+
+  // /api/test 计数。
+  const tested = rawJson(port, '/api/test', { model: 'm', accountId: 'a' });
+  await settle(1);
+  assert.equal((await tested).status, 200);
+  assert.equal(await used(), 3);
+
+  // 三个 chat alias 各计数一次。
+  for (const path of ['/chat/completions', '/v1/chat/completions', '/api/v1/chat/completions']) {
+    const response = rawJson(port, path, { model: 'm', messages: [] });
+    await settle(1);
+    assert.equal((await response).status, 200, `${path} is a counted chat caller`);
+  }
+  assert.equal(await used(), 6, 'all three chat aliases commit one permit each');
+
+  // /api/probe 计数（真实 chat attempt）。
+  const probed = rawJson(port, '/api/probe', { model: 'm', accountId: 'a' });
+  await settle(1);
+  assert.equal((await probed).status, 200);
+  assert.equal(await used(), 7);
+
+  // /api/validate-upstreams 的并发 batch 共享一个 lease，但每个 native call 各计一次。
+  const validated = rawJson(port, '/api/validate-upstreams', { model: 'validate-target', accountId: 'a' });
+  await waitUntil(() => upstream.pending.length >= 3, 3000, 'all three validation calls are real requests');
+  assert.equal(upstream.pending.length, 3);
+  upstream.drain();
+  assert.equal((await validated).status, 200);
+  assert.equal(await used(), 10, 'each validation batch call commits its own permit');
+});
+
+test('RPM-only and mixed blocking never grow the cache pool', async (t) => {
+  const upstream = controllableUpstream();
+  const upstreamPort = await listen(upstream.server), port = await unusedPort();
+  const accounts = ['a', 'b', 'c'].map((id, index) => ({ id, name: id.toUpperCase(), key: `key-${id}`, enabled: true, maxConcurrent: 1, maxRpm: 1, weight: 1, priority: index + 1, perModel: {} }));
+  const running = await startSwitcher({
+    port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts, accountMode: 'sticky', activeAccount: 0, concurrencyWaitMs: 25,
+    knownModels: ['m'], perModel: {}, errorRules: [], accountPipeline: { quotaPool: false, healthSort: false, sticky: false, order: PIPELINE_STEP_ORDER, cachePoolSize: 1, cachePoolMaxSize: 3, sessionBindingExplicitTtlMs: 7200000, sessionBindingFallbackTtlMs: 900000, sessionBindingMaxEntries: 50000 },
+  }, null, { NODE_ENV: 'test', CLINE_PASS_TEST_RPM_WINDOW_MS: '60000' });
+  t.after(async () => { await stop(running.child); await close(upstream.server); fs.rmSync(running.dir, { recursive: true, force: true }); });
+
+  const held = rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] }, { 'Session-Id': 'rpm-pool-1' });
+  await waitUntil(() => upstream.seen.length === 1, 3000, 'the active member is serving one request');
+  const blocked = await rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] }, { 'Session-Id': 'rpm-pool-2' });
+  assert.equal(blocked.status, 429, 'everything is blocked');
+  assert.equal(upstream.seen.length, 1, 'no standby member is promoted for an RPM block');
+
+  const view = await rpmView(port);
+  assert.equal(view.cachePool.targetSize, 1, 'RPM blocking must not grow the pool target');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(running.dir, 'metadata.json'), 'utf8')).cachePoolTargetSize, 1);
+  const row = await waitUntil(async () => { const page = await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?limit=20`)).json(); return (page.items || []).find((item) => item.status === 429); }, 3000, 'blocked request row');
+  assert.equal(row.blockedBy, 'mixed', 'an account that is concurrency-full and RPM-exhausted is diagnosable as mixed');
+
+  upstream.drain();
+  assert.equal((await held).status, 200);
+});
+
+test('an RPM-exhausted standby is never promoted by cache-pool growth', async (t) => {
+  const upstream = controllableUpstream();
+  const upstreamPort = await listen(upstream.server), port = await unusedPort();
+  const accounts = [
+    { id: 'a', name: 'A', key: 'key-a', enabled: true, maxConcurrent: 1, maxRpm: 0, weight: 1, priority: 1, perModel: {} },
+    { id: 'b', name: 'B', key: 'key-b', enabled: true, maxConcurrent: 1, maxRpm: 1, weight: 1, priority: 2, perModel: {} },
+  ];
+  const running = await startSwitcher({
+    port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts, accountMode: 'sticky', activeAccount: 0, concurrencyWaitMs: 25,
+    knownModels: ['m'], perModel: { m: { upstream: 'p', upstreams: ['p'], exclude: [], pinMode: 'strict', sort: null, maxRetries: 0, providerCooldownMs: 0 } }, errorRules: [],
+    accountPipeline: { quotaPool: false, healthSort: false, sticky: false, order: PIPELINE_STEP_ORDER, cachePoolSize: 1, cachePoolMaxSize: 3, sessionBindingExplicitTtlMs: 7200000, sessionBindingFallbackTtlMs: 900000, sessionBindingMaxEntries: 50000 },
+  }, null, { NODE_ENV: 'test', CLINE_PASS_TEST_RPM_WINDOW_MS: '60000' });
+  t.after(async () => { await stop(running.child); await close(upstream.server); fs.rmSync(running.dir, { recursive: true, force: true }); });
+
+  // 备用账号 b 通过绑定已保存 accountId 的 /api/test 用掉自己唯一的 RPM 名额，但仍未进入 active。
+  const probed = rawJson(port, '/api/test', { model: 'm', accountId: 'b' });
+  await waitUntil(() => upstream.pending.length >= 1, 3000, 'the standby attempt reaches upstream');
+  upstream.drain();
+  assert.equal((await probed).status, 200);
+  let view = await rpmView(port);
+  assert.equal(view.cachePool.targetSize, 1, 'the standby stays outside the active pool');
+  assert.equal(view.accounts.find((account) => account.id === 'b').rpm.used, 1, 'the standby RPM window is exhausted');
+
+  // active 账号并发满但 RPM 仍有容量：不得为一个 RPM 耗尽的备用账号扩容。
+  const held = rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] }, { 'Session-Id': 'rpm-standby-1' });
+  await waitUntil(() => upstream.seen.length === 2, 3000, 'the active member is serving');
+  const blocked = await rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] }, { 'Session-Id': 'rpm-standby-2' });
+  assert.equal(blocked.status, 429);
+  view = await rpmView(port);
+  assert.equal(view.cachePool.targetSize, 1, 'an RPM-exhausted standby must not be promoted by growth');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(running.dir, 'metadata.json'), 'utf8')).cachePoolTargetSize, 1);
+  assert.equal(upstream.seen.length, 2, 'the standby is never attempted');
+  upstream.drain();
+  assert.equal((await held).status, 200);
+});
+
+test('RPM windows clear on restart and credential rotation but survive disable/re-enable; zero means unlimited', async (t) => {
+  const upstream = controllableUpstream();
+  const upstreamPort = await listen(upstream.server), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-rpm-lifecycle-'));
+  const account = { id: 'a', name: 'A', key: 'key-a', enabled: true, maxConcurrent: 0, maxRpm: 1, weight: 1, priority: 1, perModel: {} };
+  const config = { port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [account], accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 0, knownModels: ['m'], perModel: {}, errorRules: [] };
+  const env = { NODE_ENV: 'test', CLINE_PASS_TEST_RPM_WINDOW_MS: '60000' };
+  let running = await startSwitcher(config, dir, env);
+  t.after(async () => { if (running?.child) await stop(running.child); await close(upstream.server); fs.rmSync(dir, { recursive: true, force: true }); });
+  const chat = async () => { const promise = rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] }); await waitUntil(() => upstream.pending.length >= 1, 3000, 'upstream attempt'); upstream.drain(); return promise; };
+  const save = async (mutate) => { const view = await rpmView(port); return rawJson(port, '/api/accounts', accountSave(view, mutate)); };
+
+  assert.equal((await chat()).status, 200);
+  assert.equal((await rpmView(port)).accounts[0].rpm.used, 1);
+  assert.equal((await rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] })).status, 429, 'the committed window blocks the next request');
+
+  // 普通 disable/re-enable 不得绕过窗口内已提交事实。
+  assert.equal((await save((entry) => ({ ...entry, enabled: false }))).status, 200);
+  assert.equal((await rpmView(port)).accounts[0].rpm.used, 1, 'disabling keeps the committed window');
+  assert.equal((await save((entry) => ({ ...entry, enabled: true }))).status, 200);
+  assert.equal((await rpmView(port)).accounts[0].rpm.used, 1, 're-enabling does not reset the window');
+  assert.equal((await rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] })).status, 429);
+
+  // 重启清空：进程内 soft state，不持久化。
+  await stop(running.child); running.child = null;
+  running = await startSwitcher(null, dir, env);
+  assert.equal((await rpmView(port)).accounts[0].rpm.used, 0, 'a restart clears the in-process window');
+  assert.equal((await chat()).status, 200, 'the single RPM slot is available again after restart');
+  assert.equal((await rpmView(port)).accounts[0].rpm.used, 1);
+
+  // 凭据轮换清理该账号窗口。
+  assert.equal((await save((entry) => ({ ...entry, key: 'key-a-rotated' }))).status, 200);
+  assert.equal((await rpmView(port)).accounts[0].rpm.used, 0, 'a key rotation clears the old credential window');
+  assert.equal((await chat()).status, 200);
+
+  // maxRpm=0 即时关闭限制并清理无用状态。
+  assert.equal((await save((entry) => ({ ...entry, maxRpm: 0 }))).status, 200);
+  let view = await rpmView(port);
+  assert.equal(view.accounts[0].rpm.limit, 0);
+  assert.equal(view.accounts[0].rpm.used, 0, 'turning the limit off drops the window');
+  for (let i = 0; i < 3; i++) assert.equal((await chat()).status, 200);
+  view = await rpmView(port);
+  assert.equal(view.accounts[0].rpm.used, 0, 'zero maxRpm keeps no committed state');
+  assert.equal(view.accounts[0].rpm.limit, 0);
+
+  // 窗口是进程内状态：既不持久化，也不进入管理投影，因此多副本各自独立。
+  const metadata = fs.readFileSync(path.join(dir, 'metadata.json'), 'utf8');
+  assert.equal(metadata.includes('rpmWindows'), false, 'the rolling window is never persisted');
+  assert.equal(metadata.includes('reservations'), false);
+  assert.equal(JSON.stringify(view).includes('timestamps'), false, 'the projection never exposes timestamp arrays');
+});
+
+test('initial selection skips an RPM-exhausted candidate in favour of another account', async (t) => {
+  const upstream = controllableUpstream();
+  const upstreamPort = await listen(upstream.server), port = await unusedPort();
+  const running = await startSwitcher({
+    port, upstreamBase: `http://127.0.0.1:${upstreamPort}`,
+    accounts: [
+      { id: 'a', name: 'A', key: 'key-a', enabled: true, maxConcurrent: 0, maxRpm: 1, weight: 1, priority: 1, perModel: {} },
+      { id: 'b', name: 'B', key: 'key-b', enabled: true, maxConcurrent: 0, maxRpm: 0, weight: 1, priority: 2, perModel: {} },
+    ],
+    accountMode: 'roundrobin', activeAccount: 0, concurrencyWaitMs: 0, knownModels: ['m'], perModel: {}, errorRules: [],
+  }, null, { NODE_ENV: 'test', CLINE_PASS_TEST_RPM_WINDOW_MS: '60000' });
+  t.after(async () => { await stop(running.child); await close(upstream.server); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const call = async () => {
+    const promise = rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] });
+    await waitUntil(() => upstream.pending.length >= 1, 3000, 'upstream attempt');
+    upstream.drain();
+    return promise;
+  };
+
+  const first = await call();
+  assert.equal(first.status, 200);
+  assert.equal(first.headers['x-cline-account'], 'A', 'the first round-robin slot is account A');
+  assert.equal((await rpmView(port)).accounts.find((account) => account.id === 'a').rpm.used, 1);
+  assert.equal((await call()).status, 200);
+  // 轮询重新排到 A，但 A 的窗口已耗尽：必须跳过到仍有额度的 B，而不是返回 429。
+  const third = await call();
+  assert.equal(third.status, 200);
+  assert.equal(third.headers['x-cline-account'], 'B');
+  const view = await rpmView(port);
+  assert.equal(view.accounts.find((account) => account.id === 'a').rpm.used, 1, 'the skipped candidate is not charged');
+  assert.equal(view.accounts.find((account) => account.id === 'b').rpm.limit, 0);
+});
+
+test('a client cancellation after the attempt started never refunds RPM', async (t) => {
+  const opened = [];
+  const upstream = http.createServer((req, res) => {
+    if (req.method === 'GET') { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end('{}'); }
+    req.resume(); req.on('end', () => opened.push(res));
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const running = await startSwitcher({
+    port, upstreamBase: `http://127.0.0.1:${upstreamPort}`,
+    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, maxConcurrent: 0, maxRpm: 1, weight: 1, priority: 1, perModel: {} }],
+    accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 0, knownModels: ['m'], perModel: {}, errorRules: [],
+  }, null, { NODE_ENV: 'test', CLINE_PASS_TEST_RPM_WINDOW_MS: '60000' });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+
+  const streaming = new Promise((resolve) => {
+    const req = http.request({ hostname: '127.0.0.1', port, path: '/v1/chat/completions', method: 'POST', headers: { 'Content-Type': 'application/json' } }, (res) => {
+      res.on('data', (chunk) => { if (chunk.toString().includes('data:')) { req.destroy(); resolve(); } });
+    });
+    req.on('error', () => resolve());
+    req.end(JSON.stringify({ model: 'm', messages: [], stream: true }));
+  });
+  await waitUntil(() => opened.length === 1, 3000, 'the stream attempt reached upstream');
+  opened[0].writeHead(200, { 'Content-Type': 'text/event-stream' });
+  opened[0].write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'hi' } }] })}\n\n`);
+  await streaming;
+
+  const settled = await waitUntil(async () => { const account = (await rpmView(port)).accounts[0]; return account.activeCount === 0 && account.rpm.used === 1 ? account : null; }, 3000, 'the cancelled stream releases concurrency without refunding RPM');
+  assert.equal(settled.rpm.used, 1, 'cancellation after req.end never refunds the commit');
+  assert.equal(settled.rpm.reserved, 0);
+  opened[0].destroy();
+  assert.equal((await rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] })).status, 429, 'the committed window still blocks the next request');
+});
