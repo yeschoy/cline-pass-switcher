@@ -1723,7 +1723,7 @@ test('quota scheduler is bounded, strict, fail-open and discards stale credentia
       let settled=false,timer;
       const cleanup=()=>{if(settled)return;settled=true;clearTimeout(timer);active--;};
       res.once('finish',cleanup);res.once('error',cleanup);res.once('close',cleanup);
-      const finish=()=>{if(settled)return;if(phase==='hold'){row.held=true;return;}if(phase==='rate'){res.writeHead(429);return res.end('{}');}if(phase==='duplicate'){res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify({success:true,data:{limits:[{type:'weekly',percentUsed:1},{type:'weekly',percentUsed:2}]}}));}if(phase==='oversize'){res.writeHead(200,{'Content-Type':'application/json'});return res.end(' '.repeat(257*1024));}res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(goodPayload));};timer=setTimeout(finish,30);return;
+      const finish=()=>{if(settled)return;if(phase==='hold'){row.held=true;return;}if(phase==='rate'){res.writeHead(429);return res.end('{}');}if(phase==='duplicate'){res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify({success:true,data:{limits:[{type:'weekly',percentUsed:1},{type:'weekly',percentUsed:2}]}}));}if(phase==='oversize'){res.writeHead(200,{'Content-Type':'application/json'});return res.end(' '.repeat(257*1024));}res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(goodPayload));};timer=setTimeout(finish,5);return;
     }
     req.resume();req.on('end',()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));});
   });
@@ -1745,6 +1745,11 @@ test('quota scheduler is bounded, strict, fail-open and discards stale credentia
   await waitUntil(()=>active===0); // Native finish + close must not decrement twice.
   await stop(running.child);running.child=null;
   phase='success';quotaRequests.length=0;maxActive=0;
+  // Budget hygiene: this test never asserts that the deadline fires, and every mock reply takes a
+  // fixed latency, so the injected deadline must stay an order of magnitude above that latency.
+  // The mock replies after 5ms and the deadline is 80ms (16x). It previously replied after 30ms,
+  // leaving 50ms of headroom - the same order as one local round trip under CPU load. The deadline
+  // stays finite and small because the `hold` phases rely on it to recycle the two global slots.
   running=await startSwitcher(cfg,null,{NODE_ENV:'test',CLINE_PASS_TEST_QUOTA_SUCCESS_MS:'50',CLINE_PASS_TEST_QUOTA_FAILURE_MS:'50',CLINE_PASS_TEST_QUOTA_TIMEOUT_MS:'80',CLINE_PASS_TEST_QUOTA_STALE_MS:'120'});
   let stats=await waitUntil(async()=>{const x=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();return x.accounts.every(a=>a.quota.status==='fresh')&&x;},3000);
   assert.ok(maxActive<=2,`quota concurrency exceeded 2: ${maxActive}`);assert.ok(quotaRequests.every(x=>x.url==='/api/v1/users/me/plan/usage-limits'));assert.deepEqual(new Set(quotaRequests.map(x=>x.auth)),new Set(['Bearer key-a','Bearer key-b','Bearer key-c']));assert.ok(quotaRequests.every(x=>x.custom===undefined),'chat custom headers must not reach quota endpoint');
