@@ -218,3 +218,27 @@ test('detailed logs have independent labelled controls, privacy/retention guidan
   assert.match(detailCode, /detailsText'\)\.value=text/);
   assert.match(detailCode, /navigator\.clipboard\.writeText\(text\)/);
 });
+
+test('retry rule editor, provider mode wording and paired preset expose bounded request-level stop policy', () => {
+  assert.match(html, /id="retryRulesEditor"/);
+  assert.match(html, /id="retryRuleBody"/);
+  assert.match(html, /id="retryRuleFeedback" aria-live="polite"/);
+  assert.match(html, /onclick="addRetryRule\(\)"/);
+  assert.match(html, /onclick="previewRetryPreset\(\)"/);
+  assert.match(html, /id="retryPresetModal"/);
+  assert.match(html, /id="advancedRetryRulesJson"[^>]+oninput="markAdvancedRetryRulesDirty\(\)"/);
+  assert.match(html, /function validateRetryRuleDraft\(/);
+  assert.match(html, /onclick="moveRetryRule\(\$\{index\},-1,this\)"/);
+  assert.match(html, /data-retry-rule-index/);
+  const retryPreset = html.slice(html.indexOf('const RETRY_PRESET='), html.indexOf('function previewRetryPreset'));
+  assert.match(retryPreset, /id:'stop-empty-system-message',decision:'stop'/);
+  assert.match(retryPreset, /id:'ignore-empty-system-message',scope:'provider-model',action:'ignore'/);
+  assert.doesNotMatch(retryPreset, /proxyUrl|perModel|headers|key:/);
+  // retryRules is hydrated from persisted server state, never auto-seeded during load.
+  const loadAll = html.slice(html.indexOf('async function loadAll'), html.indexOf('function renderSecurity'));
+  assert.match(loadAll, /hydrateRetryRuleDraft\(ACCS\.retryRules \|\| \[\]\)/);
+  assert.match(html, /首选固定\+健康回退/);
+  assert.match(html, /Switcher 健康自动选择/);
+  assert.doesNotMatch(html, /严格钉住/);
+  assert.doesNotMatch(html, /优先\+回退/);
+});

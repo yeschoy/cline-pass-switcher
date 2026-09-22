@@ -42,6 +42,7 @@
       }
     }
   ],
+  "retryRules": [],
   "accountPipeline": {
     "quotaPool": false,
     "healthSort": false,

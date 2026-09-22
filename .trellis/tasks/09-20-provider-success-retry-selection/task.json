@@ -3,7 +3,7 @@
   "name": "provider-success-retry-selection",
   "title": "单渠道健康与重试选择",
   "description": "修正规则动作的健康样本语义，新增status+body重试停止策略，并基于渠道模型成功率实现strict/preferred单Provider选择。",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,
