@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify no quota/pipeline invariant assertion was weakened."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify cancellation/deadline semantics stay asserted."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Confirm helper reuse instead of duplicated polling owners."}
+{"file": ".trellis/tasks/09-22-test-stability-timing-flakes/research/flake-evidence.md", "reason": "Compare before/after evidence against the reproduced failures."}

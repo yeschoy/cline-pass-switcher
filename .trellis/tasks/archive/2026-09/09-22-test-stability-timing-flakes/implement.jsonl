@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Quota admission, single-provider planning and pipeline invariants that the flaky tests must keep asserting."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Cancellation, deadline and fail-open semantics behind the timing-sensitive assertions."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Fail-open persistence and metadata assertions used by the heavy-cache tests."}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "metadata.json statistics persistence, retention and migration assertions."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse existing test helpers and hidden test hooks instead of inventing a second polling framework."}
+{"file": ".trellis/tasks/09-22-test-stability-timing-flakes/research/flake-evidence.md", "reason": "Reproduced failure evidence, risk inventory and the bounded-load protocol."}
