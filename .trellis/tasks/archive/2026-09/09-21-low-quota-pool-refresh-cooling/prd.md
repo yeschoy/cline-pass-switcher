@@ -17,8 +17,8 @@
 5. quota role优先于healthSort/sticky：low可准入时优先承接；low受并发、RPM或状态阻塞而high可用时立即high fallback，不等待low恢复。health/sticky只在同role内排序。
 6. RPM阻塞不是动态grow信号；只有既有“全部active有限并发满载、等待后仍满”才能grow-one。
 7. lease快照携带角色。仅low角色上最终canonical policy为`scope=account, action=degrade`时，设置持久化`waiting-refresh`并产生独立request-local account removal outcome；provider-model、explicit ignore和client cancel不升级账号。显式account cooldown/hard-quarantine只执行规则动作，不额外设置quota hold。
-8. waiting-refresh不使用固定时长，并绕过最近成功cache以要求下一调度周期进行一次真实quota fetch，同时继续遵守全局两槽、dedupe和failure backoff。成功且没有已知100%窗口则清除；失败/unknown保持。
-9. role-aware pool启用时，最新成功snapshot任一已知有效window为100%即设置`quota-exhausted`，即使snapshot partial或账号此前没有chat failure；失败不会解除已确认耗尽。它不改operator enabled、不冒充hard quarantine；到最早已耗尽窗口的有效未来`resetsAt`后刷新，只有全部已知窗口<100%才清除，否则重新计算。
+8. waiting-refresh不使用固定时长，并绕过最近成功cache以要求下一调度周期进行一次真实quota fetch，同时继续遵守全局两槽、dedupe和failure backoff。只有刷新成功且三个窗口齐全、均低于100%（额度可确定为可用）才清除；失败或仅部分窗口的成功快照仍属额度unknown，继续排除；部分成功中任一已知窗口达100%则转为quota-exhausted。
+9. role-aware pool启用时，最新成功snapshot任一已知有效window为100%即设置`quota-exhausted`，即使snapshot partial或账号此前没有chat failure；失败不会解除已确认耗尽。它不改operator enabled、不冒充hard quarantine；到最早已耗尽窗口的有效未来`resetsAt`后刷新，只有刷新成功且三个窗口齐全、均低于100%才清除；已知窗口仍耗尽则重新计算，部分窗口缺失即使已知值低于100%也不得把未知当作恢复。
 10. quota job继续能刷新被hold/exhausted账号，复用现有global queue、backoff、generation和routing epoch，不建第二scheduler。
 11. API/UI/log显示目标与实际组成、role、hold/exhausted/next refresh等安全事实，不显示raw quota payload、候选列表或凭据。
 
@@ -30,7 +30,7 @@
 - [ ] low>0且任一low可准入时每次确定性选择low；low并发/RPM/hold阻塞且high可用时立即high fallback；known补位优先于unknown且实际组成如实投影。
 - [ ] RPM-only不grow；并发竞争不超max且无double lease。
 - [ ] low account/degrade产生独立removal outcome并可首包前最多换号一次；显式account rule disposition、provider failure/ignore/cancel不误设quota hold，post-start只影响未来请求。
-- [ ] waiting-refresh真实fetch、success/failed/unknown、partial snapshot 100%、多个耗尽reset、无有效reset、manual recover和resetsAt自动恢复均有确定状态/持久化测试。
+- [ ] waiting-refresh真实fetch；完整可用成功才解除、失败或部分非100成功保持、部分已知100转耗尽；多个耗尽reset、无有效reset、manual recover和resetsAt自动恢复均有确定状态/持久化测试。
 - [ ] quota jobs、stream/cancel、statistics与ordinary日志安全边界保持。
 - [ ] focused、UI、integration和完整gate通过。
 

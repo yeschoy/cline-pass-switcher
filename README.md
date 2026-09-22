@@ -106,7 +106,7 @@ location / {
 | `errorRules` | 唯一权威的有序错误规则数组；每条含稳定 `id`、`account`/`provider-model` 维度、动作、可选 Provider/model 范围，以及 status/body/Header AND 条件。`cooldown.reset` 使用显式格式与严格 `d/h/m/s` fallback/max；最多 100 条/64 KiB。动作与直接健康样本固定为 `ignore`/0、`degrade`/1、`cooldown`/1、`hard-quarantine`/1 个失败样本，后两者同时保持临时/持续处置 |
 | `retryRules` | 唯一权威的有序“停止重试”数组；每条含稳定 `id`、固定 `decision: "stop"`，以及同时存在的 `when.statuses` 与 `when.body_contains`。两类条件 AND、body 数组 ANY、大小写不敏感普通文本（不支持正则/Header）；首条命中即停止本请求剩余 Provider 与账号替换。缺失默认 `[]`；最多 100 条/64 KiB。普通日志只投影 `retryRuleId`/`retryDecision`/`retryMatchedBy` 枚举，不记录 needle 或匹配片段 |
 | `accountErrorRules` / `accountContentErrorRules` | 只读兼容镜像。旧配置启动时按“内容规则在前、状态规则在后”迁移；旧客户端不提交 `errorRules` 时只能原样回传镜像，试图修改会得到 409 |
-| `accountPipeline` | 可选叠加层：三个开关与 `order`，缓存池 min/max，以及显式/消息回退会话绑定 TTL 和 LRU 上限。`0 <= cachePoolSize <= cachePoolMaxSize <= 100000`；默认 TTL 为 2h/15m、上限 50,000。旧配置缺 max 时自动取 min，不会升级后自动扩容 |
+| `accountPipeline` | 可选叠加层：三个开关与 `order`，缓存池 min/max，以及显式/消息回退会话绑定 TTL 和 LRU 上限。`0 <= cachePoolLowQuotaSize <= cachePoolSize <= cachePoolMaxSize <= 100000`；默认 TTL 为 2h/15m、上限 50,000。旧配置缺 max 时自动取 min，不会升级后自动扩容 |
 | `proxyKey` | 下游代理密钥；空 = 不鉴权 |
 | `publicBaseUrl` | 公网代理地址（控制台展示用） |
 | `detailedLogging` | 默认 `false`；完整详细捕获，也可在“详细日志”页面即时保存 |
@@ -191,7 +191,7 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 
 调度固定先执行禁用、账号冷却、硬隔离和 reserve 等资格过滤。只有 success-rate 时，每次请求按 `success / (success + degrade)` 降序，有数据优先、无数据置后；只有 sticky 时继续使用无状态 HRW。sticky 与 healthSort 同时生效时，sticky 变为“已有会话绑定命中门”：hit 直接使用绑定账号，miss 才按 `order` 中 quotaPool/healthSort 的相对顺序处理当前活跃候选，并用 HRW 做同层稳定 tie-break。成功率变化不会迁移已有绑定。
 
-`cachePoolSize > 0` 仅在 sticky 模式或显式启用会话粘性步骤时生效；它是初始/最小大小，`cachePoolMaxSize` 是扩容上限。成员始终按硬资格、非 reserve、priority 和稳定账号 ID 从当前 target 派生，不持久化成员 ID。只有全部活跃账号都设置了有限 `maxConcurrent` 且满载，等待 `concurrencyWaitMs` 后重算仍满载，target 才同步 grow-one 并持久化到 `metadata.json`；多个并发超时不会越过 max，压力下降不自动缩容，`max=min` 可关闭自动扩容。备用账号必须先正式晋升为 active 才能承载请求或建立绑定；无合格成员/达到 max 时返回容量错误，unlimited 活跃账号不会触发增长。
+`cachePoolSize > 0` 仅在 sticky 模式或显式启用会话粘性步骤时生效；它是初始/最小大小，`cachePoolMaxSize` 是扩容上限。`cachePoolLowQuotaSize` 默认 0（沿用原有非 reserve、priority/稳定 ID 成员和选择）；正数时固定低额度槽（fresh 完整快照已用 80%–<95%）先于高额度槽（<80%）承载请求，reserve（≥95%）排除，未知最后补位。低额度按剩余升序、高额度按剩余降序，再按 priority/稳定 ID 派生；实际 high/low/unknown 数量单独显示，不持久化成员 ID。动态扩容只增加高额度目标；低额度并发/RPM 不可用时立即尝试高额度。只有全部活跃账号都设置了有限 `maxConcurrent` 且满载、RPM 仍可用，等待 `concurrencyWaitMs` 后重算仍满载，target 才同步 grow-one 并持久化到 `metadata.json`；多个并发超时不会越过 max，压力下降不自动缩容，`max=min` 可关闭自动扩容。低额度账号最终 account/degrade 会进入独立 waiting-refresh，首包前最多换号一次；真实额度刷新成功才可恢复，任一已知窗口 100%（含部分快照）进入 quota-exhausted，到有效 reset 后重新刷新，失败/未知不会清除；人工恢复仅清错误规则状态。刷新沿用两槽队列与失败退避。备用账号必须先正式晋升为 active 才能承载请求或建立绑定；无合格成员/达到 max 时返回容量错误，unlimited 活跃账号不会触发增长。
 
 账号级 **RPM 限流**（`maxRpm`）与 `maxConcurrent` 共存，准入顺序固定为硬资格 → `maxConcurrent` → RPM：并发已满时不会读取或预留 RPM。账号 `lease` 在准入时原子预留第一个 RPM permit，只有真正把请求交给 Node transport（`req.end()`）才提交为窗口内事实；发送前的同步失败或未发出会立即退还预留并唤醒等待者，发送后的 DNS/连接/代理/TLS/成功/错误/超时/取消都不退款。同一账号内的 Provider retry 每次独立预留；无 permit 时不等待、不发请求、不换号，直接返回本地 429 + 精确 `Retry-After`，此前真实失败 attempt 的原始 upstream 状态与错误行仍保留，请求行以 `errorCategory: "rpm"` 记录本地限流而不是伪造 upstream 429。初始选择会跳过“有并发但 RPM 耗尽”的候选，全部不可用时 `Retry-After` 来自最早滚动窗口恢复时间；等待复用现有容量 waiter 与 `concurrencyWaitMs` 上限，不新增 refill 定时器或队列。RPM 阻塞（含混合阻塞）不会触发缓存池动态扩容，只有全部活跃候选都有限并发满载且 RPM 仍有容量时才允许既有的 grow-one。删除账号或替换 Key/代理会清理该账号窗口，普通 disable/re-enable 不会绕过窗口内已提交事实，`maxRpm: 0` 立即关闭限制并清理无用状态。`GET /api/accounts` 只投影 `rpm: { limit, used, reserved, retryAt }` 这样的安全数值，普通日志只投影 `blockedBy` 枚举与有界 `retryAfter`。
 

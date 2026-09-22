@@ -55,6 +55,7 @@
     ],
     "cachePoolSize": 0,
     "cachePoolMaxSize": 0,
+    "cachePoolLowQuotaSize": 0,
     "sessionBindingExplicitTtlMs": 7200000,
     "sessionBindingFallbackTtlMs": 900000,
     "sessionBindingMaxEntries": 50000

@@ -5,7 +5,7 @@ import vm from 'node:vm';
 
 const script = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8').match(/<script>([\s\S]*?)<\/script>/)[1];
 const DEFAULT_PIPELINE_ORDER = ['quotaPool','healthSort','sticky'];
-const DEFAULT_PIPELINE = {quotaPool:false,healthSort:false,sticky:false,order:[...DEFAULT_PIPELINE_ORDER],cachePoolSize:0,cachePoolMaxSize:0,sessionBindingExplicitTtlMs:7200000,sessionBindingFallbackTtlMs:900000,sessionBindingMaxEntries:50000};
+const DEFAULT_PIPELINE = {quotaPool:false,healthSort:false,sticky:false,order:[...DEFAULT_PIPELINE_ORDER],cachePoolSize:0,cachePoolMaxSize:0,cachePoolLowQuotaSize:0,sessionBindingExplicitTtlMs:7200000,sessionBindingFallbackTtlMs:900000,sessionBindingMaxEntries:50000};
 const fixture = () => ({mode:'single', active:1, concurrencyWaitMs:2000, errorRules:[], accountPipeline:{...DEFAULT_PIPELINE,order:[...DEFAULT_PIPELINE_ORDER]}, cachePool:{minSize:0,maxSize:0,targetSize:0,binding:{enabled:false,size:0,maxEntries:50000}}, accounts:[0,1,2].map(i => ({id:`id${i}`, name:i < 2 ? 'duplicate <name>' : 'other', note:`note${i}`, key:`fake${i}`, enabled:i !== 1, maxConcurrent:i+1, maxRpm:i*5, weight:i+1, priority:10+i, proxyUrl:'http://localhost:1234', headers:{'X-Test':'fixture'}, perModel:{model:{upstreams:['mock']}}, activeCount:0, cachePoolRole:i===0?'active':i===1?'standby':null}))});
 function harness() {
   const elements = new Map(), calls = [], timers = new Map(), windowListeners = {};
@@ -20,7 +20,7 @@ function harness() {
   pipelineList.appendChild=node=>{const index=pipelineList.children.indexOf(node);if(index>=0)pipelineList.children.splice(index,1);pipelineList.children.push(node);return node;};
   el('#accMode').options = ['single','roundrobin','sticky','least-connections','weighted-roundrobin','priority-failover'].map(value=>({value}));
   context.snapshot = fixture();
-  run("ACCS = snapshot; $('#accMode').value='single'; $('#concurrencyWaitMs').value='2000'; $('#cachePoolSize').value='0'; $('#cachePoolMaxSize').value='0'; $('#sessionBindingExplicitTtlMs').value='7200000'; $('#sessionBindingFallbackTtlMs').value='900000'; $('#sessionBindingMaxEntries').value='50000'; hydrateErrorRuleDraft(snapshot.errorRules); renderAccounts();");
+  run("ACCS = snapshot; $('#accMode').value='single'; $('#concurrencyWaitMs').value='2000'; $('#cachePoolSize').value='0'; $('#cachePoolMaxSize').value='0'; $('#cachePoolLowQuotaSize').value='0'; $('#sessionBindingExplicitTtlMs').value='7200000'; $('#sessionBindingFallbackTtlMs').value='900000'; $('#sessionBindingMaxEntries').value='50000'; hydrateErrorRuleDraft(snapshot.errorRules); renderAccounts();");
   const snapshot = () => JSON.parse(run('JSON.stringify(ACCS)'));
   return {run,el,calls,snapshot,context,timers,windowListeners,pipelineList};
 }
@@ -85,7 +85,7 @@ test('redraw callers preserve scheduling and invalid unapplied advanced JSON; ex
   assert.deepEqual(payload.accounts,h.snapshot().accounts.map(({activeCount,cachePoolRole,...a})=>a));
   assert.equal(payload.active,1); assert.equal(payload.concurrencyWaitMs,987);
   assert.deepEqual(payload.errorRules,[{id:'ignore-quota',scope:'account',action:'ignore',when:{statuses:[429],body_contains:'quota exceeded'}}]);
-  assert.deepEqual(payload.accountPipeline,{quotaPool:true,healthSort:false,sticky:true,order:DEFAULT_PIPELINE_ORDER,cachePoolSize:2,cachePoolMaxSize:4,sessionBindingExplicitTtlMs:7200000,sessionBindingFallbackTtlMs:900000,sessionBindingMaxEntries:50000});
+  assert.deepEqual(payload.accountPipeline,{quotaPool:true,healthSort:false,sticky:true,order:DEFAULT_PIPELINE_ORDER,cachePoolSize:2,cachePoolMaxSize:4,cachePoolLowQuotaSize:0,sessionBindingExplicitTtlMs:7200000,sessionBindingFallbackTtlMs:900000,sessionBindingMaxEntries:50000});
   assert.equal(h.snapshot().accounts[1].maxConcurrent,42);
 });
 
@@ -231,6 +231,9 @@ test('quota rendering preserves known zero/full values and labels partial, stale
   h.context.row={...base,quota:{...base.quota,lastAttemptAt:1001,limits:{five_hour:{percentUsed:1},weekly:{percentUsed:2},monthly:{percentUsed:3}}}};assert.match(h.run('quotaState(row,1001)'),/过期 · 上次快照/);
   h.context.row={...base,quota:{...base.quota,refresh:{eligible:false,reason:'disabled',state:'idle',nextAttemptAt:null}}};assert.match(h.run('quotaState(row,1000)'),/已禁用 · 上次额度/);
   h.context.row={...base,quota:{status:'unknown',pool:'unknown',fetchedAt:null,lastAttemptAt:null,lastSuccessAt:null,limits:{},errorCategory:null,refresh:{eligible:false,reason:'unconfigured',state:'idle',nextAttemptAt:null}}};assert.match(h.run('quotaState(row,1000)'),/未配置/);
+  h.context.row={...base,quota:{...base.quota,quotaDisposition:'quota-exhausted'}};
+  assert.match(h.run('quotaState(row,1000)'),/低额度池启用时排除/);
+  assert.doesNotMatch(h.run('quotaState(row,1000)'),/暂停路由/, 'low=0 can retain the recorded disposition without applying it');
 });
 
 test('quota forecast sums each account minimum and applies resets at fixed target boundaries', () => {
@@ -403,12 +406,12 @@ test('cache-hit preset previews, cancels and saves only the scheduling draft plu
   const h=harness(),before=h.snapshot();h.el('#cachePoolSize').value='0';h.el('#concurrencyWaitMs').value='123';h.el('#preset').value='cache';
   h.run('previewPreset()');
   const pending=JSON.parse(h.run('JSON.stringify(PENDING_PRESET)'));
-  assert.equal(pending.mode,'sticky');assert.equal(pending.concurrencyWaitMs,5000);assert.equal(pending.accountPipeline.cachePoolSize,2);
+  assert.equal(pending.mode,'sticky');assert.equal(pending.concurrencyWaitMs,5000);assert.equal(pending.accountPipeline.cachePoolSize,2);assert.equal(pending.accountPipeline.cachePoolLowQuotaSize,1);
   assert.deepEqual(pending.accounts.map(account=>({name:account.name,key:account.key,enabled:account.enabled,proxyUrl:account.proxyUrl,headers:account.headers,perModel:account.perModel})),before.accounts.map(account=>({name:account.name,key:account.key,enabled:account.enabled,proxyUrl:account.proxyUrl,headers:account.headers,perModel:account.perModel})));
   assert.match(h.el('#presetAdjust').innerHTML,/优先级/);h.run("updatePresetAccount(0,'priority',7); closePreset()");
   assert.deepEqual(h.snapshot(),before);assert.equal(h.el('#cachePoolSize').value,'0');assert.equal(h.calls.length,0);
   h.context.sent=[];h.run("api=async(path,body)=>{sent.push({path,body});return {ok:false};}; previewPreset()");await h.run('applyPreset()');
-  assert.equal(h.context.sent.length,1);assert.equal(h.context.sent[0].path,'/api/accounts');assert.equal(h.context.sent[0].body.accountPipeline.cachePoolSize,2);assert.equal(h.context.sent[0].body.mode,'sticky');assert.equal(h.context.sent[0].body.concurrencyWaitMs,5000);assert.equal(h.el('#cachePoolSize').value,2);
+  assert.equal(h.context.sent.length,1);assert.equal(h.context.sent[0].path,'/api/accounts');assert.equal(h.context.sent[0].body.accountPipeline.cachePoolSize,2);assert.equal(h.context.sent[0].body.accountPipeline.cachePoolLowQuotaSize,1);assert.equal(h.context.sent[0].body.mode,'sticky');assert.equal(h.context.sent[0].body.concurrencyWaitMs,5000);assert.equal(h.el('#cachePoolSize').value,2);
 });
 
 test('raw applied custom rules remain compatible with existing confirm-and-save presets', async () => {
@@ -555,4 +558,27 @@ test('account drawer, bulk, preset and full save preserve each account maxRpm dr
   await h.run('saveAccounts()');
   const payload = JSON.parse(h.run('JSON.stringify(sent[0].body)'));
   assert.deepEqual(payload.accounts.map((a) => a.maxRpm), [45, 0, 10], 'the destructive full save carries maxRpm');
+});
+
+test('low quota slots share the live pipeline draft, raw editor and server runtime projection', async () => {
+  const h=harness();
+  h.el('#cachePoolSize').value='2'; h.el('#cachePoolMaxSize').value='4'; h.el('#cachePoolLowQuotaSize').value='1';
+  assert.equal(h.run('collectAccounts().accountPipeline.cachePoolLowQuotaSize'),1);
+  h.run('openRawScheduling()');
+  const draft=JSON.parse(h.el('#rawSchedulingJson').value);
+  assert.equal(draft.accountPipeline.cachePoolLowQuotaSize,1);
+  draft.accountPipeline.cachePoolLowQuotaSize=3;
+  h.el('#rawSchedulingJson').value=JSON.stringify(draft);h.run('applyRawScheduling()');
+  assert.match(h.el('#rawSchedulingError').textContent,/不得大于/);
+  assert.equal(h.el('#cachePoolLowQuotaSize').value,'1');
+  draft.accountPipeline.cachePoolLowQuotaSize=0;
+  h.el('#rawSchedulingJson').value=JSON.stringify(draft);h.run('applyRawScheduling()');
+  assert.equal(h.el('#cachePoolLowQuotaSize').value,'0');
+  h.el('#cachePoolLowQuotaSize').value='3';
+  await h.run('saveAccounts()');assert.match(h.el('#accMsg').textContent,/不得大于/);assert.equal(h.calls.length,0);
+  const loaded=fixture();loaded.accountPipeline={...loaded.accountPipeline,cachePoolSize:2,cachePoolMaxSize:4,cachePoolLowQuotaSize:1};loaded.cachePool={minSize:2,maxSize:4,lowSize:1,targetSize:3,actual:{high:1,low:1,unknown:1},binding:{enabled:false,size:0,maxEntries:50000}};
+  h.context.next=loaded;h.run("render=()=>{};api=async(path)=>path==='/api/accounts'?next:path==='/api/models'?{subscription:[]}:path==='/api/statistics'?{models:[]}:path==='/api/model-aliases'?{aliases:{}}:{};");
+  await h.run('loadAll()');
+  assert.equal(h.el('#cachePoolLowQuotaSize').value,1);
+  assert.match(h.el('#cachePoolRuntime').textContent,/低额度槽 1.*实际高 1 \/ 低 1 \/ 未知 1/);
 });

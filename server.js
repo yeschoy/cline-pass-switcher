@@ -48,6 +48,7 @@ const DEFAULT_CONFIG = {
     order: ['quotaPool', 'healthSort', 'sticky'],
     cachePoolSize: 0,
     cachePoolMaxSize: 0,
+    cachePoolLowQuotaSize: 0,
     sessionBindingExplicitTtlMs: 7_200_000,
     sessionBindingFallbackTtlMs: 900_000,
     sessionBindingMaxEntries: 50_000,
@@ -176,6 +177,15 @@ function normalizeAccountStates() {
   const normalized = {};
   for (const [id, value] of Object.entries(META.accountStates)) {
     if (!/^[A-Za-z0-9_-]{1,100}$/.test(id) || !isPlainObject(value)) { dirty = true; continue; }
+    if (Object.keys(value).some((key) => key.startsWith('quota') && !['quotaDisposition','quotaDispositionAt','quotaRetryAt','quotaReason'].includes(key)) ||
+        (value.quotaDisposition !== undefined && ![null,'waiting-refresh','quota-exhausted'].includes(value.quotaDisposition)) ||
+        (value.quotaReason !== undefined && ![null,'account-degrade','known-exhausted'].includes(value.quotaReason)) ||
+        ['quotaDispositionAt','quotaRetryAt'].some((key) => value[key] !== undefined && (!Number.isSafeInteger(value[key]) || value[key] < 0)) ||
+        (value.quotaDisposition
+          ? !Number.isSafeInteger(value.quotaDispositionAt) || value.quotaDispositionAt <= 0 || !Number.isSafeInteger(value.quotaRetryAt) ||
+            (value.quotaDisposition === 'waiting-refresh' && value.quotaRetryAt !== 0) ||
+            value.quotaReason !== (value.quotaDisposition === 'waiting-refresh' ? 'account-degrade' : 'known-exhausted')
+          : (value.quotaDispositionAt ?? 0) !== 0 || (value.quotaRetryAt ?? 0) !== 0 || (value.quotaReason ?? null) !== null)) throw new Error('invalid account quota disposition');
     const state = {
       banned: value.banned === true || value.hardQuarantined === true,
       hardQuarantined: value.banned === true || value.hardQuarantined === true,
@@ -184,6 +194,10 @@ function normalizeAccountStates() {
       reason: boundedProviderNote(value.reason),
       ruleId: typeof value.ruleId === 'string' && ERROR_RULE_ID.test(value.ruleId) ? value.ruleId : null,
       updatedAt: safeProviderTimestamp(value.updatedAt),
+      quotaDisposition: ['waiting-refresh','quota-exhausted'].includes(value.quotaDisposition) ? value.quotaDisposition : null,
+      quotaDispositionAt: safeProviderTimestamp(value.quotaDispositionAt),
+      quotaRetryAt: safeProviderTimestamp(value.quotaRetryAt),
+      quotaReason: ['account-degrade','known-exhausted'].includes(value.quotaReason) ? value.quotaReason : null,
     };
     normalized[id] = state;
     if (JSON.stringify(state) !== JSON.stringify(value)) dirty = true;
@@ -690,6 +704,7 @@ function normalizeAccountPipeline(value, {
   fallbackOrder = PIPELINE_DEFAULT_ORDER,
   fallbackCachePoolSize = 0,
   fallbackCachePoolMaxSize,
+  fallbackCachePoolLowQuotaSize = 0,
   fallbackSessionBindingExplicitTtlMs = SESSION_BINDING_EXPLICIT_TTL_MS,
   fallbackSessionBindingFallbackTtlMs = SESSION_BINDING_FALLBACK_TTL_MS,
   fallbackSessionBindingMaxEntries = SESSION_BINDING_MAX_ENTRIES,
@@ -699,7 +714,7 @@ function normalizeAccountPipeline(value, {
     value = {};
   }
   const legacy = Object.hasOwn(value, 'excludeUnhealthy');
-  const allowed = [...PIPELINE_KEYS, ...(legacy ? ['excludeUnhealthy'] : []), 'order', 'cachePoolSize', 'cachePoolMaxSize', 'sessionBindingExplicitTtlMs', 'sessionBindingFallbackTtlMs', 'sessionBindingMaxEntries'];
+  const allowed = [...PIPELINE_KEYS, ...(legacy ? ['excludeUnhealthy'] : []), 'order', 'cachePoolSize', 'cachePoolMaxSize', 'cachePoolLowQuotaSize', 'sessionBindingExplicitTtlMs', 'sessionBindingFallbackTtlMs', 'sessionBindingMaxEntries'];
   if (strict && Object.keys(value).some((key) => !allowed.includes(key))) throw new Error('accountPipeline contains an unknown field');
   if (strict) {
     for (const key of PIPELINE_KEYS) if (typeof value[key] !== 'boolean') throw new Error(`accountPipeline.${key} must be boolean`);
@@ -723,6 +738,11 @@ function normalizeAccountPipeline(value, {
   else if (Number.isInteger(value.cachePoolMaxSize) && value.cachePoolMaxSize >= 0 && value.cachePoolMaxSize <= 100000) out.cachePoolMaxSize = value.cachePoolMaxSize;
   else if (strict) throw new Error('accountPipeline.cachePoolMaxSize must be an integer from 0 to 100000');
   else out.cachePoolMaxSize = out.cachePoolSize;
+  const fallbackLow = Number.isInteger(fallbackCachePoolLowQuotaSize) && fallbackCachePoolLowQuotaSize >= 0 && fallbackCachePoolLowQuotaSize <= 100000 ? fallbackCachePoolLowQuotaSize : 0;
+  if (value.cachePoolLowQuotaSize === undefined) out.cachePoolLowQuotaSize = fallbackLow;
+  else if (Number.isInteger(value.cachePoolLowQuotaSize) && value.cachePoolLowQuotaSize >= 0 && value.cachePoolLowQuotaSize <= 100000) out.cachePoolLowQuotaSize = value.cachePoolLowQuotaSize;
+  else if (strict) throw new Error('accountPipeline.cachePoolLowQuotaSize must be an integer from 0 to 100000');
+  else out.cachePoolLowQuotaSize = 0;
   const bindingDefaults = { sessionBindingExplicitTtlMs: SESSION_BINDING_EXPLICIT_TTL_MS, sessionBindingFallbackTtlMs: SESSION_BINDING_FALLBACK_TTL_MS, sessionBindingMaxEntries: SESSION_BINDING_MAX_ENTRIES };
   const boundedInteger = (field, fallback, min, max) => {
     if (value[field] === undefined) return Number.isInteger(fallback) && fallback >= min && fallback <= max ? fallback : bindingDefaults[field];
@@ -736,6 +756,10 @@ function normalizeAccountPipeline(value, {
   if (out.cachePoolMaxSize < out.cachePoolSize) {
     if (strict) throw new Error('accountPipeline.cachePoolMaxSize must be greater than or equal to cachePoolSize');
     out.cachePoolMaxSize = out.cachePoolSize;
+  }
+  if (out.cachePoolLowQuotaSize > out.cachePoolSize) {
+    if (strict) throw new Error('accountPipeline.cachePoolLowQuotaSize must not exceed cachePoolSize');
+    out.cachePoolLowQuotaSize = out.cachePoolSize;
   }
   if (out.sessionBindingFallbackTtlMs > out.sessionBindingExplicitTtlMs) {
     if (strict) throw new Error('accountPipeline.sessionBindingFallbackTtlMs must not exceed sessionBindingExplicitTtlMs');
@@ -984,6 +1008,17 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   if (normalizeAccountStates()) dirty = true;
   if (normalizeStatistics()) dirty = true;
   if (normalizeAccountQuotas()) dirty = true;
+  if (pipeline.cachePoolLowQuotaSize > 0 && pipeline.cachePoolSize > 0 && (config.accountMode === 'sticky' || pipeline.sticky)) for (const account of config.accounts) {
+    const quota = META.accountQuotas[account.id];
+    if (!quota?.snapshot || quota.lastSuccessAt !== quota.snapshot.fetchedAt) continue;
+    const exhausted = Object.values(quota.snapshot.limits || {}).filter((window) => window.percentUsed >= 100);
+    if (!exhausted.length) continue;
+    const previous = META.accountStates[account.id];
+    if (previous?.quotaDisposition === 'quota-exhausted') continue;
+    const now = Date.now(), resets = exhausted.map((window) => Date.parse(window.resetsAt)).filter((at) => Number.isSafeInteger(at) && at > now);
+    META.accountStates[account.id] = { ...(previous || {}), quotaDisposition: 'quota-exhausted', quotaDispositionAt: now, quotaRetryAt: resets.length ? Math.min(...resets) : 0, quotaReason: 'known-exhausted' };
+    dirty = true;
+  }
   const ids = new Set((config.accounts || []).map((a) => a.id));
   const envKey = String(process.env.CLINE_PASS_KEY || '').trim();
   if (envKey) ids.add(envAccountId(envKey));
@@ -1148,12 +1183,18 @@ function sensitiveMessageValues(body) {
   }
   return values.filter(Boolean);
 }
+function clearRuleAccountState(id) {
+  const state = getAccountState(id);
+  if (!state) return;
+  if (state.quotaDisposition) META.accountStates[id] = { quotaDisposition: state.quotaDisposition, quotaDispositionAt: state.quotaDispositionAt, quotaRetryAt: state.quotaRetryAt, quotaReason: state.quotaReason };
+  else delete META.accountStates[id];
+}
 function clearExpiredCooldowns() {
   let dirty = false;
   const now = Date.now();
   for (const [id, st] of Object.entries(META.accountStates || {})) {
     if (st && !st.hardQuarantined && !st.banned && st.cooldownUntil && st.cooldownUntil <= now) {
-      delete META.accountStates[id]; dirty = true;
+      clearRuleAccountState(id); dirty = true;
     }
   }
   if (dirty) saveMeta();
@@ -1165,6 +1206,7 @@ function enabledAccounts({ excludeIds = new Set() } = {}) {
     const st = getAccountState(a.id);
     if (st?.hardQuarantined || st?.banned) return false;
     if (st?.cooldownUntil && st.cooldownUntil > Date.now()) return false;
+    if (st?.quotaDisposition && configuredCachePoolLowQuotaSize() > 0 && cachePoolEnabled()) return false;
     return true;
   });
 }
@@ -1258,6 +1300,10 @@ function strategyRank(mode, list) {
   return rrRank(list);
 }
 function selectionResult(lease, mode, preferred, reason, identity, overflow = false) {
+  // Snapshot at admission, not at attempt settlement: concurrent quota refresh cannot
+  // retroactively make a high/unknown lease eligible for the low-account hold.
+  lease.quotaRole = cachePoolEnabled() && configuredCachePoolLowQuotaSize() > 0
+    ? ({ warm: 'low', hot: 'high', unknown: 'unknown' }[quotaProjection(lease.account.id).pool] || null) : null;
   return {
     lease, strategy: mode, preferredAccountId: preferred?.id || null, preferredAccountName: preferred?.name || null,
     selectedAccountId: lease.account.id, selectedAccountName: lease.account.name, reason, overflow,
@@ -1309,6 +1355,7 @@ async function acquireLegacyAccountLease(identity, { excludeIds = new Set(), all
 }
 function configuredCachePoolSize() { return Number.isInteger(config.accountPipeline?.cachePoolSize) ? config.accountPipeline.cachePoolSize : 0; }
 function configuredCachePoolMaxSize() { return Number.isInteger(config.accountPipeline?.cachePoolMaxSize) ? config.accountPipeline.cachePoolMaxSize : configuredCachePoolSize(); }
+function configuredCachePoolLowQuotaSize() { return Number.isInteger(config.accountPipeline?.cachePoolLowQuotaSize) ? config.accountPipeline.cachePoolLowQuotaSize : 0; }
 function configuredCachePoolTargetSize() { return cachePoolTargetFor(config.accountPipeline); }
 function stickyEffective() { return config.accountMode === 'sticky' || config.accountPipeline?.sticky === true; }
 function cachePoolEnabled() { return configuredCachePoolSize() > 0 && stickyEffective(); }
@@ -1317,12 +1364,14 @@ function sessionBindingEnabled(identity, ownerRequestId) { return sessionBinding
 function pipelineEnabled() { return cachePoolEnabled() || PIPELINE_KEYS.some((key) => config.accountPipeline?.[key]); }
 function quotaRoutingEnabled() { return config.accountPipeline?.quotaPool === true || cachePoolEnabled(); }
 function quotaProjection(accountId, now = Date.now()) {
+  const disposition = getAccountState(accountId);
+  const safeDisposition = { quotaDisposition: ['waiting-refresh','quota-exhausted'].includes(disposition?.quotaDisposition) ? disposition.quotaDisposition : null, quotaRetryAt: Number.isSafeInteger(disposition?.quotaRetryAt) && disposition.quotaRetryAt > now ? disposition.quotaRetryAt : null };
   const q = META.accountQuotas?.[accountId];
   const snapshot = q?.snapshot;
   const complete = snapshot && q.errorCategory == null && q.lastSuccessAt === snapshot.fetchedAt && q.lastAttemptAt <= q.lastSuccessAt && ['five_hour','weekly','monthly'].every((type) => snapshot.limits?.[type]) && snapshot.fetchedAt <= now && now - snapshot.fetchedAt <= QUOTA_STALE_MS;
-  if (!complete) return { status: 'unknown', pool: 'unknown', fetchedAt: snapshot?.fetchedAt || null, limits: snapshot?.limits || {}, errorCategory: q?.errorCategory || null };
+  if (!complete) return { ...safeDisposition, status: 'unknown', pool: 'unknown', fetchedAt: snapshot?.fetchedAt || null, limits: snapshot?.limits || {}, errorCategory: q?.errorCategory || null };
   const maximum = Math.max(...Object.values(snapshot.limits).map((limit) => limit.percentUsed));
-  return { status: 'fresh', pool: maximum < 80 ? 'hot' : maximum < 95 ? 'warm' : 'reserve', fetchedAt: snapshot.fetchedAt, limits: snapshot.limits, errorCategory: null };
+  return { ...safeDisposition, status: 'fresh', pool: maximum < 80 ? 'hot' : maximum < 95 ? 'warm' : 'reserve', fetchedAt: snapshot.fetchedAt, limits: snapshot.limits, errorCategory: null };
 }
 function statisticsQuotaProjection(account, now = Date.now()) {
   const quota = quotaProjection(account.id, now), state = META.accountQuotas?.[account.id];
@@ -1330,15 +1379,27 @@ function statisticsQuotaProjection(account, now = Date.now()) {
   const job = quotaJobs.get(account.id), activeJob = job && quotaJobAccount(job) && quotaJobHasOwner(job) ? job : null;
   let nextAttemptAt = null;
   if (!reason && state?.errorCategory && state.lastAttemptAt) nextAttemptAt = state.lastAttemptAt + quotaFailureDelay(account.id);
-  else if (!reason) { const successAt = successfulQuotaTime(state, now); if (successAt) nextAttemptAt = successAt + QUOTA_SUCCESS_MS; }
+  else if (!reason) { const successAt = successfulQuotaTime(state, now); if (successAt) nextAttemptAt = quotaNextAttemptAt(account, successAt, now); else if (cachePoolEnabled() && configuredCachePoolLowQuotaSize() > 0 && getAccountState(account.id)?.quotaDisposition === 'waiting-refresh') nextAttemptAt = now; }
   return { ...quota, lastAttemptAt: state?.lastAttemptAt || null, lastSuccessAt: state?.lastSuccessAt || null, refresh: { eligible: reason === null, reason, state: activeJob ? (activeJob.state === 'running' ? 'fetching' : 'queued') : 'idle', nextAttemptAt } };
+}
+function quotaNextAttemptAt(account, successAt, now = Date.now()) {
+  const disposition = getAccountState(account.id);
+  if (cachePoolEnabled() && configuredCachePoolLowQuotaSize() > 0) {
+    if (disposition?.quotaDisposition === 'waiting-refresh') return successAt >= disposition.quotaDispositionAt ? successAt + QUOTA_SUCCESS_MS : now;
+    if (disposition?.quotaDisposition === 'quota-exhausted' && disposition.quotaRetryAt > successAt) return disposition.quotaRetryAt;
+  }
+  return successAt + QUOTA_SUCCESS_MS;
 }
 function pipelineCandidates(list) {
   return list.map((account) => ({ account, health: successHealthProjection('account', account.id), quota: quotaProjection(account.id) }));
 }
 function buildPipelineGroups(list, identity, candidates = pipelineCandidates(list), { skipSticky = false } = {}) {
   const diagnostics = [];
-  let groups = [{ candidates, quota: 'ordinary', health: 'ordinary' }];
+  // Role-aware cache pools fix role priority before any optional quota/health/sticky step.
+  // With low=0 this is the original single group and preserves legacy ranking.
+  const roleAware = cachePoolEnabled() && configuredCachePoolLowQuotaSize() > 0;
+  let groups = roleAware ? ['warm','hot','unknown'].map((role) => ({ candidates: candidates.filter((candidate) => candidate.quota.pool === role), quota: role, health: 'ordinary' })).filter((group) => group.candidates.length)
+    : [{ candidates, quota: 'ordinary', health: 'ordinary' }];
   let stickyApplied = false;
   const applySticky = () => {
     if (!identity?.fingerprint) return;
@@ -1369,11 +1430,24 @@ function cachePoolMembership(list, candidates = null) {
   if (!cachePoolEnabled()) return null;
   candidates ||= pipelineCandidates(list);
   const size = configuredCachePoolSize(), maxSize = configuredCachePoolMaxSize(), targetSize = configuredCachePoolTargetSize();
-  const eligibleCandidates = candidates.filter((candidate) => candidate.quota.pool !== 'reserve')
-    .sort((left, right) => (left.account.priority || 100) - (right.account.priority || 100) || (left.account.id < right.account.id ? -1 : left.account.id > right.account.id ? 1 : 0));
-  const activeCandidates = eligibleCandidates.slice(0, targetSize);
+  const stable = (left, right) => (left.account.priority || 100) - (right.account.priority || 100) || (left.account.id < right.account.id ? -1 : left.account.id > right.account.id ? 1 : 0);
+  let eligibleCandidates = candidates.filter((candidate) => candidate.quota.pool !== 'reserve').sort(stable);
+  let activeCandidates;
+  if (configuredCachePoolLowQuotaSize() > 0) {
+    const remaining = (candidate) => 100 - Math.max(...Object.values(candidate.quota.limits).map((limit) => limit.percentUsed));
+    const low = eligibleCandidates.filter((candidate) => candidate.quota.pool === 'warm').sort((a,b) => remaining(a) - remaining(b) || stable(a,b));
+    const high = eligibleCandidates.filter((candidate) => candidate.quota.pool === 'hot').sort((a,b) => remaining(b) - remaining(a) || stable(a,b));
+    const unknown = eligibleCandidates.filter((candidate) => candidate.quota.pool === 'unknown');
+    const lowTarget = configuredCachePoolLowQuotaSize();
+    const selected = [...low.slice(0, lowTarget), ...high.slice(0, targetSize - lowTarget)];
+    const chosen = new Set(selected.map((candidate) => candidate.account.id));
+    // Known filler is real high/low, never relabelled to satisfy a target. Unknown is last.
+    eligibleCandidates = [...selected, ...[...high, ...low, ...unknown].filter((candidate) => !chosen.has(candidate.account.id))];
+    activeCandidates = eligibleCandidates.slice(0, targetSize);
+  } else activeCandidates = eligibleCandidates.slice(0, targetSize);
   const activeIds = new Set(activeCandidates.map((candidate) => candidate.account.id));
-  return { size, maxSize, targetSize, activeIds, activeCandidates, eligibleCandidates, candidates, byId: new Map(candidates.map((candidate) => [candidate.account.id, candidate])) };
+  const actual = { high: activeCandidates.filter((c) => c.quota.pool === 'hot').length, low: activeCandidates.filter((c) => c.quota.pool === 'warm').length, unknown: activeCandidates.filter((c) => c.quota.pool === 'unknown').length };
+  return { size, maxSize, lowSize: configuredCachePoolLowQuotaSize(), targetSize, actual, activeIds, activeCandidates, eligibleCandidates, candidates, byId: new Map(candidates.map((candidate) => [candidate.account.id, candidate])) };
 }
 function rpmProjection(account, now = Date.now()) {
   const limit = rpmLimit(account), state = rpmWindowState(account.id);
@@ -1408,7 +1482,10 @@ function cachePipelineFacts(plan, membership, candidate, tier, capacityFallback)
     capacityFallback,
     cachePoolSize: membership.size,
     cachePoolMaxSize: membership.maxSize,
+    cachePoolLowQuotaSize: membership.lowSize,
     cachePoolTargetSize: membership.targetSize,
+    cachePoolActual: membership.actual,
+    selectedQuotaRole: membership.lowSize ? ({ warm: 'low', hot: 'high', unknown: 'unknown' }[candidate?.quota.pool] || null) : null,
     cachePoolTier: tier,
     cachePoolFallback: false,
   };
@@ -1515,6 +1592,28 @@ async function acquireStatefulBindingAccountLease(identity, { excludeIds = new S
         break;
       }
       const bound = context.activeCandidates.find((candidate) => candidate.account.id === entry.accountId);
+      // Recheck after every capacity wake: a high binding cannot hide a newly
+      // admissible low, and a blocked low cannot delay an admissible high.
+      if (context.membership?.lowSize) {
+        const lowAvailable = context.activeCandidates.some((candidate) => candidate.quota.pool === 'warm' && accountHasCapacity(candidate.account) && rpmAvailable(candidate.account));
+        const otherAvailable = context.activeCandidates.some((candidate) => candidate.account.id !== entry.accountId && accountHasCapacity(candidate.account) && rpmAvailable(candidate.account));
+        if (lowAvailable && bound?.quota.pool !== 'warm') {
+          deleteSessionBinding(identity.fingerprint, entry);
+          lookup = { entry: null, result: 'invalidated' };
+          break;
+        }
+        if ((!accountHasCapacity(bound?.account) || !rpmAvailable(bound?.account)) && otherAvailable && allowOverflow) {
+          const plan = buildPipelineGroups(context.activeCandidates.map((candidate) => candidate.account), identity, context.activeCandidates, { skipSticky: true });
+          const fallback = tryPipelinePlanLease(plan, identity, mode, { excludeId: entry.accountId });
+          if (fallback.lease) {
+            incrementBindingCounter('temporaryOverflows');
+            const reason = context.membership ? 'cache-pool-active-overflow' : 'pipeline-capacity-fallback';
+            const result = selectionResult(fallback.lease, mode, bound.account, reason, identity, true);
+            result.pipeline = bindingPipelineFacts(plan, context, context.activeCandidates.find((candidate) => candidate.account.id === fallback.account.id), true);
+            return attachBindingHit(result, identity, entry, 'temporary-overflow');
+          }
+        }
+      }
       const boundLease = tryLease(bound?.account);
       if (boundLease) {
         const reason = context.membership ? 'cache-pool-active' : 'pipeline-sticky-primary';
@@ -2298,6 +2397,9 @@ function record(modelId, info, detail = detailContext.getStore()) {
     capacityFallback: !!info.pipeline?.capacityFallback,
     cachePoolSize: Number.isInteger(info.pipeline?.cachePoolSize) ? info.pipeline.cachePoolSize : configuredCachePoolSize(),
     cachePoolMaxSize: Number.isInteger(info.pipeline?.cachePoolMaxSize) ? info.pipeline.cachePoolMaxSize : configuredCachePoolMaxSize(),
+    cachePoolLowQuotaSize: Number.isInteger(info.pipeline?.cachePoolLowQuotaSize) ? info.pipeline.cachePoolLowQuotaSize : configuredCachePoolLowQuotaSize(),
+    cachePoolActual: info.pipeline?.cachePoolActual ? Object.fromEntries(['high','low','unknown'].map((role) => [role, Number.isInteger(info.pipeline.cachePoolActual[role]) && info.pipeline.cachePoolActual[role] >= 0 && info.pipeline.cachePoolActual[role] <= 100000 ? info.pipeline.cachePoolActual[role] : null])) : null,
+    selectedQuotaRole: ['low','high','unknown'].includes(info.pipeline?.selectedQuotaRole) ? info.pipeline.selectedQuotaRole : null,
     cachePoolTargetSize: Number.isInteger(info.pipeline?.cachePoolTargetSize) ? info.pipeline.cachePoolTargetSize : configuredCachePoolTargetSize(),
     cachePoolTier: ['active','standby'].includes(info.pipeline?.cachePoolTier) ? info.pipeline.cachePoolTier : null, cachePoolFallback: info.pipeline?.cachePoolFallback === true,
     targetProviders: Array.isArray(info.targets) ? info.targets : [], actualProvider: info.provider || null,
@@ -2312,7 +2414,7 @@ function record(modelId, info, detail = detailContext.getStore()) {
       matchedBy: Array.isArray(t.matchedBy) ? t.matchedBy.filter((value) => ['status','body','header','provider','model','default'].includes(value)).slice(0, 5) : [],
       providerCircuitAction: ['cooldown','half-open-success','half-open-failed'].includes(t.providerCircuitAction) ? t.providerCircuitAction : null,
       errorScope: t.errorScope || null, scopeEvidence: t.scopeEvidence || null, failureClass: t.failureClass || null,
-      healthAction: t.healthAction || 'none', retryAfterMs: t.retryAfterMs ?? null,
+      healthAction: t.healthAction || 'none', quotaRemovalAction: t.quotaRemovalAction === 'waiting-refresh' ? 'waiting-refresh' : null, retryAfterMs: t.retryAfterMs ?? null,
       retryRuleId: typeof t.retryRuleId === 'string' && ERROR_RULE_ID.test(t.retryRuleId) ? t.retryRuleId : null,
       retryDecision: t.retryDecision === 'stop' ? 'stop' : 'continue',
       retryMatchedBy: Array.isArray(t.retryMatchedBy) ? t.retryMatchedBy.filter((value) => RETRY_MATCH_KINDS.has(value)).slice(0, 2) : [],
@@ -2344,7 +2446,7 @@ function record(modelId, info, detail = detailContext.getStore()) {
       ruleAction: ERROR_RULE_ACTIONS.has(attempt.ruleAction) ? attempt.ruleAction : null,
       matchedBy: Array.isArray(attempt.matchedBy) ? attempt.matchedBy.filter((value) => ['status','body','header','provider','model','default'].includes(value)).slice(0, 5) : [],
       errorScope: attempt.errorScope || null, scopeEvidence: attempt.scopeEvidence || null, failureClass: attempt.failureClass || null,
-      healthAction: attempt.healthAction || 'none', retryAfterMs: attempt.retryAfterMs ?? null,
+      healthAction: attempt.healthAction || 'none', quotaRemovalAction: attempt.quotaRemovalAction === 'waiting-refresh' ? 'waiting-refresh' : null, retryAfterMs: attempt.retryAfterMs ?? null,
       retryRuleId: typeof attempt.retryRuleId === 'string' && ERROR_RULE_ID.test(attempt.retryRuleId) ? attempt.retryRuleId : null,
       retryDecision: attempt.retryDecision === 'stop' ? 'stop' : 'continue',
       retryMatchedBy: Array.isArray(attempt.retryMatchedBy) ? attempt.retryMatchedBy.filter((value) => RETRY_MATCH_KINDS.has(value)).slice(0, 2) : [],
@@ -2625,7 +2727,13 @@ function quotaDemandOutcome(account, { force = false, pageToken = null } = {}, n
   const lastSuccessAt = successfulQuotaTime(q, now);
   const pageSuccess = pageToken?.force && quotaPageOwnerHasNewSuccess(pageToken, account.id, lastSuccessAt);
   const forceRequired = pageToken ? quotaPageOwnerRequiresForce(pageToken, account.id, lastSuccessAt) : force;
-  if (pageSuccess || (!forceRequired && lastSuccessAt && now - lastSuccessAt < QUOTA_SUCCESS_MS)) return 'cached';
+  const disposition = cachePoolEnabled() && configuredCachePoolLowQuotaSize() > 0 ? getAccountState(account.id) : null;
+  if (!forceRequired && disposition?.quotaDisposition === 'waiting-refresh' && lastSuccessAt && lastSuccessAt >= disposition.quotaDispositionAt && now - lastSuccessAt < QUOTA_SUCCESS_MS) return 'cached';
+  if (!forceRequired && disposition?.quotaDisposition === 'quota-exhausted' && lastSuccessAt) {
+    const next = disposition.quotaRetryAt > lastSuccessAt ? disposition.quotaRetryAt : lastSuccessAt + QUOTA_SUCCESS_MS;
+    if (now < next) return 'cached';
+  }
+  if (pageSuccess || (!forceRequired && disposition?.quotaDisposition !== 'waiting-refresh' && disposition?.quotaDisposition !== 'quota-exhausted' && lastSuccessAt && now - lastSuccessAt < QUOTA_SUCCESS_MS)) return 'cached';
   return null;
 }
 function quotaJobAccount(job) {
@@ -2729,6 +2837,7 @@ async function runQuotaJob(job, account) {
   state.lastAttemptAt = attemptedAt;
   if (snapshot) {
     state.snapshot = snapshot; state.lastSuccessAt = snapshot.fetchedAt; state.errorCategory = null; quotaFailureCounts.delete(job.id); quotaSuccessVersions.set(job.id, (quotaSuccessVersions.get(job.id) || 0) + 1);
+    reconcileQuotaDisposition(job.id, snapshot);
     if (quotaProjection(job.id).pool === 'reserve') invalidateSessionBindingsForAccount(job.id);
     else reconcileSessionBindings();
   } else {
@@ -2737,6 +2846,37 @@ async function runQuotaJob(job, account) {
   }
   try { saveMeta(); } catch (error) { console.error(`[额度] 持久化失败：${safeReason(error.message)}`); }
   return snapshot ? 'refreshed' : 'failed';
+}
+// The existing quota job is the only writer that may clear a quota disposition.
+// A partial known-100 snapshot confirms exhaustion; an incomplete/failed snapshot
+// never proves that a previously confirmed exhaustion (or waiting hold) recovered.
+function reconcileQuotaDisposition(id, snapshot) {
+  if (!cachePoolEnabled() || configuredCachePoolLowQuotaSize() === 0) return;
+  const now = Date.now(), state = getAccountState(id);
+  const windows = Object.values(snapshot.limits || {});
+  const exhausted = windows.filter((window) => window.percentUsed >= 100);
+  if (exhausted.length) {
+    const resets = exhausted.map((window) => Date.parse(window.resetsAt)).filter((at) => Number.isSafeInteger(at) && at > now);
+    const retryAt = resets.length ? Math.min(...resets) : 0;
+    META.accountStates[id] = { ...(state || {}), quotaDisposition: 'quota-exhausted', quotaDispositionAt: state?.quotaDisposition === 'quota-exhausted' ? state.quotaDispositionAt : now, quotaRetryAt: retryAt, quotaReason: 'known-exhausted' };
+    invalidateSessionBindingsForAccount(id);
+    notifyCapacityWaiters();
+  } else if (windows.length === 3 && state?.quotaDisposition && snapshot.fetchedAt >= state.quotaDispositionAt) {
+    // An operator save may reconcile an older cached snapshot. Only a success
+    // obtained after this disposition is evidence that it may be cleared.
+    META.accountStates[id] = { ...state, quotaDisposition: null, quotaDispositionAt: 0, quotaRetryAt: 0, quotaReason: null };
+    notifyCapacityWaiters();
+  }
+}
+function persistLowQuotaHold(account) {
+  if (!account?.id) return;
+  // Distinguish a pre-hold cached success even when both events share one millisecond.
+  const now = Math.max(Date.now(), (successfulQuotaTime(META.accountQuotas?.[account.id]) || 0) + 1);
+  META.accountStates[account.id] = { ...(getAccountState(account.id) || {}), quotaDisposition: 'waiting-refresh', quotaDispositionAt: now, quotaRetryAt: 0, quotaReason: 'account-degrade' };
+  invalidateSessionBindingsForAccount(account.id);
+  notifyCapacityWaiters();
+  try { saveMeta(); } catch (error) { console.error(`[账号] 状态持久化失败：${safeReason(error.message)}`); }
+  scheduleQuotaRefresh();
 }
 function pumpQuotaQueue() {
   if (shuttingDown) { for (const job of [...quotaQueue]) finishQueuedQuotaJob(job); return; }
@@ -3309,7 +3449,7 @@ function persistAccountAction(account, action) {
   if (!account?.id || !action || action.scope !== 'account' || !['cooldown','hard-quarantine'].includes(action.action)) return;
   const now = Date.now();
   const state = { banned: action.action === 'hard-quarantine', hardQuarantined: action.action === 'hard-quarantine', cooldownUntil: action.action === 'cooldown' ? now + action.cooldownMs : 0, statusCode: action.statusCode, reason: action.ruleId ? `rule:${action.ruleId}` : 'rule', ruleId: action.ruleId, updatedAt: now };
-  META.accountStates ||= {}; META.accountStates[account.id] = state;
+  META.accountStates ||= {}; META.accountStates[account.id] = { ...(getAccountState(account.id) || {}), ...state };
   clearProviderCircuitForAccount(account.id);
   invalidateSessionBindingsForAccount(account.id);
   try { saveMeta(); } catch (error) { console.error(`[账号] 状态持久化失败：${safeReason(error.message)}`); }
@@ -3346,7 +3486,7 @@ async function attemptOnce(modelId, body, attempt, account, forwardedHeaders, si
     return { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${errText(e.message)}`, type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter: null, responseHeaders: {}, responseContentType: null, responseBytes: 0, netError: errText(e.message), terminalOrigin: origin, acc: account, attemptToken: e.attemptToken || null, detailAttempt: e.detailAttempt || null, detailResponseBody: null, detailCaptureState: 'no-response' };
   }
 }
-function settleAttempt(modelId, attempt, result, account, { clientDisconnected = false, updateSuccess = true, cfg = {}, sensitiveValues = [] } = {}) {
+function settleAttempt(modelId, attempt, result, account, { clientDisconnected = false, updateSuccess = true, cfg = {}, sensitiveValues = [], quotaRole = null } = {}) {
   const currentGeneration = providerAttemptGenerationIsCurrent(modelId, account, attempt);
   const detailAttempt = result.detailAttempt || null, detailRoot = detailAttempt?.root || detailContext.getStore();
   const settleDetail = (failed, captureState = result.detailCaptureState) => detailRoot?.settleAttempt(detailAttempt, {
@@ -3375,14 +3515,16 @@ function settleAttempt(modelId, attempt, result, account, { clientDisconnected =
   result.ordinaryReason = ordinaryFailureReason(result, sensitiveValues);
   const policy = matchErrorRule({ result, classification, modelId, provider: attempt.upstream, sensitiveValues });
   const accountAction = policy.scope === 'account' && ['cooldown','hard-quarantine'].includes(policy.action) ? policy : null;
-  const removesAccount = !!accountAction;
+  const quotaRemovalAction = currentGeneration && quotaRole === 'low' && policy.scope === 'account' && policy.action === 'degrade' ? 'waiting-refresh' : null;
+  const removesAccount = !!accountAction || !!quotaRemovalAction;
   if (currentGeneration && policy.scope === 'account') persistAccountAction(account, policy);
+  if (quotaRemovalAction) persistLowQuotaHold(account);
   else if (currentGeneration && policy.scope === 'provider-model') persistProviderAction(modelId, attempt.upstream, policy);
   const healthAction = currentGeneration ? (policy.action === 'degrade' ? 'degrade' : policy.action) : 'none';
   if (currentGeneration && policy.scope === 'provider-model' && policy.action === 'degrade') updateProviderHealth(modelId, attempt.upstream, { classification, note: `${classification.evidence}:${classification.failureClass}` });
   const providerCircuitAction = currentGeneration && !removesAccount ? settleProviderCircuit(modelId, cfg, account, attempt, result) : null;
   const retryDecision = matchRetryRule(result, sensitiveValues);
-  return { classification, policy, accountAction, healthAction, providerCircuitAction, retryDecision };
+  return { classification, policy, accountAction, quotaRemovalAction, healthAction, providerCircuitAction, retryDecision };
 }
 function traceAttempt(attempt, result, account, ms, diagnostic) {
   const candidate = result.attemptToken || (result.detailAttempt ? { attemptIndex: result.detailAttempt.attemptIndex, callId: result.detailAttempt.callId } : null);
@@ -3399,7 +3541,7 @@ function traceAttempt(attempt, result, account, ms, diagnostic) {
     providerCircuitAction: diagnostic.providerCircuitAction || null,
     errorScope: diagnostic.classification?.scope || null,
     scopeEvidence: diagnostic.classification?.evidence || null, failureClass: diagnostic.classification?.failureClass || null,
-    healthAction: diagnostic.healthAction || 'none', retryAfterMs: diagnostic.policy?.cooldownMs ?? diagnostic.classification?.retryAfterMs ?? null,
+    healthAction: diagnostic.healthAction || 'none', quotaRemovalAction: diagnostic.quotaRemovalAction === 'waiting-refresh' ? 'waiting-refresh' : null, retryAfterMs: diagnostic.policy?.cooldownMs ?? diagnostic.classification?.retryAfterMs ?? null,
     retryRuleId: diagnostic.retryDecision?.ruleId || null,
     retryDecision: diagnostic.retryDecision?.decision || 'continue',
     retryMatchedBy: Array.isArray(diagnostic.retryDecision?.matchedBy) ? diagnostic.retryDecision.matchedBy.filter((value) => RETRY_MATCH_KINDS.has(value)) : [],
@@ -3414,6 +3556,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
   const plan = buildProviderPlan(modelId, cfg, account), trace = [], attempted = new Set();
   let retryStop = false, localRpm = false, localRpmRetryAt = null;
   const lease = attemptOwner?.lease || null;
+  const quotaRole = lease?.quotaRole || null;
   // 上一个真实上游尝试的终态；本地 RPM 阻塞时保留它作为历史事实，不被伪造成 upstream 429。
   let rpmBlockedAfter = null;
   const auto = plan.source === 'auto';
@@ -3522,22 +3665,22 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
               detailResponseBody: streamErrorBody || (transportOrigin ? null : text), detailCaptureState: transportOrigin ? 'stream-transport-failed' : 'response-error',
             };
             result.note = errText(un.body?.error?.message || netError);
-            const diagnostic = settleAttempt(modelId, attempt, result, account, { clientDisconnected: clientClosed, cfg, sensitiveValues });
+            const diagnostic = settleAttempt(modelId, attempt, result, account, { clientDisconnected: clientClosed, cfg, sensitiveValues, quotaRole });
             trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
             if (!attempt.upstream) learnAvailableProviders(modelId, result.note);
-            last = { ...result, accountAction: diagnostic.accountAction, classification: diagnostic.classification };
+            last = { ...result, accountAction: diagnostic.accountAction, quotaRemovalAction: diagnostic.quotaRemovalAction, classification: diagnostic.classification };
             if (diagnostic.retryDecision?.decision === 'stop') { retryStop = true; break; }
-            if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine') break;
+            if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine' || last.quotaRemovalAction) break;
             continue;
           }
           if (!up) {
             const origin = timedOut || /timeout/i.test(netError || '') ? 'timeout' : account.proxyUrl ? 'proxy' : 'network';
             const result = { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${netError || 'no response'}`, type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter: null, responseHeaders: {}, responseContentType: null, responseBytes: 0, netError: netError || 'no response', terminalOrigin: origin, acc: account, note: netError || 'no response', attemptToken: failedAttemptToken, detailAttempt: failedDetailAttempt, detailResponseBody: null, detailCaptureState: 'no-response' };
-            const diagnostic = settleAttempt(modelId, attempt, result, account, { clientDisconnected: clientClosed, cfg, sensitiveValues });
+            const diagnostic = settleAttempt(modelId, attempt, result, account, { clientDisconnected: clientClosed, cfg, sensitiveValues, quotaRole });
             trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
-            last = { ...result, accountAction: diagnostic.accountAction, classification: diagnostic.classification };
+            last = { ...result, accountAction: diagnostic.accountAction, quotaRemovalAction: diagnostic.quotaRemovalAction, classification: diagnostic.classification };
             if (diagnostic.retryDecision?.decision === 'stop') { retryStop = true; break; }
-            if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine') break;
+            if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine' || last.quotaRemovalAction) break;
             continue;
           }
           keepCloseHook = true;
@@ -3550,13 +3693,13 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
         if (timedOut && result.status !== 200) { result.terminalOrigin = 'timeout'; result.netError = 'upstream timeout'; result.out = { error: { message: 'upstream fetch failed: upstream timeout', type: 'upstream_error' } }; }
         const ms = Date.now() - t1;
         result.note = result.netError || (result.status !== 200 ? errText(result.out?.error?.message) : 'ok');
-        const diagnostic = settleAttempt(modelId, attempt, result, account, { clientDisconnected: clientClosed, cfg, sensitiveValues });
+        const diagnostic = settleAttempt(modelId, attempt, result, account, { clientDisconnected: clientClosed, cfg, sensitiveValues, quotaRole });
         trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
         if (result.status !== 200 && !attempt.upstream) learnAvailableProviders(modelId, result.note);
-        last = { ...result, accountAction: diagnostic.accountAction, classification: diagnostic.classification };
+        last = { ...result, accountAction: diagnostic.accountAction, quotaRemovalAction: diagnostic.quotaRemovalAction, classification: diagnostic.classification };
         if (result.status === 200) break;
         if (diagnostic.retryDecision?.decision === 'stop') { retryStop = true; break; }
-        if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine') break;
+        if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine' || last.quotaRemovalAction) break;
       } catch (error) { permit?.release(); throw error; } finally { clearTimeout(timer); }
     }
   } finally {
@@ -3658,7 +3801,7 @@ async function handleChat(req, res) {
     }
     const action = chain.accountAction;
     if (action) accountActions.push({ account: account.name, action: action.action, statusCode: action.statusCode, ruleId: action.ruleId || null, scope: action.scope });
-    if (action && (action.action === 'cooldown' || action.action === 'hard-quarantine') && !chain.started && accountAttempt === 0 && !chain.retryStop) {
+    if ((action?.action === 'cooldown' || action?.action === 'hard-quarantine' || chain.quotaRemovalAction === 'waiting-refresh') && !chain.started && accountAttempt === 0 && !chain.retryStop) {
       excluded.add(account.id);
       lease.release();
       chainLease = null;
@@ -3703,13 +3846,13 @@ async function handleChat(req, res) {
       const disconnected = origin === 'client_disconnect';
       if (observed.error && providerAttempt) {
         const result = { status: observed.normalizedStatus, upstreamStatus: 200, normalizedStatus: observed.normalizedStatus, routing: { finalProvider: observed.provider }, structuredError: observed.errorPayload, failureText: observed.error, retryAfter: null, responseHeaders: up.headers, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: 'upstream_envelope', note: safeReason(observed.error, sensitiveValues), attemptToken: chain.streamAttemptToken, detailAttempt: chain.streamDetailAttempt, detailResponseBody: observed.errorEvent, detailCaptureState: 'response-error' };
-        const diagnostic = settleAttempt(modelId, attempt, result, acc, { cfg, sensitiveValues });
+        const diagnostic = settleAttempt(modelId, attempt, result, acc, { cfg, sensitiveValues, quotaRole: lease.quotaRole });
         Object.assign(providerAttempt, traceAttempt(attempt, result, acc, providerAttempt.ms, diagnostic));
         const action = diagnostic.accountAction;
         if (action) accountActions.push({ account: acc.name, action: action.action, statusCode: action.statusCode, ruleId: action.ruleId || null, scope: action.scope });
       } else if (error && !disconnected && providerAttempt) {
         const result = { status: 502, upstreamStatus: 200, normalizedStatus: 502, routing: {}, structuredError: null, failureText: error, retryAfter: null, responseHeaders: up.headers, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: /timeout/i.test(String(error)) ? 'timeout' : acc.proxyUrl ? 'proxy' : 'network', note: 'stream transport error', attemptToken: chain.streamAttemptToken, detailAttempt: chain.streamDetailAttempt, detailResponseBody: null, detailCaptureState: 'stream-transport-failed' };
-        const diagnostic = settleAttempt(modelId, attempt, result, acc, { cfg, sensitiveValues });
+        const diagnostic = settleAttempt(modelId, attempt, result, acc, { cfg, sensitiveValues, quotaRole: lease.quotaRole });
         Object.assign(providerAttempt, traceAttempt(attempt, result, acc, providerAttempt.ms, diagnostic));
         const action = diagnostic.accountAction;
         if (action) accountActions.push({ account: acc.name, action: action.action, statusCode: action.statusCode, ruleId: action.ruleId || null, scope: action.scope });
@@ -4025,10 +4168,10 @@ async function dispatch(req, res) {
       clearExpiredCooldowns();
       const cacheRoles = cachePoolRoles();
       return sendJSON(res, 200, {
-        accounts: config.accounts.map((a) => { const recent = projectAggregate(aggregateRange(a.id).aggregate),lifetime=META.statistics.lifetime.accounts[a.id]; return { ...a, state: getAccountState(a.id), activeCount: activeCounts.get(a.id) || 0, rpm: rpmProjection(a), health: healthProjection(a), quota: quotaProjection(a.id), cachePoolRole: cacheRoles.get(a.id) ?? null, statistics: { recent24h: recent, lifetimeRequests: lifetime ? lifetime.requests : 0, lifetimeErrors: lifetime ? lifetime.errors : 0 } }; }),
+        accounts: config.accounts.map((a) => { const recent = projectAggregate(aggregateRange(a.id).aggregate),lifetime=META.statistics.lifetime.accounts[a.id]; return { ...a, state: getAccountState(a.id), activeCount: activeCounts.get(a.id) || 0, rpm: rpmProjection(a), health: healthProjection(a), quota: quotaProjection(a.id), cachePoolRole: cacheRoles.get(a.id) ?? null, cachePoolQuotaRole: configuredCachePoolLowQuotaSize() > 0 && cacheRoles.get(a.id) === 'active' ? ({ hot: 'high', warm: 'low', unknown: 'unknown' }[quotaProjection(a.id).pool] || null) : null, statistics: { recent24h: recent, lifetimeRequests: lifetime ? lifetime.requests : 0, lifetimeErrors: lifetime ? lifetime.errors : 0 } }; }),
         mode: config.accountMode, active: config.activeAccount, concurrencyWaitMs: config.concurrencyWaitMs,
         errorRules: config.errorRules, retryRules: config.retryRules, accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline,
-        cachePool: { minSize: configuredCachePoolSize(), maxSize: configuredCachePoolMaxSize(), targetSize: configuredCachePoolTargetSize(), binding: sessionBindingSummary() },
+        cachePool: { minSize: configuredCachePoolSize(), maxSize: configuredCachePoolMaxSize(), lowSize: configuredCachePoolLowQuotaSize(), targetSize: configuredCachePoolTargetSize(), actual: cachePoolMembership(enabledAccounts())?.actual || { high: 0, low: 0, unknown: 0 }, binding: sessionBindingSummary() },
         stats: Object.fromEntries(config.accounts.map((a) => [a.name, { requests: META.statistics.lifetime.accounts[a.id]?.requests ?? 0 }])),
       });
     }
@@ -4055,6 +4198,7 @@ async function dispatch(req, res) {
           fallbackOrder: config.accountPipeline.order,
           fallbackCachePoolSize: configuredCachePoolSize(),
           fallbackCachePoolMaxSize: configuredCachePoolMaxSize(),
+          fallbackCachePoolLowQuotaSize: config.accountPipeline.cachePoolLowQuotaSize,
           fallbackSessionBindingExplicitTtlMs: config.accountPipeline.sessionBindingExplicitTtlMs,
           fallbackSessionBindingFallbackTtlMs: config.accountPipeline.sessionBindingFallbackTtlMs,
           fallbackSessionBindingMaxEntries: config.accountPipeline.sessionBindingMaxEntries,
@@ -4099,6 +4243,12 @@ async function dispatch(req, res) {
         else for (const model of new Set([...Object.keys(previous.perModel || {}), ...Object.keys(current.perModel || {})])) if (JSON.stringify(previous.perModel?.[model]) !== JSON.stringify(current.perModel?.[model])) clearProviderCircuitForRoute(id, model);
       }
       if (quotaRoutingWasEnabled !== quotaRoutingEnabled()) advanceQuotaRoutingEpoch();
+      // Enabling role-aware routing must evaluate the latest already-persisted
+      // successful snapshot immediately, not wait behind its five-minute cache.
+      if (cachePoolEnabled() && configuredCachePoolLowQuotaSize() > 0) for (const account of accs) {
+        const quota = META.accountQuotas?.[account.id];
+        if (quota?.snapshot && quota.lastSuccessAt === quota.snapshot.fetchedAt) reconcileQuotaDisposition(account.id, quota.snapshot);
+      }
       for (const id of Object.keys(META.accountStates || {})) if (!seen.has(id)) delete META.accountStates[id];
       for (const id of Object.keys(META.statistics.lifetime.accounts)) if (!seen.has(id)) delete META.statistics.lifetime.accounts[id];
       for (const bucket of META.statistics.minuteBuckets) for (const id of new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health),...Object.keys(bucket.accountHealth)])) if (!seen.has(id)) { delete bucket.accounts[id]; delete bucket.health[id]; delete bucket.accountHealth[id]; }
@@ -4116,7 +4266,7 @@ async function dispatch(req, res) {
       const body = await readJsonBody(req);
       const id = String(body?.id || '');
       if (!config.accounts.some((a) => a.id === id)) return sendJSON(res, 400, { error: { message: 'unknown account id' } });
-      delete META.accountStates[id]; reconcileSessionBindings(); saveMeta();
+      clearRuleAccountState(id); reconcileSessionBindings(); saveMeta();
       return sendJSON(res, 200, { ok: true });
     }
     if (req.method === 'POST' && p === '/api/providers/recover') {
