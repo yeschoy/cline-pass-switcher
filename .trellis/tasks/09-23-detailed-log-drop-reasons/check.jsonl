@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Verify fixed safe reason projection, counter reconciliation, failure isolation and detailed/ordinary boundary."}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Verify capture drops never alter model responses or count cancellation/upstream errors."}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Verify DETAIL_* visit ownership, stale response guards and no account draft mutation."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Verify textContent/ARIA/narrow-width behavior of safe reason breakdown."}
+{"file":".trellis/tasks/09-23-detailed-log-drop-reasons/research/current-drop-contract.md","reason":"Cross-check every original dropped increment and production aggregate motivation without bodies."}
