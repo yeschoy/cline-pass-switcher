@@ -70,6 +70,13 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 - Check the public hostname when DNS is available. A DNS failure that is reproduced before switching on both the deploy host and an independent client is an external pre-existing dependency failure: report it, but do not reinterpret the deployment target or roll back an otherwise healthy release solely for that DNS condition.
 - Never print `proxyKey`; read it only inside the remote process to make authenticated loopback checks, then unset it.
 
+#### New API Chat runtime integration (operator guidance, not a deployment instruction)
+
+- The supported path is New API → Switcher `/v1/chat/completions` over HTTP/1.1 → Cline. Switcher's default inbound between-request idle is 95000 ms, with `headersTimeout = keepAliveTimeout + 5000` (100000 ms by default), slightly longer than New API's documented 90-second outbound idle pool. Set these from the strictly bounded runtime environment in `database-guidelines.md` when the actual intermediary has different limits; do not change persisted config to tune sockets or SSE timers. Reuse is conditional on the proxy/upstream also keeping connections open.
+- Disable SSE response buffering at each reverse proxy on this path. Switcher sends `: PING\n\n` downstream after a valid first `data:` event, at complete SSE event boundaries and after 25000 ms of upstream silence by default; `CLINE_PASS_SSE_HEARTBEAT_MS=0` disables only that comment. New API's upstream scanner can reset its idle window on these comments without presenting model chunks. This does **not** keep New API → final client alive: enable New API's **existing** downstream ping setting separately if required. Do not claim to have modified New API.
+- An upstream that never sends a first data event still hits Switcher's 120000 ms wall deadline (including headers and any comment prelude); an already-started but permanently silent Cline stream still hits its 360000 ms upstream socket idle timeout despite downstream pings. New API's ordinary Chat path may not propagate final-client cancellation immediately before Switcher has responded with headers; the first-event deadline bounds that gap, not an instant abort.
+- Roll back by setting `CLINE_PASS_SSE_HEARTBEAT_MS=0` to stop comments, or use the normal committed-HEAD rollback path for the full connection-pool change. Neither switcher nor this deployment procedure offers inbound HTTP/2/h2c, `/v1/realtime` WebSocket, or `/v1/responses` routing. No production or live-New-API verification is implied by local integration tests; Node >=18 is the target but Node 18 execution remains unverified (local mock tests ran on Node 26; Docker daemon unavailable).
+
 ### 4. Validation & Error Matrix
 
 | Condition | Required result |
@@ -88,6 +95,8 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 | `data/config.json` hash changes without a declared migration, or differs from the copy-predicted migration hash | Restore the backed-up config, roll back, and report |
 | Authenticated loopback API or internal network alias fails | Roll back and retain evidence |
 | Public DNS was already unavailable before switching | Continue only with all required local/internal gates; report public ingress as degraded |
+| An intermediary buffers SSE or has a shorter idle threshold than the heartbeat | The Switcher cannot guarantee streaming keepalive through it; configure the intermediary/interval, validate end-to-end before claiming success |
+| Switcher comments arrive at New API but the final client still idles out | Enable New API's existing downstream ping where needed; Switcher comments alone cover only New API ← Switcher |
 | Public endpoint fails despite working DNS | Treat as deployment validation failure and roll back |
 | Deployment succeeds | Atomically update `deployment.json` with release, commit, source hashes, previous release, safe verification facts, and no secrets |
 
@@ -101,12 +110,15 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 - **Bad:** use `scp -r .`, which can upload gitignored credentials, local data, `.pi`, `.trellis`, or unrelated dirty files.
 - **Bad:** print the admin key in logs or pass it through a parent-visible command line.
 - **Bad:** extract under `umask 077`, build root-owned `0600` JavaScript files, and test only as container root; production UID/GID `1000:1000` will fail before listening.
+- **Good:** a local/mock New API-style HTTP/1.1 client reuses a Switcher socket beyond five seconds and a line scanner ignores comments as chunks; an operator separately enables New API's downstream ping and disables intermediary buffering.
 - **Bad:** assume host-level `node` exists or embed a local hash inside a multiply nested quoted SSH command; both can fail at an ambiguous operational boundary.
+- **Bad:** promise final-client keepalive merely because Switcher emits pings, or describe local Node 26 tests as proof of production/New API/Node 18 behavior.
 
 ### 6. Tests Required
 
 Before switching:
 
+- for New API Chat deployments, inspect (without printing secrets) the chosen HTTP/1.1 upstream path, intermediary SSE buffering/idle settings and whether New API's own downstream ping is needed; local `test/integration.test.js` covers inbound socket reuse >5 seconds, direct and proxy tunnel reuse, comment-filtering scanner, first-data/stream-idle separation, backpressure and graceful SSE finalization, but cannot replace a staging end-to-end check against the actual topology or a Node 18 runtime run;
 - prove the checked-out deployment source is `main` and local `main` equals `origin/main`;
 - run the repository full test suite against committed code;
 - verify the identity path is gitignored and mode `0600` without reading it;

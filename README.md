@@ -90,7 +90,18 @@ location / {
 | `PUBLIC_BASE_URL` | 门户展示的公网代理地址，如 `https://pass.example.com` |
 | `PORT` / `BIND_HOST` / `DATA_DIR` | 端口 / 绑定地址（容器内为 0.0.0.0）/ 配置目录 |
 
-环境变量在启动时覆盖 `config.json`；此后通过控制台保存设置，会以当前生效值写回文件。
+上述账号/安全类环境变量在启动时覆盖 `config.json`；此后通过控制台保存设置，会以当前生效值写回文件。以下连接/流运行参数只从环境变量读取，不写入配置文件；非法值回退各自默认值，单位均为 **毫秒或连接数**，不猜测秒数。
+
+| 运行变量 | 默认值 | 合法范围 |
+|---|---:|---:|
+| `CLINE_PASS_INBOUND_KEEP_ALIVE_MS`（请求间 idle；headers 超时为此值 + 5000） | 95000 | 100～120000 |
+| `CLINE_PASS_SSE_FIRST_EVENT_MS`（首响应/首个 data 硬期限） | 120000 | 100～120000 |
+| `CLINE_PASS_SSE_STREAM_IDLE_MS`（起流后 Cline socket idle） | 360000 | 200～600000 |
+| `CLINE_PASS_SSE_HEARTBEAT_MS`（下游静默注释；0 关闭） | 25000 | 0～60000 |
+| `CLINE_PASS_DIRECT_MAX_SOCKETS` / `CLINE_PASS_DIRECT_MAX_FREE_SOCKETS` | 256 / 32 | 1～1024 / 1～64 |
+| `CLINE_PASS_PROXY_MAX_SOCKETS` / `CLINE_PASS_PROXY_MAX_FREE_SOCKETS` | 32 / 2 | 1～128 / 1～16 |
+
+空闲上限不会超过同池活跃上限；最多缓存 128 个已保存代理 URL，超过后使用请求级一次性 agent，draft 代理测试同样一次性销毁。`NODE_ENV=test` 下可用对应 `CLINE_PASS_TEST_*` 毫秒变量覆盖上表四项时间设置，遵守相同范围；非测试环境忽略测试变量。
 
 ---
 
@@ -181,7 +192,7 @@ Cline Pass 订阅模型在 Cline 网关之后分成两条管道，钉住上游�
 
 ## NewAPI、会话粘性与 Header 边界
 
-NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流式/非流式 OpenAI Chat Completions。下游 `Authorization` 只用于本代理鉴权，转发到 Cline 的始终是所选账号密钥。
+NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流式/非流式 OpenAI Chat Completions。建议保持到 Switcher 的 HTTP/1.1 长连接（其入站 idle 95 秒，略长于 New API 默认的 90 秒连接池 idle），并关闭中间反代的 SSE 响应缓冲。Switcher 在首个上游 data 事件通过后才会向 New API 发送静默注释心跳 `: PING`（仅在完整 SSE 事件边界注入，不拆开未完成的 data 行）；这只维护 Switcher → New API 链路。若最终客户端也需要静默段心跳，请在 **New API 自己的现有运维设置**中启用其下游 ping；不需要修改 New API 源码。New API 普通 Chat 在收到上游响应头前的最终客户端取消可能不会立即传播到 Switcher，此处由首事件超时有界收敛。仅支持 HTTP/1.1 Chat Completions；不提供 HTTP/2/h2c 入站、Realtime WebSocket 或 Responses API。下游 `Authorization` 只用于本代理鉴权，转发到 Cline 的始终是所选账号密钥。
 
 `sticky` 模式分别识别 Codex 的 parent thread / `prompt_cache_key` / session/thread 字段，以及 Claude Code 的 parent-agent / session / agent 字段；parent/root 优先于 child/agent。直接 Chat 请求若已有合法 `prompt_cache_key` 或 `session_id` 会原样保留；若只收到 Codex/Claude 显式会话 Header/metadata，则派生域分离、不可反推原值的 `prompt_cache_key` 发给 Cline。无显式会话时仍只对首个 system/developer 与首个 user 消息做本机 HMAC 账号路由，但不会把该 fallback 冒充成显式上游 key。原始会话、派生 key、HMAC 指纹和消息不会进入普通日志/metadata。客户端真实提供的协议 Header 仍按允许列表透传；`Authorization`、`Proxy-Authorization`、Cookie、逐跳 Header、Installation ID 和 Attestation 始终剔除，也不会伪造 User-Agent、设备、浏览器或 TLS 指纹。NewAPI 若在到达 Switcher 前已丢失会话字段，本服务无法恢复原值，会如实显示 `message_hmac` 回退。
 
