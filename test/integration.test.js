@@ -2920,7 +2920,7 @@ test('retry rules stop deterministic request errors before remaining providers o
     retryRules: [
       { id: 'stop-first-match', decision: 'stop', when: { statuses: [502], body_contains: ['alpha needle'] } },
       { id: 'stop-beta', decision: 'stop', when: { statuses: [502], body_contains: ['beta'] } },
-      { id: 'stop-system-message', decision: 'stop', when: { statuses: [502], body_contains: ['system message must have content'] } },
+      { id: 'stop-system-message', decision: 'stop', when: { statuses: [502], body_contains: 'system message must have content' } },
       { id: 'stop-status-only', decision: 'stop', when: { statuses: [503], body_contains: ['never appears'] } },
     ],
     errorRules: [
@@ -2974,6 +2974,31 @@ test('retry rules stop deterministic request errors before remaining providers o
   await stop(running.child); running.child = null; running = await startSwitcher(null, dir);
   const view = await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
   assert.equal(view.retryRules.length, 4, 'retryRules round-trip through restart');
+});
+
+test('string retry rule preserves pre-stream timeout status and ordinary failure logs', async (t) => {
+  const upstream = http.createServer((req) => { req.resume(); }); // No response headers or first SSE data.
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const running = await startSwitcher({
+    port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', activeAccount: 0,
+    accounts: [{ id: 'a', name: 'A', key: 'local-test-key', enabled: true }], knownModels: ['timeout-model'],
+    perModel: { 'timeout-model': { upstreams: ['first'], maxRetries: 0 } },
+    retryRules: [{ id: 'stop-specific', decision: 'stop', when: { statuses: [502], body_contains: 'system message must have content' } }],
+  }, null, { NODE_ENV: 'test', CLINE_PASS_TEST_SSE_FIRST_EVENT_MS: '200' });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+
+  const response = await rawJson(port, '/v1/chat/completions', { model: 'timeout-model', messages: [], stream: true });
+  assert.equal(response.status, 502, 'a nonmatching string needle must not mask the upstream timeout with a 500');
+  const requestId = response.headers['x-cline-request-id'];
+  const requestRow = await waitUntil(async () => (await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${requestId}`)).json()).items[0]);
+  const errorRow = await waitUntil(async () => (await (await fetch(`http://127.0.0.1:${port}/api/logs/errors?requestId=${requestId}`)).json()).items[0]);
+  assert.equal(requestRow.status, 502);
+  assert.equal(requestRow.result, 'failed');
+  assert.equal(requestRow.attempts.length, 1);
+  assert.equal(errorRow.status, 502);
+  assert.equal(errorRow.upstreamStatus, 0);
+  assert.equal(errorRow.retryDecision, 'continue');
+  assert.equal(errorRow.retryRuleId, null);
 });
 
 test('retryRules management API validates strictly, preserves old-client omission and keeps config bytes on rejection', async (t) => {

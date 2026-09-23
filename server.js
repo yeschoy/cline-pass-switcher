@@ -3463,7 +3463,7 @@ function matchRetryRule(result, sensitiveValues = []) {
   const body = failureRuleText(result, sensitiveValues).toLowerCase();
   for (const rule of config.retryRules || []) {
     if (!rule.when.statuses.includes(statusCode)) continue;
-    const needles = rule.when.body_contains;
+    const needles = Array.isArray(rule.when.body_contains) ? rule.when.body_contains : [rule.when.body_contains];
     const matchedBy = ['status'];
     if (!body || !needles.some((needle) => body.includes(needle.toLowerCase()))) continue;
     matchedBy.push('body');
