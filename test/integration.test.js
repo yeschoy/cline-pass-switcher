@@ -1025,7 +1025,7 @@ test('account HTTP proxy is used for chat and quota, and proxy failure never fal
   const proxyPort=await listen(proxy);const socket=http.createServer();const switchPort=await listen(socket);await close(socket);
   const config={port:switchPort,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'single',concurrencyWaitMs:0,accountPipeline:{quotaPool:true,excludeUnhealthy:false,healthSort:false,sticky:false},accounts:[{id:'a',name:'A',key:'ka',enabled:true,proxyUrl:`http://127.0.0.1:${proxyPort}`,headers:{'X-Chat-Only':'chat-value'},perModel:{}}],knownModels:['cline-pass/test'],perModel:{},accountErrorRules:{}};
   const running=await startSwitcher(config,null,{NODE_ENV:'test',CLINE_PASS_TEST_QUOTA_SUCCESS_MS:'500'});t.after(async()=>{await stop(running.child);await close(proxy);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
-  await waitUntil(async()=>quotaHits>0);const ok=await rawJson(switchPort,'/v1/chat/completions',{model:'cline-pass/test',messages:[]});assert.equal(ok.status,200);assert.ok(connects>=2);assert.equal(chatHits,1);assert.equal(quotaHits,1);
+  await waitUntil(async()=>quotaHits>0);const ok=await rawJson(switchPort,'/v1/chat/completions',{model:'cline-pass/test',messages:[]});assert.equal(ok.status,200);assert.equal(connects,1,'quota and chat reuse the persisted HTTP CONNECT tunnel');assert.equal(chatHits,1);assert.equal(quotaHits,1);
   const accounts=(await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json()).accounts;
   const spare=http.createServer();const deadPort=await listen(spare);await close(spare);
   accounts[0].proxyUrl=`http://user:password@127.0.0.1:${deadPort}`;
@@ -1050,7 +1050,10 @@ test('account HTTPS proxy uses a TLS CONNECT tunnel', async (t) => {
   const running = await startSwitcher(config, null, { NODE_EXTRA_CA_CERTS: certPath });
   t.after(async () => { await stop(running.child); for (const socket of tunnels) socket.destroy(); proxy.closeAllConnections?.(); upstream.closeAllConnections?.(); await close(proxy); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
   const result = await rawJson(switchPort, '/v1/chat/completions', { model: 'cline-pass/test', messages: [] });
-  assert.equal(result.status, 200, result.text); assert.equal(connects, 1); assert.equal(upstreamHits, 1);
+  assert.equal(result.status, 200, result.text);
+  assert.equal((await rawJson(switchPort, '/v1/chat/completions', { model: 'cline-pass/test', messages: [] })).status, 200);
+  assert.equal(upstreamHits, 2);
+  assert.equal(connects, 1, 'HTTPS CONNECT tunnel is reused when the proxy and upstream allow it');
 });
 
 test('SOCKS5 and SOCKS5H account proxies tunnel requests', async (t) => {
@@ -1061,8 +1064,8 @@ test('SOCKS5 and SOCKS5H account proxies tunnel requests', async (t) => {
   const socksPort=await listen(socks);const socket=http.createServer();const switchPort=await listen(socket);await close(socket);
   const base={id:'a',name:'A',key:'ka',enabled:true,perModel:{}};
   const running=await startSwitcher({port:switchPort,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'single',concurrencyWaitMs:0,accounts:[{...base,proxyUrl:`socks5://127.0.0.1:${socksPort}`}],knownModels:['cline-pass/test'],perModel:{},accountErrorRules:{}});t.after(async()=>{await stop(running.child);await close(socks);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
-  for(const protocol of ['socks5','socks5h']){const accounts=(await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json()).accounts;accounts[0].proxyUrl=`${protocol}://127.0.0.1:${socksPort}`;assert.equal((await rawJson(switchPort,'/api/accounts',{accounts,mode:'single',active:0,concurrencyWaitMs:0,accountErrorRules:{}})).status,200);assert.equal((await rawJson(switchPort,'/v1/chat/completions',{model:'cline-pass/test',messages:[]})).status,200);}
-  assert.equal(hits,2);assert.equal(socksConnections,2);
+  for(const protocol of ['socks5','socks5h']){const accounts=(await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json()).accounts;accounts[0].proxyUrl=`${protocol}://127.0.0.1:${socksPort}`;assert.equal((await rawJson(switchPort,'/api/accounts',{accounts,mode:'single',active:0,concurrencyWaitMs:0,accountErrorRules:{}})).status,200);for(let i=0;i<2;i++)assert.equal((await rawJson(switchPort,'/v1/chat/completions',{model:'cline-pass/test',messages:[]})).status,200);assert.equal(socksConnections,['socks5','socks5h'].indexOf(protocol)+1,`${protocol} tunnel reused`);}
+  assert.equal(hits,4);assert.equal(socksConnections,2);
 });
 
 test('usage statistics, health, pipeline validation and quota refresh are bounded and truthful', async (t) => {
@@ -2097,6 +2100,37 @@ test('graceful shutdown drains completed ordinary and error-detail records and b
   const blocked = await startSwitcher({ ...config, port: blockedPort }, blockedDir, { NODE_ENV: 'test', NODE_OPTIONS: `--import=${loader}`, CLINE_PASS_SHUTDOWN_MS: '120' });
   const blockedResponse = await rawJson(blockedPort, '/v1/chat/completions', { model: 'shutdown', messages: [] }); assert.equal(blockedResponse.status, 500);
   const started = Date.now(); await stop(blocked.child); assert.ok(Date.now() - started < 1000, 'shutdown deadline must bound a blocked detailed writer');
+});
+
+test('SIGTERM waits for an active SSE finalizer before draining logs and destroying agents', async (t) => {
+  const upstream = http.createServer((req, res) => {
+    req.resume(); req.on('end', () => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: {"choices":[{"delta":{"content":"first"}}]}\n\n');
+      setTimeout(() => res.end('data: [DONE]\n\n'), 350);
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-sse-shutdown-'));
+  let running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'test', enabled: true }], knownModels: ['m'] }, dir, { NODE_ENV: 'test', CLINE_PASS_SHUTDOWN_MS: '2000', CLINE_PASS_TEST_SSE_HEARTBEAT_MS: '70' });
+  t.after(async () => { if (running?.child?.exitCode === null) await stop(running.child); upstream.closeAllConnections?.(); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  const response = new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: '/v1/chat/completions', method: 'POST' }, (res) => {
+      let text = '', signaled = false;
+      res.on('data', (chunk) => {
+        text += chunk.toString();
+        if (!signaled && text.includes('first')) { signaled = true; running.child.kill('SIGTERM'); }
+      });
+      res.on('end', () => resolve({ text, requestId: res.headers['x-cline-request-id'] })); res.on('error', reject);
+    });
+    req.on('error', reject); req.end(JSON.stringify({ model: 'm', messages: [], stream: true }));
+  });
+  const { text, requestId } = await response;
+  assert.match(text, /data: \[DONE\]/);
+  await waitUntil(() => running.child.exitCode !== null, 3000, 'graceful SSE shutdown exits');
+  running = await startSwitcher(null, dir);
+  const rows = (await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${requestId}`)).json()).items;
+  assert.equal(rows.length, 1); assert.equal(rows[0].result, 'success'); assert.equal(rows[0].status, 200);
 });
 
 test('one successful chat finalization persists combined statistics and record metadata once', async (t) => {
@@ -3662,4 +3696,228 @@ test('a client cancellation after the attempt started never refunds RPM', async 
   assert.equal(settled.rpm.reserved, 0);
   opened[0].destroy();
   assert.equal((await rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] })).status, 429, 'the committed window still blocks the next request');
+});
+
+test('HTTP/1.1 inbound idle reuse crosses five seconds and direct outbound connections are pooled', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    seen.push(req.socket.remotePort);
+    req.resume(); req.on('end', () => res.end('{"choices":[{"message":{"content":"ok"}}]}'));
+  });
+  upstream.keepAliveTimeout = 9_000;
+  const upstreamPort = await listen(upstream);
+  const port = await unusedPort();
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'test', enabled: true }], knownModels: ['m'] }, null, { NODE_ENV: 'test', CLINE_PASS_TEST_INBOUND_KEEP_ALIVE_MS: '8500' });
+  const client = new http.Agent({ keepAlive: true, maxSockets: 1 });
+  t.after(async () => { client.destroy(); await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const send = () => new Promise((resolve, reject) => {
+    const data = JSON.stringify({ model: 'm', messages: [] });
+    const req = http.request({ host: '127.0.0.1', port, path: '/v1/chat/completions', method: 'POST', agent: client, headers: { 'Content-Length': Buffer.byteLength(data) } }, (res) => {
+      const localPort = req.socket.localPort;
+      res.resume(); res.on('end', () => resolve({ status: res.statusCode, localPort }));
+    });
+    req.on('error', reject); req.end(data);
+  });
+  const first = await send();
+  await new Promise((resolve) => setTimeout(resolve, 5200));
+  const second = await send();
+  assert.equal(first.status, 200); assert.equal(second.status, 200);
+  assert.equal(first.localPort, second.localPort, 'New API-style idle client reuses the inbound socket');
+  assert.equal(seen.length, 2); assert.equal(seen[0], seen[1], 'direct upstream HTTP socket reused');
+});
+
+test('persisted HTTP CONNECT tunnels reuse while proxy-test draft tunnels are destroyed', async (t) => {
+  let connects = 0, hits = 0, closed = 0;
+  const tunnels = new Set();
+  const upstream = http.createServer((req, res) => { hits++; req.resume(); req.on('end', () => res.end('{"choices":[]}')); });
+  const upstreamPort = await listen(upstream);
+  const proxy = http.createServer();
+  proxy.on('connect', (req, client, head) => {
+    connects++; tunnels.add(client); client.on('close', () => closed++);
+    const target = net.connect(upstreamPort, '127.0.0.1', () => {
+      tunnels.add(target); client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (head.length) target.write(head); target.pipe(client); client.pipe(target);
+    });
+    target.on('error', () => client.destroy());
+  });
+  const proxyPort = await listen(proxy), port = await unusedPort();
+  const proxyUrl = `http://127.0.0.1:${proxyPort}`;
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'test', enabled: true, proxyUrl }], knownModels: ['m'] });
+  t.after(async () => { await stop(running.child); for (const socket of tunnels) socket.destroy(); await close(proxy); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const chat = () => rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] });
+  assert.equal((await chat()).status, 200); assert.equal((await chat()).status, 200);
+  assert.equal(connects, 1, 'persisted HTTP proxy tunnel is pooled');
+  for (let i = 0; i < 3; i++) {
+    const testUrl = `http://user${i}:draft${i}@127.0.0.1:${proxyPort}`;
+    const result = await rawJson(port, '/api/accounts/proxy-test', { accountId: 'a', proxyUrl: testUrl });
+    assert.equal(result.json.ok, true);
+    await waitUntil(() => closed >= i + 1, 3000, 'draft tunnel destroyed after response settles');
+  }
+  assert.equal(connects, 4);
+  assert.equal((await chat()).status, 200); assert.equal(connects, 4, 'draft overrides did not evict or enter the persisted pool');
+  assert.equal(hits, 6);
+  const accounts = (await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json()).accounts;
+  accounts[0].proxyUrl = '';
+  assert.equal((await rawJson(port, '/api/accounts', { accounts, mode: 'single', active: 0, concurrencyWaitMs: 0, errorRules: [] })).status, 200);
+  await waitUntil(() => closed >= 4, 3000, 'saved proxy rotation destroys the stale idle tunnel');
+});
+
+test('direct HTTPS upstream reuses a TLS socket', async (t) => {
+  const certPath = path.resolve('test/fixtures/proxy-cert.pem');
+  const tlsOptions = { key: fs.readFileSync(path.resolve('test/fixtures/proxy-key.pem')), cert: fs.readFileSync(certPath) };
+  const ports = [];
+  const upstream = https.createServer(tlsOptions, (req, res) => { ports.push(req.socket.remotePort); req.resume(); req.on('end', () => res.end('{"choices":[]}')); });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const running = await startSwitcher({ port, upstreamBase: `https://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'test', enabled: true }], knownModels: ['m'] }, null, { NODE_EXTRA_CA_CERTS: certPath });
+  t.after(async () => { await stop(running.child); upstream.closeAllConnections?.(); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  for (let i = 0; i < 2; i++) assert.equal((await rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] })).status, 200);
+  assert.equal(ports.length, 2); assert.equal(ports[0], ports[1]);
+});
+
+test('production heartbeat env uses bounded milliseconds and ignores test-only overrides', async (t) => {
+  const upstream = http.createServer((req, res) => {
+    req.resume(); req.on('end', () => { res.writeHead(200, { 'Content-Type': 'text/event-stream' }); res.write('data: {}\n\n'); setTimeout(() => res.end('data: [DONE]\n\n'), 300); });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'test', enabled: true }], knownModels: ['m'] }, null, { NODE_ENV: 'production', CLINE_PASS_SSE_HEARTBEAT_MS: '80', CLINE_PASS_TEST_SSE_HEARTBEAT_MS: '0' });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const text = await new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: '/v1/chat/completions', method: 'POST' }, (res) => {
+      let body = ''; res.on('data', (chunk) => { body += chunk.toString(); }); res.on('end', () => resolve(body)); res.on('error', reject);
+    });
+    req.on('error', reject); req.end(JSON.stringify({ model: 'm', messages: [], stream: true }));
+  });
+  assert.match(text, /: PING\n\n/); assert.match(text, /data: \[DONE\]/);
+});
+
+test('SSE downstream write(false) waits for drain and never fabricates a cancelled request', async (t) => {
+  const upstream = http.createServer((req, res) => {
+    req.resume(); req.on('end', () => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: {"choices":[]}\n\n');
+      setTimeout(() => { for (let i = 0; i < 24; i++) res.write(`data: ${'x'.repeat(32_000)}\n\n`); res.end('data: [DONE]\n\n'); }, 180);
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-backpressure-'));
+  const loader = path.join(dir, 'observe-write.mjs');
+  fs.writeFileSync(loader, "import http from 'node:http'; const write=http.ServerResponse.prototype.write; http.ServerResponse.prototype.write=function(...args){const ok=write.apply(this,args); if(!ok && String(this.getHeader('content-type')).includes('text/event-stream')) console.error('TEST_BACKPRESSURE_FALSE'); return ok;};");
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'test', enabled: true, maxConcurrent: 1 }], knownModels: ['m'] }, dir, { NODE_ENV: 'test', NODE_OPTIONS: `--import=${loader}`, CLINE_PASS_TEST_SSE_HEARTBEAT_MS: '70', CLINE_PASS_TEST_SSE_STREAM_IDLE_MS: '1500' });
+  t.after(async () => { await stop(running.child); upstream.closeAllConnections?.(); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  const body = await new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: '/v1/chat/completions', method: 'POST' }, (res) => {
+      let text = ''; res.on('data', (c) => { text += c.toString(); });
+      res.pause(); setTimeout(() => res.resume(), 400);
+      res.on('end', () => resolve({ status: res.statusCode, text })); res.on('error', reject);
+    });
+    req.on('error', reject); req.end(JSON.stringify({ model: 'm', messages: [], stream: true }));
+  });
+  assert.equal(body.status, 200); assert.match(body.text, /data: \[DONE\]/);
+  await waitUntil(() => running.output().includes('TEST_BACKPRESSURE_FALSE'), 3000, 'res.write returned false');
+  const rows = await waitForRequestLogs(port, 1);
+  assert.equal(rows.length, 1); assert.equal(rows[0].result, 'success'); assert.equal(rows[0].status, 200);
+  const account = (await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json()).accounts[0];
+  assert.equal(account.activeCount, 0);
+});
+
+test('comment-only SSE head over 64 KiB closes an unfinished upstream before the first-event deadline', async (t) => {
+  let upstreamClosed = false;
+  const upstream = http.createServer((req, res) => {
+    req.resume(); req.on('end', () => {
+      res.on('close', () => { upstreamClosed = true; });
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(`: ${'x'.repeat(65_536)}\n\n`); // Intentionally never end the response.
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'test', enabled: true, maxConcurrent: 1 }], knownModels: ['m'] }, null, { NODE_ENV: 'test', CLINE_PASS_TEST_SSE_FIRST_EVENT_MS: '2500' });
+  t.after(async () => { await stop(running.child); upstream.closeAllConnections?.(); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const started = Date.now();
+  const result = await rawJson(port, '/v1/chat/completions', { model: 'm', messages: [], stream: true });
+  assert.equal(result.status, 502); assert.doesNotMatch(result.text, /: x/);
+  assert.ok(Date.now() - started < 1500, 'rejected head must not wait for the 2500ms first-event deadline');
+  await waitUntil(() => upstreamClosed, 800, 'rejected SSE head closes the native response');
+  const accounts = (await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json()).accounts;
+  assert.equal(accounts[0].activeCount, 0);
+});
+
+test('SSE prelude, first-data deadline, heartbeat, upstream idle and finalizers are independent', async (t) => {
+  const hits = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = []; req.on('data', (chunk) => chunks.push(chunk)); req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString());
+      const model = body.model, provider = body.provider?.only?.[0] || body.providerOptions?.gateway?.only?.[0];
+      hits.push({ model, provider });
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      if (model === 'cap') return res.end(`: ${'x'.repeat(65536)}\n\n`);
+      if (model === 'deadline') { res.write(': PING\n\n'); return; }
+      if (model === 'fallback' && provider === 'first') return res.end(': PING\n\nevent: error\ndata: {"error":{"message":"bad","status":429}}\n\n');
+      if (model === 'coalesced') return res.end(': PRELUDE\n\ndata: {"choices":[]}\n\ndata: [DONE]\n\n');
+      res.write(': PRELUDE\n\nevent: message\nid: 7\n\n');
+      res.write('data: {"choices":[{"delta":{"content":"first"}}]}\n\n');
+      if (model === 'idle') return;
+      if (model === 'fragmented') {
+        res.write('data: {"choices":[{"delta":{"content":"');
+        return setTimeout(() => res.end('later"}}]}\n\ndata: [DONE]\n\n'), 300);
+      }
+      setTimeout(() => res.end('data: {"usage":{"prompt_tokens":2,"completion_tokens":0}}\n\ndata: [DONE]\n\n'), 360);
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'test', enabled: true, maxConcurrent: 1, maxRpm: 20 }], knownModels: ['ok', 'idle', 'deadline', 'cap', 'fallback', 'fragmented', 'coalesced'], perModel: { fallback: { upstreams: ['first', 'second'] } } }, null, { NODE_ENV: 'test', CLINE_PASS_TEST_SSE_FIRST_EVENT_MS: '500', CLINE_PASS_TEST_SSE_STREAM_IDLE_MS: '900', CLINE_PASS_TEST_SSE_HEARTBEAT_MS: '75' });
+  t.after(async () => { await stop(running.child); upstream.closeAllConnections?.(); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const stream = (model) => new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: '/v1/chat/completions', method: 'POST' }, (res) => {
+      let text = '', pendingLine = '', idleResets = 0, pingAfterData = 0, scannerExpired = false, scannerTimer;
+      const dataEvents = [];
+      const snapshot = (aborted = false) => ({ status: res.statusCode, text, idleResets, pingAfterData, scannerExpired, dataEvents, aborted });
+      res.on('data', (c) => {
+        text += c.toString(); pendingLine += c.toString();
+        let end;
+        while ((end = pendingLine.indexOf('\n')) !== -1) {
+          const line = pendingLine.slice(0, end).replace(/\r$/, ''); pendingLine = pendingLine.slice(end + 1);
+          // New API resets its scanner idle window on each line, before filtering comments.
+          idleResets++;
+          if (model === 'ok') {
+            clearTimeout(scannerTimer);
+            scannerTimer = setTimeout(() => { scannerExpired = true; }, 250);
+          }
+          if (line === ': PING' && dataEvents.length) pingAfterData++;
+          if (line.startsWith('data:')) dataEvents.push(line.slice(5).trim());
+        }
+      });
+      res.on('end', () => { clearTimeout(scannerTimer); resolve(snapshot()); });
+      res.on('error', () => { clearTimeout(scannerTimer); resolve(snapshot(true)); });
+    });
+    req.on('error', reject); req.end(JSON.stringify({ model, messages: [], stream: true }));
+  });
+  const ok = await stream('ok');
+  assert.equal(ok.status, 200); assert.match(ok.text, /^: PRELUDE\n\nevent: message\nid: 7\n\ndata: /);
+  assert.match(ok.text, /data: \{"choices":.*\}\n\n(?:\: PING\n\n)+data: \{"usage"/); assert.match(ok.text, /data: \[DONE\]/);
+  assert.equal(ok.dataEvents.length, 3, 'New API-equivalent scanner ignores comments as model chunks');
+  assert.ok(ok.pingAfterData > 0); assert.equal(ok.scannerExpired, false, 'comment lines reset the 250ms scanner idle window during the 360ms pause');
+  const cap = await stream('cap'); assert.equal(cap.status, 502); assert.doesNotMatch(cap.text, /: x/);
+  const deadline = await stream('deadline'); assert.equal(deadline.status, 502); assert.doesNotMatch(deadline.text, /: PING/);
+  const idle = await stream('idle'); assert.equal(idle.status, 200); assert.equal(idle.aborted, true);
+  assert.match(idle.text, /: PING/); assert.doesNotMatch(idle.text, /\[DONE\]/);
+  const coalesced = await stream('coalesced');
+  assert.equal(coalesced.status, 200); assert.equal(coalesced.text, ': PRELUDE\n\ndata: {"choices":[]}\n\ndata: [DONE]\n\n', 'unshift preserves multiple events in one source chunk');
+  const fragmented = await stream('fragmented');
+  assert.equal(fragmented.status, 200); assert.match(fragmented.text, /data: \{"choices":\[\{"delta":\{"content":"later"\}\}\]\}\n\n/);
+  assert.equal(fragmented.text.split(': PING').length - 1, 0, 'no heartbeat can split an unfinished upstream SSE data line');
+  const fallback = await stream('fallback'); assert.equal(fallback.status, 200);
+  assert.match(fallback.text, /data: \[DONE\]/); assert.doesNotMatch(fallback.text, /"message":"bad"/);
+  assert.deepEqual(hits.filter((hit) => hit.model === 'fallback').map((hit) => hit.provider), ['first', 'second']);
+  const rows = await waitForRequestLogs(port, 7);
+  for (const model of ['ok', 'idle', 'deadline', 'cap', 'fallback', 'fragmented', 'coalesced']) assert.equal(rows.filter((row) => row.requestedModel === model).length, 1);
+  assert.equal(rows.find((row) => row.requestedModel === 'idle').result, 'failed');
+  assert.equal(rows.find((row) => row.requestedModel === 'ok').status, 200);
+  assert.equal(rows.find((row) => row.requestedModel === 'ok').attempts.length, 1);
+  assert.equal(rows.find((row) => row.requestedModel === 'fallback').attempts.length, 2);
+  const statistics = await (await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();
+  assert.equal(statistics.lifetime.global.requests, 7);
+  assert.equal(statistics.lifetime.global.usageRequests, 2, 'only explicit upstream usage, never heartbeat, is counted');
+  const accounts = await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+  assert.equal(accounts.accounts[0].activeCount, 0); assert.equal(accounts.accounts[0].rpm.used, 8);
+  assert.equal(hits.length, 8);
 });

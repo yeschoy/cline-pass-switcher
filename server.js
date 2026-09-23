@@ -9,7 +9,7 @@ import https from 'node:https';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { Transform } from 'node:stream';
+import { Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
@@ -2607,19 +2607,46 @@ function forwardHeadersFor(req, body = {}) {
   // unrelated generic metadata merely because the client supplied it.
   return copyAllowedHeaders(req, protocol === 'codex' ? CODEX_HEADERS : protocol === 'claude' ? CLAUDE_HEADERS : GENERIC_HEADERS);
 }
+// All runtime knobs use explicit milliseconds/counts. Invalid values fall back to a safe default.
+function boundedEnv(name, fallback, min, max) {
+  const raw = process.env[name];
+  if (raw === undefined || !/^(0|[1-9]\d*)$/.test(raw)) return fallback;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= min && value <= max ? value : fallback;
+}
+function runtimeDuration(name, fallback, min, max) {
+  const value = boundedEnv(`CLINE_PASS_${name}`, fallback, min, max);
+  return process.env.NODE_ENV === 'test' ? boundedEnv(`CLINE_PASS_TEST_${name}`, value, min, max) : value;
+}
+const INBOUND_KEEP_ALIVE_MS = runtimeDuration('INBOUND_KEEP_ALIVE_MS', 95_000, 100, 120_000);
+const SSE_FIRST_EVENT_MS = runtimeDuration('SSE_FIRST_EVENT_MS', 120_000, 100, 120_000);
+const SSE_STREAM_IDLE_MS = runtimeDuration('SSE_STREAM_IDLE_MS', 360_000, 200, 600_000);
+const SSE_HEARTBEAT_MS = runtimeDuration('SSE_HEARTBEAT_MS', 25_000, 0, 60_000);
+const directSockets = boundedEnv('CLINE_PASS_DIRECT_MAX_SOCKETS', 256, 1, 1024);
+const proxySockets = boundedEnv('CLINE_PASS_PROXY_MAX_SOCKETS', 32, 1, 128);
+const directAgentOptions = { keepAlive: true, maxSockets: directSockets, maxFreeSockets: Math.min(directSockets, boundedEnv('CLINE_PASS_DIRECT_MAX_FREE_SOCKETS', 32, 1, 64)), scheduling: 'lifo', timeout: 60_000 };
+const proxyAgentOptions = { keepAlive: true, maxSockets: proxySockets, maxFreeSockets: Math.min(proxySockets, boundedEnv('CLINE_PASS_PROXY_MAX_FREE_SOCKETS', 2, 1, 16)), scheduling: 'lifo', timeout: 60_000 };
+const directHttpAgent = new http.Agent(directAgentOptions);
+const directHttpsAgent = new https.Agent(directAgentOptions);
 const proxyAgents = new Map();
-function proxyAgentFor(proxyUrl) {
+const MAX_CACHED_PROXY_AGENTS = 128;
+function proxyAgentFor(proxyUrl, { ephemeral = false } = {}) {
   if (!proxyUrl) return undefined;
-  if (proxyAgents.has(proxyUrl)) return proxyAgents.get(proxyUrl);
+  if (!ephemeral && proxyAgents.has(proxyUrl)) return proxyAgents.get(proxyUrl);
   const protocol = new URL(proxyUrl).protocol;
-  const agent = protocol === 'socks5:' || protocol === 'socks5h:' ? new SocksProxyAgent(proxyUrl) : new HttpsProxyAgent(proxyUrl);
-  proxyAgents.set(proxyUrl, agent);
+  const agent = protocol === 'socks5:' || protocol === 'socks5h:'
+    ? new SocksProxyAgent(proxyUrl, proxyAgentOptions) : new HttpsProxyAgent(proxyUrl, proxyAgentOptions);
+  if (!ephemeral) proxyAgents.set(proxyUrl, agent);
   return agent;
 }
-function clineRequestJSON(url, { headers = {}, body, signal, timeoutMs = 120000, account = null, proxyUrl = '', method = 'POST', maxResponseBytes = Infinity, attemptOwner = null, attemptMeta = null, permit = null } = {}) {
-  return clineRequest(url, { headers, body, signal, timeoutMs, account, proxyUrl, method, attemptOwner, attemptMeta, permit }).then(async (res) => ({ ...res, text: await streamToString(res.body, maxResponseBytes) }));
+function pruneProxyAgents() {
+  const retained = new Set(config.accounts.map((account) => account.proxyUrl).filter(Boolean));
+  for (const [url, agent] of proxyAgents) if (!retained.has(url)) { agent.destroy(); proxyAgents.delete(url); }
 }
-function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, account = null, proxyUrl = '', method = 'POST', attemptOwner = null, attemptMeta = null, permit = null } = {}) {
+function clineRequestJSON(url, { headers = {}, body, signal, timeoutMs = 120000, account = null, proxyUrl = '', method = 'POST', maxResponseBytes = Infinity, attemptOwner = null, attemptMeta = null, permit = null, ephemeralProxy = false } = {}) {
+  return clineRequest(url, { headers, body, signal, timeoutMs, account, proxyUrl, method, attemptOwner, attemptMeta, permit, ephemeralProxy }).then(async (res) => ({ ...res, text: await streamToString(res.body, maxResponseBytes) }));
+}
+function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, account = null, proxyUrl = '', method = 'POST', attemptOwner = null, attemptMeta = null, permit = null, ephemeralProxy = false } = {}) {
   const root = detailContext.getStore();
   const nativeChat = method === 'POST' && url === `${config.upstreamBase}/chat/completions`;
   let detailAttempt = null, attemptToken = null, req = null;
@@ -2627,9 +2654,12 @@ function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, acc
     let settled = false;
     let response = null;
     let cleanup = () => {};
+    let agent = null, disposableAgent = ephemeralProxy;
+    const dispose = () => { if (disposableAgent) agent?.destroy(); };
     const onAbort = () => { response?.destroy(new Error('aborted')); req?.destroy(new Error('aborted')); };
     const fail = (error) => {
       cleanup();
+      dispose();
       // 未调用 req.end() 就结束的 attempt 不是真实上游请求：立即退还预留并唤醒等待者。
       try { permit?.release(); } catch {}
       if (!settled) {
@@ -2640,25 +2670,33 @@ function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, acc
       }
     };
     // 创建 request / 解析 URL / 构造 agent 的同步失败都属于"未发出"，必须退还预留。
-    let u, lib, data, agent, requestHeaders;
+    let u, lib, data, requestHeaders;
     try {
       u = new URL(url);
       lib = u.protocol === 'https:' ? https : http;
       data = Buffer.isBuffer(body) ? body : Buffer.from(String(body || ''));
       cleanup = () => signal?.removeEventListener('abort', onAbort);
-      agent = proxyAgentFor(proxyUrl || account?.proxyUrl || '');
+      const effectiveProxy = proxyUrl || account?.proxyUrl || '';
+      disposableAgent = !!effectiveProxy && (ephemeralProxy || !config.accounts.some((a) => a.proxyUrl === effectiveProxy) ||
+        (!proxyAgents.has(effectiveProxy) && proxyAgents.size >= MAX_CACHED_PROXY_AGENTS));
+      agent = effectiveProxy ? proxyAgentFor(effectiveProxy, { ephemeral: disposableAgent }) : u.protocol === 'https:' ? directHttpsAgent : directHttpAgent;
       requestHeaders = { ...headers }; if (method !== 'GET') requestHeaders['Content-Length'] = data.length;
-      req = lib.request({ protocol: u.protocol, hostname: u.hostname, port: u.port, path: `${u.pathname}${u.search}`, method, headers: requestHeaders, ...(agent ? { agent } : {}) }, (res) => {
+      req = lib.request({ protocol: u.protocol, hostname: u.hostname, port: u.port, path: `${u.pathname}${u.search}`, method, headers: requestHeaders, agent }, (res) => {
         response = res;
-        res.once('end', cleanup);
-        res.once('close', cleanup);
+        res.once('end', () => { cleanup(); dispose(); });
+        res.once('close', () => { cleanup(); dispose(); });
         if (detailAttempt) { detailAttempt.status = res.statusCode || 502; detailAttempt.responseHeaders = res.headers; }
         const responseBody = detailAttempt?.output ? observeStream(res, detailAttempt.output) : res;
-        if (!settled) { settled = true; resolve({ status: res.statusCode || 502, headers: res.headers, body: responseBody, attemptToken, detailAttempt }); }
+        if (!settled) { settled = true; resolve({ status: res.statusCode || 502, headers: res.headers, body: responseBody, attemptToken, detailAttempt,
+          setIdleTimeout(ms) {
+            // Node detaches IncomingMessage.socket once a complete response ends;
+            // buffered first events still need forwarding, but no idle socket remains.
+            if (res.socket && !res.destroyed) { req.setTimeout(ms); res.setTimeout(ms); }
+          } }); }
       });
     } catch (error) { fail(error); return; }
     req.on('error', fail);
-    req.setTimeout(timeoutMs, () => req.destroy(new Error('upstream timeout')));
+    req.setTimeout(timeoutMs, () => { const error = new Error('upstream timeout'); response?.destroy(error); req.destroy(error); });
     if (signal) {
       if (signal.aborted) { onAbort(); return; }
       signal.addEventListener('abort', onAbort, { once: true });
@@ -2970,17 +3008,32 @@ function createSseObserver(maxBytes = 64 * 1024) {
 }
 function readFirstSseEvent(stream, maxBytes = 64 * 1024) {
   return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
+    let buffer = Buffer.alloc(0), scanned = 0;
     const cleanup = () => { stream.off('data', onData); stream.off('end', onEnd); stream.off('error', onError); };
-    const finish = (complete) => { stream.pause(); cleanup(); resolve({ buffer: Buffer.concat(chunks), complete }); };
-    const onData = (chunk) => {
-      const b = Buffer.from(chunk); chunks.push(b); size += b.length;
-      const text = Buffer.concat(chunks).toString('utf8');
-      if (/\r?\n\r?\n/.test(text)) finish(true);
-      else if (size >= maxBytes) finish(false);
+    const finish = (complete, dataEvent = null, end = buffer.length, remainder = null) => {
+      stream.pause(); cleanup();
+      if (remainder?.length) stream.unshift(remainder);
+      if (end < buffer.length) stream.unshift(buffer.subarray(end));
+      buffer = buffer.subarray(0, end);
+      resolve({ buffer, complete, dataEvent });
     };
-    const onEnd = () => { cleanup(); resolve({ buffer: Buffer.concat(chunks), complete: false }); };
+    const onData = (chunk) => {
+      const available = maxBytes - buffer.length;
+      const remainder = chunk.length > available ? chunk.subarray(available) : null;
+      buffer = Buffer.concat([buffer, remainder ? chunk.subarray(0, available) : chunk]);
+      // Scan only complete bounded events; the final chunk may contain bytes after the first data event.
+      while (true) {
+        const boundary = /\r?\n\r?\n/.exec(buffer.toString('latin1', scanned));
+        if (!boundary) break;
+        const end = scanned + boundary.index + boundary[0].length;
+        if (end > maxBytes) return finish(false, null, buffer.length, remainder);
+        const event = buffer.subarray(scanned, end);
+        scanned = end;
+        if (event.toString('utf8').split(/\r?\n/).some((line) => line.startsWith('data:'))) return finish(true, event, end, remainder);
+      }
+      if (buffer.length >= maxBytes) finish(false, null, buffer.length, remainder);
+    };
+    const onEnd = () => { cleanup(); resolve({ buffer, complete: false, dataEvent: null }); };
     const onError = (error) => { cleanup(); reject(error); };
     stream.on('data', onData); stream.once('end', onEnd); stream.once('error', onError); stream.resume();
   });
@@ -3602,13 +3655,13 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
       const ctrl = new AbortController();
       let timedOut = false;
       activeReq = ctrl;
-      const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, attemptTimeoutMs);
+      const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, stream ? SSE_FIRST_EVENT_MS : attemptTimeoutMs);
       try {
         if (stream) {
           const send = injectPrefs(body, modelId, attempt), requestBody = JSON.stringify(send);
           let up = null, netError = null, transportOrigin = null, failedAttemptToken = null, failedDetailAttempt = null;
           try {
-            up = await clineRequest(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, forwardedHeaders), body: requestBody, signal: ctrl.signal, timeoutMs: attemptTimeoutMs, account, attemptOwner, permit, attemptMeta: { model: modelId, provider: attempt.upstream ? [attempt.upstream] : [] } });
+            up = await clineRequest(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, forwardedHeaders), body: requestBody, signal: ctrl.signal, timeoutMs: SSE_FIRST_EVENT_MS, account, attemptOwner, permit, attemptMeta: { model: modelId, provider: attempt.upstream ? [attempt.upstream] : [] } });
           } catch (e) { netError = timedOut ? 'upstream timeout' : errText(e.message); failedAttemptToken = e.attemptToken || null; failedDetailAttempt = e.detailAttempt || null; }
           const responseContentType = normalizeResponseContentType(up?.headers);
           let isSSE = !!up && up.status === 200 && responseContentType === 'text/event-stream';
@@ -3619,18 +3672,15 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
               firstChunk = first.buffer;
               if (!firstChunk.length) { isSSE = false; netError = 'empty stream'; }
               else {
-                const head = firstChunk.toString('utf8').trimStart();
-                if (!first.complete || !head.startsWith('data:')) {
+                if (!first.complete) {
                   isSSE = false; netError = 'unexpected stream head';
                 } else {
-                  const eventText = head.split(/\r?\n\r?\n/, 1)[0];
-                  const payload = eventText.split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.replace(/^data:\s?/, '')).join('\n');
+                  const payload = first.dataEvent.toString('utf8').split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.replace(/^data:\s?/, '')).join('\n');
                   const event = payload === '[DONE]' ? null : safeJsonParse(payload, 64 * 1024);
                   const eventError = upstreamErrorOf(event);
                   if (eventError) {
                     isSSE = false; netError = `stream error: ${errText(eventError)}`;
-                    const boundary = /\r?\n\r?\n/.exec(firstChunk.toString('latin1'));
-                    streamErrorBody = firstChunk.subarray(0, boundary ? boundary.index + boundary[0].length : firstChunk.length);
+                    streamErrorBody = first.dataEvent;
                   }
                 }
               }
@@ -3643,10 +3693,16 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
           const ms = Date.now() - t1;
           if (up && !isSSE) {
             let rest = '';
-            try { rest = await streamToString(up.body); }
-            catch (e) {
-              if (!netError) netError = timedOut ? 'upstream timeout' : errText(e.message);
-              transportOrigin = timedOut || /timeout/i.test(netError) ? 'timeout' : account.proxyUrl ? 'proxy' : 'network';
+            if (up.status === 200 && responseContentType === 'text/event-stream') {
+              // A rejected SSE head (including comment-only overflow) is already
+              // bounded; never read an unbounded tail or wait for this stream to end.
+              up.body.destroy();
+            } else {
+              try { rest = await streamToString(up.body); }
+              catch (e) {
+                if (!netError) netError = timedOut ? 'upstream timeout' : errText(e.message);
+                transportOrigin = timedOut || /timeout/i.test(netError) ? 'timeout' : account.proxyUrl ? 'proxy' : 'network';
+              }
             }
             const text = (firstChunk ? firstChunk.toString('utf8') : '') + rest;
             let json = null;
@@ -3683,6 +3739,8 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
             if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine' || last.quotaRemovalAction) break;
             continue;
           }
+          up.setIdleTimeout(SSE_STREAM_IDLE_MS);
+          clearTimeout(timer);
           keepCloseHook = true;
           const result = { status: 200, upstreamStatus: 200, normalizedStatus: 200, terminalOrigin: 'success', responseHeaders: up.headers, responseContentType, responseBytes: safeResponseBytes(firstChunk), note: 'stream', attemptToken: up.attemptToken, detailAttempt: up.detailAttempt, detailResponseBody: null, detailCaptureState: 'stream-started' };
           const diagnostic = settleAttempt(modelId, attempt, result, account, { updateSuccess: false, cfg, sensitiveValues });
@@ -3829,12 +3887,51 @@ async function handleChat(req, res) {
     });
     if (detail?.profile === 'error') detail.status = up.status;
     const observer = createSseObserver();
-    if (chain.streamHead) { observer.push(chain.streamHead); res.write(chain.streamHead); }
     let finalized = false;
+    let heartbeat = null, blocked = false, atEventBoundary = true;
+    const pendingDrains = new Set();
+    const onDrain = (callback) => {
+      const drain = () => { pendingDrains.delete(drain); callback(); };
+      pendingDrains.add(drain);
+      res.once('drain', drain);
+    };
+    let upstreamTail = Buffer.alloc(0);
+    const observeBoundary = (chunk) => {
+      // Do not inject a comment into an unfinished data line/event: that would
+      // change the model event. Silence during a partial event cannot be pinged safely.
+      const bytes = Buffer.from(chunk);
+      const suffix = bytes.subarray(Math.max(0, bytes.length - 4));
+      upstreamTail = Buffer.concat([upstreamTail, suffix]).subarray(Math.max(0, upstreamTail.length + suffix.length - 4));
+      atEventBoundary = /\r?\n\r?\n$/.test(upstreamTail.toString('latin1'));
+    };
+    const clearHeartbeat = () => { clearTimeout(heartbeat); heartbeat = null; };
+    const armHeartbeat = () => {
+      clearHeartbeat();
+      if (!SSE_HEARTBEAT_MS || finalized || blocked || !atEventBoundary || observer.result().done || res.destroyed || res.writableEnded) return;
+      heartbeat = setTimeout(() => {
+        heartbeat = null;
+        try { writeDownstream(': PING\n\n'); }
+        catch (error) { onDownstreamError(error); }
+      }, SSE_HEARTBEAT_MS);
+      heartbeat.unref?.();
+    };
+    const writeDownstream = (chunk, cb = null) => {
+      clearHeartbeat();
+      if (res.write(chunk)) { cb?.(); armHeartbeat(); }
+      else {
+        blocked = true;
+        onDrain(() => { blocked = false; cb?.(); armHeartbeat(); });
+      }
+    };
+    let onDownstreamError;
+    let forward;
     let onUpstreamError, onResponseClose;
     const finalize = (error = null, origin = null) => {
       if (finalized) return;
       finalized = true;
+      clearHeartbeat();
+      for (const drain of pendingDrains) res.off('drain', drain);
+      pendingDrains.clear();
       chain.cleanupClientClose?.();
       up.body.off('error', onUpstreamError);
       res.off('close', onResponseClose);
@@ -3875,12 +3972,29 @@ async function handleChat(req, res) {
       finalizeStatistics({ globalError: requestResult === 'failed', usage, clientDisconnect: clientCancelled, segments: statisticsSegments(chain.trace, acc.id, usage, clientCancelled) });
       recordChat({ requestId, requestedModel, resolvedModel: modelId, provider: observed.provider, canonical: observed.canonical, ms: Date.now() - chain.t0, stream: true, result: requestResult, error: safeStreamError, upstreamStatus: providerAttempt?.upstreamStatus ?? null, normalizedStatus, account: acc.name, accountId: acc.id, attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, accountPath, accountActions, ...affinityFacts(usage), strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, providerPlanSource: targetSource, providerMode: targetMode, appliedHeaderNames: Object.keys(acc.headers || {}), proxyError: !!acc.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues });
     };
-    const tap = new Transform({ transform(c, enc, cb) { observer.push(c); cb(null, c); }, flush(cb) { finalize(); cb(); } });
-    onUpstreamError = (e) => { finalize(e.message, 'upstream'); if (!res.destroyed) res.destroy(e); };
-    onResponseClose = () => { if (res.writableEnded) return; finalize('client disconnected', 'client_disconnect'); if (!up.body.destroyed) up.body.destroy(); };
+    forward = new Writable({
+      write(c, enc, cb) {
+        observer.push(c);
+        observeBoundary(c);
+        const submit = () => { try { writeDownstream(c, cb); } catch (error) { cb(error); } };
+        if (blocked) onDrain(submit);
+        else submit();
+      },
+      final(cb) { clearHeartbeat(); finalize(); res.end(); cb(); },
+    });
+    onUpstreamError = (e) => { finalize(e.message, 'upstream'); if (!res.destroyed) res.destroy(e); forward.destroy(); };
+    onDownstreamError = (e) => { finalize(e.message, 'client_disconnect'); if (!up.body.destroyed) up.body.destroy(); if (!res.destroyed) res.destroy(e); forward.destroy(); };
+    onResponseClose = () => { if (res.writableEnded) return; finalize('client disconnected', 'client_disconnect'); if (!up.body.destroyed) up.body.destroy(); forward.destroy(); };
     up.body.on('error', onUpstreamError);
+    forward.on('error', onDownstreamError);
+    res.on('error', onDownstreamError);
     res.on('close', onResponseClose);
-    up.body.pipe(tap).pipe(res);
+    if (chain.streamHead) {
+      observer.push(chain.streamHead);
+      try { writeDownstream(chain.streamHead); }
+      catch (error) { onDownstreamError(error); return; }
+    }
+    up.body.pipe(forward);
     return;
   }
 
@@ -3963,6 +4077,8 @@ const server = http.createServer((req, res) => {
   }
   return dispatch(req, res);
 });
+server.keepAliveTimeout = INBOUND_KEEP_ALIVE_MS;
+server.headersTimeout = INBOUND_KEEP_ALIVE_MS + 5_000;
 async function dispatch(req, res) {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
@@ -4124,7 +4240,7 @@ async function dispatch(req, res) {
         const model = config.knownModels[0];
         const claim = leased.lease.takeRpmPermit();
         if (!claim.ok) return sendBusy(res, 'account rpm limit reached', blockedByRetryAfter('rpm', claim.retryAt, config.concurrencyWaitMs));
-        const result = await clineRequestJSON(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, {}), body: JSON.stringify({ model, messages: [], max_tokens: 1 }), proxyUrl, account, timeoutMs: 15000, attemptMeta: { model, provider: [] }, permit: claim.permit });
+        const result = await clineRequestJSON(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, {}), body: JSON.stringify({ model, messages: [], max_tokens: 1 }), proxyUrl, ephemeralProxy: true, account, timeoutMs: 15000, attemptMeta: { model, provider: [] }, permit: claim.permit });
         return sendJSON(res, 200, { ok: result.status > 0, proxyType: new URL(proxyUrl).protocol.replace(':', ''), ms: Date.now() - t0, status: result.status });
       } catch (e) {
         let reason = String(e.message || 'proxy error');
@@ -4259,7 +4375,7 @@ async function dispatch(req, res) {
       for (const id of [...rpmWindows.keys()]) if (!seen.has(id) || !rpmLimit(accs.find((a) => a.id === id))) clearRpmState(id);
       pruneOrphanProviderStates();
       reconcileSessionBindings();
-      saveConfig(); saveMeta(); RR_COUNTER = 0; strategyCounters.clear(); proxyAgents.clear(); scheduleQuotaRefresh();
+      saveConfig(); saveMeta(); RR_COUNTER = 0; strategyCounters.clear(); pruneProxyAgents(); scheduleQuotaRefresh();
       return sendJSON(res, 200, { ok: true, accounts: accs.length, mode: config.accountMode, active: config.activeAccount });
     }
     if (req.method === 'POST' && p === '/api/accounts/recover') {
@@ -4415,8 +4531,9 @@ function stopQuotaWork() {
 function destroyRuntimeConnections() {
   server.closeAllConnections?.();
   for (const socket of inboundSockets) socket.destroy();
-  for (const agent of proxyAgents.values()) agent.destroy?.();
+  for (const agent of proxyAgents.values()) agent.destroy();
   proxyAgents.clear();
+  directHttpAgent.destroy(); directHttpsAgent.destroy();
 }
 function shutdown(signal) {
   if (shutdownPromise) return shutdownPromise;
