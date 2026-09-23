@@ -37,7 +37,7 @@ New API scanner会在过滤comment前重置idle timeout并忽略该行。最终�
 
 ## 6. 取消、退出与agents
 
-直接client close继续destroy upstream response/request。经New API首响应前取消无法仅由switcher感知，first-event timeout提供有界收敛，文档不宣称即时传播。统一shutdown coordinator先stop intake/调度并等待active流finalizer（stores仍开放），再drain logs，最后destroy sockets和agents；deadline到期才强制销毁。Node18上feature-detect`closeIdleConnections/closeAllConnections`，不依赖较新`keepAliveTimeoutBuffer`。
+直接client close继续destroy upstream response/request。经New API首响应前取消无法仅由switcher感知，first-event timeout提供有界收敛，文档不宣称即时传播。**当前 main 已有唯一的 `shutdown()` coordinator（`server.js` 底部）：先stop intake/调度并等待active流finalizer（stores仍开放），再drain logs，最后调用 `destroyRuntimeConnections()`；本任务只给该既有销毁入口补 direct/proxy agents，不能重建第二个退出流程。**deadline到期才强制销毁。Node18上feature-detect`closeIdleConnections/closeAllConnections`，不依赖较新`keepAliveTimeoutBuffer`。
 
 ## 7. 配置与文档
 
