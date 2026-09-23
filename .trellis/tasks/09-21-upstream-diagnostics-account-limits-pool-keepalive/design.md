@@ -61,7 +61,7 @@ hard eligibility
 
 池target来自既有min/max/metadata grow-only owner。`cachePoolLowQuotaSize=0`时完全绕过role-aware membership并保留基线priority/ID成员；大于0时固定该数量的warm槽，其余target为high槽。低层可准入时确定性优先，受并发/RPM/quota disposition阻塞时立即回退high，不等待低层；known candidate不足时unknown最后补位并投影真实组成。
 
-只有low角色快照上最终`account/degrade`设置持久化`waiting-refresh`并产生独立request-local removal outcome。下一次真实额度刷新决定解除、继续hold或转为`quota-exhausted`。启用role-aware pool后，最新成功快照的任一已知窗口100%（即使partial）都设置exhausted；到最早有效未来`resetsAt`后重评，只有全部已知窗口低于100%才恢复，不改写人工`enabled`。
+只有low角色快照上最终`account/degrade`设置持久化`waiting-refresh`并产生独立request-local removal outcome。下一次真实额度刷新决定解除、继续hold或转为`quota-exhausted`。启用role-aware pool后，最新成功快照的任一已知窗口100%（即使partial）都设置exhausted；到最早有效未来`resetsAt`后重评，只有真实成功且三个窗口齐全、均低于100%才恢复；部分非100%仍属未知，不改写人工`enabled`。
 
 ### 3.3 错误诊断
 

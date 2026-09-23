@@ -64,7 +64,7 @@
 - 在不破坏高额度兜底容量和请求可用性的前提下，提高低额度账号的请求分配概率，以尽可能先消耗低余额。
 - 启用role-aware pool时，角色快照为low且最终规则结果为`scope=account, action=degrade`的attempt立即触发独立的quota removal outcome，退出调度并进入`waiting-refresh`，不使用固定时长；显式account cooldown/hard-quarantine只执行其规则动作，不叠加quota hold。Provider/model-scope、显式`ignore`和客户端取消不设置quota hold。
 - 冷却账号只有在下一次额度刷新成功后才重新判断：额度变为可用则自动解除该冷却；刷新失败、额度未知或仍不可用时继续排除。
-- 启用role-aware pool时，最新成功额度快照中任一已知有效窗口达到100%即进入持久化`quota-exhausted`调度状态，即使快照不完整；刷新失败或其余窗口未知不会解除已确认耗尽。不修改operator的`enabled`，也不冒充人工禁用/硬隔离；到最早已耗尽窗口的有效未来`resetsAt`后刷新并重新判断，只有所有已知窗口均低于100%才自动解除，仍耗尽则继续排除并计算下一次。
+- 启用role-aware pool时，最新成功额度快照中任一已知有效窗口达到100%即进入持久化`quota-exhausted`调度状态，即使快照不完整；刷新失败或其余窗口未知不会解除已确认耗尽。不修改operator的`enabled`，也不冒充人工禁用/硬隔离；到最早已耗尽窗口的有效未来`resetsAt`后刷新并重新判断，只有成功刷新且三个窗口齐全、均低于100%（额度不再未知）才自动解除；部分非100%快照仍未知、不得解除，仍耗尽则继续排除并计算下一次。
 - 未知额度与已知数值零必须保持不同语义。
 
 ### R4. 日志性能
@@ -97,7 +97,7 @@
 - [ ] AC2：账号并发和RPM限制均生效；自动化测试证明并发优先且并发失败不消耗RPM，每个调用`req.end()`的真实Chat attempt（包括Provider retry）各计一次，发送前预留可释放并唤醒等待者；retry无permit时返回本地429且保留此前真实attempt，lease在完成/错误/取消路径正确释放。
 - [ ] AC3：账号配置的 RPM 字段可经配置文件、管理 API 和浏览器控制台完整往返，旧配置保持兼容。
 - [ ] AC4：low=0时成员与既有priority/ID行为一致；low>0且至少一个low账号可准入时确定性选择low，low被并发/RPM/quota状态阻塞且high可用时立即选择high；实际high/low/unknown组成如实投影。
-- [ ] AC5：low角色账号命中account-scope degrade后立即产生quota removal outcome、首包前最多换号一次并进入waiting-refresh；显式rule disposition和quota disposition互不误清。启用role-aware pool后任一已知窗口确认100%即进入quota-exhausted，并在resetsAt后的真实刷新确认全部已知窗口恢复时自动解除。
+- [ ] AC5：low角色账号命中account-scope degrade后立即产生quota removal outcome、首包前最多换号一次并进入waiting-refresh；显式rule disposition和quota disposition互不误清。启用role-aware pool后任一已知窗口确认100%即进入quota-exhausted，并在resetsAt后的真实刷新确认三个窗口齐全且均低于100%时自动解除；部分非100%仍未知并保持排除。
 - [ ] AC6：结构性测试证明成功error-only路径不复制请求/成功正文、ordinary单条与pending队列有固定边界、同一chat终态只执行一次可合并metadata保存、shutdown有deadline；同机benchmark记录wall time/event-loop/heap但不作为跨机器绝对门禁。写入故障保持fail-open。
 - [ ] AC7：形成 New API 与 cline-pass-switcher 长连接能力的证据化结论；若需改动，集成测试证明仅修改本项目即可协同工作。
 - [ ] AC8：相关单元、集成、UI 契约和全项目质量门通过，操作文档、示例配置和可复用规格同步更新。
