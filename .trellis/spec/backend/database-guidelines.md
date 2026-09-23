@@ -71,7 +71,7 @@ These are evaluated once from environment by `boundedEnv()`/`runtimeDuration()`;
 | `CLINE_PASS_PROXY_MAX_SOCKETS` | 32 | 1–128; each cached/disposable HTTP(S)/SOCKS proxy Agent |
 | `CLINE_PASS_PROXY_MAX_FREE_SOCKETS` | 2 | 1–16; effective value `min(configured free, effective proxy max sockets)` |
 
-Only the four duration keys support `CLINE_PASS_TEST_INBOUND_KEEP_ALIVE_MS`, `CLINE_PASS_TEST_SSE_FIRST_EVENT_MS`, `CLINE_PASS_TEST_SSE_STREAM_IDLE_MS`, and `CLINE_PASS_TEST_SSE_HEARTBEAT_MS`. Agent options also set `keepAlive: true`, `scheduling: 'lifo'`, and 60000 ms socket timeout; at most 128 persisted proxy URLs enter the cache, with disposable agents for draft tests and cache overflow. No new persisted migration is required. Target Node >=18 APIs; local mock verification currently ran on Node 26 only, not a Node 18 runtime or a Docker container.
+Only the four duration keys support `CLINE_PASS_TEST_INBOUND_KEEP_ALIVE_MS`, `CLINE_PASS_TEST_SSE_FIRST_EVENT_MS`, `CLINE_PASS_TEST_SSE_STREAM_IDLE_MS`, and `CLINE_PASS_TEST_SSE_HEARTBEAT_MS`. Agent options also set `keepAlive: true`, `scheduling: 'lifo'`, and 60000 ms socket timeout; at most 128 persisted proxy URLs enter the cache, with disposable agents for draft tests and cache overflow. No new persisted migration is required. Target Node >=18 APIs; the archived `09-21-newapi-chat-keepalive/check-report.md` records an official SHA256-verified Node 18.20.8 `darwin-arm64` full 241/241 test run. The parent cross-feature check additionally ran on Node 26; neither run verifies a Docker container or the real New API topology.
 
 #### Static `config.json`
 
