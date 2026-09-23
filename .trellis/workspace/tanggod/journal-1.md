@@ -676,3 +676,27 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 28: New API Chat 长连接兼容
+<!-- trellis-session: v=2 fp=f4f72ec9ec92383b -->
+
+**Date**: 2026-09-23
+**Task**: New API Chat 长连接兼容
+**Branch**: `feat/newapi-chat-keepalive`
+
+### Summary
+
+在既有 native clineRequest owner 内实现有界 direct/proxy keep-alive agents、draft proxy 一次性销毁与入站95秒空闲复用；SSE首事件有界容忍注释与event/id，首data后完整事件边界静默发送注释心跳，区分首事件wall/已开始上游idle，背压false不误报断开。复用原shutdown先等待finalizer和日志drain再销毁agents。独立检查补齐拒绝首事件不读无界上游尾部与drain监听清理；本地代理协议及静默流矩阵通过，Node26全量241/241；官方SHA256校验的Node18.20.8全量241/241；英文规范已同步。未改New API、未触达真实上游或部署。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c67b7e8` | feat: 为 New API Chat 补齐 HTTP 长连接与 SSE 静默保活 |
+| `dd28284` | docs(spec): 同步 HTTP 连接复用与 SSE 保活契约 |
+| `d53d1d6` | docs(task): 记录长连接检查及 Node 18 兼容验证 |
+
+### Status
+
+[OK] **Completed**

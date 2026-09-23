@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 27
+- **Total Sessions**: 28
 - **Last Active**: 2026-09-23
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~678 | Active |
+| `journal-1.md` | ~702 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 28 | 2026-09-23 | New API Chat 长连接兼容 | `c67b7e8`, `dd28284`, `d53d1d6` | `feat/newapi-chat-keepalive` |
 | 27 | 2026-09-23 | 低额度热池调度与刷新驱动恢复 | `c75bbe1`, `2019430`, `81e348e` | `feat/low-quota-pool-refresh-cooling` |
 | 26 | 2026-09-23 | 账号级 RPM 限流 | `ba18795`, `1ce2804` | `feat/account-rpm-limits` |
 | 25 | 2026-09-23 | 父任务集成验收：双维度错误规则与动态路由策略 | `37271d3`, `f0852bd` | `main` |
