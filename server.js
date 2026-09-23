@@ -2711,7 +2711,7 @@ function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, acc
         try {
           detailAttempt = root?.attempt({ token: attemptToken, url, method, headers: req.getHeaders(), body: body || '', account, proxyUrl, model: attemptMeta?.model || '', provider: attemptMeta?.provider ?? null }) || null;
           if (!attemptToken && detailAttempt) attemptToken = { attemptIndex: detailAttempt.attemptIndex, callId: detailAttempt.callId };
-        } catch { detailedLogs.health.dropped++; detailAttempt = null; }
+        } catch { detailedLogs.recordDrop('attemptCaptureFailure'); detailAttempt = null; }
       }
     } catch (error) { fail(error); }
   });
@@ -4070,7 +4070,7 @@ const server = http.createServer((req, res) => {
     ? 'full'
     : config.errorDetailLogging === true && req.method === 'POST' && CHAT_PATHS.has(pathname) ? 'error' : null;
   if (profile) {
-    if (DetailRoot.active >= 128) { detailedLogs.health.dropped++; return dispatch(req, res); }
+    if (DetailRoot.active >= 128) { detailedLogs.recordDrop('activeLimit'); return dispatch(req, res); }
     const secrets = [config.proxyKey, PROXY_KEY, ...config.accounts.flatMap((account) => [account.key, account.proxyUrl, ...Object.values(account.headers || {})])];
     const root = new DetailRoot(req, res, detailedLogs, secrets, { profile });
     return detailContext.run(root, () => dispatch(req, res));

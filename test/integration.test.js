@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { DETAIL_DROP_REASONS } from '../lib/detailed-log-store.js';
 
 const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 const close = (server) => new Promise((resolve) => server.close(resolve));
@@ -1892,6 +1893,30 @@ test('quota body cancellation and key A-to-B-to-A rotation settle without stale 
   const quota=(await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json()).accounts[0].quota;assert.equal(quota.limits.five_hour.percentUsed,55);assert.equal(quota.errorCategory,null);assert.equal(quota.status,'fresh');
 });
 
+test('concurrent detailed-root admission rejects only diagnostic capture at its activity fence', async (t) => {
+  const port = await unusedPort();
+  const running = await startSwitcher({ port, proxyKey: 'local-test-admin', detailedLogging: true, accounts: [] });
+  const held = [];
+  t.after(async () => { for (const req of held) req.destroy(); await stop(running.child); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const auth = { 'X-Admin-Key': 'local-test-admin' };
+  for (let i = 0; i < 128; i++) {
+    const req = http.request({ hostname: '127.0.0.1', port, path: '/v1/chat/completions', method: 'POST', headers: { ...auth, 'Content-Type': 'application/json', 'Content-Length': '100' } });
+    req.on('error', () => {});
+    req.write('{'); // Keep the input reader pending; do not send a model request.
+    held.push(req);
+  }
+  await waitUntil(async () => {
+    const response = await fetch(`http://127.0.0.1:${port}/api/logs/details?limit=200`, { headers: auth });
+    return (await response.json()).items.length === 128;
+  }, 10000, '128 open detailed roots');
+  const response = await fetch(`http://127.0.0.1:${port}/v1/responses`, { method: 'POST', headers: auth });
+  assert.equal(response.status, 501, 'the existing response is not changed by the diagnostic fence');
+  const settings = await (await fetch(`http://127.0.0.1:${port}/api/logs/settings`, { headers: auth })).json();
+  assert.equal(settings.health.dropped, 1);
+  assert.equal(settings.health.dropReasons.activeLimit, 1);
+  assert.equal(Object.values(settings.health.dropReasons).reduce((a, b) => a + b, 0), 1);
+});
+
 test('detailed logging settings, route matrix, actual-call groups and credential boundaries', async (t) => {
   const seen = [];
   const upstream = http.createServer((req, res) => {
@@ -1917,8 +1942,14 @@ test('detailed logging settings, route matrix, actual-call groups and credential
   assert.equal((await fetch(`http://127.0.0.1:${port}/api/logs/settings`)).status, 401);
   const initialSettings = (await get('/api/logs/settings')).json;
   assert.equal(initialSettings.detailedLogging, false); assert.equal(initialSettings.errorDetailLogging, false);
+  const initialList = (await get('/api/logs/details')).json;
+  const zeroReasons = Object.fromEntries(DETAIL_DROP_REASONS.map((reason) => [reason, 0]));
+  assert.deepEqual(initialSettings.health.dropReasons, zeroReasons);
+  assert.deepEqual(initialList.health.dropReasons, zeroReasons);
+  assert.equal(initialSettings.health.dropped, 0); assert.equal(initialList.health.dropped, 0);
   await rawJson(port, '/v1/chat/completions', { model: 'alias', messages: [] }, auth);
   assert.equal((await list()).length, 0);
+  assert.deepEqual((await get('/api/logs/settings')).json.health.dropReasons, zeroReasons);
   const settingsBefore = fs.readFileSync(path.join(running.dir, 'config.json'));
   for (const value of [null, [], {}, { detailedLogging: 1 }, { errorDetailLogging: 1 }, { detailedLogging: true, extra: 1 }]) assert.equal((await rawJson(port, '/api/logs/settings', value, auth)).status, 400);
   assert.deepEqual(fs.readFileSync(path.join(running.dir, 'config.json')), settingsBefore);
@@ -1979,8 +2010,15 @@ test('detailed logging settings, route matrix, actual-call groups and credential
   assert.doesNotMatch(ordinary, /retained prompt|retained output|incoming-cookie-secret|saved-detail-secret/);
   assert.doesNotMatch(running.output(), /saved-detail-secret|detail-admin-secret|incoming-cookie-secret|ephemeral-detail-secret|ephemeral-proxy-password/);
   const countBeforeRestart = (await list()).length;
+  const settingsHealth = (await get('/api/logs/settings')).json.health;
+  const listingHealth = (await get('/api/logs/details')).json.health;
+  assert.deepEqual(settingsHealth.dropReasons, listingHealth.dropReasons);
+  assert.equal(Object.values(settingsHealth.dropReasons).reduce((a, b) => a + b, 0), settingsHealth.dropped);
+  assert.ok(DETAIL_DROP_REASONS.every((reason) => Object.hasOwn(settingsHealth.dropReasons, reason)));
+  assert.doesNotMatch(JSON.stringify(settingsHealth.dropReasons), /detail-admin-secret|saved-detail-secret|incoming-cookie-secret|requestId|session/);
   await stop(running.child); running = await startSwitcher(null, running.dir);
   const restartedSettings = (await get('/api/logs/settings')).json; assert.equal(restartedSettings.detailedLogging, true); assert.equal(restartedSettings.errorDetailLogging, false); assert.equal((await list()).length, countBeforeRestart);
+  assert.deepEqual(restartedSettings.health.dropReasons, zeroReasons);
   const ordinaryBefore = allText(path.join(running.dir, 'logs'));
   await get('/api/logs/details', 'DELETE'); assert.equal((await list()).length, 0); assert.equal(allText(path.join(running.dir, 'logs')), ordinaryBefore);
   await rawJson(port, '/api/logs/settings', { detailedLogging: false }, auth);

@@ -5,6 +5,9 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { BodyCapture, CaptureBudget, captureBudget, DetailRedactor, MAX_BODY_BYTES, MAX_PAYLOAD_BYTES, observeStream, detailRoute, DetailRoot } from '../lib/detailed-log-capture.js';
+import { DetailedLogStore, DETAIL_DROP_REASONS } from '../lib/detailed-log-store.js';
+
+const mockDropHealth = () => ({ dropped: 0, dropReasons: Object.fromEntries(DETAIL_DROP_REASONS.map((reason) => [reason, 0])) });
 
 function capture(chunks, redactor = new DetailRedactor(), options = {}, complete = true) {
   const body = new BodyCapture(options);
@@ -86,7 +89,7 @@ test('group prepass discovers structured response credentials before earlier bod
   const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: { 'x-echo': echo } });
   const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
   let group;
-  const store = { generation: 0, health: { dropped: 0 }, open: async () => true, failure() { assert.fail('unexpected store failure'); },
+  const store = { generation: 0, health: mockDropHealth(), recordDrop: DetailedLogStore.prototype.recordDrop, open: async () => true, failure() { assert.fail('unexpected store failure'); },
     publish({ produce, release }) { group = produce(); release(); return Promise.resolve(true); } };
   const root = new DetailRoot(req, res, store);
   root.input.add(JSON.stringify({ echo, ...ordinaryFields })); root.input.end();
@@ -108,7 +111,7 @@ test('error profile retains only failed response diagnostics with caller-owned a
   let group = null, opened = false;
   const store = {
     generation: 0,
-    health: { dropped: 0 },
+    health: mockDropHealth(), recordDrop: DetailedLogStore.prototype.recordDrop,
     open() { opened = true; return Promise.resolve(true); },
     failure() { assert.fail('unexpected store failure'); },
     publish({ produce, release }) { group = produce(); release(); return Promise.resolve(true); },
@@ -151,7 +154,7 @@ test('error profile successful 50 MiB request holds no BodyCapture reservation o
   const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: {} });
   const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
   let publications = 0;
-  const store = { generation: 0, health: { dropped: 0 }, open() { assert.fail('error profile must not open'); }, failure() { assert.fail('unexpected failure'); }, publish() { publications++; return Promise.resolve(true); } };
+  const store = { generation: 0, health: mockDropHealth(), recordDrop: DetailedLogStore.prototype.recordDrop, open() { assert.fail('error profile must not open'); }, failure() { assert.fail('unexpected failure'); }, publish() { publications++; return Promise.resolve(true); } };
   const before = captureBudget.used, payload = 'x'.repeat(50 * 1024 * 1024);
   const root = new DetailRoot(req, res, store, [], { profile: 'error' });
   const attempt = root.attempt({ token: { attemptIndex: 0, callId: randomUUID() }, url: 'https://example.test/chat/completions', body: payload, model: 'm', provider: [] });
@@ -163,7 +166,7 @@ test('clear generation drops an error collector source before any late settlemen
   const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: {} });
   const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
   let publications = 0;
-  const store = { generation: 0, health: { dropped: 0 }, open() { assert.fail('error profile must not open'); }, failure() { assert.fail('unexpected failure'); }, publish() { publications++; return Promise.resolve(true); } };
+  const store = { generation: 0, health: mockDropHealth(), recordDrop: DetailedLogStore.prototype.recordDrop, open() { assert.fail('error profile must not open'); }, failure() { assert.fail('unexpected failure'); }, publish() { publications++; return Promise.resolve(true); } };
   const root = new DetailRoot(req, res, store, [], { profile: 'error' });
   const attempt = root.attempt({ token: { attemptIndex: 0, callId: randomUUID() }, url: 'https://example.test/chat/completions', body: 'x'.repeat(1024 * 1024), model: 'm', provider: [] });
   store.generation++;
@@ -175,7 +178,7 @@ test('resource-limited error request discovery fences response echoes group-wide
   const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: {} });
   const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
   let group;
-  const store = { generation: 0, health: { dropped: 0 }, open() { assert.fail('error profile must not open'); }, failure() { assert.fail('unexpected failure'); }, publish({ produce, release }) { group = produce(); release(); return Promise.resolve(true); } };
+  const store = { generation: 0, health: mockDropHealth(), recordDrop: DetailedLogStore.prototype.recordDrop, open() { assert.fail('error profile must not open'); }, failure() { assert.fail('unexpected failure'); }, publish({ produce, release }) { group = produce(); release(); return Promise.resolve(true); } };
   const held = MAX_PAYLOAD_BYTES - 128;
   assert.equal(captureBudget.reserve(held), true);
   try {
@@ -270,7 +273,7 @@ test('uncertain credential discovery suppresses earlier headers and every group 
     const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: { 'x-echo': secret } });
     const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
     let group;
-    const store = { generation: 0, health: { dropped: 0 }, open: async () => true, failure() { assert.fail('unexpected failure'); },
+    const store = { generation: 0, health: mockDropHealth(), recordDrop: DetailedLogStore.prototype.recordDrop, open: async () => true, failure() { assert.fail('unexpected failure'); },
       publish({ produce, release }) { group = produce(); release(); return Promise.resolve(true); } };
     const root = new DetailRoot(req, res, store);
     root.input.add(JSON.stringify({ echo: secret })); root.input.end(); root.output.add(secret); root.output.end();
@@ -298,7 +301,7 @@ test('complete ordinary escaped text remains visible across a detailed group', (
   const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: { 'x-ordinary': ordinary } });
   const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
   let group;
-  const store = { generation: 0, health: { dropped: 0 }, open: async () => true, failure() { assert.fail('unexpected failure'); },
+  const store = { generation: 0, health: mockDropHealth(), recordDrop: DetailedLogStore.prototype.recordDrop, open: async () => true, failure() { assert.fail('unexpected failure'); },
     publish({ produce, release }) { group = produce(); release(); return Promise.resolve(true); } };
   const root = new DetailRoot(req, res, store);
   const payload = JSON.stringify({ model: 'demo', messages: [{ role: 'user', content: ordinary }] });
@@ -322,7 +325,7 @@ test('escaped credentials redact decoded echoes without blanking the detailed gr
     const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: { 'x-echo': secret } });
     const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
     let group;
-    const store = { generation: 0, health: { dropped: 0 }, open: async () => true, failure() { assert.fail('unexpected failure'); },
+    const store = { generation: 0, health: mockDropHealth(), recordDrop: DetailedLogStore.prototype.recordDrop, open: async () => true, failure() { assert.fail('unexpected failure'); },
       publish({ produce, release }) { group = produce(); release(); return Promise.resolve(true); } };
     const root = new DetailRoot(req, res, store);
     root.input.add(JSON.stringify({ echo: secret })); root.input.end(); root.output.add(secret); root.output.end();
@@ -344,7 +347,7 @@ test('escaped credential names omit only the affected string and redact cross-gr
   const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: { 'x-echo': secret } });
   const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
   let group;
-  const store = { generation: 0, health: { dropped: 0 }, open: async () => true, failure() { assert.fail('unexpected failure'); },
+  const store = { generation: 0, health: mockDropHealth(), recordDrop: DetailedLogStore.prototype.recordDrop, open: async () => true, failure() { assert.fail('unexpected failure'); },
     publish({ produce, release }) { group = produce(); release(); return Promise.resolve(true); } };
   const root = new DetailRoot(req, res, store);
   root.input.add(JSON.stringify({ messages: [{ role: 'user', content: escaped }], echo: secret })); root.input.end();
@@ -508,7 +511,7 @@ test('downstream wrapper keeps overloads, callbacks, return values and exactly-o
     end(chunk, encoding, callback) { if (chunk) this.write(chunk, encoding); callback?.(); this.emit('finish'); return this; }
   }
   const res = new Response(), published = [];
-  const store = { generation: 0, health: { dropped: 0 }, open: async () => true, failure() { assert.fail('unexpected store failure'); }, publish({ produce, release }) { return Promise.resolve().then(() => { published.push(produce()); release(); }); } };
+  const store = { generation: 0, health: mockDropHealth(), recordDrop: DetailedLogStore.prototype.recordDrop, open: async () => true, failure() { assert.fail('unexpected store failure'); }, publish({ produce, release }) { return Promise.resolve().then(() => { published.push(produce()); release(); }); } };
   const root = new DetailRoot(req, res, store); root.input.add('{}'); root.input.end();
   assert.equal(res.writeHead(201, 'Created', { 'X-Ordinary': 'ordinary response', 'X-Passwd': 'header-secret' }), res);
   let callbacks = 0; assert.equal(res.write('hello ', () => callbacks++), false); assert.equal(res.end(new Uint8Array(Buffer.from('world')), undefined, () => callbacks++), res);
@@ -525,7 +528,7 @@ test('header URLs and textual authorization are learned before every group echo 
   } });
   const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
   let group;
-  const store = { generation: 0, health: { dropped: 0 }, open: async () => true, failure() { assert.fail('unexpected failure'); },
+  const store = { generation: 0, health: mockDropHealth(), recordDrop: DetailedLogStore.prototype.recordDrop, open: async () => true, failure() { assert.fail('unexpected failure'); },
     publish({ produce, release }) { group = produce(); release(); return Promise.resolve(true); } };
   const root = new DetailRoot(req, res, store);
   root.input.add(JSON.stringify({ echo: secrets.join(' '), message: 'ordinary prompt' })); root.input.end();
@@ -569,7 +572,7 @@ test('original credential syntax survives known syntax collisions and credential
     const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: { 'x-earlier': secret, ...(requestCredential ? { [name]: value } : {}) } });
     const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
     let group;
-    const store = { generation: 0, health: { dropped: 0 }, open: async () => true, failure() { assert.fail('unexpected failure'); },
+    const store = { generation: 0, health: mockDropHealth(), recordDrop: DetailedLogStore.prototype.recordDrop, open: async () => true, failure() { assert.fail('unexpected failure'); },
       publish({ produce, release }) { try { group = produce(); } finally { release(); } return Promise.resolve(true); } };
     const root = new DetailRoot(req, res, store, [known]);
     root.input.add(JSON.stringify({ echo: secret, message: 'ordinary prompt' })); root.input.end();
@@ -601,7 +604,7 @@ test('outer scheme tokens cannot shadow complete inner URL or assignment credent
     const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: { 'x-earlier': secret } });
     const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
     let group;
-    const store = { generation: 0, health: { dropped: 0 }, open: async () => true, failure() { assert.fail('unexpected failure'); },
+    const store = { generation: 0, health: mockDropHealth(), recordDrop: DetailedLogStore.prototype.recordDrop, open: async () => true, failure() { assert.fail('unexpected failure'); },
       publish({ produce, release }) { try { group = produce(); } finally { release(); } return Promise.resolve(true); } };
     const root = new DetailRoot(req, res, store);
     root.input.add(JSON.stringify({ echo: secret, message: 'ordinary prompt' })); root.input.end();
@@ -730,16 +733,100 @@ test('assignment work pressure omits the whole root group and releases retained 
   const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: { 'x-ordinary': 'visible' } });
   const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
   let group;
-  const store = { generation: 0, health: { dropped: 0 }, open: async () => true, failure() { assert.fail('unexpected failure'); },
+  const store = { generation: 0, health: mockDropHealth(), recordDrop: DetailedLogStore.prototype.recordDrop, open: async () => true, failure() { assert.fail('unexpected failure'); },
     publish({ produce, release }) { try { group = produce(); } finally { release(); } return Promise.resolve(true); } };
   const root = new DetailRoot(req, res, store);
   root.input.add('ordinary prompt'); root.input.end(); root.output.add('ordinary output'); root.output.end();
   const attempt = root.attempt({ url: 'https://example.test/chat/completions', body: '{}' });
   attempt.output.add('key=x;'.repeat(16385)); attempt.output.end(); root.finalize();
   assert.equal(group.request.state, 'resource-limited'); assert.equal(store.health.dropped, 1);
+  assert.equal(store.health.dropReasons.redactionWorkLimit, 1);
+  assert.equal(Object.values(store.health.dropReasons).reduce((a, b) => a + b, 0), 1);
   assert.ok(group.bodies.every((body) => body.text === '' && body.descriptor.state === 'resource-limited' && body.descriptor.complete));
   assert.match(JSON.stringify(group.request.headers), /OMITTED/);
   assert.equal(captureBudget.used, before); assert.equal(DetailRoot.active, active);
+});
+
+test('one root drop classifies capture, redaction and multiple-body limits without changing descriptors', () => {
+  const makeRoot = ({ secrets = [], headers = {}, budget = null, profile = 'full' } = {}) => {
+    let group;
+    const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers });
+    const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
+    const store = { generation: 0, health: mockDropHealth(), recordDrop: DetailedLogStore.prototype.recordDrop,
+      open: async () => true, failure() { assert.fail('unexpected failure'); },
+      publish({ produce, release }) { try { group = produce(); } finally { release(); } return Promise.resolve(true); } };
+    const root = new DetailRoot(req, res, store, secrets, { profile });
+    if (budget) { root.input.budget = budget; root.output.budget = budget; }
+    return { root, store, group: () => group };
+  };
+  const check = (fixture, key, count = 1) => {
+    const { store, group } = fixture;
+    assert.equal(store.health.dropped, count);
+    assert.equal(store.health.dropReasons[key], count);
+    assert.equal(Object.values(store.health.dropReasons).reduce((a, b) => a + b, 0), count);
+    assert.equal(JSON.stringify({ request: group().request, attempts: group().attempts, bodies: group().bodies.map((body) => body.descriptor) }).includes('limitReason'), false, 'internal reason cannot enter manifest');
+  };
+  {
+    const f = makeRoot({ budget: new CaptureBudget(1) });
+    f.root.input.add('a'); f.root.input.end(); f.root.output.add('b'); f.root.output.end(); f.root.finalize();
+    check(f, 'captureBudget'); assert.equal(f.group().bodies.filter((b) => b.descriptor.state === 'resource-limited').length, 2);
+    assert.equal(f.root.input.budget.used, 0);
+  }
+  {
+    const f = makeRoot({ secrets: ['x'], budget: new CaptureBudget(3) });
+    f.root.input.add('x'); f.root.input.end(); f.root.output.end(); f.root.finalize();
+    check(f, 'captureBudget'); assert.equal(f.group().bodies[0].descriptor.state, 'resource-limited');
+    assert.equal(f.root.input.budget.used, 0);
+  }
+  {
+    const f = makeRoot({ secrets: Array.from({ length: 257 }, (_, i) => `fixture-secret-${i}`) });
+    f.root.input.add('safe'); f.root.input.end(); f.root.output.end(); f.root.finalize(); check(f, 'redactionSecretLimit');
+  }
+  for (const [headers, key] of [
+    [{ 'x-ordinary': 'ordinary=x;'.repeat(16385) }, 'redactionWorkLimit'],
+    [{ 'x-ordinary': 'z'.repeat(MAX_BODY_BYTES + 1) }, 'redactionOutputLimit']
+  ]) {
+    const f = makeRoot({ headers }); f.root.input.add('safe'); f.root.input.end(); f.root.output.end(); f.root.finalize(); check(f, key);
+  }
+  {
+    const f = makeRoot({ secrets: Array.from({ length: 257 }, (_, i) => `fixture-secret-${i}`), budget: new CaptureBudget(1) });
+    f.root.input.add('safe'); f.root.input.end(); f.root.output.add('also limited'); f.root.output.end(); f.root.finalize();
+    check(f, 'captureBudget'); assert.equal(f.store.health.dropReasons.redactionSecretLimit, 0, 'budget outranks secret limit');
+  }
+  {
+    const f = makeRoot(); f.root.input.limit = 3; f.root.input.add('abcdef'); f.root.input.end(); f.root.output.end(); f.root.finalize();
+    assert.equal(f.group().bodies[0].descriptor.state, 'truncated');
+    assert.equal(f.store.health.dropped, 0); // The ordinary per-body cap is truncation, not a resource drop.
+  }
+  {
+    const f = makeRoot(); f.root.input.add('ambiguous { bytes'); f.root.input.end(); f.root.output.end(); f.root.finalize();
+    assert.equal(f.store.health.dropped, 0); assert.equal(f.group().bodies[0].descriptor.state, 'omitted-for-safety');
+  }
+});
+
+test('error profile counts multiple limited responses once and attempt fence remains independent', () => {
+  let group;
+  const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: {} });
+  const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
+  const store = { generation: 0, health: mockDropHealth(), recordDrop: DetailedLogStore.prototype.recordDrop,
+    open() { assert.fail('error-only root must not open'); }, failure() { assert.fail('unexpected failure'); },
+    publish({ produce, release }) { try { group = produce(); } finally { release(); } return Promise.resolve(true); } };
+  const root = new DetailRoot(req, res, store, [], { profile: 'error' });
+  for (let i = 0; i < 2; i++) {
+    const attempt = root.attempt({ url: 'https://fixture.test/chat/completions', body: '{}' });
+    root.settleAttempt(attempt, { failed: true, responseBody: 'fixture response' });
+    attempt.output.release(); attempt.output = new BodyCapture({ budget: new CaptureBudget(1) });
+    attempt.output.add('limited'); attempt.output.end();
+  }
+  root.finalize(); root.finalize();
+  assert.equal(group.request.state, 'resource-limited'); assert.equal(group.bodies.length, 2);
+  assert.equal(store.health.dropped, 1); assert.equal(store.health.dropReasons.captureBudget, 1);
+  assert.equal(Object.values(store.health.dropReasons).reduce((a, b) => a + b, 0), 1);
+  const limitedRoot = new DetailRoot(req, res, store, [], { profile: 'error' });
+  limitedRoot.attempts = Array(256).fill(null);
+  assert.equal(limitedRoot.attempt({ url: 'https://fixture.test/chat/completions' }), null);
+  assert.equal(store.health.dropReasons.attemptLimit, 1); assert.equal(store.health.dropped, 2);
+  limitedRoot.attempts = []; limitedRoot.finalize();
 });
 
 test('unconsumed GET payloads remain unread instead of claiming a complete empty body', () => {
@@ -747,7 +834,7 @@ test('unconsumed GET payloads remain unread instead of claiming a complete empty
     const req = Object.assign(new EventEmitter(), { method: 'GET', url: '/v1/models', headers });
     const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
     let group;
-    const store = { generation: 0, health: { dropped: 0 }, open: async () => true, failure() { assert.fail('unexpected failure'); },
+    const store = { generation: 0, health: mockDropHealth(), recordDrop: DetailedLogStore.prototype.recordDrop, open: async () => true, failure() { assert.fail('unexpected failure'); },
       publish({ produce, release }) { group = produce(); release(); return Promise.resolve(true); } };
     new DetailRoot(req, res, store).finalize();
     const unread = !!headers['transfer-encoding'] || headers['content-length'] === '2';

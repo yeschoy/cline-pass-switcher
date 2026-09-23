@@ -235,6 +235,7 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 - 文件独立存于 `DATA_DIR/detailed-logs/`（目录 0700、文件 0600），按最早请求整组清理，最多 **7 天 / 1 GiB**，高流量可能提前淘汰。查询仅扫描有界元数据，正文单独读取；游标按时间/UUID 继续，即使前页已淘汰也不会把路径当作游标。
 - “清空详细日志”仅清除此存储；清空前的活动请求不能重新写回，清空后新请求仍可记录。普通日志和统计不受影响。启动时把已落盘的 `open` 请求身份标记为 `interrupted`；未完成正文不会被伪装成完整记录。早期元数据尚未落盘就退出的请求仍可能丢失。
 - 诊断文件写入不阻塞模型完成。内部保留负载预算为 64 MiB（不是精确 RSS 上限），并限制活动捕获/队列及脱敏工作量；超限只丢弃诊断并报告 `resource-limited`/计数，不改变流量。普通错误原因在脱敏后限制为 16 KiB，单条普通 JSONL 限制为 64 KiB，pending 队列同时限制记录数和字节数。临时存储失败通过安全健康状态报告，恢复后后续请求可继续记录；不可读/损坏组不会被当作有效完整记录或自动删除。
+- 认证的 `GET /api/logs/settings` 与 `GET /api/logs/details` 在 `health` 中提供 `dropped` 和固定 `dropReasons` 分项（捕获预算、脱敏秘密/扫描/输出、活动/调用数、发布队列、过期/代际、开放详情关联、大小/存储准入等）。每次诊断省略或发布拒绝只计一个主因；同一详情多份正文受限只计一次；分项之和等于 `dropped`。它们是**本进程启动以来**的聚合事件数，重启归零，不追溯旧记录，也不等于失败模型请求数或缺失详情根数。普通 5 MiB 截断不计丢弃；`failures`/`corrupt` 独立。页面仅显示非零原因，旧服务缺字段时标为原因暂不可用。
 - SIGTERM/SIGINT 会先停止新接入和额度调度，等待活动请求 finalizer 写入，再有界 drain 普通/详细 store；达到期限后才强制关闭连接，永久阻塞的日志 writer 不会无限拖住退出。
 
 管理 API（沿用现有密钥边界，返回 `Cache-Control: no-store`）：`GET/POST /api/logs/settings`，POST 接受由 `detailedLogging` / `errorDetailLogging` 组成的非空布尔字段子集，旧的单字段请求仍兼容；`GET/DELETE /api/logs/details`；`GET /api/logs/details/<requestId>`；`GET /api/logs/details/<requestId>/bodies/<bodyId>`（脱敏 `text/plain`，`nosniff`）。列表支持 `limit` 1–200、`cursor`、`requestId`、`from`/`to` 毫秒时间戳、`model`、`account`、`status`、`result`；错误参数返回 400，过期/已清空/缺失正文返回安全 404。

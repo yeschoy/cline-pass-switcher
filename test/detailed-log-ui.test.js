@@ -20,6 +20,25 @@ function harness() {
   return { context, run, el, calls, copies, drafts };
 }
 
+test('detailed health renders fixed nonzero reasons with safe old-server fallback and stale-read guards', async () => {
+  const h = harness(), before = h.drafts(); h.el('#detailsPanel').hidden = false;
+  const reasons = { ...h.run('Object.fromEntries(Object.keys(DETAIL_DROP_LABELS).map(key=>[key,0]))'), captureBudget: 2, storeQueue: 1, '<script>': 10 };
+  h.context.handler = async () => ({ ...page('row'), health: { dropped: 3, failures: 0, corrupt: 0, dropReasons: reasons } });
+  await h.run('loadDetails()');
+  assert.match(h.el('#detailsDropReasons').textContent, /本进程启动以来.*3 次.*捕获内存预算 2.*发布队列／关闭 1/);
+  assert.equal(h.el('#detailsDropReasons').innerHTML, '');
+  assert.doesNotMatch(h.el('#detailsDropReasons').textContent, /<script>|其他限制/);
+  h.context.handler = async () => page('legacy'); await h.run('loadDetails()');
+  assert.match(h.el('#detailsDropReasons').textContent, /原因暂不可用/);
+  h.context.handler = async () => ({ ...page('bad'), health: { dropped: 2, failures: 0, corrupt: 0, dropReasons: { ...reasons, captureBudget: '<img>', storeQueue: Number.MAX_SAFE_INTEGER + 1 } } });
+  await h.run('loadDetails()'); assert.match(h.el('#detailsDropReasons').textContent, /原因暂不可用/);
+  assert.doesNotMatch(h.el('#detailsDropReasons').textContent, /img|9007199254740992/);
+  const old = deferred(); h.context.handler = () => old.promise;
+  const pending = h.run('loadDetails()'); await h.run("switchSection('console')"); old.resolve({ ...page('stale'), health: { dropped: 999, dropReasons: reasons } }); await pending;
+  assert.doesNotMatch(h.el('#detailsDropReasons').textContent, /999/);
+  assert.equal(h.drafts(), before);
+});
+
 test('five sections, toggle and detail reads preserve all account/bulk/raw draft owners', async () => {
   const h = harness(), before = h.drafts(); let settings = { detailedLogging: false, errorDetailLogging: false, authRequired: false };
   h.context.handler = async (path, body) => { if (!path.includes('settings')) return page('row'); if (body) settings = { ...settings, ...body }; return settings; };

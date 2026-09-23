@@ -37,6 +37,71 @@ test('independent owner-only groups, metadata-only paging, on-demand body and re
   await assert.rejects(store.body(a.requestId, a.bodyId), { statusCode: 404 });
 });
 
+test('fixed drop reasons reconcile at every store admission edge, saturate and reset on restart', async (t) => {
+  const store = await setup(t);
+  const expected = Object.keys(store.health.dropReasons);
+  assert.equal(store.health.dropped, 0);
+  assert.ok(expected.length > 0 && expected.every((key) => store.health.dropReasons[key] === 0));
+  const count = (key, total) => {
+    assert.equal(store.health.dropReasons[key], total);
+    assert.equal(Object.values(store.health.dropReasons).reduce((a, b) => a + b, 0), store.health.dropped);
+  };
+  const queue = store.pending; store.pending = 128;
+  const blocked = publish(store); assert.equal(await blocked.done, false); assert.equal(blocked.released(), true);
+  store.pending = queue; count('storeQueue', 1);
+  const stale = publish(store, { generation: -1 }); assert.equal(await stale.done, false); count('storeStale', 1);
+  const expired = publish(store, { ts: store.now() - store.maxAgeMs }); assert.equal(await expired.done, false); count('storeStale', 2);
+  const invalid = publish(store, { requestId: 'invalid-id' }); assert.equal(await invalid.done, false); count('storeStale', 3);
+  const missingOpen = store.publish({ generation: store.generation, ts: store.now(), requestId: randomUUID(), requireOpen: true, release() {}, produce() { assert.fail('no associated root'); } });
+  assert.equal(await missingOpen, false); count('storeOpenRoot', 1);
+  const accepted = publish(store); assert.equal(await accepted.done, true, 'normal publication does not count as dropped');
+  const small = await setup(t, { maxTotalBytes: 1 });
+  const sizeRejected = publish(small); assert.equal(await sizeRejected.done, false); assert.equal(small.health.dropReasons.storeSize, 1);
+  const full = await setup(t, { maxInventoryEntries: 0 });
+  const capacityRejected = publish(full); assert.equal(await capacityRejected.done, false); assert.equal(full.health.dropReasons.storeCapacity, 1);
+  const hugeId = randomUUID(), hugeTs = store.now();
+  const hugeManifest = store.publish({ generation: store.generation, ts: hugeTs, requestId: hugeId, release() {}, produce() {
+    return { request: { requestId: hugeId, ts: hugeTs, model: 'x'.repeat(1024 * 1024) }, attempts: [], bodies: [] };
+  } });
+  assert.equal(await hugeManifest, false); count('storeSize', 1);
+  store.failure(); store.health.corrupt++;
+  assert.equal(store.health.failures, 1); assert.equal(store.health.corrupt, 1); assert.equal(store.health.dropped, 6);
+  store.recordDrop('untrusted-label'); count('other', 1);
+  const rebooted = new DetailedLogStore({ dir: store.dir }); t.after(() => rebooted.close()); await rebooted.queue;
+  assert.equal(rebooted.health.dropped, 0); assert.ok(expected.every((key) => rebooted.health.dropReasons[key] === 0));
+  // The saturation policy freezes the complete distribution rather than overflowing one bucket.
+  store.health.dropped = Number.MAX_SAFE_INTEGER - 1;
+  store.health.dropReasons = Object.fromEntries(expected.map((key) => [key, key === 'other' ? Number.MAX_SAFE_INTEGER - 1 : 0]));
+  store.recordDrop('captureBudget'); count('captureBudget', 1);
+  store.recordDrop('storeQueue'); count('storeQueue', 0);
+  assert.equal(store.health.dropped, Number.MAX_SAFE_INTEGER);
+});
+
+test('late generation and open-root association fences count one reason and release publication', async (t) => {
+  const store = await setup(t);
+  const open = { requestId: randomUUID(), ts: store.now(), generation: store.generation, method: 'POST', pathname: '/v1/chat/completions' };
+  assert.equal(await store.open(open), true);
+  await fs.rm(path.join(store.dir, open.requestId, 'manifest.json'));
+  let released = 0;
+  const missing = await store.publish({ ...open, requireOpen: true, release() { released++; }, produce() { assert.fail('missing open root must not be materialized'); } });
+  assert.equal(missing, false); assert.equal(released, 1);
+  assert.equal(store.health.dropReasons.storeOpenRoot, 1);
+
+  let lateClear;
+  const io = { ...fs, writeFile: async (file, ...args) => {
+    await fs.writeFile(file, ...args);
+    if (String(file).endsWith('manifest.json') && String(file).includes('.tmp-')) lateClear = fenced.clear();
+  } };
+  const fenced = await setup(t, { io });
+  const candidate = publish(fenced); assert.equal(await candidate.done, false);
+  await lateClear;
+  assert.equal(candidate.released(), true); assert.equal(fenced.pending, 0);
+  assert.equal(fenced.health.dropReasons.storeStale, 1);
+  assert.equal(fenced.health.dropped, 1);
+  assert.equal(Object.values(fenced.health.dropReasons).reduce((a, b) => a + b, 0), 1);
+  assert.equal((await fenced.query()).items.length, 0);
+});
+
 test('runtime publication, query and expiry reuse the startup inventory until explicit reconciliation', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cps-details-index-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -276,6 +341,7 @@ test('async close drains accepted publications and drops post-close work with re
   await new Promise((resolve) => setImmediate(resolve)); assert.equal(closed, false, 'close waits for accepted work');
   const rejected = publish(store); assert.equal(await rejected.done, false); assert.equal(rejected.released(), true);
   hold = false; unblock(); assert.equal(await accepted.done, true); await closing;
+  assert.equal(store.health.dropped, 1); assert.equal(store.health.dropReasons.storeQueue, 1);
   assert.equal(accepted.released(), true); assert.equal(store.pending, 0);
 });
 

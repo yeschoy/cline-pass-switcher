@@ -169,6 +169,7 @@
       <div class="toolbar"><label for="errorDetailLogging"><input id="errorDetailLogging" type="checkbox" disabled onchange="toggleErrorDetailLogging()"> 启用错误详情（仅失败 attempt）</label><label for="detailedLogging"><input id="detailedLogging" type="checkbox" disabled onchange="toggleDetailedLogging()"> 启用完整详细日志（立即独立保存，不提交账号草稿）</label><button class="ghost" type="button" onclick="loadDetails()">刷新 / 筛选</button><button class="ghost" type="button" onclick="clearDetails()">清空详细日志</button></div>
       <div class="toolbar"><label>请求 ID <input id="detailsRequestId"></label><label>模型 <input id="detailsModel"></label><label>账号 <input id="detailsAccount"></label><label>状态码 <input id="detailsStatusFilter" type="number" min="100" max="599"></label><label>结果 <select id="detailsResult"><option value="">全部</option><option value="success">成功</option><option value="client_cancelled">客户端取消</option><option value="failed">失败</option></select></label><label>开始时间 <input id="detailsFrom" type="datetime-local"></label><label>结束时间 <input id="detailsTo" type="datetime-local"></label></div>
       <p id="detailsStatus" aria-live="polite"></p>
+      <p id="detailsDropReasons" aria-live="polite"></p>
       <div class="table-wrap"><table><thead><tr><th>时间 / 请求</th><th>模型 / 账号</th><th>状态 / 完整性</th><th>操作</th></tr></thead><tbody id="detailsList"></tbody></table></div>
       <button id="detailsNext" class="ghost" type="button" disabled onclick="loadDetails(true)">下一页</button>
       <h3>请求与实际调用（正文按需加载）</h3><pre id="detailsMetadata" tabindex="-1" style="max-height:24rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere"></pre>
@@ -1285,11 +1286,20 @@ async function switchSection(section){
 }
 let DETAIL_SETTINGS_ID=0,DETAIL_BODY_TEXT=null,DETAIL_LIST_ID=0,DETAIL_SELECTION_ID=0,DETAIL_NAV_ID=0,DETAIL_CURSOR=null,DETAIL_REQUEST=null,DETAIL_CONFIRMED=false,ERROR_DETAIL_CONFIRMED=false,DETAIL_TOGGLE_PENDING=false;
 const detailVisible=()=>!$('#detailsPanel').hidden;
+const DETAIL_DROP_LABELS={activeLimit:'活动捕获数上限',attemptLimit:'单次详情调用数上限',attemptCaptureFailure:'调用捕获失败',captureBudget:'捕获内存预算',redactionSecretLimit:'脱敏秘密集合预算',redactionWorkLimit:'脱敏扫描／深度工作量',redactionOutputLimit:'脱敏文本／输出预算',redactionOther:'其他脱敏资源限制',storeQueue:'发布队列／关闭',storeStale:'过期／代际或身份无效',storeOpenRoot:'开放详情关联丢失',storeSize:'详情大小上限',storeCapacity:'存储准入容量',other:'其他限制'};
+const detailCount=value=>Number.isSafeInteger(value)&&value>=0?value:null;
+function renderDetailHealth(health){
+  const total=detailCount(health?.dropped),reasons=health?.dropReasons;
+  const entries=reasons&&typeof reasons==='object'&&!Array.isArray(reasons)?Object.entries(DETAIL_DROP_LABELS).map(([key,label])=>[label,detailCount(reasons[key])]):null;
+  const known=entries&&entries.every(([,count])=>count!==null)&&total!==null&&entries.reduce((sum,[,count])=>sum+count,0)===total;
+  $('#detailsDropReasons').textContent=`本进程启动以来，诊断省略/拒绝 ${total??'未知'} 次；${!known?'原因暂不可用':entries.some(([,count])=>count>0)?entries.filter(([,count])=>count>0).map(([label,count])=>`${label} ${count}`).join(' · '):'无原因分项'}`;
+}
 async function detailJSON(path,body,method){const result=await api(path,body,method);if(result.error)throw Error(result.error.message||'详细日志操作失败');return result;}
 async function loadDetailSettings(){
   const nav=DETAIL_NAV_ID,version=++DETAIL_SETTINGS_ID;
   try{const data=await detailJSON('/api/logs/settings');if(nav!==DETAIL_NAV_ID||version!==DETAIL_SETTINGS_ID||!detailVisible())return;
     $('#detailsAuth').textContent=data.authRequired?'管理 API 已启用密钥认证。':'警告：未配置代理/管理密钥，当前详细内容没有密钥保护！';
+    renderDetailHealth(data.health);
     if(!DETAIL_TOGGLE_PENDING){DETAIL_CONFIRMED=data.detailedLogging===true;ERROR_DETAIL_CONFIRMED=data.errorDetailLogging===true;$('#detailedLogging').checked=DETAIL_CONFIRMED;$('#errorDetailLogging').checked=ERROR_DETAIL_CONFIRMED;$('#detailedLogging').disabled=false;$('#errorDetailLogging').disabled=false;}
   }catch{if(nav===DETAIL_NAV_ID&&version===DETAIL_SETTINGS_ID&&detailVisible())$('#detailsStatus').textContent='日志设置加载失败';}
 }
@@ -1314,6 +1324,7 @@ async function loadDetails(next=false){
   try{const data=await detailJSON('/api/logs/details?'+params);if(id!==DETAIL_LIST_ID||!detailVisible())return;
     $('#detailsList').innerHTML=data.items.map(row=>`<tr><td>${escapeHtml(new Date(row.ts).toLocaleString())}<br>${escapeHtml(row.requestId)}</td><td>${escapeHtml(row.model)}<br>${escapeHtml((row.accounts||[]).join(', '))}</td><td>${escapeHtml(row.profile||'full')} · HTTP ${escapeHtml(row.httpStatus??row.status??'—')} / outcome ${escapeHtml(row.outcomeStatus??'—')} / ${escapeHtml(row.result||'未知')}<br>${escapeHtml(row.captureState||row.state)} · ${escapeHtml(row.attemptCount)} 次调用</td><td><button type="button" class="ghost" onclick="selectDetail(${jsArg(row.requestId)})">查看请求</button></td></tr>`).join('')||'<tr><td colspan="4">暂无详细日志</td></tr>';
     DETAIL_CURSOR=data.nextCursor;$('#detailsNext').disabled=!DETAIL_CURSOR;$('#detailsStatus').textContent=`存储失败 ${data.health.failures} · 诊断丢弃 ${data.health.dropped} · 损坏记录 ${data.health.corrupt}`;
+    renderDetailHealth(data.health);
   }catch(error){if(id===DETAIL_LIST_ID&&detailVisible())$('#detailsStatus').textContent=error.message;}
 }
 const DETAIL_UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
