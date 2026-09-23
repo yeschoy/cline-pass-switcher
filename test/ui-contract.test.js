@@ -209,11 +209,15 @@ test('detailed logs have independent labelled controls, privacy/retention guidan
   assert.match(html, /attemptIndex/); assert.match(html, /detailCallId/);
   assert.match(html, /5 MiB/); assert.match(html, /7 天 \/ 1 GiB/); assert.match(html, /不提交账号草稿/);
   assert.match(html, /id="detailsStatus" aria-live="polite"/);
+  assert.match(html, /id="detailsDropReasons" aria-live="polite"/);
   assert.match(html, /<label for="detailsText">/); assert.match(html, /<textarea id="detailsText" readonly/);
   assert.match(html, /id="detailsCopy"[^>]+disabled/);
   const detailCode = html.slice(html.indexOf('let DETAIL_SETTINGS_ID'), html.indexOf('async function loadLogs'));
   assert.doesNotMatch(detailCode, /loadAll\(|saveAccounts\(/);
   assert.match(detailCode, /DETAIL_LIST_ID/); assert.match(detailCode, /DETAIL_SELECTION_ID/); assert.match(detailCode, /DETAIL_SETTINGS_ID/);
+  assert.match(detailCode, /detailsDropReasons'\)\.textContent=/);
+  assert.match(detailCode, /DETAIL_DROP_LABELS/);
+  assert.match(detailCode, /detailCount\(reasons\[key\]\)/);
   assert.match(detailCode, /detailsMetadata'\)\.textContent=JSON\.stringify/);
   assert.match(detailCode, /detailsText'\)\.value=text/);
   assert.match(detailCode, /navigator\.clipboard\.writeText\(text\)/);
