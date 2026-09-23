@@ -746,3 +746,27 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 31: 详细日志丢弃分原因计数
+<!-- trellis-session: v=2 fp=06745a2f2af02c5d -->
+
+**Date**: 2026-09-23
+**Task**: 详细日志丢弃分原因计数
+**Branch**: `feat/detailed-log-drop-reasons`
+
+### Summary
+
+统一 DetailedLogStore.recordDrop 为详细诊断 health.dropped 的唯一 owner，增 14 个固定且进程内归零的原因桶，分项之和严格等于总数；资源受限由捕获预算、脱敏秘密/工作/输出等原因归类，full/error 单根多正文仅计一次，普通截断不误算。两处管理 health API 和控制台仅展示安全聚合计数，无每请求原因、正文或身份投影；旧返回兼容。独立检查用队列归因与根原因优先级反向变异证明测试有判别力。全量248/248，真实 Chrome 375px 7/7；英文 spec 已同步，历史生产 dropped 不可回填。未推送或部署。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `87ee8a3` | feat: 为详细日志丢弃增加固定原因计数 |
+| `04aabb4` | docs(spec): 同步详细日志分原因健康投影与安全边界 |
+| `608045f` | docs(task): 记录详细日志原因计数检查与浏览器证据 |
+
+### Status
+
+[OK] **Completed**
