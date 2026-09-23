@@ -42,11 +42,14 @@ injectPrefs(body, modelId, attempt)
 classifyAttemptFailure(result, attempt, account, now)
 updateProviderHealth(modelId, upstream, outcome, now)
 responseHeadersFor(account, forwardedHeaders)
-proxyAgentFor(proxyUrl)
+proxyAgentFor(proxyUrl, { ephemeral = false })
+pruneProxyAgents()
+readFirstSseEvent(stream, maxBytes = 64 * 1024)
 runChatChain(req, body, modelId, cfg, account, forwardedHeaders,
   { stream = false, attemptTimeoutMs = 120000, sensitiveValues = [], attemptOwner = null })
 clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000,
-  account = null, proxyUrl = "" })
+  account = null, proxyUrl = "", ephemeralProxy = false })
+// response: { status, headers, body, setIdleTimeout(ms), attemptToken, detailAttempt }
 normalizeUsage(raw)
 createSseObserver(maxBytes = 64 * 1024)
 commitStatistics({ ts, modelId, globalError, usage, segments, clientDisconnect })
@@ -100,7 +103,7 @@ GET/DELETE /api/logs/errors
 
 When `proxyKey` is non-empty, `/api/*`, `/v1/*`, and chat endpoints require either `Authorization: Bearer <proxyKey>` or `X-Admin-Key: <proxyKey>`. `GET /api/meta` is the intentional public exception.
 
-Runtime environment keys are `DATA_DIR`, `CLINE_PASS_KEY`, `PROXY_KEY`, `PUBLIC_BASE_URL`, `PORT`, and `BIND_HOST`. Environment values override the loaded runtime configuration; a later console save may write the effective account/security value to `config.json`.
+Existing environment keys are `DATA_DIR`, `CLINE_PASS_KEY`, `PROXY_KEY`, `PUBLIC_BASE_URL`, `PORT`, and `BIND_HOST`. Effective account/security values from `CLINE_PASS_KEY`, `PROXY_KEY` and `PUBLIC_BASE_URL` may be persisted by a later console save; `DATA_DIR` and `BIND_HOST` are not persisted. Connection-pool and SSE timing environment keys are separate, never persisted and enumerated with ranges in `database-guidelines.md`.
 
 ### 3. Contracts
 
@@ -212,7 +215,8 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 
 #### Account proxy and model alias boundary
 
-- Empty `proxyUrl` means native direct transport. `http:`/`https:` use `HttpsProxyAgent`; `socks5:`/`socks5h:` use `SocksProxyAgent`. The pinned agent versions preserve Node >=18.
+- Empty `proxyUrl` selects the process-wide native `http.Agent` or `https.Agent` (both `keepAlive: true`, `scheduling: 'lifo'`, 256 max sockets / 32 max free per agent by default, bounded runtime overrides). `http:`/`https:` use `HttpsProxyAgent`; `socks5:`/`socks5h:` use `SocksProxyAgent`, each explicitly keep-alive with 32 max sockets / 2 max free by default. Agent socket idle timeout is 60 seconds; reuse still depends on the peer keeping the connection open. Do not substitute `fetch` or global Agent defaults for `clineRequest()`.
+- `proxyAgents` caches only URLs referenced by persisted accounts and stops at 128 URLs. Excess/new non-persisted URLs get disposable agents rather than enlarging the cache; saving account changes calls `pruneProxyAgents()` to destroy stale agents before removal. `/api/accounts/proxy-test` always passes `ephemeralProxy: true`, even for a saved URL; its agent is destroyed on response end/close, setup failure, or abort and never enters the cache. The in-flight request retains its agent until settlement; do not destroy it just because response headers arrived.
 - The account proxy applies to account-bound Cline chat/probe/validation/test and quota-upstream traffic. Probe and validation accept an optional account ID, lease that account once, and keep probe+harvest or the whole validation batch on it; unknown/unavailable/busy accounts return 400/409/429. Public catalog/document fetching and ordinary management APIs remain direct.
 - A configured proxy failure is a proxy/network attempt failure and never retries the same request without an agent.
 - `requestedModel` is preserved for diagnostics. `resolvedModel = modelAliases[requestedModel] || requestedModel` replaces outbound `body.model` and owns global/account `perModel` lookup. Aliases are not chained.
@@ -227,12 +231,16 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 
 #### Abort and SSE lifecycle
 
-- A client socket close aborts the active upstream request.
-- The stream path buffers at most the first 64 KiB while waiting for a complete first SSE event. A pre-response error event is normalized and may still trigger provider/account failover.
+- The native HTTP/1.1 server sets `keepAliveTimeout = 95_000` ms and `headersTimeout = keepAliveTimeout + 5_000` ms by default. This is the *between-requests* idle window (slightly above New API's documented 90-second pool idle), not a stream duration or replacement for the existing 50 MiB body limit. Do not require newer Node-only `keepAliveTimeoutBuffer`.
+- A direct client socket close aborts the active upstream request. If New API keeps its ordinary Chat upstream request open after its own final client disconnect *before* Switcher returns headers, Switcher cannot observe that final client; the first-event deadline bounds residual work but does not make cancellation immediate.
+- Non-stream attempts retain the bounded 120-second default attempt timer. Streaming uses a 120-second wall deadline from attempt start through response headers and the first complete valid `data:` event; comment/metadata bytes never extend it. `clineRequest()` initially sets the native request timeout and returns `setIdleTimeout(ms)` so that, after acceptance, `runChatChain()` clears the first-event timer and actually replaces the active socket timeout with the 360-second upstream idle limit. Downstream heartbeats do not reset this upstream idle timer.
+- `readFirstSseEvent()` buffers no more than 64 KiB of prelude and first event: retain comment-only/empty events and `event:`/`id:`/`retry:` metadata until a complete event with `data:` arrives; pass through the raw prelude and first event. Bytes following that event in the same chunk go back to the paused response via `unshift()` in order. A first `data:` error is classified/retried before committing SSE headers. A rejected head (including comment-only overflow) destroys its upstream response immediately; never wait for an unbounded tail. No downstream heartbeat precedes acceptance.
+- After the first legal data event has been submitted downstream, the single stream-local `Writable` owns upstream forwarding, the SSE observer and heartbeat writes. With no upstream bytes for 25 seconds (default), it writes `: PING\n\n` only at a complete SSE event boundary; any upstream chunk resets the heartbeat timer, and a partial data line/event suppresses injection rather than corrupting model data. `res.write() === false` pauses further upstream forwarding and extra heartbeat until `drain`, not a client cancellation. A write throw or socket error/close is terminal. Clear heartbeat and drain listeners on every terminal path. The upstream observer never sees generated comments, so usage, DONE, errors, health, attempts and RPM are unchanged.
+- Only accepted stream output is eligible for heartbeat; `CLINE_PASS_SSE_HEARTBEAT_MS=0` disables it. New API's scanner resets its own idle window on comment lines before ignoring them as model chunks; Switcher's comments keep only New API ← Switcher alive. Final-client idle protection requires New API's separate existing downstream ping setting.
 - After a valid SSE response is exposed (`started: true`), the request is never replayed. Clean completion recovers the named provider and releases any half-open owner; a later classified SSE error updates future provider/account state only.
 - The SSE observer records a complete `data: [DONE]` event. A downstream close after `[DONE]` finalizes once as `200 / success`; a close before `[DONE]` finalizes once as `499 / client_cancelled`.
 - An observed SSE error or upstream transport error takes precedence over `[DONE]` and remains a real failure. A client cancellation creates no error attempt, usage, error statistic, health result, account action, or provider-health update.
-- The account lease stays held until normal stream flush, upstream error, or downstream close. Stream finalization, listener cleanup, statistics submission, provider settlement and lease release are idempotent.
+- The account lease stays held until normal stream flush, upstream error/idle timeout, or downstream close. Stream finalization, timer/drain listener cleanup, statistics submission, provider settlement and lease release are idempotent. Existing `shutdown()` stops intake/quota work, waits for active response finalizers while logs remain open, then drains both stores; `destroyRuntimeConnections()` destroys inbound sockets and direct/proxy agents after successful drain or at the deadline (force path). Do not add another exit coordinator or close logs before active finalizers.
 - Detailed capture, when enabled, observes native responses before SSE-head consumers with a single pass-through Transform and two-way destruction propagation. Use native `stream.finished(source, { readable: true, writable: false }, callback)` to observe terminal source errors: `aborted` may precede Node's actual `error`, and synthesizing an earlier error changes downstream error bodies with logging enabled. Preserve the native error object/code (`ECONNRESET`); a silent premature close still terminates the tap with `ERR_STREAM_PREMATURE_CLOSE`. The 5 MiB capture cap never becomes a traffic limit; asynchronous store publication is not awaited here. Preserve downstream write/end/writeHead overloads/return values and explicitly carry the detail root into chat result recording because close callbacks may run outside the originating AsyncLocalStorage context. The request-local native-chat owner assigns monotonically increasing `attemptIndex` plus UUID `callId` only after `req.end()`; capture profiles consume the token and never own ordering. See the detailed logging contract for route exclusions and failure states.
 
 #### Usage, statistics, and health
@@ -294,6 +302,10 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 | `/api/accounts.accountPipeline` is non-object, incomplete, has unknown keys/non-booleans, has `cachePoolSize`/`cachePoolMaxSize` outside integer 0-100000, has a TTL outside integer 60000-604800000, has `sessionBindingMaxEntries` outside integer 1-100000, or has a non-permutation `order` | `400`; do not save |
 | `cachePoolMaxSize < cachePoolSize`, or `sessionBindingFallbackTtlMs > sessionBindingExplicitTtlMs` | strict save `400`; non-strict normalization clamps max to min and fallback to the default-or-explicit TTL |
 | Usage field is absent/invalid while another usage field is valid | keep the absent field unknown; count only explicit valid fields |
+| First SSE head never produces a complete `data:` event (comment-only/metadata until 64 KiB, EOF, or first-event wall deadline) | reject before exposing the SSE response; on overflow destroy the native response immediately without consuming an unbounded tail; no heartbeat |
+| First SSE `data:` event is a recognized error after a valid prelude | classify/possibly retry before output; do not expose the error event or leak prelude to the downstream client |
+| After start, upstream stays silent beyond socket idle timeout despite downstream comments | terminate as one upstream timeout/failure; do not replay or create a heartbeat attempt |
+| `res.write()` returns `false` | wait for `drain` and continue, without a fabricated `499` or premature lease release; throw/close/error is terminal |
 | A streaming SSE event exceeds 64 KiB | discard that event only; resume at its CRLF/LF terminator and observe later usage |
 | A fixed statistics counter exceeds `Number.MAX_SAFE_INTEGER` | persist `null` plus the exact `overflowFields` marker; never wrap or clamp |
 | Rule/default outcome is `ignore`, traffic is management or an unattributed `auto` provider attempt, a completion is stale-generation, or the client disconnects | no success/degrade sample is recorded; `degrade`/`cooldown`/`hard-quarantine` each record exactly one failure sample in their scope |
@@ -320,6 +332,10 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - **Good:** an alias request logs both names, applies the resolved target's account route, and returns the internal request ID used by request/error logs.
 - **Good:** a SOCKS/HTTPS-proxied account reaches Cline through its Agent; a bad proxy produces no direct request.
 - **Good:** a streaming request receives fragmented events and one oversized event, then commits the final later cumulative usage exactly once.
+- **Good:** an HTTP/1.1 New API-style client reuses an inbound socket across the previous five-second idle window; direct HTTP/HTTPS and persisted proxy tunnels reuse eligible sockets, while draft proxy tests destroy their own tunnel.
+- **Good:** a prelude plus first data event is forwarded in order; quiet complete-event intervals produce `: PING\n\n`, but a partial data event is never split by a heartbeat. A slow downstream returns `write(false)`, later drains and still finishes as success.
+- **Base:** `CLINE_PASS_SSE_HEARTBEAT_MS=0` leaves accepted SSE model traffic intact without injecting comments; a quiet upstream beyond its socket idle limit still fails.
+- **Bad:** counting a heartbeat as an upstream attempt/usage event, resetting the first-data wall deadline with comments, or treating `write(false)` as disconnect.
 - **Good:** account success sorting puts known rates before unknown and higher rates first, while ties preserve prior order and no rate is filtered.
 - **Good:** a two-account cache pool keeps ordinary sessions on its priority/ID-stable active set; quota reserve and hard account state can replace members, while success-rate changes do not remap membership.
 - **Good:** an old quota request finishes after credential rotation; its generation mismatch prevents any state write.
@@ -359,7 +375,11 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - provider health tests cover valid/missing Retry-After, 5xx/transport/unsupported cooldowns, model isolation, success recovery, stale-generation rejection, restart persistence, and late SSE updates without replay;
 - account override reports `configSource: "account"`; `action: "inherit"` restores `"inherited"`; account-scoped probe/validation keeps one account/proxy and never promotes account auth/proxy/quota failures into global provider health;
 - real allowed and safe account Headers arrive, prohibited Headers do not, downstream Authorization is replaced, and no synthetic User-Agent appears;
-- HTTP, HTTPS, SOCKS5, and SOCKS5H proxies create real local tunnels; bad proxy tests prove no direct fallback and no credential leakage;
+- local mock direct HTTP/HTTPS peers observe repeated chat calls on one upstream TCP/TLS socket; an inbound New API-style keep-alive client sees the same local port across a >5-second gap shorter than its configured idle window;
+- HTTP and HTTPS CONNECT mocks count one handshake for two requests on a saved proxy; SOCKS5 and SOCKS5H mocks each count one handshake for two requests; draft proxy-test responses close disposable tunnels, account-save proxy rotation destroys stale idle tunnels, and a bad proxy never produces a direct upstream hit or credential leak; these are local peer-dependent reuse observations, not a guarantee for arbitrary external proxies;
+- comment-only prelude beyond 64 KiB destroys a never-ending response promptly; comment-only wait hits the first-data wall deadline without exposing SSE; coalesced prelude/data/DONE preserves ordering and a prelude followed by first-data error may fail over before output;
+- independent first-event/stream-idle/heartbeat test observes a New API-equivalent line scanner resetting idle on comments while ignoring them as model data, blocks injection into partial SSE events, and demonstrates that heartbeats cannot mask permanently silent upstreams; `write(false)` is actually observed under backpressure, followed by drain, DONE, one success row and zero active leases;
+- complete-DONE, upstream error/idle, early client cancellation and SIGTERM during SSE settle the request/usage/health/attempt/RPM/lease only once; SIGTERM preserves a terminal row through log drain, while a blocked writer is bounded by shutdown deadline;
 - old three modes plus least-connections, weighted proportions, priority full-tier fallback/cooldown/recovery behave deterministically and all `activeCount` values return to zero;
 - aliases rewrite outbound model/routing lookup, reject conflicts, preserve originals in `/v1/models`, and log requested/resolved names;
 - log API request IDs, strict filters, bounded reasons/rows/queues, optional validated error-detail tokens, projections and sensitive-value absence satisfy `logging-guidelines.md`;
@@ -415,6 +435,16 @@ try {
 ```
 
 The streaming path transfers release responsibility to its idempotent finalizer instead of releasing in this immediate `finally` block.
+
+An SSE write returning false is backpressure, not cancellation:
+
+```js
+// Wrong: a full downstream buffer is not a broken client.
+if (!res.write(': PING\n\n')) finalize('client disconnected', 'client_disconnect');
+
+// Correct: the existing stream-local writer owns writes and drain cleanup.
+writeDownstream(': PING\n\n'); // pauses extra pings and resumes on drain
+```
 
 Missing usage must remain unknown rather than being converted to a plausible zero.
 

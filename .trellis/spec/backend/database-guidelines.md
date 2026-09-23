@@ -56,6 +56,23 @@ metadata.json   DATA_DIR/metadata.json
 
 ### 3. Contracts
 
+#### Process-only HTTP/1.1 connection and SSE settings
+
+These are evaluated once from environment by `boundedEnv()`/`runtimeDuration()`; they are **not** `config.json` or `metadata.json` fields and are not echoed by account/config saves. Each value is an unsigned canonical decimal safe integer (no signs, spaces, decimals, exponent, or guessed seconds). Missing, malformed, unsafe or out-of-range values fall back to the listed default; the unit is always milliseconds (`_MS`) or socket counts. `runtimeDuration()` reads the production key first and applies the matching `CLINE_PASS_TEST_*` override **only** with `NODE_ENV=test`, using the same bounds (invalid test input keeps the already selected production value).
+
+| Environment key | Default | Inclusive bounds / effect |
+|---|---:|---|
+| `CLINE_PASS_INBOUND_KEEP_ALIVE_MS` | 95000 | 100–120000; `server.keepAliveTimeout`, with `headersTimeout = value + 5000` |
+| `CLINE_PASS_SSE_FIRST_EVENT_MS` | 120000 | 100–120000; stream first-data wall deadline including headers/prelude |
+| `CLINE_PASS_SSE_STREAM_IDLE_MS` | 360000 | 200–600000; native upstream socket idle after accepted first data |
+| `CLINE_PASS_SSE_HEARTBEAT_MS` | 25000 | 0–60000; 0 disables downstream SSE comments |
+| `CLINE_PASS_DIRECT_MAX_SOCKETS` | 256 | 1–1024; each process-wide HTTP/HTTPS Agent |
+| `CLINE_PASS_DIRECT_MAX_FREE_SOCKETS` | 32 | 1–64; effective value `min(configured free, effective direct max sockets)` |
+| `CLINE_PASS_PROXY_MAX_SOCKETS` | 32 | 1–128; each cached/disposable HTTP(S)/SOCKS proxy Agent |
+| `CLINE_PASS_PROXY_MAX_FREE_SOCKETS` | 2 | 1–16; effective value `min(configured free, effective proxy max sockets)` |
+
+Only the four duration keys support `CLINE_PASS_TEST_INBOUND_KEEP_ALIVE_MS`, `CLINE_PASS_TEST_SSE_FIRST_EVENT_MS`, `CLINE_PASS_TEST_SSE_STREAM_IDLE_MS`, and `CLINE_PASS_TEST_SSE_HEARTBEAT_MS`. Agent options also set `keepAlive: true`, `scheduling: 'lifo'`, and 60000 ms socket timeout; at most 128 persisted proxy URLs enter the cache, with disposable agents for draft tests and cache overflow. No new persisted migration is required. Target Node >=18 APIs; local mock verification currently ran on Node 26 only, not a Node 18 runtime or a Docker container.
+
 #### Static `config.json`
 
 ```js
@@ -265,6 +282,7 @@ Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/
 
 | Input/state | Persisted result or error |
 |---|---|
+| Invalid or out-of-range process-only connection/SSE environment value | use its documented default without changing operator JSON; invalid `CLINE_PASS_TEST_*` in test mode retains the already-selected production value, and non-test mode ignores it |
 | Missing file (`ENOENT`) | use fallback; persist only if normalization becomes dirty or a later save occurs |
 | Malformed existing JSON | throw `cannot read <file>: ...`; process exits; original bytes remain |
 | Missing legacy account fields | generate/persist `id`, `maxConcurrent: 0`, `perModel: {}` |
@@ -312,6 +330,8 @@ Startup normalization is permissive for legacy files; management APIs validate s
 - **Good:** changing an account key invalidates its quota generation/state while retaining that stable ID's local usage history.
 - **Good:** a config with `maxRpm: 7` round-trips through `GET/POST /api/accounts`; a complete save from an older client that omits the field keeps `7`, a new account without it becomes `0`, and the rolling window never appears in `metadata.json`.
 - **Base:** `maxRpm: 0` means unlimited and keeps no window state.
+- **Good:** `NODE_ENV=production` with a valid millisecond heartbeat override and a conflicting test-only override uses the production value; neither field enters `config.json`/`metadata.json`.
+- **Bad:** saving `SSE_HEARTBEAT_MS` as account configuration, treating `25` as seconds automatically, or letting a test-only override affect production.
 - **Base:** `errorRules: []`, `retryRules: []`, all-false canonical `accountPipeline` with `cachePoolSize: 0`, and `maxConcurrent: 0` preserve no-action/continue-retry/legacy-routing/unlimited behavior.
 - **Base:** a missing metadata file creates a routing secret and owner-only metadata on first migration save.
 - **Bad:** catching JSON parse failure and saving defaults; this destroys operator configuration.
@@ -323,6 +343,7 @@ Startup normalization is permissive for legacy files; management APIs validate s
 
 Persistence changes must use a temporary `DATA_DIR` and assert:
 
+- production duration overrides use literal milliseconds, a test-only override cannot change production heartbeat, invalid inputs use the bounded fallback, and process-only timing/socket-pool settings do not enter `config.json` or `metadata.json` after startup or account saves; `test/integration.test.js` covers the production/test heartbeat distinction, with other env boundaries to add as needed;
 - malformed `config.json` causes non-zero startup, reports `cannot read config.json`, and retains the exact original bytes;
 - legacy accounts gain non-empty stable IDs, `maxConcurrent: 0`, `weight: 1`, `priority: 100`, empty note/proxy/Header fields, and `perModel`, then retain IDs across restart;
 - all new account fields, model aliases, and all 24 pipeline order permutations survive an authenticated save/restart round trip without erasing account routes;
