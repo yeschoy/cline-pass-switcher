@@ -320,6 +320,7 @@ Request-log rows additionally render only bounded affinity type/confidence, call
 ```js
 api(path, body, method, asText = false, options = {})
 loadDetailSettings()
+renderDetailHealth(health)
 toggleDetailedLogging()
 toggleErrorDetailLogging()
 loadDetails(next = false)
@@ -335,6 +336,8 @@ The fourth `api()` argument preserves authenticated text-body reads (including 4
 `DETAIL_NAV_ID`, `DETAIL_LIST_ID` and `DETAIL_SELECTION_ID` are independent generations. Every section switch invalidates list/selection/navigation; metadata/body responses require the captured generation and visible details panel, and bodies also require the selected request ID. `DETAIL_CURSOR` belongs to the current filter set: editing any filter invalidates list/selection, clears the cursor and loaded copy content, disables Next and requests a refresh. Starting a query disables Next; only its accepted response can enable it.
 
 `DETAIL_CONFIRMED`, `ERROR_DETAIL_CONFIRMED`, `DETAIL_TOGGLE_PENDING` and `DETAIL_SETTINGS_ID` own the full/error-only settings. A stale settings GET cannot undo a later POST; a failed POST restores both confirmed modes. Each toggle posts only its changed field, while the server response refreshes both confirmed values. Navigation away suppresses stale status messages, but a completed setting write still updates the confirmed values. Do not call `loadAll()`, `saveAccounts()` or mutate ACCS, bulk selection, raw editor or live scheduling controls for any diagnostic action.
+
+`renderDetailHealth(health)` projects the additive, process-since-start aggregate from accepted authenticated settings/list reads into `#detailsDropReasons` (`aria-live="polite"`), using only the fixed `DETAIL_DROP_LABELS` and `textContent`. It reports total diagnostic omissions/rejections, then only nonzero reason buckets. The complete backend key set and single-primary-cause accounting belong to `../backend/logging-guidelines.md`; this view never joins reasons to a request, guesses whether a manifest exists, or changes a mode/cursor/account draft. `detailCount()` accepts only nonnegative safe integers; a missing/invalid breakdown, invalid total or sum mismatch renders “原因暂不可用” rather than inventing zeros or inferring old records from `dropped`. Extra server keys are never displayed. Settings and list responses share the existing detail navigation/settings/list generation guards; stale reads cannot replace the visible aggregate. Clear/filter/navigation does not reset a process counter.
 
 `DETAIL_BODY_TEXT` is null during reads/invalidations; copy uses only its loaded sanitized string, not metadata, raw network errors or stale text. Clear captures navigation before awaiting DELETE, invalidates pending detail reads, removes loaded content and reloads only if that same details navigation is still visible. Missing/expired bodies remain a safe empty/error state.
 
@@ -389,6 +392,8 @@ DETAIL_LIST_ID++; DETAIL_CURSOR = null; resetDetailSelection();
 | Alias text is malformed/duplicated or server target invalid | block locally when possible; server `400` remains authoritative |
 | Log filter/cursor query is rejected | show safe error; do not render stale results as current |
 | Detail filter edited while reads are pending | Invalidate response generations, selected/copy text and old cursor; disable Next |
+| Accepted detailed health has fixed safe counters and a matching total | Announce process-since-start total and only nonzero fixed labelled buckets via `#detailsDropReasons.textContent`; do not show arbitrary keys or per-request causes |
+| Older health omits `dropReasons`, or any expected count/total is unsafe, missing or inconsistent | Show “原因暂不可用” (total “未知” if invalid); never manufacture a zero breakdown or reuse stale values |
 | Either detailed toggle fails or a stale settings read completes | Preserve both latest confirmed modes and every account/raw/bulk draft |
 | Detail clear completes after navigation away | Do not reload another section |
 | Dirty drawer closes by Escape/backdrop/button | confirm before discard and restore opener focus |
@@ -441,6 +446,7 @@ Cross-layer changes must assert:
 - alias generation/save/reload and log type/filter/cursor/clear keep separate state owners;
 - request logs alone filter/render `result`, historical rows without it use a display-only fallback, and the shared description distinguishes one final request from potentially many failed attempts;
 - top-level console/statistics/request/error/details sections remain mutually exclusive, request/error reuse one log owner, details keep their own generations, and stale reads or clears cannot update a different section;
+- `test/detailed-log-ui.test.js` executes `renderDetailHealth()` against fixed nonzero buckets, an ignored markup-like extra key, legacy missing reasons, unsafe/mismatched counts and stale list reads: only accepted detail reads update the `aria-live` text-only aggregate without changing account/raw/bulk drafts; `test/ui-contract.test.js` checks the live DOM marker, while `test/integration.test.js` checks authenticated settings/list health parity and process-restart zeros;
 - error rows omit the detail action when capture intent was absent, and exact attempt-index/call-ID matching gates metadata/body access across retries and account replacement;
 - invalid scope, malformed JSON, immutable ID changes, empty account lists, and invalid rule shapes return `400` without persistence;
 - account recovery clears displayed dynamic state after reload;
