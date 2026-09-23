@@ -700,3 +700,26 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 29: 上游诊断、账号限流、热池调度与长连接兼容集成验收
+<!-- trellis-session: v=2 fp=ace20e2687b6a4d1 -->
+
+**Date**: 2026-09-23
+**Task**: 上游诊断、账号限流、热池调度与长连接兼容集成验收
+**Branch**: `main`
+
+### Summary
+
+四个子任务均已合入 main，父任务做跨 owner 验收：error-only/full/ordinary 关联与敏感边界、并发优先与逐 attempt RPM、低额度 hold/高额度兜底/真实刷新、SSE 注释心跳与 exactly-once finalizer；新增本地 mock 复合场景与变异判别。README 校正 RPM 只读诊断、backend spec 校正 Node18 验证证据。真实 Chrome 375px 账号 RPM 抽屉键盘/Escape 焦点、错误详情开关写入与 aria-live 公告 5/5；全量 242/242。Node18 子任务历史证据 241/241，父任务新增用例未在 Node18 重测。未访问真实 New API/Cline，未部署/推送。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1fd8e35` | test: 补齐上游诊断、RPM、低额度池与 SSE 的复合场景 |
+| `7b02dfd` | docs(spec): 校正 Node 18 兼容验证的证据边界 |
+
+### Status
+
+[OK] **Completed**
