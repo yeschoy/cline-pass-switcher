@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 29
+- **Total Sessions**: 30
 - **Last Active**: 2026-09-23
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~725 | Active |
+| `journal-1.md` | ~748 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 30 | 2026-09-23 | 部署集成版本 2431d5b 到生产 Switcher | `2431d5b`, `31a2191` | `main` |
 | 29 | 2026-09-23 | 上游诊断、账号限流、热池调度与长连接兼容集成验收 | `1fd8e35`, `7b02dfd` | `main` |
 | 28 | 2026-09-23 | New API Chat 长连接兼容 | `c67b7e8`, `dd28284`, `d53d1d6` | `feat/newapi-chat-keepalive` |
 | 27 | 2026-09-23 | 低额度热池调度与刷新驱动恢复 | `c75bbe1`, `2019430`, `81e348e` | `feat/low-quota-pool-refresh-cooling` |

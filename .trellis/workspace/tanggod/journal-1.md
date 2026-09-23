@@ -723,3 +723,26 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 30: 部署集成版本 2431d5b 到生产 Switcher
+<!-- trellis-session: v=2 fp=329b71fe6798fee1 -->
+
+**Date**: 2026-09-23
+**Task**: 部署集成版本 2431d5b 到生产 Switcher
+**Branch**: `main`
+
+### Summary
+
+按 canonical host 的不可变 release 流程部署已推送 origin/main 的 2431d5b8。白名单 Git archive 验哈希，候选 Compose 仅 image/context 两字段，exact Compose-built image a8468d22 与提交源码哈希/UID1000文件模式一致；私有副本按生产硬化启动两次，config 仅新增16处预期 schema 字段，迁移哈希 83d2fe1e 幂等；旧 image 搭配原 config+迁移后 metadata 的回滚预演通过，私有原子替换/恢复与 pre-live no-op guard 已演练。正式 up -d --no-build 后即时、90秒及独立后检：新 image running/healthy、零重启/OOM、本地认证 API/内部别名通过、10账号/6规则及配置迁移哈希正确。公网在切换前后均不可用（远端 DNS 不通，本机连接被重置）如实保留为外部依赖问题；未发送真实模型请求，未修改 New API，未删生产备份/镜像/日志。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2431d5b` | chore: record journal |
+| `31a2191` | docs(task): 记录集成版本生产发布与回滚证据 |
+
+### Status
+
+[OK] **Completed**
