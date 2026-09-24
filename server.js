@@ -21,6 +21,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 const META_PATH = path.join(DATA_DIR, 'metadata.json');
+const ADMIN_PATH = path.join(DATA_DIR, 'admin-auth.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const LOG_DIR = path.join(DATA_DIR, 'logs');
 
@@ -94,6 +95,24 @@ function atomicWriteJson(file, obj) {
   } finally {
     try { fs.unlinkSync(tmp); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
   }
+}
+const MISSING_ADMIN = Symbol('missing admin state');
+function validAdminState(state) {
+  return state !== null && typeof state === 'object' && !Array.isArray(state) && Object.getPrototypeOf(state) === Object.prototype &&
+    Object.keys(state).sort().join(',') === 'hash,initialized,salt,version' &&
+    state.version === 1 && typeof state.initialized === 'boolean' &&
+    typeof state.salt === 'string' && /^[a-f0-9]{64}$/.test(state.salt) &&
+    typeof state.hash === 'string' && /^[a-f0-9]{128}$/.test(state.hash);
+}
+let loadedAdminState = MISSING_ADMIN;
+try {
+  const stat = fs.lstatSync(ADMIN_PATH);
+  if (!stat.isFile() || (stat.mode & 0o077)) throw new Error('admin-auth.json must be a private regular file (0600)');
+  try { loadedAdminState = JSON.parse(fs.readFileSync(ADMIN_PATH, 'utf8')); }
+  catch { throw new Error('invalid or unreadable admin-auth.json'); }
+  if (!validAdminState(loadedAdminState)) throw new Error('invalid admin-auth.json');
+} catch (error) {
+  if (error?.code !== 'ENOENT') throw error;
 }
 const loadedConfig = loadJson(CONFIG_PATH, {});
 const configHadCanonicalErrorRules = Object.hasOwn(loadedConfig, 'errorRules');
@@ -1786,18 +1805,146 @@ const chatHeaders = (key) => ({
   Authorization: `Bearer ${key}`,
 });
 
-// 代理密钥：非空时，/v1/* 与 /api/* 均需鉴权（Authorization: Bearer <key> 或 X-Admin-Key: <key>）；
-// 控制台页面本身保持开放（不含任何敏感数据，数据由带鉴权的 /api/* 提供）。
-// 可通过 POST /api/security 在运行期修改（下游密钥 = 客户端访问代理的凭据）。
+// Downstream client credentials never grant management access. Admin state is independent of config.json.
 let PROXY_KEY = config.proxyKey || '';
 function authOK(req) {
   if (!PROXY_KEY) return true;
-  const bearer = String(req.headers['authorization'] || '').replace(/^Bearer\s+/i, '').trim();
-  const admin = String(req.headers['x-admin-key'] || '').trim();
-  return bearer === PROXY_KEY || admin === PROXY_KEY;
+  const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  const key = String(req.headers['x-admin-key'] || '').trim(); // legacy client header, model routes only
+  return bearer === PROXY_KEY || key === PROXY_KEY;
 }
 function unauthorized(res) {
-  return sendJSON(res, 401, { error: { message: 'unauthorized: 代理密钥缺失或错误', type: 'auth_error' } });
+  return sendJSON(res, 401, { error: { message: 'unauthorized', type: 'auth_error' } });
+}
+const ADMIN_COOKIE = 'cps_admin';
+const testAdminTTL = process.env.NODE_ENV === 'test' ? Number(process.env.CLINE_PASS_TEST_ADMIN_TTL_MS) : NaN;
+const ADMIN_TTL_MS = Number.isSafeInteger(testAdminTTL) && testAdminTTL >= 50 && testAdminTTL <= 60_000 ? testAdminTTL : 8 * 60 * 60 * 1000;
+const adminSessions = new Map();
+const adminFailures = new Map();
+function adminVerifier(password) {
+  const salt = crypto.randomBytes(32).toString('hex');
+  return { salt, hash: crypto.scryptSync(password, Buffer.from(salt, 'hex'), 64).toString('hex') };
+}
+let adminState = loadedAdminState === MISSING_ADMIN ? null : loadedAdminState;
+// Explicit operator opt-in prevents silent re-derivation if the state file is lost.
+if (!adminState && process.env.CLINE_PASS_ADMIN_BOOTSTRAP === '1') {
+  const initial = PROXY_KEY || process.env.CLINE_PASS_ADMIN_INITIAL_PASSWORD;
+  if (!initial || initial.length > 1024 || !process.env.CLINE_PASS_ADMIN_INIT_CODE || process.env.CLINE_PASS_ADMIN_INIT_CODE.length < 16 ||
+      process.env.CLINE_PASS_ADMIN_INIT_CODE.length > 1024 || process.env.CLINE_PASS_ADMIN_INIT_CODE === initial)
+    throw new Error('admin bootstrap requires a non-empty initial password and independent initialization code');
+  adminState = { version: 1, initialized: false, ...adminVerifier(initial) };
+  atomicWriteJson(ADMIN_PATH, adminState);
+}
+function adminPasswordOK(password) {
+  if (!adminState || typeof password !== 'string' || password.length > 1024) return false;
+  const hash = crypto.scryptSync(password, Buffer.from(adminState.salt, 'hex'), 64);
+  return crypto.timingSafeEqual(hash, Buffer.from(adminState.hash, 'hex'));
+}
+if (adminState?.initialized && PROXY_KEY && adminPasswordOK(PROXY_KEY))
+  throw new Error('client key must differ from the administrator password');
+function adminCodeOK(code) {
+  const expected = process.env.CLINE_PASS_ADMIN_INIT_CODE;
+  if (!expected || typeof code !== 'string' || code.length > 1024) return false;
+  const a = crypto.createHash('sha256').update(code).digest();
+  const b = crypto.createHash('sha256').update(expected).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+function adminSession(req) {
+  const cookies = String(req.headers.cookie || '').split(';').map((s) => s.trim());
+  const values = cookies.filter((s) => s.startsWith(`${ADMIN_COOKIE}=`));
+  if (values.length !== 1) return null;
+  const token = values[0].slice(ADMIN_COOKIE.length + 1);
+  if (!/^[a-f0-9]{64}$/.test(token)) return null;
+  const session = adminSessions.get(token);
+  if (session && session.expires <= Date.now()) { adminSessions.delete(token); return null; }
+  return session ? { token, ...session } : null;
+}
+function adminOriginOK(req) {
+  if (req.headers['sec-fetch-site'] === 'cross-site' || req.headers['sec-fetch-site'] === 'same-site') return false;
+  if (!req.headers.origin) return true; // scripts still need cookie and CSRF token
+  try {
+    const origin = new URL(String(req.headers.origin));
+    const host = String(req.headers.host || '');
+    const expected = config.publicBaseUrl ? new URL(config.publicBaseUrl).origin : `${req.socket.encrypted ? 'https' : 'http'}://${host}`;
+    return origin.origin === expected && origin.host === host;
+  } catch { return false; }
+}
+function adminTransportOK(req) {
+  if (req.socket.encrypted) return true;
+  const address = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+  const loopback = ['127.0.0.1', '::1'].includes(address);
+  if (loopback && /^((127\.0\.0\.1)|(localhost)|(\[::1\]))(:\d+)?$/.test(String(req.headers.host || ''))) return true;
+  // Private network peers can spoof X-Forwarded-Proto. Only an explicitly provisioned
+  // reverse proxy may attest HTTPS; it must replace (never forward) the client header.
+  const privateProxy = loopback || /^10\./.test(address) || /^192\.168\./.test(address) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(address) || /^f[cd][0-9a-f:]+$/i.test(address);
+  const expected = process.env.CLINE_PASS_ADMIN_PROXY_TOKEN;
+  const supplied = req.headers['x-cline-pass-proxy-token'];
+  return privateProxy && req.headers['x-forwarded-proto'] === 'https' && /^https:\/\//i.test(config.publicBaseUrl || '') &&
+    typeof expected === 'string' && /^[a-f0-9]{64}$/.test(expected) && typeof supplied === 'string' && /^[a-f0-9]{64}$/.test(supplied) &&
+    crypto.timingSafeEqual(Buffer.from(supplied, 'hex'), Buffer.from(expected, 'hex'));
+}
+function adminCookie(res, req, token = '', clear = false) {
+  res.setHeader('Set-Cookie', `${ADMIN_COOKIE}=${token}; Path=/api; HttpOnly; SameSite=Strict; ${req.socket.encrypted || /^https:\/\//i.test(config.publicBaseUrl || '') ? 'Secure; ' : ''}Max-Age=${clear ? 0 : Math.ceil(ADMIN_TTL_MS / 1000)}`);
+}
+function issueAdminSession(req, res, pending = false) {
+  for (const [key, value] of adminSessions) if (value.expires <= Date.now()) adminSessions.delete(key);
+  if (adminSessions.size >= 128) adminSessions.delete(adminSessions.keys().next().value);
+  const token = crypto.randomBytes(32).toString('hex');
+  const csrf = crypto.randomBytes(32).toString('hex');
+  adminSessions.set(token, { csrf, pending, expires: Date.now() + ADMIN_TTL_MS });
+  adminCookie(res, req, token);
+  return sendJSON(res, 200, { ok: true, pending, csrf });
+}
+function adminThrottle(req, success) {
+  const ip = req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const entry = adminFailures.get(ip) || { count: 0, until: 0 };
+  if (success) adminFailures.delete(ip);
+  else { entry.count = entry.until > now ? entry.count + 1 : 1; entry.until = now + 60_000; adminFailures.set(ip, entry); }
+  if (adminFailures.size > 1024) adminFailures.delete(adminFailures.keys().next().value);
+  return !success && entry.count >= 5;
+}
+async function adminAuthRoute(req, res, p) {
+  if (!adminTransportOK(req) || !adminOriginOK(req)) return unauthorized(res);
+  const session = adminSession(req);
+  if (p === '/api/auth/state' && req.method === 'GET') return sendJSON(res, 200, { initialized: adminState?.initialized === true, available: !!adminState });
+  if (p === '/api/auth/session' && req.method === 'GET')
+    return session ? sendJSON(res, 200, { ok: true, pending: session.pending, csrf: session.csrf }) : unauthorized(res);
+  if (req.method !== 'POST' || !['/api/auth/bootstrap', '/api/auth/login', '/api/auth/password', '/api/auth/logout'].includes(p))
+    return sendJSON(res, 404, { error: { message: 'no route' } });
+  if (!/^application\/json(?:\s*;|$)/i.test(String(req.headers['content-type'] || ''))) return sendJSON(res, 415, { error: { message: 'JSON required' } });
+  if (p === '/api/auth/bootstrap' || p === '/api/auth/login') {
+    const ip = req.socket.remoteAddress || 'unknown';
+    const failure = adminFailures.get(ip);
+    if (failure && failure.count >= 5 && failure.until > Date.now()) return sendJSON(res, 429, { error: { message: 'try again later' } });
+    const body = await readJsonBody(req, 4096);
+    // Concurrent requests can pass the first check before their bodies arrive.
+    // Check again before the expensive password verifier is invoked.
+    const currentFailure = adminFailures.get(ip);
+    if (currentFailure && currentFailure.count >= 5 && currentFailure.until > Date.now()) return sendJSON(res, 429, { error: { message: 'try again later' } });
+    const valid = isPlainObject(body) && Object.keys(body).sort().join(',') === (p.endsWith('bootstrap') ? 'code,password' : 'password') &&
+      adminState && adminState.initialized === !p.endsWith('bootstrap') && adminPasswordOK(body.password) &&
+      (p.endsWith('bootstrap') ? adminCodeOK(body.code) : true);
+    adminThrottle(req, valid);
+    if (!valid) return unauthorized(res);
+    return issueAdminSession(req, res, !adminState.initialized);
+  }
+  if (!session || session.csrf !== req.headers['x-csrf-token']) return unauthorized(res);
+  const body = await readJsonBody(req, 4096);
+  if (p === '/api/auth/logout') {
+    if (!isPlainObject(body) || Object.keys(body).length) return sendJSON(res, 400, { error: { message: 'invalid body' } });
+    adminSessions.delete(session.token); adminCookie(res, req, '', true);
+    return sendJSON(res, 200, { ok: true });
+  }
+  if (session.pending !== !adminState?.initialized || !isPlainObject(body) || Object.keys(body).sort().join(',') !== (session.pending ? 'newPassword' : 'currentPassword,newPassword') ||
+      typeof body.newPassword !== 'string' || body.newPassword.length < 12 || body.newPassword.length > 1024 ||
+      body.newPassword === PROXY_KEY || adminPasswordOK(body.newPassword) ||
+      (!session.pending && !adminPasswordOK(body.currentPassword))) return sendJSON(res, 400, { error: { message: 'invalid password change' } });
+  const candidate = { version: 1, initialized: true, ...adminVerifier(body.newPassword) };
+  atomicWriteJson(ADMIN_PATH, candidate); adminState = candidate; adminSessions.clear();
+  adminCookie(res, req, '', true);
+  return sendJSON(res, 200, { ok: true });
 }
 function publicProxyBase() {
   return config.publicBaseUrl
@@ -3043,7 +3190,7 @@ function readFirstSseEvent(stream, maxBytes = 64 * 1024) {
 const CHAT_PATHS = new Set(['/chat/completions', '/v1/chat/completions', '/api/v1/chat/completions']);
 
 const MAX_REQUEST_BODY_BYTES = 50 * 1024 * 1024;
-function readBody(req) {
+function readBody(req, maxBytes = MAX_REQUEST_BODY_BYTES) {
   const detail = detailContext.getStore();
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -3077,7 +3224,7 @@ function readBody(req) {
     const onData = (chunk) => {
       detail?.input?.add(chunk);
       size += chunk.length;
-      if (size > MAX_REQUEST_BODY_BYTES) return rejectTooLarge();
+      if (size > maxBytes) return rejectTooLarge();
       chunks.push(chunk);
     };
     const onEnd = () => {
@@ -3101,11 +3248,11 @@ function readBody(req) {
     req.on('aborted', onAborted);
     req.on('close', onClose);
     const declaredLength = Number(req.headers['content-length']);
-    if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BODY_BYTES) rejectTooLarge();
+    if (Number.isFinite(declaredLength) && declaredLength > maxBytes) rejectTooLarge();
   });
 }
-async function readJsonBody(req) {
-  try { const body = JSON.parse((await readBody(req)).toString('utf8')); const detail = detailContext.getStore(); if (detail?.profile === 'full') detail.redactor.learn(body); return body; }
+async function readJsonBody(req, maxBytes = MAX_REQUEST_BODY_BYTES) {
+  try { const body = JSON.parse((await readBody(req, maxBytes)).toString('utf8')); const detail = detailContext.getStore(); if (detail?.profile === 'full') detail.redactor.learn(body); return body; }
   catch (e) {
     if (e?.statusCode) throw e;
     const invalid = new Error('invalid JSON body'); invalid.statusCode = 400; throw invalid;
@@ -4029,13 +4176,13 @@ async function handleChat(req, res) {
 
 // ---------- HTTP 服务 ----------
 function sendJSON(res, status, obj) {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...(res.adminResponse ? {} : { 'Access-Control-Allow-Origin': '*' }) });
   res.end(JSON.stringify(obj));
 }
 function sendBusy(res, message, retryAfter = 1, status = 429) {
   // retryAfter 为秒；RPM 阻塞时来自最早滚动窗口恢复时间，容量阻塞仍为 bounded 1-30s。
   const seconds = Math.min(3600, Math.max(1, Math.ceil(Number(retryAfter) || 1)));
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Retry-After': String(seconds) });
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...(res.adminResponse ? {} : { 'Access-Control-Allow-Origin': '*' }), 'Retry-After': String(seconds) });
   res.end(JSON.stringify({ error: { message: safeReason(message || 'upstream accounts unavailable'), type: status === 429 ? 'rate_limit_error' : 'upstream_error' } }));
 }
 
@@ -4066,9 +4213,10 @@ const server = http.createServer((req, res) => {
   trackActiveResponse(res);
   if (shuttingDown) return sendJSON(res, 503, { error: { message: 'server shutting down' } });
   const pathname = new URL(req.url, 'http://local').pathname;
-  const profile = config.detailedLogging === true && detailRoute(req.method, pathname)
+  // Never retain detailed content while migration/recovery is awaiting the first independent password change.
+  const profile = adminState?.initialized === true && config.detailedLogging === true && detailRoute(req.method, pathname)
     ? 'full'
-    : config.errorDetailLogging === true && req.method === 'POST' && CHAT_PATHS.has(pathname) ? 'error' : null;
+    : adminState?.initialized === true && config.errorDetailLogging === true && req.method === 'POST' && CHAT_PATHS.has(pathname) ? 'error' : null;
   if (profile) {
     if (DetailRoot.active >= 128) { detailedLogs.recordDrop('activeLimit'); return dispatch(req, res); }
     const secrets = [config.proxyKey, PROXY_KEY, ...config.accounts.flatMap((account) => [account.key, account.proxyUrl, ...Object.values(account.headers || {})])];
@@ -4082,27 +4230,32 @@ server.headersTimeout = INBOUND_KEEP_ALIVE_MS + 5_000;
 async function dispatch(req, res) {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
-  if (p === '/api/logs/settings' || p === '/api/logs/details' || p.startsWith('/api/logs/details/')) res.setHeader('Cache-Control', 'no-store');
+  const modelRoute = CHAT_PATHS.has(p) || p === '/v1/responses' || p === '/v1/models' || p === '/api/v1/models' || p === '/models';
+  const managementRoute = p.startsWith('/api/') && p !== '/api/meta' && !modelRoute;
+  if (managementRoute) { res.adminResponse = true; res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Content-Type-Options', 'nosniff'); }
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-      'Access-Control-Allow-Headers': '*',
-    });
+    if (managementRoute) return sendJSON(res, 403, { error: { message: 'forbidden' } });
+    res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET,POST,OPTIONS', 'Access-Control-Allow-Headers': '*' });
     return res.end();
   }
   try {
     if (req.method === 'GET' && p === '/api/meta') {
       return sendJSON(res, 200, { authRequired: !!PROXY_KEY, proxyBase: publicProxyBase(), configured: isConfigured() });
     }
-    if (p.startsWith('/api/') || p.startsWith('/v1/') || CHAT_PATHS.has(p)) {
+    if (p.startsWith('/api/auth/')) return await adminAuthRoute(req, res, p);
+    if (managementRoute) {
+      if (!adminTransportOK(req) || !adminOriginOK(req)) return unauthorized(res);
+      const session = adminSession(req);
+      if (!session || session.pending || !adminState?.initialized) return unauthorized(res);
+      if (!['GET', 'HEAD'].includes(req.method) && session.csrf !== req.headers['x-csrf-token']) return unauthorized(res);
+    } else if (modelRoute || p.startsWith('/v1/')) {
       if (!authOK(req)) return unauthorized(res);
     }
     if (req.method === 'POST' && p === '/v1/responses') {
       return sendJSON(res, 501, { error: { message: 'OpenAI Responses API is not supported; use /v1/chat/completions instead', type: 'unsupported_api', param: null, code: 'unsupported_api' } });
     }
     if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" });
       return res.end(fs.readFileSync(path.join(PUBLIC_DIR, 'index.html')));
     }
     if (req.method === 'GET' && p === '/api/models') {
@@ -4176,7 +4329,7 @@ async function dispatch(req, res) {
     }
     if (p === '/api/logs/settings' || p === '/api/logs/details' || p.startsWith('/api/logs/details/')) {
       if (p === '/api/logs/settings') {
-        if (req.method === 'GET') return sendJSON(res, 200, { detailedLogging: config.detailedLogging === true, errorDetailLogging: config.errorDetailLogging === true, authRequired: !!PROXY_KEY, maxBodyBytes: MAX_BODY_BYTES, maxAgeMs: MAX_AGE_MS, maxTotalBytes: MAX_TOTAL_BYTES, health: { ...detailedLogs.health, captureDropped: captureBudget.dropped, retainedPayloadBytes: captureBudget.used } });
+        if (req.method === 'GET') return sendJSON(res, 200, { detailedLogging: config.detailedLogging === true, errorDetailLogging: config.errorDetailLogging === true, authRequired: true, maxBodyBytes: MAX_BODY_BYTES, maxAgeMs: MAX_AGE_MS, maxTotalBytes: MAX_TOTAL_BYTES, health: { ...detailedLogs.health, captureDropped: captureBudget.dropped, retainedPayloadBytes: captureBudget.used } });
         if (req.method === 'POST') {
           const body = await readJsonBody(req), keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : [];
           if (!keys.length || keys.length > 2 || keys.some((key) => !['detailedLogging', 'errorDetailLogging'].includes(key) || typeof body[key] !== 'boolean')) return sendJSON(res, 400, { error: { message: 'expected one or both boolean logging settings' } });
@@ -4436,7 +4589,11 @@ async function dispatch(req, res) {
     }
     if (req.method === 'POST' && p === '/api/security') {
       const body = await readJsonBody(req);
-      if (body.proxyKey !== undefined) config.proxyKey = String(body.proxyKey).trim();
+      if (body.proxyKey !== undefined) {
+        const candidate = String(body.proxyKey).trim();
+        if (candidate && adminState?.initialized && adminPasswordOK(candidate)) return sendJSON(res, 400, { error: { message: 'client key must differ from admin password' } });
+        config.proxyKey = candidate;
+      }
       if (body.publicBaseUrl !== undefined) config.publicBaseUrl = String(body.publicBaseUrl).trim().replace(/\/+$/, '');
       if (body.exposeCatalog !== undefined) config.exposeCatalog = !!body.exposeCatalog;
       saveConfig();

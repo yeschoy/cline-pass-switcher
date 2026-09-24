@@ -1,0 +1,10 @@
+# Independent console login — implementation checklist (planning)
+
+- [x] Enumerate every protected management route, public exception, static page and alias in server.js/test; explicit route matrix covers `/api/*`, `/v1/*` and chat aliases.
+- [x] Strict admin state migration and empty-client-key bootstrap, out-of-band one-time code, salted password verifier and same-directory atomic persistence under DATA_DIR; malformed/permissive state fails without overwriting bytes.
+- [x] Login/first-change/change/logout/session expiration/revocation, rate limits and cookie/CSRF; client key alone cannot access management and admin session cannot authenticate model routes.
+- [x] Migrate public/index.html to session `api()`; clear old localStorage key, preserve existing drafts on re-login, handle 401/expiry with native form, focus trap and live status. Opaque login overlay is above drawers/dialogs.
+- [x] Verify real-browser login focus, Tab wrapping, Escape behavior, initialized-login Enter, 375px width and nav keyboard activation in isolated Chrome 154 CDP with temporary DATA_DIR/local mock. Native `agent_browser` was unavailable and Orca Chrome accessibility reads were blocked; bootstrap change submission used form `requestSubmit()` rather than a physical Enter key. Evidence and remaining caveat in `check-report.md`.
+- [x] Test env-overridden client key, empty-key initialization, concurrent pending logins, code reuse, wrong credentials, restart, password reset/rotation, cross-site writes, logout, malformed state and no secret leakage in local temporary DATA_DIR.
+- [x] Focused integration/UI tests, full project gate (258/258 after parent fixes), operator docs and backend/frontend spec contracts updated; rollback/authentication matrix reviewed. No production deployment or raw-body task started.
+- [ ] Before any deployment, verify trusted reverse-proxy TLS/Host/attestation behavior and isolated backup/rollback using committed HEAD. Deployment requires separate operator authorization.

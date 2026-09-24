@@ -9,6 +9,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { DETAIL_DROP_REASONS } from '../lib/detailed-log-store.js';
+import { prepareAdminFixture, connectAdminFixture, fixtureHeaders, installFixtureFetch, bareFetch } from './admin-fixture.js';
+installFixtureFetch();
 
 const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 const close = (server) => new Promise((resolve) => server.close(resolve));
@@ -19,12 +21,12 @@ function testCanonicalRules(statusRules = {}, contentRules = []) {
   for(const [status,rule] of Object.entries(statusRules||{})) rules.push({id:`test-status-${status}`,scope:'account',action:rule.action==='ban'?'hard-quarantine':rule.action,when:{statuses:[Number(status)]},...(rule.action==='cooldown'?{reset:{fallback:duration(rule.cooldownMs),max:duration(rule.cooldownMs)}}:{})});
   return rules;
 }
-function rawJson(port, pathname, body, headers = {}, { exactPayload = false } = {}) {
+function rawJson(port, pathname, body, headers = {}, { exactPayload = false, skipAdmin = false } = {}) {
   return new Promise((resolve, reject) => {
     // Older fixtures use the legacy rule shape as shorthand; compatibility tests opt into the exact wire payload.
     const payload=pathname==='/api/accounts'&&body?.errorRules===undefined&&body?.accountErrorRules!==undefined&&!exactPayload?{...body,errorRules:testCanonicalRules(body.accountErrorRules,body.accountContentErrorRules||[])}:body;
     const data = Buffer.from(JSON.stringify(payload));
-    const req = http.request({ hostname: '127.0.0.1', port, path: pathname, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': data.length, ...headers } }, (res) => {
+    const req = http.request({ hostname: '127.0.0.1', port, path: pathname, method: 'POST', headers: skipAdmin ? { 'Content-Type': 'application/json', 'Content-Length': data.length, ...headers } : fixtureHeaders(port, pathname, 'POST', { 'Content-Type': 'application/json', 'Content-Length': data.length, ...headers }) }, (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => {
@@ -85,6 +87,7 @@ function pausedOversizedJson(port, pathname) {
 async function startSwitcher(config, existingDir = null, extraEnv = {}) {
   const dir = existingDir || fs.mkdtempSync(path.join(os.tmpdir(), 'cps-test-'));
   if (config) fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config));
+  prepareAdminFixture(dir);
   const child = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: { ...process.env, ...extraEnv, DATA_DIR: dir, BIND_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
   child.stdout.on('data', (c) => { output += c; }); child.stderr.on('data', (c) => { output += c; });
@@ -93,6 +96,7 @@ async function startSwitcher(config, existingDir = null, extraEnv = {}) {
     const poll = setInterval(() => { if (output.includes('OpenAI 兼容代理地址')) { clearInterval(poll); clearTimeout(deadline); resolve(); } }, 20);
     child.once('exit', (code) => { clearInterval(poll); clearTimeout(deadline); reject(new Error(`switcher exited ${code}: ${output}`)); });
   });
+  await connectAdminFixture(Number(extraEnv.PORT || config?.port || JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8')).port || 3123));
   return { dir, child, output: () => output };
 }
 
@@ -351,7 +355,7 @@ test('account routing, header boundary, failover, state and streaming', async (t
   assert.equal((await rawJson(switchPort, '/api/config', { scope: 'typo', perModel: {} })).status, 400);
   assert.equal((await rawJson(switchPort, '/api/config', { scope: 'global', perModel: { 'test-model': { providerCooldownMs: 300001 } } })).status, 400);
   const malformed = await new Promise((resolve, reject) => {
-    const req = http.request({ hostname: '127.0.0.1', port: switchPort, path: '/api/config', method: 'POST', headers: { 'Content-Type': 'application/json' } }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
+    const req = http.request({ hostname: '127.0.0.1', port: switchPort, path: '/api/config', method: 'POST', headers: fixtureHeaders(switchPort, '/api/config', 'POST', { 'Content-Type': 'application/json' }) }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
     req.on('error', reject); req.end('{');
   });
   assert.equal(malformed, 400);
@@ -1787,7 +1791,7 @@ test('statistics quota refresh is authenticated, strict, routing-independent, ca
   const configBefore=fs.readFileSync(path.join(dir,'config.json'));
   let stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`,{headers:auth})).json();assert.equal(hits.length,0,'GET statistics remains a projection');
   assert.equal(stats.accounts.find(a=>a.id==='disabled').quota.refresh.reason,'disabled');assert.equal(stats.accounts.find(a=>a.id==='disabled').quota.limits.monthly.percentUsed,60);
-  assert.equal((await rawJson(port,'/api/statistics/quota-refresh',{force:false})).status,401);
+  assert.equal((await rawJson(port,'/api/statistics/quota-refresh',{force:false},{},{skipAdmin:true})).status,401);
   for(const body of [null,[],{}, {force:'false'},{force:false,extra:true}])assert.equal((await refresh(body)).status,400);
   assert.equal((await refresh({force:false},'/api/statistics/quota-refresh?accountId=a')).status,400);assert.equal(hits.length,0);
   let result=await refresh({force:false});assert.equal(result.status,200);assert.deepEqual(result.json,{ok:true,refreshed:1,cached:0,deferred:0,skipped:1,failed:0,cancelled:0});assert.equal(hits.length,1);assert.deepEqual(hits[0],{auth:'Bearer enabled-key',path:'/api/v1/users/me/plan/usage-limits',phase:'full'});
@@ -1855,7 +1859,7 @@ test('forced quota batch reuses a success published after its request was accept
   t.after(async()=>{await stop(running.child);heldResponse?.destroy();await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
   const first=rawJson(port,'/api/statistics/quota-refresh',{force:true});await waitUntil(()=>heldResponse);
   const body='{"force":true}';let delayedRequest;
-  const delayed=new Promise((resolve,reject)=>{delayedRequest=http.request({hostname:'127.0.0.1',port,path:'/api/statistics/quota-refresh',method:'POST',headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(body)}},res=>{const chunks=[];res.on('data',chunk=>chunks.push(chunk));res.on('end',()=>resolve({status:res.statusCode,json:JSON.parse(Buffer.concat(chunks).toString())}));});delayedRequest.on('error',reject);delayedRequest.write('{"force":');});
+  const delayed=new Promise((resolve,reject)=>{delayedRequest=http.request({hostname:'127.0.0.1',port,path:'/api/statistics/quota-refresh',method:'POST',headers:fixtureHeaders(port,'/api/statistics/quota-refresh','POST',{'Content-Type':'application/json','Content-Length':Buffer.byteLength(body)})},res=>{const chunks=[];res.on('data',chunk=>chunks.push(chunk));res.on('end',()=>resolve({status:res.statusCode,json:JSON.parse(Buffer.concat(chunks).toString())}));});delayedRequest.on('error',reject);delayedRequest.write('{"force":');});
   await new Promise(resolve=>setTimeout(resolve,50));heldResponse.writeHead(200,{'Content-Type':'application/json'});heldResponse.end(payload);
   const firstResult=await first;assert.equal(firstResult.status,200);assert.equal(firstResult.json.refreshed,1);
   delayedRequest.end('true}');const delayedResult=await delayed;assert.equal(delayedResult.status,200);assert.equal(delayedResult.json.cached,1);assert.equal(delayedResult.json.refreshed,0);assert.equal(quotaRequests,1,'a forced batch must reuse a success published since that batch started');
@@ -1870,7 +1874,7 @@ test('forced quota baseline remains monotonic across identity rotation and reuse
   const refresh=()=>rawJson(port,'/api/statistics/quota-refresh',{force:true});
   for(let i=0;i<3;i++){const result=await refresh();assert.equal(result.status,200);assert.equal(result.json.refreshed,1);}await waitUntil(()=>active===0);assert.equal(rows.filter(row=>row.auth==='Bearer key-a').length,3);
   const body='{"force":true}';let delayedRequest;
-  const delayed=new Promise((resolve,reject)=>{delayedRequest=http.request({hostname:'127.0.0.1',port,path:'/api/statistics/quota-refresh',method:'POST',headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(body)}},res=>{const chunks=[];res.on('data',chunk=>chunks.push(chunk));res.on('end',()=>resolve({status:res.statusCode,json:JSON.parse(Buffer.concat(chunks).toString())}));});delayedRequest.on('error',reject);delayedRequest.write('{"force":');});
+  const delayed=new Promise((resolve,reject)=>{delayedRequest=http.request({hostname:'127.0.0.1',port,path:'/api/statistics/quota-refresh',method:'POST',headers:fixtureHeaders(port,'/api/statistics/quota-refresh','POST',{'Content-Type':'application/json','Content-Length':Buffer.byteLength(body)})},res=>{const chunks=[];res.on('data',chunk=>chunks.push(chunk));res.on('end',()=>resolve({status:res.statusCode,json:JSON.parse(Buffer.concat(chunks).toString())}));});delayedRequest.on('error',reject);delayedRequest.write('{"force":');});
   await new Promise(resolve=>setTimeout(resolve,50));const view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();view.accounts[0].key='key-b';assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:view.mode,active:view.active,concurrencyWaitMs:view.concurrencyWaitMs,accountErrorRules:view.accountErrorRules,accountPipeline:view.accountPipeline})).status,200);
   const newIdentity=await refresh();assert.equal(newIdentity.status,200);assert.equal(newIdentity.json.refreshed,1);await waitUntil(()=>active===0);assert.equal(rows.filter(row=>row.auth==='Bearer key-b').length,1);
   delayedRequest.end('true}');const result=await delayed;assert.equal(result.status,200);assert.equal(result.json.cached,1);assert.equal(result.json.refreshed,0);assert.equal(rows.filter(row=>row.auth==='Bearer key-b').length,1,'the delayed batch must reuse the new-identity success');assert.equal(maxActive,1);
@@ -1939,7 +1943,7 @@ test('detailed logging settings, route matrix, actual-call groups and credential
   const auth = { 'X-Admin-Key': 'detail-admin-secret', Cookie: 'session=incoming-cookie-secret' };
   const get = async (route, method = 'GET') => { const response = await fetch(`http://127.0.0.1:${port}${route}`, { method, headers: auth }); return { response, json: await response.json() }; };
   const list = async () => (await get('/api/logs/details?limit=200')).json.items;
-  assert.equal((await fetch(`http://127.0.0.1:${port}/api/logs/settings`)).status, 401);
+  assert.equal((await bareFetch(`http://127.0.0.1:${port}/api/logs/settings`)).status, 401);
   const initialSettings = (await get('/api/logs/settings')).json;
   assert.equal(initialSettings.detailedLogging, false); assert.equal(initialSettings.errorDetailLogging, false);
   const initialList = (await get('/api/logs/details')).json;
@@ -2262,7 +2266,7 @@ test('detailed logging discovers original credential syntax and bounds assignmen
     const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, proxyKey: 'p1-admin-fixture', accounts: [{ id: 'a', name: 'A', key: known, enabled: true, perModel: {} }], knownModels: ['p1'], perModel: {}, accountErrorRules: {} });
     t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
     const auth = { 'X-Admin-Key': 'p1-admin-fixture' }, get = (route) => fetch(`http://127.0.0.1:${port}${route}`, { headers: auth });
-    assert.equal((await fetch(`http://127.0.0.1:${port}/api/logs/details`)).status, 401);
+    assert.equal((await bareFetch(`http://127.0.0.1:${port}/api/logs/details`)).status, 401);
     for (const stream of [false, true]) for (const count of known === 'https' ? [0, 16384, 16385] : [0]) {
       const input = { model: 'p1', messages: [], stream, echo: secret, message: 'ordinary prompt', ...(count ? { assignments: 'key=x;'.repeat(count) } : {}) };
       const requestHeaders = { ...auth, 'X-Earlier-Echo': secret, ...(requestCredential ? { [header]: value } : {}) };
@@ -2278,7 +2282,7 @@ test('detailed logging discovers original credential syntax and bounds assignmen
       assert.equal(group.request.result, 'success'); assert.equal(group.request.complete, true);
       assert.equal(group.attempts.length, 1); assert.equal(group.bodies.length, 4);
       assert.equal(JSON.stringify(group).includes('fixture-long-secret'), false);
-      assert.equal((await fetch(`http://127.0.0.1:${port}${route}/bodies/${group.request.requestBody}`)).status, 401);
+      assert.equal((await bareFetch(`http://127.0.0.1:${port}${route}/bodies/${group.request.requestBody}`)).status, 401);
       for (const descriptor of group.bodies) {
         const response = await get(route + '/bodies/' + descriptor.bodyId); assert.equal(response.status, 200);
         const text = await response.text(); assert.equal(text.includes('fixture-long-secret'), false); assert.equal(descriptor.complete, true);
@@ -2315,7 +2319,7 @@ test('outer scheme shadowing never exposes inner credentials through authenticat
   const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, proxyKey: 'shadow-admin-fixture', accounts: [{ id: 'a', name: 'A', key: 'shadow-account-fixture', enabled: true, perModel: {} }], knownModels: ['shadow'], perModel: {}, accountErrorRules: {} });
   t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
   const auth = { 'X-Admin-Key': 'shadow-admin-fixture' }, get = (route) => fetch(`http://127.0.0.1:${port}${route}`, { headers: auth });
-  assert.equal((await fetch(`http://127.0.0.1:${port}/api/logs/details`)).status, 401);
+  assert.equal((await bareFetch(`http://127.0.0.1:${port}/api/logs/details`)).status, 401);
   for (const [caseIndex, [secret]] of fixtures.entries()) await t.test(`shape ${caseIndex}`, async () => {
     for (const stream of [false, true]) {
       const input = { model: 'shadow', messages: [], caseIndex, stream, echo: secret, message: 'ordinary prompt' };
@@ -2330,7 +2334,7 @@ test('outer scheme shadowing never exposes inner credentials through authenticat
       assert.equal(group.request.state, 'complete'); assert.equal(group.request.result, 'success');
       assert.equal(group.attempts.length, 1); assert.equal(group.bodies.length, 4);
       for (const forbidden of [secret, 'tail-fixture', 'fixture-nested-secret']) assert.equal(JSON.stringify(group).includes(forbidden), false);
-      assert.equal((await fetch(`http://127.0.0.1:${port}${route}/bodies/${group.request.requestBody}`)).status, 401);
+      assert.equal((await bareFetch(`http://127.0.0.1:${port}${route}/bodies/${group.request.requestBody}`)).status, 401);
       for (const descriptor of group.bodies) {
         const response = await get(route + '/bodies/' + descriptor.bodyId); assert.equal(response.status, 200); const text = await response.text();
         assert.equal(descriptor.state, 'complete'); assert.equal(descriptor.complete, true); assert.match(text, /ordinary (?:prompt|output)/);
@@ -2567,7 +2571,7 @@ fsp.rm=async(a,...args)=>{if(String(a).includes('/detailed-logs/')&&path.basenam
     await waitUntil(async () => { const health = (await (await api('/api/logs/settings')).json()).health; return health.failures >= failures + 2 && health.retainedPayloadBytes === 0; });
     assert.equal(temps().length, 1);
     if (boundary === 'clear') {
-      assert.equal((await fetch(`http://127.0.0.1:${port}/api/logs/details`, { method: 'DELETE' })).status, 401);
+      assert.equal((await bareFetch(`http://127.0.0.1:${port}/api/logs/details`, { method: 'DELETE' })).status, 401);
       const failed = await api('/api/logs/details', 'DELETE'); assert.equal(failed.status, 503);
       assert.deepEqual(await failed.json(), { error: { message: 'detailed storage unavailable' } });
       assert.equal(temps().length, 1);

@@ -5,6 +5,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { prepareAdminFixture, connectAdminFixture, installFixtureFetch } from './admin-fixture.js';
+installFixtureFetch();
 
 const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 const close = (server) => new Promise((resolve) => server.close(resolve));
@@ -18,6 +20,7 @@ async function waitFor(check, label, timeout = 5000) {
   throw new Error(`timed out: ${label}`);
 }
 async function boot(dir, port) {
+  prepareAdminFixture(dir);
   const child = spawn(process.execPath, ['server.js'], {
     cwd: path.resolve('.'),
     env: { ...process.env, DATA_DIR: dir, PORT: String(port), BIND_HOST: '127.0.0.1', NODE_ENV: 'test',
@@ -31,6 +34,7 @@ async function boot(dir, port) {
     if (child.exitCode !== null) throw new Error(`switcher exited: ${output}`);
     return output.includes('OpenAI 兼容代理地址');
   }, 'switcher startup');
+  await connectAdminFixture(port);
   return child;
 }
 async function stop(child) {

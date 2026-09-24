@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
+import { prepareAdminFixture, connectAdminFixture, installFixtureFetch } from './admin-fixture.js';
+installFixtureFetch();
 
 const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 const close = (server) => new Promise((resolve) => server.close(resolve));
@@ -15,10 +17,13 @@ async function waitFor(check, label, ms = 5000) {
   throw new Error(`timed out: ${label}`);
 }
 async function start(dir, extra = {}) {
+  prepareAdminFixture(dir);
   const child = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: { ...process.env, DATA_DIR: dir, BIND_HOST: '127.0.0.1', NODE_ENV: 'test', ...extra }, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
   child.stdout.on('data', (data) => { output += data; }); child.stderr.on('data', (data) => { output += data; });
   await waitFor(() => { if (child.exitCode !== null) throw new Error(`startup failed: ${output}`); return output.includes('OpenAI 兼容代理地址'); }, 'server startup');
+  const config = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'));
+  await connectAdminFixture(Number(extra.PORT || config.port));
   return child;
 }
 async function stop(child) { if (!child || child.exitCode !== null) return; child.kill('SIGTERM'); await Promise.race([new Promise((resolve) => child.once('exit', resolve)), new Promise((resolve) => setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 1000))]); }

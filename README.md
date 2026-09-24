@@ -17,7 +17,7 @@ Node.js 本地/服务器代理 + 网页控制台，用于 [Cline Pass](https://c
 - 🌡️ **可排序调度流水线** —— 可拖动排序 Cline 额度热池、账号成功率和会话粘性；成功率仅排序账号且不设置隐式淘汰阈值，全部关闭时六种账号模式保持原行为
 - 📋 **观测** —— 独立滚动请求/错误 JSONL 日志，支持筛选、分页和清空；记录安全的亲和键类型、上游 key 是否提供、缓存命中三态、调度原因与供应商路径，但绝不记录实际会话键
 - 🏷️ **模型别名** —— 批量把 `cline-pass/*` 生成客户端短别名，原始模型仍保留
-- 🔑 **代理密钥** —— 给下游客户端发一把独立密钥，可随时在页面轮换
+- 🔑 **代理密钥与管理员登录分离** —— 客户端密钥仅供模型接口；独立管理员密码与可吊销会话保护管理 API
 - 🌐 **OpenAI 兼容** —— 任何 OpenAI 客户端 / Cline 扩展把 Base URL 指向代理即可，无侵入
 
 ![控制台截图](docs/screenshot-top.png)
@@ -30,11 +30,12 @@ Node.js 本地/服务器代理 + 网页控制台，用于 [Cline Pass](https://c
 git clone https://github.com/<你的用户名>/cline-pass-switcher.git
 cd cline-pass-switcher
 npm install
-node server.js        # Node ≥ 18
+# 首次运行先在仓库外创建 mode 0600 的私有 env 文件（变量见下方初始化说明）
+set -a; . /path/to/private-admin.env; set +a
+node server.js        # Node ≥ 18；完成首次改密后移除初始化变量再重启
 ```
 
-打开 <http://127.0.0.1:3123/>，在「账号管理」里添加你的 Cline Pass 账号（`sk_` 开头的 key）并保存即可。
-没有 key 也能启动：页面会提示配置入口。
+首次运行先按下方“管理员首次初始化”设置一次性码并启动。打开 <http://127.0.0.1:3123/> 完成首次改密，然后在「账号管理」里添加 Cline Pass 账号。没有上游 key 也能启动，但管理 API 在完成初始化前一律拒绝访问。
 
 > Cline Pass key 从哪里来？购买 Cline Pass 订阅后，在 Cline 的账户设置里创建 API Key。
 > 订阅模型 ID 均为 `cline-pass/*` 前缀（如 `cline-pass/glm-5.2`）。
@@ -57,18 +58,23 @@ Model:    cline-pass/glm-5.2 等
 mkdir -p data && cp config.example.json data/config.json
 # 编辑 data/config.json，或在启动时用环境变量注入 key
 
-# 有域名（A 记录指向服务器，自动签发 Let's Encrypt 受信证书）：
-CPASS_DOMAIN=pass.example.com docker compose -f deploy/docker-compose.all-in-one.yml up -d --build
+# 首次初始化：在仓库外创建 mode 0600 的私有 env 文件，填写
+# CLINE_PASS_ADMIN_BOOTSTRAP=1、CLINE_PASS_ADMIN_INIT_CODE=<独立随机码>；
+# 空客户端 key 时还需 CLINE_PASS_ADMIN_INITIAL_PASSWORD=<非空初始密码>。
+# 有域名（确保 TLS 证书受信且反代 Host 与浏览器域名一致）：
+# 私有 env 文件还需 CPASS_DOMAIN=pass.example.com、CPASS_PUBLIC_ORIGIN=https://pass.example.com
+# 以及 CPASS_ADMIN_PROXY_TOKEN=<openssl rand -hex 32 生成的独立 64 字符十六进制反代凭据>
+docker compose --env-file /path/to/private-admin.env -f deploy/docker-compose.all-in-one.yml up -d --build
 
-# 只有 IP（自签证书，浏览器需手动信任一次）：
-docker compose -f deploy/docker-compose.all-in-one.yml up -d --build
+# 仅有 IP 时也需把 Caddy 监听地址和公网 Origin 设为同一 IP，
+# 并确认实际 TLS 证书可被浏览器信任；不要依赖未配置域名的 localhost 默认值。
 ```
 
-访问 `https://你的域名/`（或 `https://服务器IP/`），控制台里设置代理密钥即可对外提供服务。
+访问配置的 HTTPS 域名/IP，先完成独立管理员初始化，再设置客户端代理密钥。远程登录必须通过受信反代 HTTPS：设置 `PUBLIC_BASE_URL=https://实际浏览器访问域名`（all-in-one 用 `CPASS_PUBLIC_ORIGIN`，与浏览器 Origin/Host 相同），反代覆盖 `X-Forwarded-Proto: https` 和 `X-Cline-Pass-Proxy-Token`（应用环境 `CLINE_PASS_ADMIN_PROXY_TOKEN` 必须与反代私有值一致），应用端口只对该反代所在的私有网络开放；私网来源本身不能证明 TLS，公网直连 HTTP 即使设置了公网地址也会拒绝管理登录。
 
 ### 方式 B：已有一个性化反代（nginx 门户等）
 
-根目录的 `docker-compose.yml` 只启动应用并绑定 `127.0.0.1:3123`，由你现有的 nginx/Caddy 做 TLS：
+根目录的 `docker-compose.yml` 只启动应用并绑定 `127.0.0.1:3123`，由你现有的 nginx/Caddy 做 TLS；通过私有 env 文件设置 `PUBLIC_BASE_URL=https://实际域名`、`CLINE_PASS_ADMIN_PROXY_TOKEN=<openssl rand -hex 32 的随机值>` 及首次初始化变量。反代配置中的同一 token 须从权限受限的私有配置注入，不要提交到仓库或转发客户端送来的同名 Header：
 
 ```nginx
 location / {
@@ -76,21 +82,34 @@ location / {
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Cline-Pass-Proxy-Token <与应用环境一致的私有值>;
     proxy_buffering off;            # 流式响应必须
     proxy_read_timeout 600s;
 }
 ```
+
+### 管理员首次初始化、升级及回滚
+
+在受信环境中生成**独立**随机初始化码（至少 16 字符），通过仓库外权限 0600 的私有环境文件/secret 注入 `CLINE_PASS_ADMIN_INIT_CODE`，并设置 `CLINE_PASS_ADMIN_BOOTSTRAP=1`。首次启动将当前**生效**的 `PROXY_KEY`（含环境覆盖值）作为初始管理员密码的哈希写入 `DATA_DIR/admin-auth.json`（新文件 0600）。客户端 key 为空时必须另配非空 `CLINE_PASS_ADMIN_INITIAL_PASSWORD`；空字符串永不能登录。浏览器首次远程访问须同时提交初始密码与独立初始化码，立即设定至少 12 字符的新管理员密码；此之前其他管理 API 均 401。完成后从运行环境移除初始化码、初始密码与启动标志并重启，已有管理员状态不受重启或客户端密钥轮换影响。管理员状态缺失或尚未完成首次改密期间，即使旧配置保留详细日志开关也不会捕获详细内容；完成改密后才恢复既有设置，迁移前请检查并按需关闭。不要把一次性码交给只持有客户端 key 的使用者。初始化和后续密码都不存浏览器 localStorage；旧 `cps_key` 被删除，不能迁移为管理身份。
+
+管理脚本必须改用 `POST /api/auth/login` 获取 `HttpOnly; SameSite=Strict` Cookie 和响应中的 CSRF token；非 GET 管理请求带 `X-CSRF-Token`。`GET /api/auth/session` 可在同一会话取 token；`POST /api/auth/logout`（JSON `{}`、CSRF）吊销单个会话；`POST /api/auth/password`（`currentPassword`/`newPassword`、CSRF）保存并吊销所有会话。会话最多 8 小时，重启也吊销；密码和会话只在受信反代（公网 HTTPS Origin、覆盖的 TLS Header 和独立反代 token 均匹配）或本机 loopback HTTP 受理。重启时如生效 `PROXY_KEY`（包括环境覆盖）等于已设的管理员密码，服务会拒绝启动；应在隔离状态下改正客户端 key，再启动。`GET /api/meta` 公开；`/v1/models`、`/api/v1/models`、`/models` 与聊天别名仅认客户端 key（为空时延续开放模型代理）；`/api/*` 其余端点仅认管理员会话。旧 `Authorization`/`X-Admin-Key` 不再授权管理 API。请先验证首次改密、管理读写与脚本改造，再开放详细日志。
+
+备份 `admin-auth.json` 时必须作为敏感状态与 `config.json` 一起保留，不要放入 release archive。丢失/损坏时管理端**不**自动从当前代理密钥重建：损坏文件启动报错并保持原字节；丢失状态要由有权访问 DATA_DIR 的运维先隔离服务，恢复安全备份，或在保留其他数据的情况下通过受信恢复流程重新设置上述一次性标志和独立码，重新完成首次改密并吊销旧浏览器会话。升级前在隔离副本演练该流程并保留原 release/配置/管理员文件备份。旧版本回滚后其旧共享代理 key 管理边界会恢复，**不得**在回滚期间启用详细正文日志或公网管理入口；优先隔离管理流量、保留原始管理员文件、恢复旧版本镜像和文件哈希，排查后再按新版本迁回，不能把回滚当作独立鉴权仍在生效。
 
 ### 环境变量
 
 | 变量 | 说明 |
 |---|---|
 | `CLINE_PASS_KEY` | 上游 Cline Pass API Key（无 config 时自动创建账号） |
-| `PROXY_KEY` | 下游代理密钥（客户端访问代理的凭据） |
-| `PUBLIC_BASE_URL` | 门户展示的公网代理地址，如 `https://pass.example.com` |
+| `PROXY_KEY` | 下游代理密钥（仅客户端访问模型代理的凭据） |
+| `CLINE_PASS_ADMIN_BOOTSTRAP` | 仅首次/受信恢复时设置 `1`，允许创建独立管理员状态（已有状态不重置） |
+| `CLINE_PASS_ADMIN_INIT_CODE` | 独立于代理密钥的随机一次性码，至少 16 字符；从运维环境/私有配置注入，不要写入 config、命令历史或日志 |
+| `CLINE_PASS_ADMIN_INITIAL_PASSWORD` | 仅当生效客户端密钥为空时所需的非空初始密码；仍必须搭配一次性码，首次改密后失效 |
+| `PUBLIC_BASE_URL` | 门户展示地址兼管理员 HTTPS Origin 校验值，如 `https://pass.example.com`；须与反代 Host/浏览器 Origin 一致 |
+| `CLINE_PASS_ADMIN_PROXY_TOKEN` | 远程 TLS 反代与应用共享的私有随机 64 字符十六进制 token；反代必须覆盖请求 Header `X-Cline-Pass-Proxy-Token`，禁止给客户端；本机 loopback HTTP 不需要 |
 | `PORT` / `BIND_HOST` / `DATA_DIR` | 端口 / 绑定地址（容器内为 0.0.0.0）/ 配置目录 |
 
-上述账号/安全类环境变量在启动时覆盖 `config.json`；此后通过控制台保存设置，会以当前生效值写回文件。以下连接/流运行参数只从环境变量读取，不写入配置文件；非法值回退各自默认值，单位均为 **毫秒或连接数**，不猜测秒数。
+`PROXY_KEY` 等现有代理/账号变量在启动时覆盖 `config.json`；管理员首次初始化环境变量只用于独立鉴权，不写入 config/metadata。以下连接/流运行参数只从环境变量读取，不写入配置文件；非法值回退各自默认值，单位均为 **毫秒或连接数**，不猜测秒数。
 
 | 运行变量 | 默认值 | 合法范围 |
 |---|---:|---:|
@@ -118,8 +137,8 @@ location / {
 | `retryRules` | 唯一权威的有序“停止重试”数组；每条含稳定 `id`、固定 `decision: "stop"`，以及同时存在的 `when.statuses` 与 `when.body_contains`。两类条件 AND、body 数组 ANY、大小写不敏感普通文本（不支持正则/Header）；首条命中即停止本请求剩余 Provider 与账号替换。缺失默认 `[]`；最多 100 条/64 KiB。普通日志只投影 `retryRuleId`/`retryDecision`/`retryMatchedBy` 枚举，不记录 needle 或匹配片段 |
 | `accountErrorRules` / `accountContentErrorRules` | 只读兼容镜像。旧配置启动时按“内容规则在前、状态规则在后”迁移；旧客户端不提交 `errorRules` 时只能原样回传镜像，试图修改会得到 409 |
 | `accountPipeline` | 可选叠加层：三个开关与 `order`，缓存池 min/max，以及显式/消息回退会话绑定 TTL 和 LRU 上限。`0 <= cachePoolLowQuotaSize <= cachePoolSize <= cachePoolMaxSize <= 100000`；默认 TTL 为 2h/15m、上限 50,000。旧配置缺 max 时自动取 min，不会升级后自动扩容 |
-| `proxyKey` | 下游代理密钥；空 = 不鉴权 |
-| `publicBaseUrl` | 公网代理地址（控制台展示用） |
+| `proxyKey` | 下游模型代理密钥；空仅表示客户端模型接口不鉴权，管理接口始终要求独立管理员会话 |
+| `publicBaseUrl` | 公网代理地址，也是管理员远程 HTTPS Origin 校验值（应与浏览器域名一致） |
 | `detailedLogging` | 默认 `false`；完整详细捕获，也可在“详细日志”页面即时保存 |
 | `errorDetailLogging` | 默认 `false`；仅捕获真实失败聊天 attempt 的脱敏响应诊断；完整模式同时开启时优先 |
 | `exposeCatalog` | `true` 时代理的 `/v1/models` 会合并 Cline 公开目录模型；默认 `false` 只返回订阅模型（避免客户端模型列表被淹没） |
@@ -238,7 +257,7 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 - 认证的 `GET /api/logs/settings` 与 `GET /api/logs/details` 在 `health` 中提供 `dropped` 和固定 `dropReasons` 分项（捕获预算、脱敏秘密/扫描/输出、活动/调用数、发布队列、过期/代际、开放详情关联、大小/存储准入等）。每次诊断省略或发布拒绝只计一个主因；同一详情多份正文受限只计一次；分项之和等于 `dropped`。它们是**本进程启动以来**的聚合事件数，重启归零，不追溯旧记录，也不等于失败模型请求数或缺失详情根数。普通 5 MiB 截断不计丢弃；`failures`/`corrupt` 独立。页面仅显示非零原因，旧服务缺字段时标为原因暂不可用。
 - SIGTERM/SIGINT 会先停止新接入和额度调度，等待活动请求 finalizer 写入，再有界 drain 普通/详细 store；达到期限后才强制关闭连接，永久阻塞的日志 writer 不会无限拖住退出。
 
-管理 API（沿用现有密钥边界，返回 `Cache-Control: no-store`）：`GET/POST /api/logs/settings`，POST 接受由 `detailedLogging` / `errorDetailLogging` 组成的非空布尔字段子集，旧的单字段请求仍兼容；`GET/DELETE /api/logs/details`；`GET /api/logs/details/<requestId>`；`GET /api/logs/details/<requestId>/bodies/<bodyId>`（脱敏 `text/plain`，`nosniff`）。列表支持 `limit` 1–200、`cursor`、`requestId`、`from`/`to` 毫秒时间戳、`model`、`account`、`status`、`result`；错误参数返回 400，过期/已清空/缺失正文返回安全 404。
+管理 API（独立管理员 Cookie 会话，返回 `Cache-Control: no-store`）：`GET/POST /api/logs/settings`，POST 接受由 `detailedLogging` / `errorDetailLogging` 组成的非空布尔字段子集，旧的单字段请求仍兼容；`GET/DELETE /api/logs/details`；`GET /api/logs/details/<requestId>`；`GET /api/logs/details/<requestId>/bodies/<bodyId>`（脱敏 `text/plain`，`nosniff`）。列表支持 `limit` 1–200、`cursor`、`requestId`、`from`/`to` 毫秒时间戳、`model`、`account`、`status`、`result`；错误参数返回 400，过期/已清空/缺失正文返回安全 404。
 
 ---
 

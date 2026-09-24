@@ -111,14 +111,16 @@
 </style>
 </head>
 <body>
-  <div id="loginOverlay" style="display:none; position:fixed; inset:0; background:rgba(8,10,14,.85); z-index:50; align-items:center; justify-content:center;">
-    <div style="background:var(--card); border:1px solid var(--border); border-radius:12px; padding:28px; width:360px;">
-      <h2 style="font-size:16px; margin-bottom:6px;">Cline Pass 上游控制台</h2>
-      <p class="dim" style="font-size:13px; margin-bottom:14px;">此部署已启用代理密钥保护，请输入密钥访问控制台。</p>
-      <input id="loginKey" type="password" placeholder="代理密钥" style="width:100%; background:var(--card2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:9px 10px; font-size:14px;">
-      <div id="loginErr" style="color:var(--red); font-size:12px; margin-top:6px;"></div>
-      <button style="width:100%; margin-top:12px;" onclick="tryLogin()">进入控制台</button>
-    </div>
+  <div id="loginOverlay" role="dialog" aria-modal="true" aria-labelledby="loginTitle" style="display:none; position:fixed; inset:0; background:var(--bg); z-index:100; align-items:center; justify-content:center; padding:16px; overflow:auto;">
+    <form id="loginForm" style="background:var(--card); border:1px solid var(--border); border-radius:12px; padding:28px; width:min(100%,420px); max-height:100%; overflow:auto;">
+      <h2 id="loginTitle" style="font-size:16px; margin-bottom:6px;">管理员登录</h2>
+      <p id="loginHint" class="dim" style="font-size:13px; margin-bottom:14px;"></p>
+      <label for="loginKey">管理员密码</label><input id="loginKey" type="password" autocomplete="current-password" required style="width:100%;">
+      <div id="bootstrapFields" hidden><label for="loginCode">一次性初始化码（由运维单独提供）</label><input id="loginCode" type="password" autocomplete="off" style="width:100%;"></div>
+      <div id="changeFields" hidden><label for="newAdminPassword">新管理员密码（至少 12 字符）</label><input id="newAdminPassword" type="password" autocomplete="new-password" minlength="12" style="width:100%;"></div>
+      <div id="loginErr" role="status" aria-live="polite" style="color:var(--red); font-size:12px; margin-top:6px;"></div>
+      <button type="submit" style="width:100%; margin-top:12px;">继续</button>
+    </form>
   </div>
 
   <h1>Cline Pass 上游控制台</h1>
@@ -307,9 +309,14 @@
     </div>
     <div style="display:flex; gap:10px; align-items:center; margin-top:12px; flex-wrap:wrap;">
       <button onclick="saveSecurity()">保存访问设置</button>
-      <span class="dim" style="font-size:12px">修改密钥后，客户端需改用新密钥；控制台会自动更新本机保存的密钥，不会被锁在外面。</span>
+      <span class="dim" style="font-size:12px">修改代理密钥仅影响模型客户端，不影响管理员登录。</span>
       <span class="dim" style="font-size:12px" id="secMsg"></span>
     </div>
+  </div>
+  <div class="card"><h2>管理员会话</h2>
+    <label for="currentAdminPassword">当前管理员密码</label><input id="currentAdminPassword" type="password" autocomplete="current-password">
+    <label for="changedAdminPassword">新管理员密码（至少 12 字符）</label><input id="changedAdminPassword" type="password" autocomplete="new-password" minlength="12">
+    <div class="toolbar"><button type="button" onclick="changeAdminPassword()">修改管理员密码</button><button type="button" class="ghost" onclick="logoutAdmin()">退出登录</button><span id="adminStatus" role="status" aria-live="polite"></span></div>
   </div>
 
   <div class="card">
@@ -378,7 +385,10 @@
 <div id="upstreamSetupModal" class="modal"><div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="upstreamSetupTitle"><h2 id="upstreamSetupTitle">上游一键配置预览</h2><label for="upstreamSetupStrategy" class="dim">策略</label><select id="upstreamSetupStrategy" onchange="renderUpstreamSetupProposal()"><option value="cache">缓存优先（strict）</option><option value="available">可用性优先（preferred）</option><option value="automatic">自动 sticky</option></select><pre id="upstreamSetupDiff" style="white-space:pre-wrap;margin:14px 0"></pre><div id="upstreamSetupStatus" aria-live="polite" class="dim" style="margin-bottom:12px"></div><button type="button" onclick="testUpstreamSetup()">测试建议</button> <button type="button" onclick="applyUpstreamSetup()">确认保存</button> <button type="button" class="ghost" onclick="closeUpstreamSetup()">取消</button></div></div>
 <script>
 let DATA = null;
-let AUTH_KEY = localStorage.getItem('cps_key') || '';
+try { localStorage.removeItem('cps_key'); } catch {}
+let ADMIN_CSRF = null;
+let ADMIN_PENDING = false;
+let ADMIN_BOOTSTRAP = false;
 const $ = (s) => document.querySelector(s);
 const escapeHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 const jsArg = (s) => escapeHtml(JSON.stringify(String(s ?? '')));
@@ -386,26 +396,62 @@ const fmt = (ts) => new Date(ts).toLocaleTimeString();
 
 async function api(path, body, method, asText=false, options={}) {
   const headers = body ? { 'Content-Type': 'application/json' } : {};
-  if (AUTH_KEY) headers['X-Admin-Key'] = AUTH_KEY;
   const verb = method || (body ? 'POST' : 'GET');
-  const res = await fetch(path, { method: verb, headers, ...(body ? { body: JSON.stringify(body) } : {}), ...(options.signal ? { signal: options.signal } : {}) });
-  if (res.status === 401) { showLogin(); throw new Error('unauthorized'); }
+  if (!['GET', 'HEAD'].includes(verb) && ADMIN_CSRF) headers['X-CSRF-Token'] = ADMIN_CSRF;
+  const res = await fetch(path, { method: verb, headers, credentials: 'same-origin', ...(body ? { body: JSON.stringify(body) } : {}), ...(options.signal ? { signal: options.signal } : {}) });
+  if (res.status === 401) { ADMIN_CSRF = null; showLogin(); throw new Error('unauthorized'); }
   if(asText){if(!res.ok)throw Error('正文已过期、清空或暂不可用');return res.text();}
   return res.json();
 }
 
-function showLogin() { $('#loginOverlay').style.display = 'flex'; setTimeout(() => $('#loginKey').focus(), 50); }
+function showLogin() {
+  $('#loginOverlay').style.display = 'flex';
+  $('#bootstrapFields').hidden = !ADMIN_BOOTSTRAP || ADMIN_PENDING;
+  $('#changeFields').hidden = !ADMIN_PENDING;
+  $('#loginKey').hidden = ADMIN_PENDING;
+  $('#loginKey').disabled = ADMIN_PENDING;
+  $('label[for="loginKey"]').hidden = ADMIN_PENDING;
+  $('#loginHint').textContent = ADMIN_PENDING ? '首次登录必须设置独立的新密码，完成前无法访问管理 API。' : ADMIN_BOOTSTRAP ? '首次初始化：输入当前生效的客户端密钥（空密钥时输入运维配置的初始密码）和独立初始化码。' : '请输入独立管理员密码；客户端 API 密钥不能登录。';
+  setTimeout(() => (ADMIN_PENDING ? $('#newAdminPassword') : $('#loginKey')).focus(), 50);
+}
 async function tryLogin() {
-  const k = $('#loginKey').value.trim();
-  if (!k) return;
-  const res = await fetch('/api/models', { headers: { 'X-Admin-Key': k } });
-  if (res.ok) {
-    AUTH_KEY = k; localStorage.setItem('cps_key', k);
+  const pending = ADMIN_PENDING;
+  const endpoint = pending ? 'password' : ADMIN_BOOTSTRAP ? 'bootstrap' : 'login';
+  const payload = pending ? { newPassword: $('#newAdminPassword').value } : ADMIN_BOOTSTRAP ? { password: $('#loginKey').value, code: $('#loginCode').value } : { password: $('#loginKey').value };
+  try {
+    const res = await fetch('/api/auth/' + endpoint, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', ...(pending ? { 'X-CSRF-Token': ADMIN_CSRF } : {}) }, body: JSON.stringify(payload) });
+    if (pending && res.status === 401) {
+      ADMIN_PENDING = false; ADMIN_CSRF = null; $('#newAdminPassword').value = '';
+      try {
+        const stateRes = await fetch('/api/auth/state', { credentials: 'same-origin' });
+        if (stateRes.ok) { const state = await stateRes.json(); ADMIN_BOOTSTRAP = state.available === true && state.initialized === false; }
+      } catch {}
+      showLogin(); $('#loginErr').textContent = ADMIN_BOOTSTRAP ? '首次改密会话已失效，请重新验证初始密码和初始化码' : '会话已失效，请重新登录'; return;
+    }
+    if (!res.ok) { $('#loginErr').textContent = res.status === 429 ? '尝试过多，请稍后重试' : '认证失败，请检查输入'; return; }
+    const data = await res.json();
+    $('#loginKey').value = ''; $('#loginCode').value = ''; $('#newAdminPassword').value = '';
+    if (pending) { ADMIN_CSRF = null; ADMIN_PENDING = false; ADMIN_BOOTSTRAP = false; showLogin(); $('#loginErr').textContent = '密码已更改，请用新密码登录'; return; }
+    ADMIN_CSRF = data.csrf; ADMIN_PENDING = data.pending;
+    if (ADMIN_PENDING) { showLogin(); return; }
     $('#loginOverlay').style.display = 'none'; $('#loginErr').textContent = '';
-    loadAll();
-  } else {
-    $('#loginErr').textContent = '密钥错误，请重试';
-  }
+    if (!DATA) loadAll().catch(() => {}); // re-login must not discard unsaved drafts
+  } catch { $('#loginErr').textContent = '网络错误，请重试'; }
+}
+async function changeAdminPassword() {
+  try {
+    const res = await api('/api/auth/password', { currentPassword: $('#currentAdminPassword').value, newPassword: $('#changedAdminPassword').value });
+    $('#adminStatus').textContent = res.ok ? '已修改，请重新登录' : '修改失败';
+    if (res.ok) { $('#currentAdminPassword').value = ''; $('#changedAdminPassword').value = ''; ADMIN_CSRF = null; showLogin(); }
+  } catch { $('#adminStatus').textContent = '修改失败'; }
+}
+async function logoutAdmin() {
+  try {
+    const result = await api('/api/auth/logout', {});
+    if (!result.ok) throw new Error('logout failed');
+    ADMIN_CSRF = null; DATA = null; ACCS = null; $('#currentAdminPassword').value = ''; $('#changedAdminPassword').value = '';
+    location.reload();
+  } catch { $('#adminStatus').textContent = '退出未确认，请重试'; }
 }
 
 const ST_TAG = { ok: '✔可用', limited: '⏳限流', degraded: '⚠退化', bad: '✘不可钉', unknown: '？未知', auth: '🔑key错' };
@@ -623,8 +669,7 @@ async function saveSecurity() {
   };
   const r = await api('/api/security', payload);
   if (r.ok) {
-    // 控制台鉴权与代理密钥同源：改完立即换新密钥，避免会话失效
-    if (r.proxyKey) { AUTH_KEY = r.proxyKey; localStorage.setItem('cps_key', r.proxyKey); }
+    // 管理员会话与下游客户端密钥独立；无需更新登录态。
     renderSecurity(r);
     DATA.proxyBase = r.proxyBase;
     $('#proxyBase').textContent = '代理地址：' + r.proxyBase + '（点击复制）';
@@ -1298,7 +1343,7 @@ async function detailJSON(path,body,method){const result=await api(path,body,met
 async function loadDetailSettings(){
   const nav=DETAIL_NAV_ID,version=++DETAIL_SETTINGS_ID;
   try{const data=await detailJSON('/api/logs/settings');if(nav!==DETAIL_NAV_ID||version!==DETAIL_SETTINGS_ID||!detailVisible())return;
-    $('#detailsAuth').textContent=data.authRequired?'管理 API 已启用密钥认证。':'警告：未配置代理/管理密钥，当前详细内容没有密钥保护！';
+    $('#detailsAuth').textContent='管理 API 使用独立管理员会话认证（与模型客户端密钥分离）。';
     renderDetailHealth(data.health);
     if(!DETAIL_TOGGLE_PENDING){DETAIL_CONFIRMED=data.detailedLogging===true;ERROR_DETAIL_CONFIRMED=data.errorDetailLogging===true;$('#detailedLogging').checked=DETAIL_CONFIRMED;$('#errorDetailLogging').checked=ERROR_DETAIL_CONFIRMED;$('#detailedLogging').disabled=false;$('#errorDetailLogging').disabled=false;}
   }catch{if(nav===DETAIL_NAV_ID&&version===DETAIL_SETTINGS_ID&&detailVisible())$('#detailsStatus').textContent='日志设置加载失败';}
@@ -1394,16 +1439,26 @@ function status(msg) { $('#status').textContent = msg; clearTimeout(statusTimer)
 $('#proxyBase').onclick = () => navigator.clipboard.writeText(DATA.proxyBase).then(() => status('已复制代理地址'));
 $('#testModel').addEventListener('change', onTestModelChange);
 $('#catFilter').addEventListener('input', renderCatalog);
-$('#loginKey').addEventListener('keydown', (e) => { if (e.key === 'Enter') tryLogin(); });
-// 仅当服务端开启鉴权且本地没有已保存的密钥时才弹登录框
+$('#loginForm').addEventListener('submit', (e) => { e.preventDefault(); tryLogin(); });
+$('#loginOverlay').addEventListener('keydown', (e) => {
+  if (e.key !== 'Tab') return;
+  const nodes = [...$('#loginForm').querySelectorAll('input:not([hidden]),button')].filter((node) => !node.closest('[hidden]'));
+  const first = nodes[0], last = nodes[nodes.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+});
 (async () => {
   try {
-    const meta = await (await fetch('/api/meta')).json();
-    if (meta.authRequired && !AUTH_KEY) showLogin();
-    else loadAll().catch(() => {});
-  } catch {
-    loadAll().catch(() => {});
-  }
+    const state = await (await fetch('/api/auth/state', { credentials: 'same-origin' })).json();
+    ADMIN_BOOTSTRAP = state.initialized === false && state.available === true;
+    if (state.available === false) $('#loginErr').textContent = '管理员尚未启用；请运维配置独立初始化码并开启一次性初始化后重启。';
+    const res = await fetch('/api/auth/session', { credentials: 'same-origin' });
+    if (res.ok) {
+      const session = await res.json(); ADMIN_CSRF = session.csrf; ADMIN_PENDING = session.pending;
+      if (!ADMIN_PENDING) return loadAll().catch(() => {});
+    }
+  } catch {}
+  showLogin();
 })();
 </script>
 </body>

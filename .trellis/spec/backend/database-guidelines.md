@@ -44,12 +44,17 @@ saveMeta()   // atomicWriteJson(META_PATH, META)
 Paths and environment:
 
 ```text
-DATA_DIR        optional; defaults to the server directory and owns both JSON paths
+DATA_DIR        optional; defaults to the server directory and owns config, metadata and admin-auth JSON paths
 CLINE_PASS_KEY  optional runtime account override with a deterministic HMAC-derived ID
 PROXY_KEY       optional runtime proxyKey override
-PUBLIC_BASE_URL optional runtime publicBaseUrl override
+PUBLIC_BASE_URL optional runtime publicBaseUrl override; also the exact HTTPS Origin expected for remote admin login behind a trusted private proxy
+CLINE_PASS_ADMIN_PROXY_TOKEN  private 64-character lowercase hex secret shared with the TLS reverse proxy; it must replace X-Cline-Pass-Proxy-Token on forwarded requests
 PORT            optional runtime port override
 BIND_HOST       optional listen address only; not persisted by startup normalization
+CLINE_PASS_ADMIN_BOOTSTRAP  explicit '1' only to create missing admin state
+CLINE_PASS_ADMIN_INIT_CODE  independent private initialization code, >=16 characters
+CLINE_PASS_ADMIN_INITIAL_PASSWORD  required nonempty bootstrap seed when effective client key is empty
+admin-auth.json  DATA_DIR/admin-auth.json (salted scrypt verifier + initialized flag only; never config/metadata)
 config.json     DATA_DIR/config.json
 metadata.json   DATA_DIR/metadata.json
 ```
@@ -268,6 +273,10 @@ Quota snapshots are keyed by stable account ID and store only projected percenta
 Durable request/error diagnostics no longer grow `metadata.history`; they are separate bounded JSONL streams under `DATA_DIR/logs/` and follow `logging-guidelines.md`. The legacy history array remains compatibility-only.
 
 Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/` store described in `logging-guidelines.md`; metadata exclusions above remain unchanged. `detailedLogging` selects full capture and `errorDetailLogging` selects failed-chat-attempt capture; both default off and full wins when both are enabled. `POST /api/logs/settings` accepts a non-empty exact subset of those two boolean fields, so legacy `{ detailedLogging: boolean }` remains valid. Persist the complete candidate config with `atomicWriteJson(CONFIG_PATH, { ...config, ...candidate })` **before** changing either runtime mode. Failed writes return a safe 500 with both prior runtime values/file intact; rejected payloads return 400 without a write. The settings must not reuse destructive account saves or reload account drafts. Missing/invalid persisted values are off, not truthy enablement.
+
+#### Independent administrator state
+
+`admin-auth.json` has the exact schema `{ version: 1, salt: 64 lowercase hex, hash: 128 lowercase hex, initialized: boolean }`. Only a missing file with explicit `CLINE_PASS_ADMIN_BOOTSTRAP=1` and an independent nonempty >=16-character `CLINE_PASS_ADMIN_INIT_CODE` creates an uninitialized verifier from the effective downstream key (including `PROXY_KEY` environment override), or from a separately supplied nonempty `CLINE_PASS_ADMIN_INITIAL_PASSWORD` when that key is empty. No implicit fallback for a missing state file; without explicit opt-in all management requests remain 401. Existing valid state is never re-derived from the client key on restart or rotation. Startup fails closed if the effective nonempty client key (including an environment override) matches the initialized administrator password; operator must correct the client key without resetting the admin state. Wrong/malformed existing state, a symlink/non-regular file or a group/world-readable admin state fails startup without replacing its bytes; new state is owner-only 0600. Bootstrap requires password plus code and creates only a pending in-memory session; first password change atomically saves an independent verifier, marks initialized and revokes all sessions. Subsequent changes require the current admin password and revoke all sessions. No plaintext password, code, cookie/session token or CSRF token enters durable state. Operators must keep a private backup of this file and use trusted recovery if lost; see README onboarding and rollback.
 
 #### Atomic write and file mode
 

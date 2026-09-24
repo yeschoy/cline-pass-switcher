@@ -5,6 +5,11 @@ services:
     restart: unless-stopped
     environment:
       - DATA_DIR=/data
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
+      - CLINE_PASS_ADMIN_PROXY_TOKEN=${CLINE_PASS_ADMIN_PROXY_TOKEN:-}
+      - CLINE_PASS_ADMIN_BOOTSTRAP=${CLINE_PASS_ADMIN_BOOTSTRAP:-}
+      - CLINE_PASS_ADMIN_INIT_CODE=${CLINE_PASS_ADMIN_INIT_CODE:-}
+      - CLINE_PASS_ADMIN_INITIAL_PASSWORD=${CLINE_PASS_ADMIN_INITIAL_PASSWORD:-}
     volumes:
       - ./data:/data
     ports:

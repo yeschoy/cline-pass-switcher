@@ -163,7 +163,7 @@ DELETE /api/logs/{requests|errors}
   -> { ok: true }
 ```
 
-The browser sends the proxy/admin credential as `X-Admin-Key`; it stores that credential in `localStorage` under `cps_key` and refreshes it after `/api/security` changes the proxy key.
+The browser deletes legacy `localStorage.cps_key` without copying it. `api()` uses same-origin HttpOnly administrator Cookie credentials and the in-memory CSRF token from login or `GET /api/auth/session`; it never sends downstream API keys to management routes. A 401 opens the login dialog without rehydrating `DATA`/`ACCS` or destroying unsaved drafts. A 401 during pending first password change clears the expired pending session and CSRF token, refreshes bootstrap availability, and returns to the initial password/code form instead of trapping the user in a disabled login field. First login submits the effective client key or separate empty-key seed together with the independent one-time code, then requires an immediate new admin password before any management read. Password change and logout revoke sessions; neither rotates the client key. `POST /api/security` rotates only the downstream client key, not the admin session.
 
 ### 3. Contracts
 

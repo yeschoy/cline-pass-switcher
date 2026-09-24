@@ -45,7 +45,7 @@ test('five sections, toggle and detail reads preserve all account/bulk/raw draft
   await h.run("switchSection('details')");
   assert.equal(h.el('#detailsPanel').hidden, false);
   for (const id of ['#consolePanel', '#statisticsPanel', '#logPanel']) assert.equal(h.el(id).hidden, true);
-  assert.equal(h.el('#navDetails').attrs['aria-pressed'], 'true'); assert.match(h.el('#detailsAuth').textContent, /没有密钥保护/);
+  assert.equal(h.el('#navDetails').attrs['aria-pressed'], 'true'); assert.match(h.el('#detailsAuth').textContent, /独立管理员会话认证/);
   h.el('#detailedLogging').checked = true; await h.run('toggleDetailedLogging()');
   assert.equal(h.el('#detailedLogging').checked, true); h.el('#errorDetailLogging').checked = true; await h.run('toggleErrorDetailLogging()'); assert.equal(h.el('#errorDetailLogging').checked, true); assert.equal(h.drafts(), before);
   assert.ok(h.calls.every(([path]) => path.startsWith('/api/logs/')));

@@ -1,10 +1,11 @@
 # All-in-one 部署：应用 + Caddy 自动 HTTPS
 # 用法：
 #   1. mkdir -p data && cp config.example.json data/config.json  （填入你的账号 key）
-#   2. 有域名：CPASS_DOMAIN=pass.example.com docker compose -f deploy/docker-compose.all-in-one.yml up -d --build
-#      （把域名 A 记录指向服务器 IP，Caddy 自动向 Let's Encrypt 申请受信证书）
-#   3. 没有域名（仅 IP）：直接 docker compose -f deploy/docker-compose.all-in-one.yml up -d --build
-#      （Caddy 使用自签证书，浏览器需信任一次；访问 https://服务器IP）
+#   2. 仓库外私有 env 文件（0600）提供 CPASS_DOMAIN、CPASS_PUBLIC_ORIGIN=https://同域名、
+#      CPASS_ADMIN_PROXY_TOKEN（openssl rand -hex 32；供 Caddy 和应用共享，不能交给模型客户端），
+#      首次启动还需 CLINE_PASS_ADMIN_BOOTSTRAP=1 和独立 CLINE_PASS_ADMIN_INIT_CODE；空客户端密钥另需初始密码。
+#   3. docker compose --env-file /path/to/private-admin.env -f deploy/docker-compose.all-in-one.yml up -d --build
+#      确保实际 TLS 证书受信；无域名时 CPASS_DOMAIN/CPASS_PUBLIC_ORIGIN 须与访问 IP 一致。
 services:
   app:
     build: ..
@@ -13,6 +14,11 @@ services:
     environment:
       - DATA_DIR=/data
       - BIND_HOST=0.0.0.0
+      - PUBLIC_BASE_URL=${CPASS_PUBLIC_ORIGIN:-}
+      - CLINE_PASS_ADMIN_PROXY_TOKEN=${CPASS_ADMIN_PROXY_TOKEN:?set a private 64-hex reverse proxy token}
+      - CLINE_PASS_ADMIN_BOOTSTRAP=${CLINE_PASS_ADMIN_BOOTSTRAP:-}
+      - CLINE_PASS_ADMIN_INIT_CODE=${CLINE_PASS_ADMIN_INIT_CODE:-}
+      - CLINE_PASS_ADMIN_INITIAL_PASSWORD=${CLINE_PASS_ADMIN_INITIAL_PASSWORD:-}
     volumes:
       - ../data:/data
     expose:
@@ -29,6 +35,7 @@ services:
       - "443:443"
     environment:
       - CPASS_DOMAIN=${CPASS_DOMAIN:-}
+      - CPASS_ADMIN_PROXY_TOKEN=${CPASS_ADMIN_PROXY_TOKEN:?set a private 64-hex reverse proxy token}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
