@@ -20,9 +20,9 @@ This parent owns the integration contract only. Each child has a separate PRD, d
 
 No production operation is authorized by planning. Deployment, when separately requested, uses committed main HEAD and the deployment guidelines. Migrating admin auth needs a reversible plan without an API-key management backdoor; raw-body mode must remain off across migrations and rollback. The baseline deployment contract requires config/metadata backup, and the previous production release procedure additionally copied detailed logs into a private backup. Therefore a future 48h raw-body source TTL cannot be claimed for existing or new backups: raw diagnostics must be excluded from backups or covered by a separately enforced backup-expiry policy before raw capture is enabled.
 
-## Open design gates
+## Resolved design choices and remaining release gates
 
-- Decide where the independent one-time admin bootstrap code is supplied without placing it in responses, project files or ordinary service logs; bound login attempts and session lifetime.
-- Decide the supported `MB`/`MiB` display; tentatively 35 MiB per body and 512 MiB reserved payload (not RSS).
-- For raw bodies, document whether the 48-hour retention policy covers operator-created backups; default recommendation is exclusion of raw logs from backups.
-- Review each child's PRD for unresolved product choices before writing implementation code; this parent is not a direct implementation target.
+- The admin bootstrap used a separate private one-time code, independent initialized verifier/session, bounded login attempts and session lifetime; no client-key management fallback. The authorized admin-login production migration is complete; the four later children remain local only.
+- Raw text is an independent default-off mode: **35 MiB per body / 512 MiB shared retained reservation**, not an RSS cap. Valid owned raw groups become unreadable at 48h and are removed on startup/minute maintenance, including corrupt manifests; unknown/suspicious files remain inaccessible, undeleted and health-visible. Old sanitized groups keep 5 MiB/7d in the same store. Physical deletion can lag an IO failure or outage.
+- External backups are not subject to the store TTL. The deployment contract now requires raw directory exclusion or an independently enforced private 48h expiry before any separately authorized raw production enablement; old-image management ingress/read-denial must be rehearsed on private copies. Target-container memory and actual-browser raw-panel acceptance also remain release gates.
+- Each child was reviewed, implemented, checked, committed and archived independently. Parent local integration findings are in `integration-report.md`; this parent coordinates outstanding release gates, not direct code implementation or production readiness.
