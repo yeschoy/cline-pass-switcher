@@ -1,0 +1,13 @@
+# Account quota exhaustion protection — planning draft
+
+## Signals and state
+
+Keep this policy distinct from configurable errorRules while reusing the existing normalized bounded failure facts and **existing quota job owner**. An actual pre-output upstream failure with an explicit account quota status and bounded/redacted content initiates a deduplicated, backoff-respecting force refresh for that account; a bounded temporary hold prevents a concurrent storm while verification is pending. Fail/unknown cannot persist a manual ban, and temporary hold cannot last forever.
+
+The new permanent *monthly* ban requires all three signals on the same account: actual matching status, matching content, and a successful fresh monthly snapshot *from after the trigger* with reference remaining `< $0.20` by default (global admin-configurable and strictly validated). It persists independently of ordinary rule cooldown and existing known-100 quota disposition. Neither timeout, reset, refresh, restart nor ordinary rule recovery clears it; a deliberate admin action can. No permanent ban for a generic provider 429, missing/old quota or request cancellation. Do not replay output after SSE start or let the observation block model response finalization.
+
+5h/week window exhaustion has a separate automatic temporary block. Independently track every proven limiting window; an available 5h with exhausted week is still blocked. Schedule recheck near each provided resetsAt through the existing quota scheduler; if absent use bounded backoff. Automatic reentry requires a successful **new full three-window** snapshot showing no window exhausted, positive evidence that the held window reset/recovered (not merely the same nonzero sliver that already failed), and no monthly manual ban. When the upstream error does not identify a 5h/week window and no window is confirmed 100%, keep only a bounded short hold rather than inventing a reset deadline. A timer merely makes a refresh eligible, never unlocks directly. Preserve existing low-slot cache-pool role semantics and account generation/key/proxy fences; no second quota queue, account lease or scheduler.
+
+## Management and compatibility
+
+Expose safe per-account reason/state/next check, threshold settings and an explicit recovery action in current account/statistics projections. Store only bounded booleans/enums/timestamps/threshold, not raw error text or monthly dollar history. The existing account recover button clears rule fields only, so design explicit UI and endpoint semantics for the independent manual ban. Full account saves retain any new config field and cannot unknowingly reset the ban. No production fetch is part of planning/testing.

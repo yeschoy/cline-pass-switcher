@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Relevant layer contract and verification boundary"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Relevant layer contract and verification boundary"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Relevant layer contract and verification boundary"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Relevant layer contract and verification boundary"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Relevant layer contract and verification boundary"}

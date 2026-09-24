@@ -1,0 +1,9 @@
+# Raw-body diagnostics — implementation checklist (planning)
+
+- [ ] Gate on completed independent admin auth and forced first password change. Ensure legacy client key cannot reach any detail settings/list/body API. Review backend logging, security and deployment specs before any code edit.
+- [ ] Trace all `DetailRoot`/`BodyCapture` construction, metadata projections and store readers/publish/expiry paths. Determine exact memory/RSS impact for 35 MiB body x multiple captures before confirming 512 MiB reservation.
+- [ ] Add explicit default-off raw-body setting with strict persist-first validation; old detailed logging continues sanitized. Distinguish raw manifests/descriptors and preserve old group reads. Maintain protected Header/list projections and ordinary JSONL exclusions without a 35 MiB credential scan.
+- [ ] Enforce 35 MiB per body, 512 MiB retained budget, existing disk admission and 48h raw expiry in the single store; no body exposure through inventory, pagination, service logs or error responses. Retain fail-open chat lifecycle and request byte/status/lease parity.
+- [ ] Add authenticated on-demand raw body viewing with warning, no-store/nosniff, safe content rendering, browser lifetime/focus control; test unauthorized client key, logout, cross-origin and interrupted loads.
+- [ ] Local-temp/mock tests: fake secret in raw body readable only to admin, same fake secret absent ordinary/header/list projections; concurrent large bodies, backpressure, cleanup/restart/clear, TTL/capacity, corrupt files, legacy sanitized group and mode switches, SSE first-event/cancel parity. No real credentials or production data.
+- [ ] Update operator docs on explicit risk, 48h TTL vs external backups, admin-first rollout/rollback, and all changed English backend/frontend specs; run focused tests, Node checks, full env-scrubbed npm test and diff check. Do not deploy without separate authorization.
