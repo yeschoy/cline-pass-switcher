@@ -8,6 +8,7 @@ import http from 'node:http';
 import https from 'node:https';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
@@ -15,7 +16,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { JsonlLogGroup } from './lib/jsonl-log-store.js';
-import { DetailRoot, DetailRedactor, detailContext, detailRoute, observeStream, MAX_BODY_BYTES, MAX_RAW_BODY_BYTES, MAX_PAYLOAD_BYTES, captureBudget } from './lib/detailed-log-capture.js';
+import { DetailRoot, DetailRedactor, detailContext, detailRoute, observeStream, MAX_BODY_BYTES, MAX_RAW_BODY_BYTES, MAX_PAYLOAD_BYTES, MAX_SANITIZED_PAYLOAD_BYTES, captureBudget } from './lib/detailed-log-capture.js';
 import { DetailedLogStore, parseDetailQuery, MAX_AGE_MS, RAW_MAX_AGE_MS, MAX_TOTAL_BYTES } from './lib/detailed-log-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -25,6 +26,27 @@ const META_PATH = path.join(DATA_DIR, 'metadata.json');
 const ADMIN_PATH = path.join(DATA_DIR, 'admin-auth.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const LOG_DIR = path.join(DATA_DIR, 'logs');
+
+// Raw capture needs an explicit operator readiness signal AND memory headroom.
+// A 512 MiB container was OOM-killed below the 512 MiB retained reservation;
+// this guard is not a substitute for the separate target-container load test.
+const RAW_BODY_MIN_MEMORY_BYTES = 2 * 1024 * 1024 * 1024;
+function rawBodyMemoryBytes() {
+  const testValue = process.env.NODE_ENV === 'test' ? process.env.CLINE_PASS_TEST_RAW_MEMORY_BYTES : null;
+  if (testValue && /^\d+$/.test(testValue) && Number.isSafeInteger(Number(testValue))) return Number(testValue);
+  if (process.platform !== 'linux') return os.totalmem();
+  for (const file of ['/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes']) {
+    let value;
+    try { value = fs.readFileSync(file, 'utf8').trim(); }
+    catch (error) { if (error.code === 'ENOENT') continue; return 0; }
+    if (value === 'max') return os.totalmem();
+    if (!/^\d+$/.test(value)) return 0;
+    const limit = BigInt(value);
+    return limit > BigInt(Number.MAX_SAFE_INTEGER) ? os.totalmem() : Math.min(Number(limit), os.totalmem());
+  }
+  return 0; // Unknown Linux container limit is not evidence of sufficient headroom.
+}
+const rawBodyAvailable = process.env.CLINE_PASS_RAW_BODY_READY === '1' && rawBodyMemoryBytes() >= RAW_BODY_MIN_MEMORY_BYTES;
 
 const DEFAULT_CONFIG = {
   port: 3123,
@@ -4537,9 +4559,10 @@ const server = http.createServer((req, res) => {
   if (shuttingDown) return sendJSON(res, 503, { error: { message: 'server shutting down' } });
   const pathname = new URL(req.url, 'http://local').pathname;
   // Never retain detailed content while migration/recovery is awaiting the first independent password change.
-  const profile = adminState?.initialized === true && config.detailedLogging === true && detailRoute(req.method, pathname)
+  const captureAllowed = config.rawBodyLogging !== true || rawBodyAvailable;
+  const profile = captureAllowed && adminState?.initialized === true && config.detailedLogging === true && detailRoute(req.method, pathname)
     ? (config.rawBodyLogging === true ? 'raw-full' : 'full')
-    : adminState?.initialized === true && config.errorDetailLogging === true && req.method === 'POST' && CHAT_PATHS.has(pathname) ? (config.rawBodyLogging === true ? 'raw-error' : 'error') : null;
+    : captureAllowed && adminState?.initialized === true && config.errorDetailLogging === true && req.method === 'POST' && CHAT_PATHS.has(pathname) ? (config.rawBodyLogging === true ? 'raw-error' : 'error') : null;
   if (profile) {
     if (DetailRoot.active >= 128) { detailedLogs.recordDrop('activeLimit'); return dispatch(req, res); }
     const secrets = profile.startsWith('raw-') ? [] : [config.proxyKey, PROXY_KEY, ...config.accounts.flatMap((account) => [account.key, account.proxyUrl, ...Object.values(account.headers || {})])];
@@ -4652,10 +4675,11 @@ async function dispatch(req, res) {
     }
     if (p === '/api/logs/settings' || p === '/api/logs/details' || p.startsWith('/api/logs/details/')) {
       if (p === '/api/logs/settings') {
-        if (req.method === 'GET') return sendJSON(res, 200, { detailedLogging: config.detailedLogging === true, errorDetailLogging: config.errorDetailLogging === true, rawBodyLogging: config.rawBodyLogging === true, authRequired: true, maxBodyBytes: MAX_BODY_BYTES, rawMaxBodyBytes: MAX_RAW_BODY_BYTES, maxPayloadBytes: MAX_PAYLOAD_BYTES, maxAgeMs: MAX_AGE_MS, rawMaxAgeMs: RAW_MAX_AGE_MS, maxTotalBytes: MAX_TOTAL_BYTES, health: { ...detailedLogs.health, captureDropped: captureBudget.dropped, retainedPayloadBytes: captureBudget.used } });
+        if (req.method === 'GET') return sendJSON(res, 200, { detailedLogging: config.detailedLogging === true, errorDetailLogging: config.errorDetailLogging === true, rawBodyLogging: config.rawBodyLogging === true, rawBodyAvailable, authRequired: true, maxBodyBytes: MAX_BODY_BYTES, rawMaxBodyBytes: MAX_RAW_BODY_BYTES, maxPayloadBytes: MAX_PAYLOAD_BYTES, maxSanitizedPayloadBytes: MAX_SANITIZED_PAYLOAD_BYTES, maxAgeMs: MAX_AGE_MS, rawMaxAgeMs: RAW_MAX_AGE_MS, maxTotalBytes: MAX_TOTAL_BYTES, health: { ...detailedLogs.health, captureDropped: captureBudget.dropped, retainedPayloadBytes: captureBudget.used } });
         if (req.method === 'POST') {
           const body = await readJsonBody(req), keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : [];
           if (!keys.length || keys.length > 3 || keys.some((key) => !['detailedLogging', 'errorDetailLogging', 'rawBodyLogging'].includes(key) || typeof body[key] !== 'boolean')) return sendJSON(res, 400, { error: { message: 'expected one or both boolean logging settings' } });
+          if (body.rawBodyLogging === true && !rawBodyAvailable) return sendJSON(res, 409, { error: { message: 'raw body capture unavailable on this runtime' } });
           const next = { detailedLogging: config.detailedLogging === true, errorDetailLogging: config.errorDetailLogging === true, rawBodyLogging: config.rawBodyLogging === true, ...body };
           try { atomicWriteJson(CONFIG_PATH, { ...config, ...next }); }
           catch { return sendJSON(res, 500, { error: { message: 'logging setting could not be saved' } }); }

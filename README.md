@@ -107,6 +107,7 @@ location / {
 | `CLINE_PASS_ADMIN_INITIAL_PASSWORD` | 仅当生效客户端密钥为空时所需的非空初始密码；仍必须搭配一次性码，首次改密后失效 |
 | `PUBLIC_BASE_URL` | 门户展示地址兼管理员 HTTPS Origin 校验值，如 `https://pass.example.com`；须与反代 Host/浏览器 Origin 一致 |
 | `CLINE_PASS_ADMIN_PROXY_TOKEN` | 远程 TLS 反代与应用共享的私有随机 64 字符十六进制 token；反代必须覆盖请求 Header `X-Cline-Pass-Proxy-Token`，禁止给客户端；本机 loopback HTTP 不需要 |
+| `CLINE_PASS_RAW_BODY_READY` | 默认不设置；仅在已单独验收原文备份/回滚、容器内存和大正文负载后由运维明确设置 `1`。还须检测到至少 2 GiB 可用内存限制才能接受 `rawBodyLogging: true`；这是准入下限，不是内存安全证明 |
 | `PORT` / `BIND_HOST` / `DATA_DIR` | 端口 / 绑定地址（容器内为 0.0.0.0）/ 配置目录 |
 
 `PROXY_KEY` 等现有代理/账号变量在启动时覆盖 `config.json`；管理员首次初始化环境变量只用于独立鉴权，不写入 config/metadata。以下连接/流运行参数只从环境变量读取，不写入配置文件；非法值回退各自默认值，单位均为 **毫秒或连接数**，不猜测秒数。
@@ -260,12 +261,12 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 - 每个请求/响应正文独立捕获最多 **5 MiB**，不截断实际流量。保留安全文本/JSON 前缀及完整 SSE 事件；缺失尾部、截断、未读、中断、无效编码或无法安全解释的片段有明确状态。部分 JSON 可能补齐结构后脱敏，因此不是可重放的原始请求。
 - 文件独立存于 `DATA_DIR/detailed-logs/`（目录 0700、文件 0600），按最早请求整组清理，最多 **7 天 / 1 GiB**，高流量可能提前淘汰。查询仅扫描有界元数据，正文单独读取；游标按时间/UUID 继续，即使前页已淘汰也不会把路径当作游标。
 - “清空详细日志”仅清除此存储；清空前的活动请求不能重新写回，清空后新请求仍可记录。普通日志和统计不受影响。启动时把已落盘的 `open` 请求身份标记为 `interrupted`；未完成正文不会被伪装成完整记录。早期元数据尚未落盘就退出的请求仍可能丢失。
-- **原文模式高风险例外**：`rawBodyLogging` 默认关闭，单独开启而两个捕获开关均关闭时不生成详情；开启后仅新请求/上游尝试/最终响应正文不脱敏（每段最多 **35 MiB**），包括正文里可能出现的任意密钥、私人对话，远程管理员可按需查看/复制。错误模式只保存失败调用的请求和响应正文，绝不保存成功尝试正文。Header 值和可自由填写的模型/账号/URL 列表元数据在原文模式省略；普通 JSONL、metadata、服务输出不获得原文。保留旧脱敏组仍是 **5 MiB / 7 天**，不会从被省略的旧记录恢复原文。原文组在同一存储的私有 `raw/` 下，**48 小时后不可读取**，启动或分钟维护清理过期组（删除失败将告警并重试），即使 manifest 损坏也只清理可确认归属的组；可疑文件不读取也不自动删除，管理健康会报告 `rawWarnings` 以便人工处理。共享磁盘 **1 GiB** 容量可能提前淘汰任一组。**生产启用前，必须让外部备份排除 `raw/` 或独立执行 48 小时私有备份到期清理，并演练旧镜像回滚时的管理入口隔离和原文文件不可读；本地实现不等于已获授权部署/启用。**服务 TTL 不保证外部复制品被删除。
-- 诊断文件写入不阻塞模型完成。内部共享保留负载预算为 512 MiB（不是精确 RSS 上限；不包含全部堆、网络缓冲和读取副本），并限制活动捕获/队列及脱敏工作量；超限只丢弃诊断并报告 `resource-limited`/计数，不改变流量。普通错误原因在脱敏后限制为 16 KiB，单条普通 JSONL 限制为 64 KiB，pending 队列同时限制记录数和字节数。临时存储失败通过安全健康状态报告，恢复后后续请求可继续记录；不可读/损坏组不会被当作有效完整记录。旧脱敏损坏组保留；可确认归属的原文组即使 manifest 损坏仍在到期后清理。
+- **原文模式高风险例外**：`rawBodyLogging` 默认关闭，单独开启而两个捕获开关均关闭时不生成详情；开启后仅新请求/上游尝试/最终响应正文不脱敏（每段最多 **35 MiB**），包括正文里可能出现的任意密钥、私人对话，远程管理员可按需查看/复制。错误模式只保存失败调用的请求和响应正文，绝不保存成功尝试正文。Header 值和可自由填写的模型/账号/URL 列表元数据在原文模式省略；普通 JSONL、metadata、服务输出不获得原文。保留旧脱敏组仍是 **5 MiB / 7 天**，不会从被省略的旧记录恢复原文。原文组在同一存储的私有 `raw/` 下，**48 小时后不可读取**，启动或分钟维护清理过期组（删除失败将告警并重试），即使 manifest 损坏也只清理可确认归属的组；可疑文件不读取也不自动删除，管理健康会报告 `rawWarnings` 以便人工处理。共享磁盘 **1 GiB** 容量可能提前淘汰任一组。`GET /api/logs/settings` 的 `rawBodyAvailable` 反映运行时准入；不满足时 `POST {rawBodyLogging:true}` 返回 409，先前人工持久化的 true 也不会创建原文详情；需先关闭该开关或修复环境。**生产启用前，必须让外部备份排除 `raw/` 或独立执行 48 小时私有备份到期清理，并演练旧镜像回滚时的管理入口隔离和原文文件不可读；本地实现不等于已获授权部署/启用。**服务 TTL 不保证外部复制品被删除。
+- 诊断文件写入不阻塞模型完成。内部共享保留负载预算最高 512 MiB，其中脱敏模式额外限制最多 64 MiB；原文还需独立运行时准入（上述数字均非精确 RSS 上限，不包含全部堆、网络缓冲和读取副本），并限制活动捕获/队列及脱敏工作量；超限只丢弃诊断并报告 `resource-limited`/计数，不改变流量。普通错误原因在脱敏后限制为 16 KiB，单条普通 JSONL 限制为 64 KiB，pending 队列同时限制记录数和字节数。临时存储失败通过安全健康状态报告，恢复后后续请求可继续记录；不可读/损坏组不会被当作有效完整记录。旧脱敏损坏组保留；可确认归属的原文组即使 manifest 损坏仍在到期后清理。
 - 认证的 `GET /api/logs/settings` 与 `GET /api/logs/details` 在 `health` 中提供 `dropped` 和固定 `dropReasons` 分项（捕获预算、脱敏秘密/扫描/输出、活动/调用数、发布队列、过期/代际、开放详情关联、大小/存储准入等）。每次诊断省略或发布拒绝只计一个主因；同一详情多份正文受限只计一次；分项之和等于 `dropped`。它们是**本进程启动以来**的聚合事件数，重启归零，不追溯旧记录，也不等于失败模型请求数或缺失详情根数。普通 5 MiB 截断不计丢弃；`failures`/`corrupt` 独立。页面仅显示非零原因，旧服务缺字段时标为原因暂不可用。
 - SIGTERM/SIGINT 会先停止新接入和额度调度，等待活动请求 finalizer 写入，再有界 drain 普通/详细 store；达到期限后才强制关闭连接，永久阻塞的日志 writer 不会无限拖住退出。
 
-管理 API（独立管理员 Cookie 会话，返回 `Cache-Control: no-store`）：`GET/POST /api/logs/settings`，POST 接受由 `detailedLogging` / `errorDetailLogging` / `rawBodyLogging` 组成的非空布尔字段子集，旧的单字段请求仍兼容；`GET/DELETE /api/logs/details`；`GET /api/logs/details/<requestId>`；`GET /api/logs/details/<requestId>/bodies/<bodyId>`（按组 profile 返回脱敏或未脱敏的 `text/plain`，`nosniff`）。列表支持 `limit` 1–200、`cursor`、`requestId`、`from`/`to` 毫秒时间戳、`model`、`account`、`status`、`result`；错误参数返回 400，过期/已清空/缺失正文返回安全 404。
+管理 API（独立管理员 Cookie 会话，返回 `Cache-Control: no-store`）：`GET/POST /api/logs/settings`，POST 接受由 `detailedLogging` / `errorDetailLogging` / `rawBodyLogging` 组成的非空布尔字段子集，旧的单字段请求仍兼容；GET 另给 `rawBodyAvailable`、`maxSanitizedPayloadBytes`，缺运行时准入的原文开启返回 409 且配置字节不变；`GET/DELETE /api/logs/details`；`GET /api/logs/details/<requestId>`；`GET /api/logs/details/<requestId>/bodies/<bodyId>`（按组 profile 返回脱敏或未脱敏的 `text/plain`，`nosniff`）。列表支持 `limit` 1–200、`cursor`、`requestId`、`from`/`to` 毫秒时间戳、`model`、`account`、`status`、`result`；错误参数返回 400，过期/已清空/缺失正文返回安全 404。
 
 ---
 

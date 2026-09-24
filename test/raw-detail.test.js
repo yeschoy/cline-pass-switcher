@@ -6,7 +6,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
-import { BodyCapture, CaptureBudget, DetailRoot, observeStream, MAX_BODY_BYTES, MAX_RAW_BODY_BYTES, MAX_PAYLOAD_BYTES } from '../lib/detailed-log-capture.js';
+import { BodyCapture, CaptureBudget, DetailRoot, observeStream, MAX_BODY_BYTES, MAX_RAW_BODY_BYTES, MAX_PAYLOAD_BYTES, MAX_SANITIZED_PAYLOAD_BYTES } from '../lib/detailed-log-capture.js';
 import { DetailedLogStore, RAW_MAX_AGE_MS, MAX_TOTAL_BYTES } from '../lib/detailed-log-store.js';
 
 const rawGroup = (ts, requestId, text = 'fixture-raw-secret') => {
@@ -26,6 +26,24 @@ const publish = (store, ts, text) => {
   const group = rawGroup(ts, randomUUID(), text);
   return { ...group, done: store.publish({ generation: store.generation, ts, requestId: group.requestId, profile: 'raw-full', release() {}, produce: group.produce }) };
 };
+
+test('production shared budget retains a separate 64 MiB sanitized fence without lowering the raw ceiling', () => {
+  assert.equal(MAX_SANITIZED_PAYLOAD_BYTES, 64 * 1024 * 1024);
+  const budget = new CaptureBudget(MAX_PAYLOAD_BYTES, MAX_SANITIZED_PAYLOAD_BYTES);
+  const chunk = Buffer.alloc(MAX_BODY_BYTES, 0x61);
+  const captures = Array.from({ length: 7 }, () => new BodyCapture({ budget }));
+  captures.forEach((capture) => { capture.add(chunk); capture.end(); });
+  assert.equal(budget.used, 6 * MAX_BODY_BYTES * 2);
+  assert.equal(budget.sanitizedUsed, budget.used);
+  assert.equal(captures[6].materialize({}).descriptor.state, 'resource-limited');
+  const raw = new BodyCapture({ budget, raw: true, limit: MAX_RAW_BODY_BYTES });
+  raw.add(Buffer.alloc(MAX_RAW_BODY_BYTES, 0x62)); raw.end();
+  assert.equal(raw.materialize().descriptor.state, 'complete');
+  assert.equal(budget.sanitizedUsed, 6 * MAX_BODY_BYTES * 2);
+  assert.equal(budget.used, 6 * MAX_BODY_BYTES * 2 + MAX_RAW_BODY_BYTES * 2);
+  captures.forEach((capture) => capture.release()); raw.release();
+  assert.equal(budget.used, 0); assert.equal(budget.sanitizedUsed, 0);
+});
 
 test('raw capture retains exact valid UTF-8 up to 35 MiB with bounded reservation and invalid omission', () => {
   assert.equal(MAX_BODY_BYTES, 5 * 1024 * 1024);

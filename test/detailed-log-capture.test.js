@@ -4,7 +4,7 @@ import { Readable, Writable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
-import { BodyCapture, CaptureBudget, captureBudget, DetailRedactor, MAX_BODY_BYTES, MAX_PAYLOAD_BYTES, observeStream, detailRoute, DetailRoot } from '../lib/detailed-log-capture.js';
+import { BodyCapture, CaptureBudget, captureBudget, DetailRedactor, MAX_BODY_BYTES, MAX_PAYLOAD_BYTES, MAX_SANITIZED_PAYLOAD_BYTES, observeStream, detailRoute, DetailRoot } from '../lib/detailed-log-capture.js';
 import { DetailedLogStore, DETAIL_DROP_REASONS } from '../lib/detailed-log-store.js';
 
 const mockDropHealth = () => ({ dropped: 0, dropReasons: Object.fromEntries(DETAIL_DROP_REASONS.map((reason) => [reason, 0])) });
@@ -179,7 +179,7 @@ test('resource-limited error request discovery fences response echoes group-wide
   const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() {}, getHeaders() { return {}; } });
   let group;
   const store = { generation: 0, health: mockDropHealth(), recordDrop: DetailedLogStore.prototype.recordDrop, open() { assert.fail('error profile must not open'); }, failure() { assert.fail('unexpected failure'); }, publish({ produce, release }) { group = produce(); release(); return Promise.resolve(true); } };
-  const held = MAX_PAYLOAD_BYTES - 128;
+  const held = MAX_SANITIZED_PAYLOAD_BYTES - 128;
   assert.equal(captureBudget.reserve(held), true);
   try {
     const root = new DetailRoot(req, res, store, [], { profile: 'error' });

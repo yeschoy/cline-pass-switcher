@@ -180,8 +180,9 @@
   <section id="detailsPanel" aria-labelledby="detailsTitle" hidden>
     <div class="card">
       <h2 id="detailsTitle">详细日志</h2>
-      <p class="banner">捕获与原文模式均默认关闭。脱敏模式：错误详情仅保存真实失败上游调用的脱敏响应诊断；完整模式保存客户端请求、上游调用和最终响应；完整模式优先。脱敏正文最多 5 MiB、最长 7 天。原文开关单独开启而两种捕获均关闭时不会采集；启用捕获后，新详情正文不再脱敏（原文可能包含任何密钥及私人对话），失败详情还会保存失败调用的请求正文；Header 值与列表元数据仍省略。原文每段最多 35 MiB，512 MiB 是共享保留预算而非 RSS 上限；原文由服务持有最长 48 小时，外部备份/复制不会自动清除。两类详情共用 1 GiB 磁盘上限，容量不足可提前淘汰；旧脱敏记录仍可读取。不要在未排除原文备份并演练回滚隔离前于生产开启。</p>
+      <p class="banner">捕获与原文模式均默认关闭。脱敏模式：错误详情仅保存真实失败上游调用的脱敏响应诊断；完整模式保存客户端请求、上游调用和最终响应；完整模式优先。脱敏正文最多 5 MiB、最长 7 天，保留预算最多 64 MiB。原文开关单独开启而两种捕获均关闭时不会采集；启用捕获后，新详情正文不再脱敏（原文可能包含任何密钥及私人对话），失败详情还会保存失败调用的请求正文；Header 值与列表元数据仍省略。原文每段最多 35 MiB，512 MiB 是原文可用时的共享保留预算而非 RSS 上限；原文须另经运行环境内存与运维准入，当前环境可能不可启用。原文由服务持有最长 48 小时，外部备份/复制不会自动清除。两类详情共用 1 GiB 磁盘上限，容量不足可提前淘汰；旧脱敏记录仍可读取。不要在未排除原文备份并演练回滚隔离前于生产开启。</p>
       <p id="detailsAuth" role="status">正在确认认证状态…</p>
+      <p id="detailsRawAvailability" role="status" aria-live="polite">正在确认原文模式运行条件…</p>
       <div class="toolbar"><label for="errorDetailLogging"><input id="errorDetailLogging" type="checkbox" disabled onchange="toggleErrorDetailLogging()"> 启用错误详情（仅失败 attempt）</label><label for="detailedLogging"><input id="detailedLogging" type="checkbox" disabled onchange="toggleDetailedLogging()"> 启用完整详细日志（立即独立保存，不提交账号草稿）</label><label for="rawBodyLogging"><input id="rawBodyLogging" type="checkbox" disabled onchange="toggleRawBodyLogging()"> 新请求正文改为未脱敏原文（高风险，独立保存）</label><button class="ghost" type="button" onclick="loadDetails()">刷新 / 筛选</button><button class="ghost" type="button" onclick="clearDetails()">清空详细日志</button></div>
       <div class="toolbar"><label>请求 ID <input id="detailsRequestId"></label><label>模型 <input id="detailsModel"></label><label>账号 <input id="detailsAccount"></label><label>状态码 <input id="detailsStatusFilter" type="number" min="100" max="599"></label><label>结果 <select id="detailsResult"><option value="">全部</option><option value="success">成功</option><option value="client_cancelled">客户端取消</option><option value="failed">失败</option></select></label><label>开始时间 <input id="detailsFrom" type="datetime-local"></label><label>结束时间 <input id="detailsTo" type="datetime-local"></label></div>
       <p id="detailsStatus" aria-live="polite"></p>
@@ -1423,7 +1424,7 @@ async function switchSection(section){
   $('#logResult').hidden=type==='errors';
   await loadLogs(false);
 }
-let DETAIL_SETTINGS_ID=0,DETAIL_BODY_TEXT=null,DETAIL_BODY_RAW=false,DETAIL_LIST_ID=0,DETAIL_SELECTION_ID=0,DETAIL_NAV_ID=0,DETAIL_CURSOR=null,DETAIL_REQUEST=null,DETAIL_CONFIRMED=false,ERROR_DETAIL_CONFIRMED=false,RAW_BODY_CONFIRMED=false,DETAIL_TOGGLE_PENDING=false;
+let DETAIL_SETTINGS_ID=0,DETAIL_BODY_TEXT=null,DETAIL_BODY_RAW=false,DETAIL_LIST_ID=0,DETAIL_SELECTION_ID=0,DETAIL_NAV_ID=0,DETAIL_CURSOR=null,DETAIL_REQUEST=null,DETAIL_CONFIRMED=false,ERROR_DETAIL_CONFIRMED=false,RAW_BODY_CONFIRMED=false,RAW_BODY_AVAILABLE=false,DETAIL_TOGGLE_PENDING=false;
 const detailVisible=()=>!$('#detailsPanel').hidden;
 const DETAIL_DROP_LABELS={activeLimit:'活动捕获数上限',attemptLimit:'单次详情调用数上限',attemptCaptureFailure:'调用捕获失败',captureBudget:'捕获内存预算',redactionSecretLimit:'脱敏秘密集合预算',redactionWorkLimit:'脱敏扫描／深度工作量',redactionOutputLimit:'脱敏文本／输出预算',redactionOther:'其他脱敏资源限制',storeQueue:'发布队列／关闭',storeStale:'过期／代际或身份无效',storeOpenRoot:'开放详情关联丢失',storeSize:'详情大小上限',storeCapacity:'存储准入容量',other:'其他限制'};
 const detailCount=value=>Number.isSafeInteger(value)&&value>=0?value:null;
@@ -1439,16 +1440,16 @@ async function loadDetailSettings(){
   try{const data=await detailJSON('/api/logs/settings');if(nav!==DETAIL_NAV_ID||version!==DETAIL_SETTINGS_ID||!detailVisible())return;
     $('#detailsAuth').textContent='管理 API 使用独立管理员会话认证（与模型客户端密钥分离）。';
     renderDetailHealth(data.health);
-    if(!DETAIL_TOGGLE_PENDING){DETAIL_CONFIRMED=data.detailedLogging===true;ERROR_DETAIL_CONFIRMED=data.errorDetailLogging===true;RAW_BODY_CONFIRMED=data.rawBodyLogging===true;$('#detailedLogging').checked=DETAIL_CONFIRMED;$('#errorDetailLogging').checked=ERROR_DETAIL_CONFIRMED;$('#rawBodyLogging').checked=RAW_BODY_CONFIRMED;$('#detailedLogging').disabled=false;$('#errorDetailLogging').disabled=false;$('#rawBodyLogging').disabled=false;}
+    if(!DETAIL_TOGGLE_PENDING){DETAIL_CONFIRMED=data.detailedLogging===true;ERROR_DETAIL_CONFIRMED=data.errorDetailLogging===true;RAW_BODY_CONFIRMED=data.rawBodyLogging===true;RAW_BODY_AVAILABLE=data.rawBodyAvailable!==false;$('#detailsRawAvailability').textContent=RAW_BODY_AVAILABLE?'原文运行条件已准入；启用前仍须完成备份、回滚及负载验收。':'当前运行条件不允许启用原文；脱敏详情仍可用。';$('#detailedLogging').checked=DETAIL_CONFIRMED;$('#errorDetailLogging').checked=ERROR_DETAIL_CONFIRMED;$('#rawBodyLogging').checked=RAW_BODY_CONFIRMED;$('#detailedLogging').disabled=false;$('#errorDetailLogging').disabled=false;$('#rawBodyLogging').disabled=!RAW_BODY_AVAILABLE&&!RAW_BODY_CONFIRMED;}
   }catch{if(nav===DETAIL_NAV_ID&&version===DETAIL_SETTINGS_ID&&detailVisible())$('#detailsStatus').textContent='日志设置加载失败';}
 }
 async function toggleLoggingSetting(field,element){
   if(DETAIL_TOGGLE_PENDING)return;DETAIL_TOGGLE_PENDING=true;DETAIL_SETTINGS_ID++;const nav=DETAIL_NAV_ID,next=element.checked;$('#detailedLogging').disabled=true;$('#errorDetailLogging').disabled=true;$('#rawBodyLogging').disabled=true;
   try{const data=await detailJSON('/api/logs/settings',{[field]:next});DETAIL_CONFIRMED=data.detailedLogging===true;ERROR_DETAIL_CONFIRMED=data.errorDetailLogging===true;RAW_BODY_CONFIRMED=data.rawBodyLogging===true;if(nav===DETAIL_NAV_ID&&detailVisible())$('#detailsStatus').textContent='日志设置已保存；账号草稿未改变';}
   catch{if(nav===DETAIL_NAV_ID&&detailVisible())$('#detailsStatus').textContent='设置保存失败，已恢复上次确认状态';}
-  finally{DETAIL_TOGGLE_PENDING=false;DETAIL_SETTINGS_ID++;$('#detailedLogging').checked=DETAIL_CONFIRMED;$('#errorDetailLogging').checked=ERROR_DETAIL_CONFIRMED;$('#rawBodyLogging').checked=RAW_BODY_CONFIRMED;$('#detailedLogging').disabled=false;$('#errorDetailLogging').disabled=false;$('#rawBodyLogging').disabled=false;}
+  finally{DETAIL_TOGGLE_PENDING=false;DETAIL_SETTINGS_ID++;$('#detailedLogging').checked=DETAIL_CONFIRMED;$('#errorDetailLogging').checked=ERROR_DETAIL_CONFIRMED;$('#rawBodyLogging').checked=RAW_BODY_CONFIRMED;$('#detailedLogging').disabled=false;$('#errorDetailLogging').disabled=false;$('#rawBodyLogging').disabled=!RAW_BODY_AVAILABLE&&!RAW_BODY_CONFIRMED;}
 }
-function toggleRawBodyLogging(){return toggleLoggingSetting('rawBodyLogging',$('#rawBodyLogging'));}
+function toggleRawBodyLogging(){if(!RAW_BODY_AVAILABLE&&$('#rawBodyLogging').checked){$('#rawBodyLogging').checked=RAW_BODY_CONFIRMED;$('#detailsStatus').textContent='原文运行条件未准入，设置未提交';return;}return toggleLoggingSetting('rawBodyLogging',$('#rawBodyLogging'));}
 function toggleDetailedLogging(){return toggleLoggingSetting('detailedLogging',$('#detailedLogging'));}
 function toggleErrorDetailLogging(){return toggleLoggingSetting('errorDetailLogging',$('#errorDetailLogging'));}
 function resetDetailSelection(){DETAIL_SELECTION_ID++;DETAIL_REQUEST=null;DETAIL_BODY_TEXT=null;DETAIL_BODY_RAW=false;$('#detailsBodyWarning').textContent='选取正文前请核对详情是否为未脱敏原文。';$('#detailsCopy').disabled=true;$('#detailsMetadata').textContent='';$('#detailsBodies').innerHTML='';$('#detailsText').value='';}

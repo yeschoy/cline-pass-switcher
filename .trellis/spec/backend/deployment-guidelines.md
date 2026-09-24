@@ -122,6 +122,7 @@ Before switching:
 - for New API Chat deployments, inspect (without printing secrets) the chosen HTTP/1.1 upstream path, intermediary SSE buffering/idle settings and whether New API's own downstream ping is needed; local `test/integration.test.js` covers inbound socket reuse >5 seconds, direct and proxy tunnel reuse, comment-filtering scanner, first-data/stream-idle separation, backpressure and graceful SSE finalization, but cannot replace a staging end-to-end check against the actual topology or a Node 18 runtime run;
 - prove the checked-out deployment source is `main` and local `main` equals `origin/main`;
 - run the repository full test suite against committed code;
+- for detailed logging changes, compare the target container's memory limit with the process-wide and sanitized-subset capture budgets. A 512 MiB target running a candidate with a 512 MiB sanitized reservation reproduced OOM (50 × 5 MiB synthetic bodies); restore the 64 MiB sanitized fence and test under the target 512 MiB cgroup before switching. Raw capture needs an explicit separate operator flag, a detected ≥2 GiB limit, private backup/rollback rehearsal and an additional target-load pass; keep the flag absent on ordinary releases;
 - verify the identity path is gitignored and mode `0600` without reading it;
 - verify host-side helper runtime availability and argument passing during read-only preflight;
 - inspect the current container/image/health, account count/mode, safe `/api/meta`, disk space, and config hash;

@@ -53,6 +53,18 @@ test('five sections, toggle and detail reads preserve all account/bulk/raw draft
   await h.run("switchSection('console')"); assert.equal(h.el('#detailsPanel').hidden, true); assert.equal(h.el('#consolePanel').hidden, false);
 });
 
+test('unavailable raw runtime disables opt-in without mutating drafts or sending a write', async () => {
+  const h = harness(), before = h.drafts(); h.el('#detailsPanel').hidden = false;
+  h.context.handler = async () => ({ detailedLogging: true, errorDetailLogging: false, rawBodyLogging: false, rawBodyAvailable: false });
+  await h.run('loadDetailSettings()');
+  assert.equal(h.el('#rawBodyLogging').disabled, true);
+  assert.equal(h.el('#detailedLogging').disabled, false);
+  assert.match(h.el('#detailsRawAvailability').textContent, /当前运行条件不允许启用原文/);
+  const count = h.calls.length; h.el('#rawBodyLogging').checked = true; await h.run('toggleRawBodyLogging()');
+  assert.equal(h.calls.length, count); assert.equal(h.el('#rawBodyLogging').checked, false);
+  assert.equal(h.drafts(), before);
+});
+
 test('stale settings/list/selection/body reads cannot overwrite newer state; copied content comes only from body API', async () => {
   const h = harness(), first = deferred(), second = deferred();
   let count = 0; h.context.handler = () => (++count === 1 ? first.promise : second.promise);

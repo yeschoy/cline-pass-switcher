@@ -49,6 +49,8 @@ CLINE_PASS_KEY  optional runtime account override with a deterministic HMAC-deri
 PROXY_KEY       optional runtime proxyKey override
 PUBLIC_BASE_URL optional runtime publicBaseUrl override; also the exact HTTPS Origin expected for remote admin login behind a trusted private proxy
 CLINE_PASS_ADMIN_PROXY_TOKEN  private 64-character lowercase hex secret shared with the TLS reverse proxy; it must replace X-Cline-Pass-Proxy-Token on forwarded requests
+CLINE_PASS_RAW_BODY_READY  process-only '1' after separate raw backup/rollback/load approval; also requires detected memory >= 2 GiB; never auto-set by rawBodyLogging
+CLINE_PASS_TEST_RAW_MEMORY_BYTES  only NODE_ENV=test; bounded fixture override for the runtime memory-admission test, never a production override
 PORT            optional runtime port override
 BIND_HOST       optional listen address only; not persisted by startup normalization
 CLINE_PASS_ADMIN_BOOTSTRAP  explicit '1' only to create missing admin state

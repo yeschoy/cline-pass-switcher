@@ -4118,6 +4118,21 @@ test('SSE prelude, first-data deadline, heartbeat, upstream idle and finalizers 
   assert.equal(hits.length, 8);
 });
 
+test('raw body setting is refused without runtime memory readiness and preserves config bytes', async (t) => {
+  const port = await unusedPort();
+  const running = await startSwitcher({ port, detailedLogging: true, accounts: [], knownModels: [] }, null, { NODE_ENV: 'test', CLINE_PASS_RAW_BODY_READY: '1', CLINE_PASS_TEST_RAW_MEMORY_BYTES: String(512 * 1024 * 1024) });
+  t.after(async () => { await stop(running.child); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const settings = await (await fetch(`http://127.0.0.1:${port}/api/logs/settings`)).json();
+  assert.equal(settings.rawBodyAvailable, false);
+  assert.equal(settings.maxSanitizedPayloadBytes, 64 * 1024 * 1024);
+  assert.equal(settings.maxPayloadBytes, 512 * 1024 * 1024);
+  const before = fs.readFileSync(path.join(running.dir, 'config.json'));
+  assert.equal((await rawJson(port, '/api/logs/settings', { rawBodyLogging: true })).status, 409);
+  assert.deepEqual(fs.readFileSync(path.join(running.dir, 'config.json')), before);
+  assert.equal((await rawJson(port, '/api/logs/settings', { errorDetailLogging: true })).status, 200);
+  assert.equal((await (await fetch(`http://127.0.0.1:${port}/api/logs/settings`)).json()).rawBodyLogging, false);
+});
+
 test('raw body mode is explicit, admin-only and never projects Header or body into ordinary diagnostics', async (t) => {
   const upstream = http.createServer((req, res) => {
     let body = ''; req.on('data', (chunk) => { body += chunk; }); req.on('end', () => {
@@ -4126,7 +4141,7 @@ test('raw body mode is explicit, admin-only and never projects Header or body in
     });
   });
   const upstreamPort = await listen(upstream), port = await unusedPort();
-  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, proxyKey: 'fixture-client-key', detailedLogging: true, accounts: [{ id: 'a', name: 'Fixture', key: 'fixture-upstream-key', enabled: true, perModel: {} }], knownModels: ['raw-fixture'], perModel: {} });
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, proxyKey: 'fixture-client-key', detailedLogging: true, accounts: [{ id: 'a', name: 'Fixture', key: 'fixture-upstream-key', enabled: true, perModel: {} }], knownModels: ['raw-fixture'], perModel: {} }, null, { NODE_ENV: 'test', CLINE_PASS_RAW_BODY_READY: '1', CLINE_PASS_TEST_RAW_MEMORY_BYTES: String(2 * 1024 * 1024 * 1024) });
   t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
   const api = (route, options = {}) => fetch(`http://127.0.0.1:${port}${route}`, options);
   const clientOnly = { Authorization: 'Bearer fixture-client-key', 'X-Admin-Key': 'fixture-client-key' };
@@ -4145,7 +4160,7 @@ test('raw body mode is explicit, admin-only and never projects Header or body in
   assert.deepEqual(fs.readFileSync(path.join(running.dir, 'config.json')), settingsBefore);
   const settings = await rawJson(port, '/api/logs/settings', { rawBodyLogging: true }); assert.equal(settings.status, 200);
   assert.equal(settings.json.rawBodyLogging, true); assert.equal(settings.json.maxPayloadBytes, undefined);
-  const projection = await (await api('/api/logs/settings')).json(); assert.equal(projection.rawMaxBodyBytes, 35 * 1024 * 1024); assert.equal(projection.maxPayloadBytes, 512 * 1024 * 1024);
+  const projection = await (await api('/api/logs/settings')).json(); assert.equal(projection.rawBodyAvailable, true); assert.equal(projection.rawMaxBodyBytes, 35 * 1024 * 1024); assert.equal(projection.maxPayloadBytes, 512 * 1024 * 1024); assert.equal(projection.maxSanitizedPayloadBytes, 64 * 1024 * 1024);
   const second = await chat(); assert.equal(second.status, first.status); assert.equal(second.text, first.text);
   const secondId = second.headers['x-cline-request-id'];
   await waitUntil(async () => (await (await api('/api/logs/details')).json()).items.some((row) => row.requestId === secondId && row.state !== 'open'));
