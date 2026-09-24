@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/index.md","reason":"Start from backend spec index and follow statistics/persistence scenario guide completely before editing"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Trace versioned price snapshot through persistence API and UI"}
+{"file":".trellis/tasks/archive/2026-09/09-24-model-provider-statistics/research/official-pricing-and-usage.md","reason":"Verified official reference tariff and known usage limitations"}
+{"file":".trellis/tasks/09-25-pricing-console-keys-300rpm/research/current-contract-and-hotpaths.md","reason":"Current owner, version and precision facts"}

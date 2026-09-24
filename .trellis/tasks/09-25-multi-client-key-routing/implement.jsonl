@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/index.md","reason":"Read complete persistence, routing and admin-auth scenario guides before code"}
+{"file":".trellis/spec/frontend/index.md","reason":"Read complete account draft/security UI scenario guides"}
+{"file":".trellis/spec/backend/admin-auth-guidelines.md","reason":"Enforce independent administrator and client credentials"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Trace auth, scoped lease, config, log and UI contracts"}
+{"file":".trellis/tasks/09-25-pricing-console-keys-300rpm/research/current-contract-and-hotpaths.md","reason":"Current global pool, env override and binding risks"}
