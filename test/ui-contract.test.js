@@ -4,6 +4,14 @@ import fs from 'node:fs';
 
 const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 
+test('monthly quota protection uses a labelled reference threshold and explicit separate recovery', () => {
+  assert.match(html, /id="monthlyQuotaThreshold"[^>]*type="number"[^>]*min="0\.01"[^>]*max="50"[^>]*step="0\.01"/);
+  assert.match(html, /for="monthlyQuotaThreshold"/);
+  assert.match(html, /解除月额度封禁/);
+  assert.match(html, /quota-recover/);
+  assert.match(html, /可能再次失败/);
+});
+
 test('console exposes seven bounded presets and accessible account drawer/log/alias views', () => {
   for (const id of ['stable','throughput','even','quota','failover','safe','cache']) assert.match(html, new RegExp(`${id}:\\{`));
   const presets = html.slice(html.indexOf('const PRESETS='), html.indexOf('function previewPreset'));
@@ -142,7 +150,7 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   assert.match(html, /coverage!==undefined&&Number\(coverage\)===0\)\?'无数据'/);
   assert.match(html, /value===null\|\|value===undefined/);
   const statistics = html.slice(html.indexOf('function statisticValue'), html.indexOf('async function switchSection'));
-  assert.match(statistics, /escapeHtml\(a\.name\)/);assert.match(statistics, /escapeHtml\(a\.id\)/);assert.match(statistics, /escapeHtml\(accountDisposition\(a\.health\)\)/);assert.match(statistics, /escapeHtml\(a\.quota\.pool\)/);
+  assert.match(statistics, /escapeHtml\(a\.name\)/);assert.match(statistics, /escapeHtml\(a\.id\)/);assert.match(statistics, /escapeHtml\(accountDisposition\(a\.health,a\.quota\)\)/);assert.match(statistics, /escapeHtml\(a\.quota\.pool\)/);
   assert.doesNotMatch(statistics, /\.key\b|proxyUrl|\.headers\b|\.note\b|rawResponse|rawTrace|session|message/);
 });
 

@@ -62,6 +62,7 @@ GET/POST /api/accounts
 GET      /api/statistics
 POST     /api/statistics/quota-refresh
 POST     /api/accounts/proxy-test
+POST     /api/accounts/quota-recover
 GET/POST /api/model-aliases
 GET      /api/logs/{requests|errors}
 DELETE   /api/logs/{requests|errors}
@@ -78,7 +79,7 @@ DELETE   /api/logs/{requests|errors}
 
 #### Account table and drawer
 
-The main table is a status summary. Its cache/success/failure cells come from each authenticated account object's stable-ID runtime projection, never the editable/repeatable account name. It shows rolling cache Token ratio and direct 24-hour account success rate with sample/coverage facts. Disabled, cooling, and hard quarantine are separate dispositions; missing, overflowed or incomplete coverage remains explicit. Full name, note, Key, capacity, weight, priority, proxy URL, custom Header map, and account-route summary are edited in the right-side account drawer. Runtime `health`, `statistics`, active counts, quota, cache roles and the `ACCS.cachePool` min/max/target/binding summary are projections only and never enter `collectAccounts()`.
+The main table is a status summary. Monthly protection bans and confirmed 5h/week holds are labelled independently of low-quota pool routing; a monthly ban with authenticated `quota.protectionPersistence === 'pending'` visibly warns of write retry/restart risk until committed; a monthly release button requires confirmation warning of repeat failures, calls the exact-ID admin endpoint and reloads accepted state. The global monthly reference threshold has a labelled native two-decimal $0.01–$50.00 input; invalid drafts block all complete account saves and preset previews without a request. Its cache/success/failure cells come from each authenticated account object's stable-ID runtime projection, never the editable/repeatable account name. It shows rolling cache Token ratio and direct 24-hour account success rate with sample/coverage facts. Disabled, cooling, and hard quarantine are separate dispositions; missing, overflowed or incomplete coverage remains explicit. Full name, note, Key, capacity, weight, priority, proxy URL, custom Header map, and account-route summary are edited in the right-side account drawer. Runtime `health`, `statistics`, active counts, quota, cache roles and the `ACCS.cachePool` min/max/target/binding summary are projections only and never enter `collectAccounts()`.
 
 The drawer:
 

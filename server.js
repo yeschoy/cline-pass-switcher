@@ -40,6 +40,7 @@ const DEFAULT_CONFIG = {
   concurrencyWaitMs: 2000,
   errorRules: [],          // canonical ordered account/provider-model failure rules
   retryRules: [],          // canonical ordered request-level retry-stop rules
+  quotaProtection: { monthlyThresholdUsd: 0.20 }, // community-reference $50 monthly cap
   accountErrorRules: {},   // legacy compatibility projection only
   accountContentErrorRules: [], // legacy compatibility projection only
   accountPipeline: {
@@ -120,7 +121,11 @@ const configHadCanonicalRetryRules = Object.hasOwn(loadedConfig, 'retryRules');
 const config = { ...DEFAULT_CONFIG, ...loadedConfig };
 const META = loadJson(META_PATH, { models: {}, history: [], catalog: null, orModelsFetchedAt: 0, orModelList: null });
 const saveConfig = () => atomicWriteJson(CONFIG_PATH, config);
-const saveMeta = () => atomicWriteJson(META_PATH, META);
+const saveMeta = () => {
+  atomicWriteJson(META_PATH, META);
+  // A successful write of the current META also commits any confirmed monthly bans.
+  for (const [id, pending] of quotaProvisional) if (pending.persistRetryAt !== undefined) quotaProvisional.delete(id);
+};
 const ordinaryLogs = new JsonlLogGroup({
   dir: LOG_DIR,
   streams: { requests: { maxRecords: 50000 }, errors: { maxRecords: 10000 } },
@@ -130,6 +135,7 @@ const requestLogs = ordinaryLogs.stream('requests');
 const errorLogs = ordinaryLogs.stream('errors');
 const detailedLogs = new DetailedLogStore({ dir: path.join(DATA_DIR, 'detailed-logs') });
 const recentHistory = Array.isArray(META.history) ? [...META.history] : [];
+const quotaProvisional = new Map(); // bounded, process-local verification holds; the quota job remains the only fetch owner
 let shuttingDown = false;
 
 function randomId(prefix = 'acc') {
@@ -190,6 +196,16 @@ function normalizeProviderHealthMetadata() {
   }
   return dirty;
 }
+function normalizeQuotaProtection(value, { strict = false } = {}) {
+  if (value === undefined && !strict) return { monthlyThresholdUsd: 0.20 };
+  const amount = value?.monthlyThresholdUsd;
+  const cents = amount * 100;
+  if (!isPlainObject(value) || Object.keys(value).length !== 1 || !Number.isFinite(amount) ||
+      Math.abs(cents - Math.round(cents)) > 2 * Number.EPSILON * Math.max(1, Math.abs(cents)) || amount < 0.01 || amount > 50) {
+    throw new Error('quotaProtection.monthlyThresholdUsd must be a two-decimal number from 0.01 to 50.00');
+  }
+  return { monthlyThresholdUsd: Math.round(cents) / 100 };
+}
 function normalizeAccountStates() {
   let dirty = false;
   if (!isPlainObject(META.accountStates)) { META.accountStates = {}; return true; }
@@ -197,6 +213,13 @@ function normalizeAccountStates() {
   for (const [id, value] of Object.entries(META.accountStates)) {
     if (!/^[A-Za-z0-9_-]{1,100}$/.test(id) || !isPlainObject(value)) { dirty = true; continue; }
     if (Object.keys(value).some((key) => key.startsWith('quota') && !['quotaDisposition','quotaDispositionAt','quotaRetryAt','quotaReason'].includes(key)) ||
+        Object.keys(value).some((key) => key.startsWith('protection') && !['protectionMonthlyAt','protectionShortAt','protectionShortWindows','protectionRetryAt'].includes(key)) ||
+        (value.protectionMonthlyAt !== undefined && (!Number.isSafeInteger(value.protectionMonthlyAt) || value.protectionMonthlyAt < 0)) ||
+        (value.protectionShortAt !== undefined && (!Number.isSafeInteger(value.protectionShortAt) || value.protectionShortAt < 0)) ||
+        (value.protectionRetryAt !== undefined && (!Number.isSafeInteger(value.protectionRetryAt) || value.protectionRetryAt < 0)) ||
+        (value.protectionShortWindows != null && (!Array.isArray(value.protectionShortWindows) || !value.protectionShortWindows.length || value.protectionShortWindows.length > 2 || new Set(value.protectionShortWindows).size !== value.protectionShortWindows.length || value.protectionShortWindows.some((type) => !['five_hour','weekly'].includes(type)))) ||
+        (!!value.protectionShortAt !== !!value.protectionShortWindows) ||
+        (!value.protectionShortAt && (value.protectionRetryAt ?? 0) !== 0) ||
         (value.quotaDisposition !== undefined && ![null,'waiting-refresh','quota-exhausted'].includes(value.quotaDisposition)) ||
         (value.quotaReason !== undefined && ![null,'account-degrade','known-exhausted'].includes(value.quotaReason)) ||
         ['quotaDispositionAt','quotaRetryAt'].some((key) => value[key] !== undefined && (!Number.isSafeInteger(value[key]) || value[key] < 0)) ||
@@ -217,6 +240,10 @@ function normalizeAccountStates() {
       quotaDispositionAt: safeProviderTimestamp(value.quotaDispositionAt),
       quotaRetryAt: safeProviderTimestamp(value.quotaRetryAt),
       quotaReason: ['account-degrade','known-exhausted'].includes(value.quotaReason) ? value.quotaReason : null,
+      protectionMonthlyAt: value.protectionMonthlyAt || 0,
+      protectionShortAt: value.protectionShortAt || 0,
+      protectionShortWindows: value.protectionShortWindows || null,
+      protectionRetryAt: value.protectionRetryAt || 0,
     };
     normalized[id] = state;
     if (JSON.stringify(state) !== JSON.stringify(value)) dirty = true;
@@ -987,6 +1014,8 @@ function normalizeCachePoolTarget(pipeline = config.accountPipeline) {
 }
 function normalizeConfigAndMeta({ persist = false } = {}) {
   let dirty = false;
+  const protection = normalizeQuotaProtection(config.quotaProtection);
+  if (JSON.stringify(config.quotaProtection) !== JSON.stringify(protection)) { config.quotaProtection = protection; dirty = true; }
   for (const field of ['detailedLogging', 'errorDetailLogging']) if (config[field] !== true && config[field] !== false) { config[field] = false; dirty = true; }
   if ((!Array.isArray(config.accounts) || config.accounts.length === 0) && config.apiKey) {
     config.accounts = [{ name: '默认账号', key: config.apiKey, enabled: true }];
@@ -1205,7 +1234,7 @@ function sensitiveMessageValues(body) {
 function clearRuleAccountState(id) {
   const state = getAccountState(id);
   if (!state) return;
-  if (state.quotaDisposition) META.accountStates[id] = { quotaDisposition: state.quotaDisposition, quotaDispositionAt: state.quotaDispositionAt, quotaRetryAt: state.quotaRetryAt, quotaReason: state.quotaReason };
+  if (state.quotaDisposition || state.protectionMonthlyAt || state.protectionShortAt) META.accountStates[id] = { quotaDisposition: state.quotaDisposition, quotaDispositionAt: state.quotaDispositionAt, quotaRetryAt: state.quotaRetryAt, quotaReason: state.quotaReason, protectionMonthlyAt: state.protectionMonthlyAt || 0, protectionShortAt: state.protectionShortAt || 0, protectionShortWindows: state.protectionShortWindows || null, protectionRetryAt: state.protectionRetryAt || 0 };
   else delete META.accountStates[id];
 }
 function clearExpiredCooldowns() {
@@ -1216,14 +1245,15 @@ function clearExpiredCooldowns() {
       clearRuleAccountState(id); dirty = true;
     }
   }
-  if (dirty) saveMeta();
+  if (dirty) try { saveMeta(); }
+  catch (error) { console.error(`[账号] 过期冷却状态持久化失败：${safeReason(error.message)}`); }
 }
 function enabledAccounts({ excludeIds = new Set() } = {}) {
   clearExpiredCooldowns();
   return (config.accounts || []).filter((a) => {
     if (!a || !a.key || a.enabled === false || excludeIds.has(a.id)) return false;
     const st = getAccountState(a.id);
-    if (st?.hardQuarantined || st?.banned) return false;
+    if (st?.hardQuarantined || st?.banned || st?.protectionMonthlyAt || st?.protectionShortAt || (quotaProvisional.get(a.id)?.until || 0) > Date.now()) return false;
     if (st?.cooldownUntil && st.cooldownUntil > Date.now()) return false;
     if (st?.quotaDisposition && configuredCachePoolLowQuotaSize() > 0 && cachePoolEnabled()) return false;
     return true;
@@ -1254,7 +1284,7 @@ function createLease(account, firstPermit) {
 }
 // 固定准入顺序：hard eligibility（上层）→ maxConcurrent → RPM。并发失败绝不消费或预留 RPM。
 function tryLeaseResult(a, now = Date.now()) {
-  if (!a) return { lease: null, blockedBy: 'unavailable', retryAt: null };
+  if (!a || getAccountState(a.id)?.protectionMonthlyAt || getAccountState(a.id)?.protectionShortAt || (quotaProvisional.get(a.id)?.until || 0) > now) return { lease: null, blockedBy: 'unavailable', retryAt: null };
   if (!accountHasCapacity(a)) return { lease: null, blockedBy: 'concurrency', retryAt: null };
   const reserved = reserveRpmPermit(a, now);
   if (!reserved.ok) return { lease: null, blockedBy: 'rpm', retryAt: reserved.retryAt ?? null };
@@ -1384,7 +1414,7 @@ function pipelineEnabled() { return cachePoolEnabled() || PIPELINE_KEYS.some((ke
 function quotaRoutingEnabled() { return config.accountPipeline?.quotaPool === true || cachePoolEnabled(); }
 function quotaProjection(accountId, now = Date.now()) {
   const disposition = getAccountState(accountId);
-  const safeDisposition = { quotaDisposition: ['waiting-refresh','quota-exhausted'].includes(disposition?.quotaDisposition) ? disposition.quotaDisposition : null, quotaRetryAt: Number.isSafeInteger(disposition?.quotaRetryAt) && disposition.quotaRetryAt > now ? disposition.quotaRetryAt : null };
+  const safeDisposition = { quotaDisposition: ['waiting-refresh','quota-exhausted'].includes(disposition?.quotaDisposition) ? disposition.quotaDisposition : null, quotaRetryAt: Number.isSafeInteger(disposition?.quotaRetryAt) && disposition.quotaRetryAt > now ? disposition.quotaRetryAt : null, protectionMonthlyAt: disposition?.protectionMonthlyAt || null, protectionShortWindows: disposition?.protectionShortWindows || null, protectionRetryAt: disposition?.protectionRetryAt > now ? disposition.protectionRetryAt : null, protectionPendingUntil: (quotaProvisional.get(accountId)?.until || 0) > now ? quotaProvisional.get(accountId).until : null, protectionPersistence: disposition?.protectionMonthlyAt ? (quotaProvisional.get(accountId)?.persistRetryAt !== undefined ? 'pending' : 'persisted') : null };
   const q = META.accountQuotas?.[accountId];
   const snapshot = q?.snapshot;
   const complete = snapshot && q.errorCategory == null && q.lastSuccessAt === snapshot.fetchedAt && q.lastAttemptAt <= q.lastSuccessAt && ['five_hour','weekly','monthly'].every((type) => snapshot.limits?.[type]) && snapshot.fetchedAt <= now && now - snapshot.fetchedAt <= QUOTA_STALE_MS;
@@ -1403,6 +1433,7 @@ function statisticsQuotaProjection(account, now = Date.now()) {
 }
 function quotaNextAttemptAt(account, successAt, now = Date.now()) {
   const disposition = getAccountState(account.id);
+  if (disposition?.protectionShortAt) return disposition.protectionRetryAt > successAt ? disposition.protectionRetryAt : successAt + QUOTA_SUCCESS_MS;
   if (cachePoolEnabled() && configuredCachePoolLowQuotaSize() > 0) {
     if (disposition?.quotaDisposition === 'waiting-refresh') return successAt >= disposition.quotaDispositionAt ? successAt + QUOTA_SUCCESS_MS : now;
     if (disposition?.quotaDisposition === 'quota-exhausted' && disposition.quotaRetryAt > successAt) return disposition.quotaRetryAt;
@@ -2561,7 +2592,7 @@ function record(modelId, info, detail = detailContext.getStore()) {
       matchedBy: Array.isArray(t.matchedBy) ? t.matchedBy.filter((value) => ['status','body','header','provider','model','default'].includes(value)).slice(0, 5) : [],
       providerCircuitAction: ['cooldown','half-open-success','half-open-failed'].includes(t.providerCircuitAction) ? t.providerCircuitAction : null,
       errorScope: t.errorScope || null, scopeEvidence: t.scopeEvidence || null, failureClass: t.failureClass || null,
-      healthAction: t.healthAction || 'none', quotaRemovalAction: t.quotaRemovalAction === 'waiting-refresh' ? 'waiting-refresh' : null, retryAfterMs: t.retryAfterMs ?? null,
+      healthAction: t.healthAction || 'none', quotaRemovalAction: ['waiting-refresh','protection-pending'].includes(t.quotaRemovalAction) ? t.quotaRemovalAction : null, retryAfterMs: t.retryAfterMs ?? null,
       retryRuleId: typeof t.retryRuleId === 'string' && ERROR_RULE_ID.test(t.retryRuleId) ? t.retryRuleId : null,
       retryDecision: t.retryDecision === 'stop' ? 'stop' : 'continue',
       retryMatchedBy: Array.isArray(t.retryMatchedBy) ? t.retryMatchedBy.filter((value) => RETRY_MATCH_KINDS.has(value)).slice(0, 2) : [],
@@ -2593,7 +2624,7 @@ function record(modelId, info, detail = detailContext.getStore()) {
       ruleAction: ERROR_RULE_ACTIONS.has(attempt.ruleAction) ? attempt.ruleAction : null,
       matchedBy: Array.isArray(attempt.matchedBy) ? attempt.matchedBy.filter((value) => ['status','body','header','provider','model','default'].includes(value)).slice(0, 5) : [],
       errorScope: attempt.errorScope || null, scopeEvidence: attempt.scopeEvidence || null, failureClass: attempt.failureClass || null,
-      healthAction: attempt.healthAction || 'none', quotaRemovalAction: attempt.quotaRemovalAction === 'waiting-refresh' ? 'waiting-refresh' : null, retryAfterMs: attempt.retryAfterMs ?? null,
+      healthAction: attempt.healthAction || 'none', quotaRemovalAction: ['waiting-refresh','protection-pending'].includes(attempt.quotaRemovalAction) ? attempt.quotaRemovalAction : null, retryAfterMs: attempt.retryAfterMs ?? null,
       retryRuleId: typeof attempt.retryRuleId === 'string' && ERROR_RULE_ID.test(attempt.retryRuleId) ? attempt.retryRuleId : null,
       retryDecision: attempt.retryDecision === 'stop' ? 'stop' : 'continue',
       retryMatchedBy: Array.isArray(attempt.retryMatchedBy) ? attempt.retryMatchedBy.filter((value) => RETRY_MATCH_KINDS.has(value)).slice(0, 2) : [],
@@ -2904,14 +2935,51 @@ function quotaPageOwnerHasNewSuccess(token, id, lastSuccessAt) {
 function quotaPageOwnerRequiresForce(token, id, lastSuccessAt) {
   return token.active && token.force && !quotaPageOwnerHasNewSuccess(token, id, lastSuccessAt);
 }
-function quotaDemandOutcome(account, { force = false, pageToken = null } = {}, now = Date.now()) {
+function quotaProtectionDue(account, now = Date.now()) {
+  if (!account?.key || account.enabled === false) return false;
+  const pending = quotaProvisional.get(account.id);
+  if (pending && pending.persistRetryAt === undefined && pending.until <= now && !quotaJobs.has(account.id)) quotaProvisional.delete(account.id);
+  const state = getAccountState(account.id), q = META.accountQuotas?.[account.id];
+  if ((quotaProvisional.get(account.id)?.until || 0) > now) return true;
+  if (state?.protectionShortAt) return !state.protectionRetryAt || now >= state.protectionRetryAt;
+  if (state?.protectionMonthlyAt) {
+    const reset = Date.parse(q?.snapshot?.limits?.monthly?.resetsAt);
+    return Number.isSafeInteger(reset) && reset > 0 && reset <= now && (q?.lastAttemptAt || 0) < reset;
+  }
+  return false;
+}
+function quotaProtectionScheduled(account) {
+  if (quotaProvisional.get(account?.id)?.persistRetryAt !== undefined) return true;
+  if (!account?.key || account.enabled === false) return false;
+  const state = getAccountState(account.id), reset = Date.parse(META.accountQuotas?.[account.id]?.snapshot?.limits?.monthly?.resetsAt);
+  return !!((quotaProvisional.get(account.id)?.until || 0) > Date.now() || state?.protectionShortAt || (state?.protectionMonthlyAt && Number.isSafeInteger(reset) && (META.accountQuotas?.[account.id]?.lastAttemptAt || 0) < reset));
+}
+function quotaProtectionWakeAt(account, now = Date.now()) {
+  const pending = quotaProvisional.get(account.id), q = META.accountQuotas?.[account.id], state = getAccountState(account.id);
+  const backoff = q?.errorCategory && q.lastAttemptAt ? q.lastAttemptAt + quotaFailureDelay(account.id) : 0;
+  if (pending?.persistRetryAt !== undefined) return Math.max(now + 10, pending.persistRetryAt);
+  if (pending) return Math.max(now + 10, Math.min(pending.until, backoff || now + 10));
+  if (state?.protectionShortAt) {
+    const successAt = successfulQuotaTime(q, now) || 0;
+    const next = state.protectionRetryAt > successAt ? state.protectionRetryAt : successAt + QUOTA_SUCCESS_MS;
+    return Math.max(now + 10, next, backoff);
+  }
+  return Math.max(now + 10, Date.parse(q?.snapshot?.limits?.monthly?.resetsAt) || now + 10, backoff);
+}
+function quotaDemandOutcome(account, { force = false, pageToken = null, protection = false } = {}, now = Date.now()) {
   if (!account?.key) return 'skipped';
   if (account.enabled === false) return 'skipped';
   const q = META.accountQuotas?.[account.id];
   if (q?.errorCategory && q.lastAttemptAt && now < q.lastAttemptAt + quotaFailureDelay(account.id)) return 'deferred';
   const lastSuccessAt = successfulQuotaTime(q, now);
   const pageSuccess = pageToken?.force && quotaPageOwnerHasNewSuccess(pageToken, account.id, lastSuccessAt);
-  const forceRequired = pageToken ? quotaPageOwnerRequiresForce(pageToken, account.id, lastSuccessAt) : force;
+  const protectionState = getAccountState(account.id);
+  const forceRequired = pageToken ? quotaPageOwnerRequiresForce(pageToken, account.id, lastSuccessAt) : force || (protection && ((quotaProvisional.get(account.id)?.until || 0) > now || (protectionState?.protectionRetryAt > lastSuccessAt && now >= protectionState.protectionRetryAt) || (protectionState?.protectionMonthlyAt && quotaProtectionDue(account, now))));
+  if (protection && !forceRequired) {
+    const state = getAccountState(account.id);
+    const next = state?.protectionRetryAt > lastSuccessAt ? state.protectionRetryAt : (lastSuccessAt || 0) + QUOTA_SUCCESS_MS;
+    if (state?.protectionShortAt && now < next) return 'cached';
+  }
   const disposition = cachePoolEnabled() && configuredCachePoolLowQuotaSize() > 0 ? getAccountState(account.id) : null;
   if (!forceRequired && disposition?.quotaDisposition === 'waiting-refresh' && lastSuccessAt && lastSuccessAt >= disposition.quotaDispositionAt && now - lastSuccessAt < QUOTA_SUCCESS_MS) return 'cached';
   if (!forceRequired && disposition?.quotaDisposition === 'quota-exhausted' && lastSuccessAt) {
@@ -2928,12 +2996,13 @@ function quotaJobAccount(job) {
 function quotaJobHasOwner(job) {
   if (job.cancelled) return false;
   if (job.routingEpoch === quotaRoutingEpoch && quotaRoutingEnabled()) return true;
+  if (job.protection && (quotaProvisional.has(job.id) || getAccountState(job.id)?.protectionShortAt || getAccountState(job.id)?.protectionMonthlyAt)) return true;
   for (const token of job.pageOwners) if (token.active) return true;
   return false;
 }
 function detachQuotaJob(job) {
   for (const token of job.pageOwners) token.jobs.delete(job);
-  job.pageOwners.clear(); job.routingEpoch = null;
+  job.pageOwners.clear(); job.routingEpoch = null; job.protection = false;
 }
 function finishQueuedQuotaJob(job, outcome = 'cancelled') {
   if (job.state !== 'queued') return;
@@ -2951,6 +3020,7 @@ function cancelQuotaJob(job) {
 function invalidateQuotaAccount(id, { clearSnapshot = false, deleted = false } = {}) {
   quotaGenerations.set(id, (quotaGenerations.get(id) || 0) + 1);
   quotaFailureCounts.delete(id);
+  if (deleted || quotaProvisional.get(id)?.persistRetryAt === undefined) quotaProvisional.delete(id);
   const job = quotaJobs.get(id);
   if (job) { detachQuotaJob(job); cancelQuotaJob(job); }
   if (clearSnapshot) delete META.accountQuotas[id];
@@ -2968,7 +3038,8 @@ function attachQuotaOwner(job, source) {
     if (!source.pageToken.active) return false;
     source.pageToken.force = !!source.force;
     job.pageOwners.add(source.pageToken); source.pageToken.jobs.add(job);
-  } else if (source.routingEpoch === quotaRoutingEpoch && quotaRoutingEnabled()) job.routingEpoch = source.routingEpoch;
+  } else if (source.protection && quotaProtectionDue(config.accounts.find((a) => a.id === job.id))) job.protection = true;
+  else if (source.routingEpoch === quotaRoutingEpoch && quotaRoutingEnabled()) job.routingEpoch = source.routingEpoch;
   else return false;
   return true;
 }
@@ -2995,7 +3066,7 @@ async function requestQuota(id, source) {
     const immediate = quotaDemandOutcome(account, source);
     if (immediate) return immediate;
     let resolve;
-    const job = { id, generation, key: account.key, proxyUrl: account.proxyUrl || '', state: 'queued', cancelled: false, controller: null, pageOwners: new Set(), routingEpoch: null, promise: null, resolve: null };
+    const job = { id, generation, key: account.key, proxyUrl: account.proxyUrl || '', state: 'queued', cancelled: false, controller: null, pageOwners: new Set(), routingEpoch: null, protection: false, promise: null, resolve: null };
     job.promise = new Promise((done) => { resolve = done; }); job.resolve = resolve;
     if (!attachQuotaOwner(job, source)) return 'cancelled';
     quotaJobs.set(id, job); quotaQueue.push(job); pumpQuotaQueue();
@@ -3023,14 +3094,63 @@ async function runQuotaJob(job, account) {
   if (snapshot) {
     state.snapshot = snapshot; state.lastSuccessAt = snapshot.fetchedAt; state.errorCategory = null; quotaFailureCounts.delete(job.id); quotaSuccessVersions.set(job.id, (quotaSuccessVersions.get(job.id) || 0) + 1);
     reconcileQuotaDisposition(job.id, snapshot);
+    reconcileQuotaProtection(job.id, snapshot);
     if (quotaProjection(job.id).pool === 'reserve') invalidateSessionBindingsForAccount(job.id);
     else reconcileSessionBindings();
   } else {
     state.errorCategory = errorCategory || 'schema'; quotaFailureCounts.set(job.id, Math.min(4, (quotaFailureCounts.get(job.id) || 0) + 1));
+    if (quotaProvisional.get(job.id)?.persistRetryAt === undefined) quotaProvisional.delete(job.id);
     reconcileSessionBindings();
   }
   try { saveMeta(); } catch (error) { console.error(`[额度] 持久化失败：${safeReason(error.message)}`); }
+  if (quotaProvisional.get(job.id)?.persistRetryAt !== undefined) scheduleQuotaRefresh();
   return snapshot ? 'refreshed' : 'failed';
+}
+// Only the existing quota job confirms and clears protection. Reset times schedule
+// evidence collection, never admission. A manual monthly ban is never auto-cleared.
+function reconcileQuotaProtection(id, snapshot) {
+  const now = Date.now(), pending = quotaProvisional.get(id), previous = getAccountState(id) || {};
+  const state = { ...previous };
+  if (pending && snapshot.fetchedAt >= pending.at && (quotaSuccessVersions.get(id) || 0) > pending.version) {
+    const used = snapshot.limits?.monthly?.percentUsed;
+    if (typeof used === 'number' && now - snapshot.fetchedAt <= QUOTA_STALE_MS &&
+        50 * (100 - used) < Math.round(config.quotaProtection.monthlyThresholdUsd * 100) - 1e-7) {
+      if (!state.protectionMonthlyAt) {
+        state.protectionMonthlyAt = now;
+        // Keep the verified ban in META for fail-closed admission. Only an atomic
+        // metadata write can clear this process-local persistence warning.
+        pending.until = 0; // verification is complete; persistence must not start another quota fetch
+        pending.persistRetryAt = now + QUOTA_FAILURE_MS;
+        pending.persistFailures = 0;
+      }
+    }
+  }
+  if (pending?.persistRetryAt === undefined) quotaProvisional.delete(id);
+  const exhausted = ['five_hour','weekly'].filter((type) => snapshot.limits?.[type]?.percentUsed >= 100);
+  if (exhausted.length) {
+    state.protectionShortAt ||= now;
+    state.protectionShortWindows = [...new Set([...(state.protectionShortWindows || []), ...exhausted])];
+    const resets = state.protectionShortWindows.map((type) => Date.parse(snapshot.limits?.[type]?.resetsAt)).filter((at) => Number.isSafeInteger(at) && at > now);
+    state.protectionRetryAt = resets.length ? Math.min(...resets) : 0;
+  } else if (state.protectionShortAt && snapshot.fetchedAt >= state.protectionShortAt &&
+             QUOTA_TYPES.every((type) => snapshot.limits?.[type]?.percentUsed < 100)) {
+    state.protectionShortAt = 0; state.protectionShortWindows = null; state.protectionRetryAt = 0;
+  } else if (state.protectionShortAt) {
+    const resets = (state.protectionShortWindows || []).map((type) => Date.parse(snapshot.limits?.[type]?.resetsAt)).filter((at) => Number.isSafeInteger(at) && at > now);
+    state.protectionRetryAt = resets.length ? Math.min(...resets) : 0;
+  }
+  if (state.protectionMonthlyAt !== previous.protectionMonthlyAt || state.protectionShortAt !== previous.protectionShortAt ||
+      state.protectionRetryAt !== previous.protectionRetryAt || JSON.stringify(state.protectionShortWindows) !== JSON.stringify(previous.protectionShortWindows)) {
+    META.accountStates[id] = state; invalidateSessionBindingsForAccount(id); notifyCapacityWaiters();
+  }
+}
+function signalQuotaProtection(account) {
+  if (getAccountState(account.id)?.protectionMonthlyAt || (quotaProvisional.get(account.id)?.until || 0) > Date.now()) return;
+  const now = Date.now();
+  quotaProvisional.set(account.id, { at: Math.max(now, (successfulQuotaTime(META.accountQuotas?.[account.id]) || 0)), until: now + Math.min(30_000, 2 * QUOTA_TIMEOUT_MS), version: quotaSuccessVersions.get(account.id) || 0 });
+  invalidateSessionBindingsForAccount(account.id); notifyCapacityWaiters();
+  void requestQuota(account.id, { protection: true }).catch((error) => console.error(`[额度] 刷新失败：${safeReason(error.message)}`));
+  scheduleQuotaRefresh();
 }
 // The existing quota job is the only writer that may clear a quota disposition.
 // A partial known-100 snapshot confirms exhaustion; an incomplete/failed snapshot
@@ -3073,7 +3193,7 @@ function pumpQuotaQueue() {
     const lastSuccessAt = successfulQuotaTime(META.accountQuotas?.[job.id]), pageOwners = [...job.pageOwners].filter((token) => token.active);
     const force = pageOwners.some((token) => quotaPageOwnerRequiresForce(token, job.id, lastSuccessAt));
     const pageSuccess = !META.accountQuotas?.[job.id]?.errorCategory && job.routingEpoch === null && pageOwners.length > 0 && pageOwners.every((token) => token.force && quotaPageOwnerHasNewSuccess(token, job.id, lastSuccessAt));
-    const immediate = pageSuccess ? 'cached' : quotaDemandOutcome(account, { force });
+    const immediate = pageSuccess ? 'cached' : quotaDemandOutcome(account, { force, protection: job.protection });
     if (immediate) { finishQueuedQuotaJob(job, immediate); continue; }
     job.state = 'running'; quotaRunning++;
     void runQuotaJob(job, account).then((outcome) => {
@@ -3104,19 +3224,34 @@ function releaseQuotaPageToken(token) { cancelQuotaPageToken(token); quotaPageBa
 function scheduleQuotaRefresh() {
   const version = ++quotaScheduleVersion, epoch = quotaRoutingEpoch;
   clearTimeout(quotaTimer); quotaTimer = null;
-  if (shuttingDown || !quotaRoutingEnabled()) return;
+  if (shuttingDown || (!quotaRoutingEnabled() && !config.accounts.some((a) => quotaProtectionScheduled(a)))) return;
   const arm = () => {
-    if (version !== quotaScheduleVersion || epoch !== quotaRoutingEpoch || !quotaRoutingEnabled()) return;
+    if (version !== quotaScheduleVersion || epoch !== quotaRoutingEpoch) return;
     const run = async () => {
-      if (version !== quotaScheduleVersion || epoch !== quotaRoutingEpoch || !quotaRoutingEnabled()) return;
+      if (version !== quotaScheduleVersion || epoch !== quotaRoutingEpoch) return;
       quotaTimer = null;
+      // Persistence retries are local writes in the same timer, never new quota jobs.
+      const pendingWrites = [...quotaProvisional.values()].filter((entry) => entry.persistRetryAt !== undefined);
+      if (pendingWrites.some((entry) => entry.persistRetryAt <= Date.now())) {
+        try { saveMeta(); }
+        catch (error) {
+          console.error(`[额度] 封禁持久化重试失败：${safeReason(error.message)}`);
+          for (const entry of pendingWrites) {
+            entry.persistFailures = Math.min(4, entry.persistFailures + 1);
+            entry.persistRetryAt = Date.now() + Math.min(15 * QUOTA_FAILURE_MS, QUOTA_FAILURE_MS * 2 ** entry.persistFailures);
+          }
+        }
+      }
       const accounts = hrwRank(config.accounts.filter((account) => account.enabled !== false && account.key), 'quota-refresh');
-      const dueAccounts = accounts.filter((account) => quotaDemandOutcome(account) === null);
+      const dueAccounts = accounts.filter((account) => quotaProtectionDue(account) || (quotaRoutingEnabled() && quotaDemandOutcome(account) === null));
       const start = quotaCursor % Math.max(1, dueAccounts.length), due = [...dueAccounts.slice(start), ...dueAccounts.slice(0, start)].slice(0, 2);
-      quotaCursor++; await Promise.all(due.map((account) => requestQuota(account.id, { routingEpoch: epoch })));
-      arm();
+      quotaCursor++; await Promise.all(due.map((account) => requestQuota(account.id, quotaProtectionDue(account) ? { protection: true } : { routingEpoch: epoch })));
+      if (quotaRoutingEnabled() || config.accounts.some((account) => quotaProtectionScheduled(account))) arm();
     };
-    quotaTimer = setTimeout(run, process.env.NODE_ENV === 'test' ? 10 : 1000 + (quotaCursor % 30) * 1000); quotaTimer.unref();
+    const now = Date.now();
+    const wake = quotaRoutingEnabled() ? (process.env.NODE_ENV === 'test' ? 10 : 1000 + (quotaCursor % 30) * 1000)
+      : Math.max(10, Math.min(2147483647, ...config.accounts.filter((account) => quotaProtectionScheduled(account)).map((account) => quotaProtectionWakeAt(account, now) - now)));
+    quotaTimer = setTimeout(run, wake); quotaTimer.unref();
   };
   arm();
 }
@@ -3715,10 +3850,16 @@ function settleAttempt(modelId, attempt, result, account, { clientDisconnected =
   result.ordinaryReason = ordinaryFailureReason(result, sensitiveValues);
   const policy = matchErrorRule({ result, classification, modelId, provider: attempt.upstream, sensitiveValues });
   const accountAction = policy.scope === 'account' && ['cooldown','hard-quarantine'].includes(policy.action) ? policy : null;
-  const quotaRemovalAction = currentGeneration && quotaRole === 'low' && policy.scope === 'account' && policy.action === 'degrade' ? 'waiting-refresh' : null;
+  const quotaSignal = currentGeneration && result.upstreamStatus === 429 && result.terminalOrigin === 'upstream_http' &&
+    hasExplicitAccountQuotaEvidence(result.structuredError) &&
+    !result.routing?.finalProvider && !hasExplicitProviderEvidence(result.structuredError, attempt.upstream) &&
+    hasExplicitAccountQuotaEvidence(failureRuleText(result, sensitiveValues)) &&
+    config.accounts.some((saved) => saved.id === account.id && saved.key === account.key && saved.proxyUrl === account.proxyUrl);
+  if (quotaSignal) signalQuotaProtection(account);
+  const quotaRemovalAction = quotaSignal ? 'protection-pending' : currentGeneration && quotaRole === 'low' && policy.scope === 'account' && policy.action === 'degrade' ? 'waiting-refresh' : null;
   const removesAccount = !!accountAction || !!quotaRemovalAction;
   if (currentGeneration && policy.scope === 'account') persistAccountAction(account, policy);
-  if (quotaRemovalAction) persistLowQuotaHold(account);
+  if (quotaRemovalAction === 'waiting-refresh') persistLowQuotaHold(account);
   else if (currentGeneration && policy.scope === 'provider-model') persistProviderAction(modelId, attempt.upstream, policy);
   const healthAction = currentGeneration ? (policy.action === 'degrade' ? 'degrade' : policy.action) : 'none';
   if (currentGeneration && policy.scope === 'provider-model' && policy.action === 'degrade') updateProviderHealth(modelId, attempt.upstream, { classification, note: `${classification.evidence}:${classification.failureClass}` });
@@ -3741,7 +3882,7 @@ function traceAttempt(attempt, result, account, ms, diagnostic) {
     providerCircuitAction: diagnostic.providerCircuitAction || null,
     errorScope: diagnostic.classification?.scope || null,
     scopeEvidence: diagnostic.classification?.evidence || null, failureClass: diagnostic.classification?.failureClass || null,
-    healthAction: diagnostic.healthAction || 'none', quotaRemovalAction: diagnostic.quotaRemovalAction === 'waiting-refresh' ? 'waiting-refresh' : null, retryAfterMs: diagnostic.policy?.cooldownMs ?? diagnostic.classification?.retryAfterMs ?? null,
+    healthAction: diagnostic.healthAction || 'none', quotaRemovalAction: ['waiting-refresh','protection-pending'].includes(diagnostic.quotaRemovalAction) ? diagnostic.quotaRemovalAction : null, retryAfterMs: diagnostic.policy?.cooldownMs ?? diagnostic.classification?.retryAfterMs ?? null,
     retryRuleId: diagnostic.retryDecision?.ruleId || null,
     retryDecision: diagnostic.retryDecision?.decision || 'continue',
     retryMatchedBy: Array.isArray(diagnostic.retryDecision?.matchedBy) ? diagnostic.retryDecision.matchedBy.filter((value) => RETRY_MATCH_KINDS.has(value)) : [],
@@ -3972,10 +4113,17 @@ async function handleChat(req, res) {
   selected = await acquireAccountLease(identity, { excludeIds: excluded, ownerRequestId: requestId });
   attemptOwner.bindingSelection = selected;
   if (!selected.lease) {
+    const protectedAccounts = config.accounts.filter((a) => a.enabled !== false && a.key && (getAccountState(a.id)?.protectionMonthlyAt || getAccountState(a.id)?.protectionShortAt || (quotaProvisional.get(a.id)?.until || 0) > Date.now()));
     const status = enabledAccounts().length ? 429 : 503;
+    const protectionBlocked = protectedAccounts.length > 0 && !enabledAccounts().length;
+    if (protectionBlocked) {
+      const next = protectedAccounts.map((a) => getAccountState(a.id)?.protectionRetryAt || quotaProvisional.get(a.id)?.until || 0).filter((at) => at > Date.now());
+      selected.retryAfter = next.length ? Math.min(3600, Math.max(1, Math.ceil((Math.min(...next) - Date.now()) / 1000))) : 60;
+      selected.error = 'upstream accounts paused for quota verification or exhausted; monthly bans require administrator release';
+    }
     const rpmBlocked = selected.blockedBy === 'rpm' || selected.blockedBy === 'mixed';
     finalizeStatistics({ globalError: true, segments: [] });
-    recordChat({ requestId, requestedModel, resolvedModel: modelId, stream: isStream, strategy: selected.strategy, ...affinityFacts(), selectionReason: rpmBlocked ? 'rpm-unavailable' : 'capacity-unavailable', normalizedStatus: status, upstreamStatus: null, blockedBy: selected.blockedBy || null, retryAfter: Number.isSafeInteger(selected.retryAfter) ? selected.retryAfter : null, errorCategory: rpmBlocked ? 'rpm' : 'capacity', error: selected.error, ms: 0 });
+    recordChat({ requestId, requestedModel, resolvedModel: modelId, stream: isStream, strategy: selected.strategy, ...affinityFacts(), selectionReason: protectionBlocked ? 'quota-protection' : rpmBlocked ? 'rpm-unavailable' : 'capacity-unavailable', normalizedStatus: status, upstreamStatus: null, blockedBy: selected.blockedBy || null, retryAfter: Number.isSafeInteger(selected.retryAfter) ? selected.retryAfter : null, errorCategory: protectionBlocked ? 'quota_protection' : rpmBlocked ? 'rpm' : 'capacity', error: selected.error, ms: 0 });
     return sendBusy(res, selected.error, selected.retryAfter, status);
   }
   attemptOwner.lease = selected.lease;
@@ -4006,7 +4154,7 @@ async function handleChat(req, res) {
     }
     const action = chain.accountAction;
     if (action) accountActions.push({ account: account.name, action: action.action, statusCode: action.statusCode, ruleId: action.ruleId || null, scope: action.scope });
-    if ((action?.action === 'cooldown' || action?.action === 'hard-quarantine' || chain.quotaRemovalAction === 'waiting-refresh') && !chain.started && accountAttempt === 0 && !chain.retryStop) {
+    if ((action?.action === 'cooldown' || action?.action === 'hard-quarantine' || chain.quotaRemovalAction === 'waiting-refresh' || chain.quotaRemovalAction === 'protection-pending') && !chain.started && accountAttempt === 0 && !chain.retryStop) {
       excluded.add(account.id);
       lease.release();
       chainLease = null;
@@ -4439,7 +4587,7 @@ async function dispatch(req, res) {
       return sendJSON(res, 200, {
         accounts: config.accounts.map((a) => { const recent = projectAggregate(aggregateRange(a.id).aggregate),lifetime=META.statistics.lifetime.accounts[a.id]; return { ...a, state: getAccountState(a.id), activeCount: activeCounts.get(a.id) || 0, rpm: rpmProjection(a), health: healthProjection(a), quota: quotaProjection(a.id), cachePoolRole: cacheRoles.get(a.id) ?? null, cachePoolQuotaRole: configuredCachePoolLowQuotaSize() > 0 && cacheRoles.get(a.id) === 'active' ? ({ hot: 'high', warm: 'low', unknown: 'unknown' }[quotaProjection(a.id).pool] || null) : null, statistics: { recent24h: recent, lifetimeRequests: lifetime ? lifetime.requests : 0, lifetimeErrors: lifetime ? lifetime.errors : 0 } }; }),
         mode: config.accountMode, active: config.activeAccount, concurrencyWaitMs: config.concurrencyWaitMs,
-        errorRules: config.errorRules, retryRules: config.retryRules, accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline,
+        quotaProtection: config.quotaProtection, errorRules: config.errorRules, retryRules: config.retryRules, accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline,
         cachePool: { minSize: configuredCachePoolSize(), maxSize: configuredCachePoolMaxSize(), lowSize: configuredCachePoolLowQuotaSize(), targetSize: configuredCachePoolTargetSize(), actual: cachePoolMembership(enabledAccounts())?.actual || { high: 0, low: 0, unknown: 0 }, binding: sessionBindingSummary() },
         stats: Object.fromEntries(config.accounts.map((a) => [a.name, { requests: META.statistics.lifetime.accounts[a.id]?.requests ?? 0 }])),
       });
@@ -4450,7 +4598,7 @@ async function dispatch(req, res) {
       if (!ACCOUNT_MODES.has(body.mode)) return sendJSON(res, 400, { error: { message: 'invalid account mode' } });
       const wait = Number(body.concurrencyWaitMs ?? 2000);
       if (!Number.isInteger(wait) || wait < 0 || wait > 30000) return sendJSON(res, 400, { error: { message: 'concurrencyWaitMs must be an integer from 0 to 30000' } });
-      let requestedErrorRules = config.errorRules, requestedPipeline = config.accountPipeline, requestedRetryRules = config.retryRules;
+      let requestedErrorRules = config.errorRules, requestedPipeline = config.accountPipeline, requestedRetryRules = config.retryRules, requestedProtection = config.quotaProtection;
       try {
         if (body.errorRules !== undefined) requestedErrorRules = normalizeErrorRules(body.errorRules, { strict: true });
         else {
@@ -4462,6 +4610,7 @@ async function dispatch(req, res) {
           if (body.accountContentErrorRules !== undefined && JSON.stringify(normalizeAccountContentErrorRules(body.accountContentErrorRules, { strict: true })) !== JSON.stringify(legacy.accountContentErrorRules)) return sendJSON(res, 409, { error: { message: 'legacy error-rule fields cannot modify canonical errorRules' } });
         }
         if (body.retryRules !== undefined) requestedRetryRules = normalizeRetryRules(body.retryRules, { strict: true });
+        if (body.quotaProtection !== undefined) requestedProtection = normalizeQuotaProtection(body.quotaProtection, { strict: true });
         if (body.accountPipeline !== undefined) requestedPipeline = normalizeAccountPipeline(body.accountPipeline, {
           strict: true,
           fallbackOrder: config.accountPipeline.order,
@@ -4502,12 +4651,12 @@ async function dispatch(req, res) {
       const requestedActive = requestedActiveId ? accs.findIndex((a) => a.id === requestedActiveId) : -1;
       const quotaRoutingWasEnabled = quotaRoutingEnabled();
       config.accounts = accs; config.accountMode = body.mode; config.activeAccount = requestedActive >= 0 ? requestedActive : Math.min(Math.max(0, Number(body.active) || 0), accs.length - 1);
-      config.concurrencyWaitMs = wait; config.errorRules = requestedErrorRules; config.retryRules = requestedRetryRules; Object.assign(config, legacyRuleProjection(requestedErrorRules)); config.accountPipeline = requestedPipeline;
+      config.concurrencyWaitMs = wait; config.errorRules = requestedErrorRules; config.retryRules = requestedRetryRules; config.quotaProtection = requestedProtection; Object.assign(config, legacyRuleProjection(requestedErrorRules)); config.accountPipeline = requestedPipeline;
       normalizeCachePoolTarget(requestedPipeline);
       for (const [id, previous] of previousById) {
         const current = accs.find((a) => a.id === id);
         if (!current) { invalidateQuotaAccount(id, { clearSnapshot: true, deleted: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); clearRpmState(id); }
-        else if (current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) { invalidateQuotaAccount(id, { clearSnapshot: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); delete META.accountStates[id]; clearRpmState(id); }
+        else if (current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) { invalidateQuotaAccount(id, { clearSnapshot: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); const month = getAccountState(id)?.protectionMonthlyAt || 0; if (month) META.accountStates[id] = { protectionMonthlyAt: month }; else delete META.accountStates[id]; clearRpmState(id); }
         else if (previous.enabled !== false && current.enabled === false) { invalidateQuotaAccount(id); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); }
         else for (const model of new Set([...Object.keys(previous.perModel || {}), ...Object.keys(current.perModel || {})])) if (JSON.stringify(previous.perModel?.[model]) !== JSON.stringify(current.perModel?.[model])) clearProviderCircuitForRoute(id, model);
       }
@@ -4530,6 +4679,18 @@ async function dispatch(req, res) {
       reconcileSessionBindings();
       saveConfig(); saveMeta(); RR_COUNTER = 0; strategyCounters.clear(); pruneProxyAgents(); scheduleQuotaRefresh();
       return sendJSON(res, 200, { ok: true, accounts: accs.length, mode: config.accountMode, active: config.activeAccount });
+    }
+    if (req.method === 'POST' && p === '/api/accounts/quota-recover') {
+      const body = await readJsonBody(req);
+      if (!isPlainObject(body) || Object.keys(body).length !== 1 || typeof body.id !== 'string' || !config.accounts.some((a) => a.id === body.id)) return sendJSON(res, 400, { error: { message: 'expected exact existing account id' } });
+      const state = getAccountState(body.id);
+      if (!state?.protectionMonthlyAt) return sendJSON(res, 409, { error: { message: 'account has no monthly quota ban' } });
+      const accountStates = { ...META.accountStates, [body.id]: { ...state, protectionMonthlyAt: 0 } };
+      atomicWriteJson(META_PATH, { ...META, accountStates });
+      META.accountStates = accountStates;
+      for (const [id, pending] of quotaProvisional) if (id === body.id || pending.persistRetryAt !== undefined) quotaProvisional.delete(id);
+      reconcileSessionBindings(); notifyCapacityWaiters();
+      return sendJSON(res, 200, { ok: true });
     }
     if (req.method === 'POST' && p === '/api/accounts/recover') {
       const body = await readJsonBody(req);

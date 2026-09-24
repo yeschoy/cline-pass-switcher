@@ -88,6 +88,7 @@ POST /api/accounts
 GET  /api/statistics
 POST /api/statistics/quota-refresh  // exact body: { force: boolean }
 POST /api/accounts/recover
+POST /api/accounts/quota-recover // exact { id }, monthly protection only
 POST /api/providers/recover       // exact { model, provider }
 POST /api/accounts/proxy-test
 GET  /api/models?accountId=<account id>
@@ -109,7 +110,7 @@ Existing environment keys are `DATA_DIR`, `CLINE_PASS_KEY`, `PROXY_KEY`, `PUBLIC
 
 #### Account selection and lease
 
-- An available account has a non-empty `key`, `enabled !== false`, no active ban, no unexpired rule cooldown and (when role-aware pool routing is enabled) no `waiting-refresh`/`quota-exhausted` disposition. See the low-quota scenario below.
+- An available account has a non-empty `key`, `enabled !== false`, no active rule or monthly-protection ban, no confirmed short-window or unexpired provisional protection hold, no unexpired rule cooldown and (when role-aware pool routing is enabled) no `waiting-refresh`/`quota-exhausted` disposition. See the low-quota scenario below.
 - `maxConcurrent: 0` means unlimited. Otherwise `tryLease()` increments `activeCounts` synchronously and returns an idempotent `release()`.
 - `tryLeaseResult()` returns a structured `{ lease, blockedBy, retryAt }` instead of only a lease. Admission order is fixed: **hard eligibility (caller) → `maxConcurrent` → RPM**. A concurrency block returns `blockedBy: 'concurrency'` without touching RPM; an RPM block returns `blockedBy: 'rpm'` without incrementing `activeCounts`. `blockedBy` is exactly `concurrency` | `rpm` | `mixed` | `unavailable` (`BLOCKED_BY_REASONS`); an account that is simultaneously concurrency-full and RPM-exhausted is `mixed`.
 - `single` waits only for the configured active account (or the first statically available fallback).
@@ -735,6 +736,64 @@ return attachBindingMiss(result, identity, ownerRequestId, lookup.result); // pr
 ```
 
 ---
+
+## Scenario: Independent account quota exhaustion protection
+
+### 1. Scope / Trigger
+
+Protect against repeated real account-quota failures without using configurable `errorRules` as the policy switch or adding another quota network queue. The $50 monthly reference cap is the current operator-confirmed same-plan assumption, not a real bill. See `database-guidelines.md` for strict persisted configuration/state fields.
+
+### 2. Signatures
+
+```text
+GET/POST /api/accounts                    quotaProtection: { monthlyThresholdUsd }
+POST /api/accounts/quota-recover           exact { id: <existing stable account ID> } -> { ok: true }
+GET /api/statistics                       account.quota.protectionMonthlyAt,
+                                          protectionShortWindows, protectionRetryAt,
+                                          protectionPendingUntil, protectionPersistence
+signalQuotaProtection(account)
+reconcileQuotaProtection(id, snapshot)
+requestQuota(id, { protection: true })    same quotaJobs/queue/timer, even if quota-pool routing is off
+```
+
+### 3. Contracts
+
+- Only a real pre-output upstream HTTP 429 with explicit structured account/subscription quota evidence **and** matching bounded/redacted failure text signals protection; an already fresh complete 100% snapshot may classify as `fresh_account_quota` but cannot suppress this separate signal. Generic Provider 429, HTTP-200 envelopes, post-start SSE, local RPM and cancellation do not qualify. One process-local provisional admission hold lasts at most 30 seconds; failed/unknown verification cannot create a monthly ban.
+- A new successful post-signal monthly window with community-reference remaining **strictly below** `quotaProtection.monthlyThresholdUsd` (default $0.20 of $50) installs separate `protectionMonthlyAt`. Monthly-only partial success may confirm the month, not short-window recovery. All lease paths exclude the ban regardless of quota-pool mode. Refresh/reset, ordinary rule recovery, restart, key/proxy rotation and full account saves do not release it. Only exact-ID admin recovery or account deletion does; the browser confirms the possible repeat-failure risk.
+- If the atomic metadata write fails, the current process still blocks admission and authenticated projections say `protectionPersistence: 'pending'`, not `'persisted'`. The **existing quota timer** retries the current META with bounded backoff even with routing off or the account disabled; a successful full atomic META write clears the pending marker without an extra quota fetch. An uncommitted ban cannot survive a restart while storage remains unwritable: repair storage and verify persistence first.
+- A successful quota snapshot with 100%-used 5h or weekly window adds a separate confirmed short-window hold. Earliest valid exhausted-window reset schedules a recheck, never direct release. Missing reset uses existing bounded cadence. Only a **new complete successful three-window** snapshot with every `percentUsed < 100` releases the short hold; failure, partial data or one recovered window cannot. The monthly ban has priority. Key/proxy rotation fences pending/short evidence, not monthly bans; disabled/unkeyed accounts retain evidence but do not keep the quota timer armed until re-enabled.
+- Keep provider/account attempts, original upstream status, retry rules, SSE replay/cancellation and ordinary-log redaction unchanged. An all-held pool fails fast with a safe explanation and `Retry-After`; the local request row has `selectionReason: 'quota-protection'`, `errorCategory: 'quota_protection'`, no upstream status or attempts, rather than a fabricated capacity/RPM/upstream failure.
+
+### 4. Validation & Error Matrix
+
+| Condition | Result |
+|---|---|
+| Threshold not a finite two-decimal number in $0.01–$50.00, or unknown config fields | Strict management save 400 before mutation; malformed persisted canonical value fails startup without replacing bytes; older omission preserves the current value |
+| Monthly reference remaining equals the threshold, or month is missing/stale/failed/not newer than trigger | No new monthly ban; known $0.00 is distinct from missing |
+| No matching real status, explicit account evidence or redacted content | No new protection signal or quota refresh on that basis |
+| Confirmed short hold, then reset time arrives without complete successful three-window evidence | Stay blocked; schedule a bounded recheck only |
+| Metadata write fails after confirmed ban | In-process block with pending persistence and bounded retry; no promise of survival if restarted before a successful write |
+| Wrong/extra/missing recovery ID or no monthly ban | Safe 400/409; no state change; ordinary rule recovery never clears monthly ban |
+
+### 5. Good / Base / Bad Cases
+
+- **Good:** account A's matching 429 triggers one deduplicated post-signal quota job while B remains usable; a $0.19 monthly reference remainder bans A until explicit recovery, even after restart.
+- **Base:** exactly $0.20 does not ban; a failed quota refresh releases only the bounded provisional hold, not a fabricated durable state.
+- **Bad:** treat any 429 as account quota, take the minimum percent and multiply by $50, clear the ban on monthly reset/key rotation, or report a failed write as persisted.
+
+### 6. Tests Required
+
+`test/quota-protection.test.js` uses temporary `DATA_DIR`/mock upstream to assert AND/equality/custom threshold, pool-off deduplication, 5h/week/month combinations, partial/failed snapshots, restart/manual release/key rotation, streaming/cancellation and safe local logs. Fault-inject metadata rename failure: original bytes unchanged, current account blocked, pending projection visible, another account unaffected, bounded retry persists then survives restart; before successful persistence, restart limitation is explicit. UI production-VM/static tests cover exact admin action, confirmation, threshold validation/round-trip and accepted-state reload; no save is sent for an invalid draft. Run the full project gate and real-browser narrow/keyboard/confirm smoke for interactive changes.
+
+### 7. Wrong vs Correct
+
+```js
+// Wrong: provider limit or timer alone becomes a durable ban/recovery.
+if (status === 429 || Date.now() >= resetAt) toggleBan(account);
+// Correct: require the full signal, then the existing quota job supplies new
+// validated evidence. The timer only schedules a recheck; admin alone clears
+// a confirmed monthly ban.
+```
 
 ## Scenario: Low-quota cache-pool roles and refresh-owned disposition
 

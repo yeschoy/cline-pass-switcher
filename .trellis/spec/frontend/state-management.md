@@ -141,6 +141,10 @@ POST /api/test
   <- { model, accountId?, upstreams?, exclude?, pinMode?, sort?, maxRetries?, providerCooldownMs? }
   -> temporary route test result; no route persistence
 
+POST /api/accounts/quota-recover
+  <- { id } // exact saved account ID; monthly protection ban only
+  -> { ok: true }
+
 POST /api/accounts/recover
   <- { id }
   -> { ok: true }
@@ -169,7 +173,7 @@ The browser deletes legacy `localStorage.cps_key` without copying it. `api()` us
 
 #### Server-state snapshots
 
-`DATA` owns the current `/api/models` response plus the ID-joined model-statistics projection from the concurrently accepted `/api/statistics` read. `ACCS` owns the current `/api/accounts` response, including safe runtime account summaries. `loadAll()` reloads these snapshots plus security/meta/alias state; successful destructive writes reload rather than continuing from an assumed server shape. Statistics join by resolved model ID and account statistics arrive embedded by stable account ID; names are never join keys.
+`DATA` owns the current `/api/models` response plus the ID-joined model-statistics projection from the concurrently accepted `/api/statistics` read. `ACCS` owns the current `/api/accounts` response, including safe runtime account summaries. The global two-decimal `#monthlyQuotaThreshold` draft ($0.01–$50.00, default $0.20) is hydrated from `ACCS.quotaProtection.monthlyThresholdUsd` and included in full account saves/presets; a missing legacy field defaults to 0.20. Monthly quota bans, short-window holds and expiring verification holds are display-only. Authenticated `quota.protectionPersistence === 'pending'` labels a confirmed monthly ban whose metadata write has not succeeded; the account and statistics views warn that restart can lose it until the existing server retry commits the ban. Missing/`'persisted'` does not claim an uncommitted write. A distinct confirmed monthly release button warns that failures may recur, calls exact-ID `/api/accounts/quota-recover` and reloads accepted state; ordinary rule recovery never clears it. `loadAll()` reloads these snapshots plus security/meta/alias state; successful destructive writes reload rather than continuing from an assumed server shape. Statistics join by resolved model ID and account statistics arrive embedded by stable account ID; names are never join keys.
 
 The route scope selector is explicit:
 

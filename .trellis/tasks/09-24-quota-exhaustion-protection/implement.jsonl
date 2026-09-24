@@ -4,3 +4,5 @@
 {"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Relevant layer contract and verification boundary"}
 {"file": ".trellis/spec/frontend/index.md", "reason": "Relevant layer contract and verification boundary"}
 {"file": ".trellis/spec/frontend/state-management.md", "reason": "Relevant layer contract and verification boundary"}
+{"file": ".trellis/tasks/09-24-quota-exhaustion-protection/research/existing-owner-review.md", "reason": "Quota job owner/admission and account-state collision findings"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Management recovery accessibility and draft preservation"}

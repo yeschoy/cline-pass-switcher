@@ -248,8 +248,10 @@ test('account routing, header boundary, failover, state and streaming', async (t
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
+      if (req.method === 'GET' && req.url.endsWith('/users/me/plan/usage-limits')) { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ success: true, data: { limits: [{ type:'five_hour', percentUsed:10 }, { type:'weekly', percentUsed:10 }, { type:'monthly', percentUsed:10 }] } })); }
       const body = chunks.length ? JSON.parse(Buffer.concat(chunks)) : {};
-      seen.push({ headers: req.headers, body });
+      // Protection may run a separate quota GET; attempt assertions count chat POSTs only.
+      if (req.method === 'POST') seen.push({ headers: req.headers, body });
       const auth = req.headers.authorization;
       const only = body.provider?.only?.[0] || body.providerOptions?.gateway?.only?.[0];
       if ((body.model === 'cooldown-model' && auth === 'Bearer key-a') || (body.model === 'double-cooldown-model' && (auth === 'Bearer key-a' || auth === 'Bearer key-b'))) {
@@ -479,6 +481,7 @@ test('account routing, header boundary, failover, state and streaming', async (t
   assert.deepEqual(seen.map((x) => x.headers.authorization), ['Bearer key-a', 'Bearer key-b']);
   await rawJson(switchPort, '/api/accounts/recover', { id: 'a' });
   await rawJson(switchPort, '/api/accounts/recover', { id: 'b' });
+  await waitUntil(async () => (await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json()).accounts.every((a) => !a.quota.protectionPendingUntil));
 
   // If no replacement account exists, the failed provider trace must remain present exactly once.
   assert.equal((await rawJson(switchPort, '/api/accounts', { accounts: [accounts[0], { ...accounts[1], enabled: false }], mode: 'single', active: 0, concurrencyWaitMs: 20, accountErrorRules: { '429': { action: 'cooldown', cooldownMs: 60000 } } })).status, 200);
@@ -492,6 +495,7 @@ test('account routing, header boundary, failover, state and streaming', async (t
   assert.equal(noReplacementHistory.history[0].trace.length, 1);
   assert.equal(noReplacementHistory.history[0].trace[0].action, 'cooldown');
   await rawJson(switchPort, '/api/accounts/recover', { id: 'a' });
+  await waitUntil(async () => !(await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json()).accounts.find((a) => a.id === 'a').quota.protectionPendingUntil);
 
   await rawJson(switchPort, '/api/accounts', { accounts, mode: 'single', active: accounts.findIndex((a) => a.id === 'a'), concurrencyWaitMs: 20, accountErrorRules: { '500': { action: 'ban' } } });
   seen.length = 0;
@@ -963,7 +967,8 @@ test('new scheduling modes, account fields, model aliases and independent logs',
   let coolFailures = 1;
   const mock = http.createServer((req, res) => {
     const chunks=[]; req.on('data',(c)=>chunks.push(c)); req.on('end',()=>{
-      const body=JSON.parse(Buffer.concat(chunks).toString()||'{}'); seen.push({ auth:req.headers.authorization, headers:req.headers, body });
+      if (req.method === 'GET' && req.url.endsWith('/users/me/plan/usage-limits')) { res.writeHead(200, { 'Content-Type':'application/json' }); return res.end(JSON.stringify({ success:true, data:{ limits:[{type:'five_hour',percentUsed:10},{type:'weekly',percentUsed:10},{type:'monthly',percentUsed:10}] } })); }
+      const body=JSON.parse(Buffer.concat(chunks).toString()||'{}'); if (req.method === 'POST') seen.push({ auth:req.headers.authorization, headers:req.headers, body });
       if (body.model === 'cool' && req.headers.authorization === 'Bearer ka' && coolFailures-- > 0) { res.writeHead(429, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'account subscription quota exhausted', code: 'account_quota_exhausted' } })); }
       if (body.model === 'leak') { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: `failed ${req.headers['x-safe-account']} ${body.messages?.[0]?.content}` } })); }
       const reply=()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}],provider:'Mock'}));};

@@ -20,10 +20,37 @@ function harness() {
   pipelineList.appendChild=node=>{const index=pipelineList.children.indexOf(node);if(index>=0)pipelineList.children.splice(index,1);pipelineList.children.push(node);return node;};
   el('#accMode').options = ['single','roundrobin','sticky','least-connections','weighted-roundrobin','priority-failover'].map(value=>({value}));
   context.snapshot = fixture();
-  run("ACCS = snapshot; $('#accMode').value='single'; $('#concurrencyWaitMs').value='2000'; $('#cachePoolSize').value='0'; $('#cachePoolMaxSize').value='0'; $('#cachePoolLowQuotaSize').value='0'; $('#sessionBindingExplicitTtlMs').value='7200000'; $('#sessionBindingFallbackTtlMs').value='900000'; $('#sessionBindingMaxEntries').value='50000'; hydrateErrorRuleDraft(snapshot.errorRules); renderAccounts();");
+  run("ACCS = snapshot; $('#monthlyQuotaThreshold').value='0.20'; $('#accMode').value='single'; $('#concurrencyWaitMs').value='2000'; $('#cachePoolSize').value='0'; $('#cachePoolMaxSize').value='0'; $('#cachePoolLowQuotaSize').value='0'; $('#sessionBindingExplicitTtlMs').value='7200000'; $('#sessionBindingFallbackTtlMs').value='900000'; $('#sessionBindingMaxEntries').value='50000'; hydrateErrorRuleDraft(snapshot.errorRules); renderAccounts();");
   const snapshot = () => JSON.parse(run('JSON.stringify(ACCS)'));
   return {run,el,calls,snapshot,context,timers,windowListeners,pipelineList};
 }
+
+test('monthly threshold draft and exact recovery preserve account state and require explicit confirmation', async () => {
+  const h = harness(); h.context.sent = [];
+  h.run("api=async(path,body)=>{sent.push({path,body});return {ok:false};}");
+  for (const invalid of ['', '0', '0.001', '50.01', '1e1', 'Infinity']) {
+    h.el('#monthlyQuotaThreshold').value=invalid; await h.run('saveAccounts()');
+    assert.equal(h.context.sent.length,0); assert.match(h.el('#accMsg').textContent,/阈值/);
+  }
+  h.el('#monthlyQuotaThreshold').value='0.30'; await h.run('saveAccounts()');
+  assert.equal(h.context.sent[0].path,'/api/accounts');
+  assert.equal(h.context.sent[0].body.quotaProtection.monthlyThresholdUsd,0.30);
+  h.context.sent.length=0; h.context.confirm=()=>false;
+  await h.run("recoverMonthlyQuota('id0')"); assert.equal(h.context.sent.length,0);
+  h.context.confirm=()=>true; await h.run("recoverMonthlyQuota('id0')");
+  assert.equal(h.context.sent[0].path,'/api/accounts/quota-recover');
+  assert.equal(h.context.sent[0].body.id,'id0');
+  h.run("ACCS.accounts[0].state={protectionMonthlyAt:123};renderAccounts()");
+  assert.match(h.el('#accBody').innerHTML,/解除月额度封禁/);
+  h.run("ACCS.accounts[0].quota={protectionPersistence:'pending'};renderAccounts()");
+  assert.match(h.el('#accBody').innerHTML,/月额度封禁（写盘待重试/);
+  h.context.pendingRow={quota:{protectionMonthlyAt:123,protectionPersistence:'pending',limits:{},refresh:{reason:'disabled'}}};
+  assert.match(h.run('quotaState(pendingRow,1000)'),/写盘待重试（重启前须确认持久化）/);
+  assert.match(h.run('accountDisposition({},pendingRow.quota)'),/写盘待重试/);
+  h.run("ACCS.accounts[0].health={disabled:true};renderAccounts()");
+  assert.match(h.el('#accBody').innerHTML,/已禁用.*月额度封禁写盘待重试/);
+  assert.match(h.run('accountDisposition({disabled:true},pendingRow.quota)'),/写盘待重试/);
+});
 
 test('bulk assignment is atomic, target-only, draft-only and independent of active radio', () => {
   const h = harness(), before = h.snapshot();
