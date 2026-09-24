@@ -18,7 +18,7 @@ This parent owns the integration contract only. Each child has a separate PRD, d
 
 ## Integration/rollout boundary
 
-No production operation is authorized by planning. Deployment, when separately requested, uses committed main HEAD and the deployment guidelines. Migrating admin auth needs a reversible plan without an API-key management backdoor; raw-body mode must remain off across migrations and rollback. The existing deployment pre-switch backup contract copies config/metadata, not detailed bodies, but unknown external backups need explicit operator guidance so 48h source retention is not represented as a backup guarantee.
+No production operation is authorized by planning. Deployment, when separately requested, uses committed main HEAD and the deployment guidelines. Migrating admin auth needs a reversible plan without an API-key management backdoor; raw-body mode must remain off across migrations and rollback. The baseline deployment contract requires config/metadata backup, and the previous production release procedure additionally copied detailed logs into a private backup. Therefore a future 48h raw-body source TTL cannot be claimed for existing or new backups: raw diagnostics must be excluded from backups or covered by a separately enforced backup-expiry policy before raw capture is enabled.
 
 ## Open design gates
 
