@@ -1,0 +1,7 @@
+{"file":".trellis/spec/backend/index.md","reason":"Follow quality, logging, persistence and routing scenario guides completely"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Protect chat finalization, metadata durability and diagnostics"}
+{"file":".trellis/tasks/09-25-pricing-console-keys-300rpm/research/current-contract-and-hotpaths.md","reason":"Profiling hypotheses and benchmark candidate boundaries"}
+{"file": ".trellis/tasks/09-25-pricing-console-keys-300rpm/research/perf-routing-transport.md", "reason": "Read-only whole-flow evidence and measured local synthetic results"}
+{"file": ".trellis/tasks/09-25-pricing-console-keys-300rpm/research/perf-stats-diagnostics-startup.md", "reason": "Read-only whole-flow evidence and measured local synthetic results"}
+{"file": ".trellis/tasks/09-25-pricing-console-keys-300rpm/research/perf-management-ui.md", "reason": "Read-only whole-flow evidence and measured local synthetic results"}
+{"file": ".trellis/tasks/09-25-pricing-console-keys-300rpm/research/local-latency-results.md", "reason": "Read-only whole-flow evidence and measured local synthetic results"}

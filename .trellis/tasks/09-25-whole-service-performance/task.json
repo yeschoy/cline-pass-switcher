@@ -1,8 +1,8 @@
 {
-  "id": "service-300rpm-performance",
-  "name": "service-300rpm-performance",
-  "title": "300 RPM 服务热路径剖析与针对性优化",
-  "description": "用隔离本地模拟负载建立全服务 300 RPM 基线、定位热路径并优化有证据的瓶颈。",
+  "id": "whole-service-performance",
+  "name": "whole-service-performance",
+  "title": "全程序性能审查与针对性优化",
+  "description": "审查启动、请求、路由、传输、持久化、诊断和管理台等关键流程，用隔离测量定位慢操作并按证据优化。",
   "status": "planning",
   "dev_type": null,
   "scope": null,

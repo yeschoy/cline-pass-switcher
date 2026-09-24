@@ -1,8 +1,8 @@
 {
   "id": "pricing-console-keys-300rpm",
   "name": "pricing-console-keys-300rpm",
-  "title": "模型价格与简洁统计、多客户端密钥和 300 RPM 容量规划",
-  "description": "规划参考价格更新、模型与渠道统计页简化、多客户端 API 密钥分配及 300 RPM 容量验证与优化，并按独立交付拆分实施。",
+  "title": "模型价格、简洁统计、多客户端密钥与全程序性能优化",
+  "description": "规划参考价格更新、模型与渠道统计页简化、多客户端 API 密钥分配及全程序慢路径测量优化，并按独立交付拆分实施。",
   "status": "planning",
   "dev_type": null,
   "scope": null,
@@ -22,7 +22,7 @@
     "09-25-expand-reference-prices",
     "09-25-simplify-model-provider-console",
     "09-25-multi-client-key-routing",
-    "09-25-service-300rpm-performance"
+    "09-25-whole-service-performance"
   ],
   "parent": null,
   "relatedFiles": [],

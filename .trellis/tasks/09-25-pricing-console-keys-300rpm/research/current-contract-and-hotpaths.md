@@ -1,4 +1,6 @@
-# Current contract / candidate hotspots (read-only, 2026-09-25)
+# Initial current contract / candidate hotspots (read-only, 2026-09-25)
+
+This is the initial narrow scan, superseded for whole-program performance by `perf-routing-transport.md`, `perf-stats-diagnostics-startup.md`, `perf-management-ui.md` and the local two-run `local-latency-results.md`. 300 RPM is a future sample workload, not the user's main objective.
 
 ## Pricing and UI
 

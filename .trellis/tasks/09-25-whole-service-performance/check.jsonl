@@ -1,3 +1,5 @@
 {"file":".trellis/spec/backend/index.md","reason":"Follow full tests, logging, statistics and fail-open quality gates"}
 {"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Review source-to-response lifecycle and persistence semantics"}
 {"file":".trellis/tasks/09-25-pricing-console-keys-300rpm/research/current-contract-and-hotpaths.md","reason":"Distinguish measured results from initial hypotheses"}
+{"file": ".trellis/tasks/09-25-pricing-console-keys-300rpm/research/local-latency-results.md", "reason": "Compare measurements and avoid causal or production overclaims"}
+{"file": ".trellis/tasks/09-25-pricing-console-keys-300rpm/research/perf-stats-diagnostics-startup.md", "reason": "Review persisted statistics/logging correctness while profiling"}
