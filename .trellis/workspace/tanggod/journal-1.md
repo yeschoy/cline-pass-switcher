@@ -770,3 +770,25 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 32: 管理员登录生产验收与部署记录收尾
+<!-- trellis-session: v=2 fp=7341d44f93d4e071 -->
+
+**Date**: 2026-09-24
+**Task**: 管理员登录生产验收与部署记录收尾
+**Branch**: `main`
+
+### Summary
+
+操作员确认重启后三页可读与06:29 UTC配置变更有意；只读核验生产c35cd74健康、零重启、初始化码移除、账号/内部别名与配置哈希；原子完成私有部署记录，保留当前配置和备份。文档/父任务状态同步、校验并提交；未部署其余四项。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `75158cb` | docs(task): 完成管理员登录生产验收记录 |
+
+### Status
+
+[OK] **Completed**

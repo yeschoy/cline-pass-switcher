@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 31
-- **Last Active**: 2026-09-23
+- **Total Sessions**: 32
+- **Last Active**: 2026-09-24
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~772 | Active |
+| `journal-1.md` | ~794 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 32 | 2026-09-24 | 管理员登录生产验收与部署记录收尾 | `75158cb` | `main` |
 | 31 | 2026-09-23 | 详细日志丢弃分原因计数 | `87ee8a3`, `04aabb4`, `608045f` | `feat/detailed-log-drop-reasons` |
 | 30 | 2026-09-23 | 部署集成版本 2431d5b 到生产 Switcher | `2431d5b`, `31a2191` | `main` |
 | 29 | 2026-09-23 | 上游诊断、账号限流、热池调度与长连接兼容集成验收 | `1fd8e35`, `7b02dfd` | `main` |
