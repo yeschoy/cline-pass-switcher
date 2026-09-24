@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { JsonlLogGroup } from './lib/jsonl-log-store.js';
@@ -586,7 +587,7 @@ function normalizeModelAliases(value) {
   const error = validateModelAliases(value || {}); if (error) { console.warn(`[配置] 已禁用非法模型别名：${error}`); return {}; }
   return Object.fromEntries(Object.entries(value || {}).map(([a, t]) => [a.trim(), t.trim()]));
 }
-function resolveModelAlias(model) { return config.modelAliases?.[model] || model; }
+function resolveModelAlias(model) { return Object.hasOwn(config.modelAliases || {}, model) ? config.modelAliases[model] : model; }
 // 账号级 RPM：每账号一个进程内精确滚动窗口（默认 60 秒）加未提交预留。
 // 重启清空、多副本各自独立；这是软保护，不是跨进程硬上限。
 const RPM_WINDOW_MS = process.env.NODE_ENV === 'test'
@@ -846,28 +847,67 @@ function validateSuccessHealth(value, label) {
     if ((overflowed && value[key] !== null) || (!overflowed && (!Number.isSafeInteger(value[key]) || value[key] < 0))) throw new Error(`invalid statistics ${label}.${key}`);
   }
 }
-const STATISTICS_VERSION = 4;
+// Frozen ClinePass reference rates, USD per 1M tokens in integer thousandths.
+// Collection date is ours; the official table does not publish an effective date.
+const REFERENCE_PRICE = Object.freeze({ version: 'clinepass-2026-09-24-v1', collectedAt: '2026-09-24', effectiveAt: null,
+  source: 'https://docs.cline.bot/getting-started/clinepass', currency: 'USD',
+  models: {
+    'cline-pass/kimi-k3': { tier: 'single', rates: [[3000,15000,300]] },
+    'cline-pass/glm-5.3': { tier: 'single', rates: [[1400,4400,260]] },
+    'cline-pass/deepseek-v4-flash': { tier: 'peak/off-peak range', rates: [[220,660,7],[440,1320,14]] },
+    'cline-pass/deepseek-v4-pro': { tier: 'peak/off-peak range', rates: [[660,1980,22],[1320,3960,44]] },
+  },
+});
+const STATISTICS_VERSION = 5;
+const MAX_USAGE_MINUTE_CELLS = process.env.NODE_ENV === 'test' ? Math.max(1, Number(process.env.CLINE_PASS_TEST_USAGE_CELL_LIMIT) || 50000) : 50000;
+const MAX_VALUATION_MINUTE_CELLS = process.env.NODE_ENV === 'test' ? Math.max(1, Number(process.env.CLINE_PASS_TEST_VALUATION_CELL_LIMIT) || 50000) : 50000;
+const MAX_PRICE_VERSIONS = 8;
+const VALUATION_FIELDS = ['pricedRequests','lowPicoUsd','highPicoUsd'];
+function emptyValuation() { return { pricedRequests: 0, lowPicoUsd: 0, highPicoUsd: 0, overflowFields: [] }; }
+const STAT_PROVIDER_ID = /^[a-z0-9][a-z0-9._/-]{0,199}$/i;
+const FINAL_FIELDS = ['successes','failures','cancelled'];
+function emptyFinal() { return { successes: 0, failures: 0, cancelled: 0, overflowFields: [] }; }
+function validateFinal(value) {
+  if (!isPlainObject(value) || Object.keys(value).length !== 4 || !Array.isArray(value.overflowFields) || new Set(value.overflowFields).size !== value.overflowFields.length || value.overflowFields.some((key) => !FINAL_FIELDS.includes(key))) throw new Error('invalid statistics model final');
+  for (const key of FINAL_FIELDS) if (value.overflowFields.includes(key) ? value[key] !== null : !Number.isSafeInteger(value[key]) || value[key] < 0) throw new Error('invalid statistics model final counter');
+}
+function validPriceVersion(id) { return typeof id === 'string' && /^[a-z0-9][a-z0-9-]{0,79}$/.test(id) && !['constructor','prototype','__proto__'].includes(id); }
+function validateValuation(value) {
+  if (!isPlainObject(value) || Object.keys(value).length !== 4 || !Array.isArray(value.overflowFields) || new Set(value.overflowFields).size !== value.overflowFields.length || value.overflowFields.some((key) => !VALUATION_FIELDS.includes(key))) throw new Error('invalid statistics valuation');
+  for (const key of VALUATION_FIELDS) if (value.overflowFields.includes(key) ? value[key] !== null : !Number.isSafeInteger(value[key]) || value[key] < 0) throw new Error('invalid statistics valuation counter');
+}
+function validatePriceSnapshot(snapshot) {
+  if (!isPlainObject(snapshot) || Object.keys(snapshot).sort().join(',') !== 'collectedAt,currency,effectiveAt,models,source,version' || !validPriceVersion(snapshot.version) || !/^\d{4}-\d{2}-\d{2}$/.test(snapshot.collectedAt) || snapshot.effectiveAt !== null || snapshot.source !== REFERENCE_PRICE.source || snapshot.currency !== 'USD' || !isPlainObject(snapshot.models) || Object.keys(snapshot.models).length > 16) throw new Error('invalid statistics price snapshot');
+  for (const [id, price] of Object.entries(snapshot.models)) if (!/^cline-pass\/[a-z0-9._-]{1,200}$/.test(id) || !isPlainObject(price) || Object.keys(price).sort().join(',') !== 'rates,tier' || !['single','peak/off-peak range'].includes(price.tier) || !Array.isArray(price.rates) || price.rates.length !== (price.tier === 'single' ? 1 : 2) || price.rates.some((row) => !Array.isArray(row) || row.length !== 3 || row.some((rate) => !Number.isSafeInteger(rate) || rate < 0 || rate > 10000000))) throw new Error('invalid statistics price rates');
+}
+function referenceValue(modelId, usage) {
+  const price = Object.hasOwn(REFERENCE_PRICE.models, modelId) ? REFERENCE_PRICE.models[modelId] : null;
+  if (!price || !usage || ![usage.inputTokens,usage.outputTokens,usage.cachedTokens].every((n) => Number.isSafeInteger(n) && n >= 0) || usage.cachedTokens > usage.inputTokens) return null;
+  const amounts = price.rates.map(([input,output,cached]) => (BigInt(usage.inputTokens - usage.cachedTokens) * BigInt(input) + BigInt(usage.outputTokens) * BigInt(output) + BigInt(usage.cachedTokens) * BigInt(cached)) * 1000n);
+  return { lowPicoUsd: amounts[0] <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(amounts[0]) : null, highPicoUsd: amounts.at(-1) <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(amounts.at(-1)) : null };
+}
 const MAX_ACCOUNT_MINUTE_CELLS = process.env.NODE_ENV === 'test' ? Math.max(1, Number(process.env.CLINE_PASS_TEST_ACCOUNT_MINUTE_CELL_LIMIT) || 50000) : 50000;
 const MAX_MODEL_MINUTE_CELLS = process.env.NODE_ENV === 'test' ? Math.max(1, Number(process.env.CLINE_PASS_TEST_MODEL_CELL_LIMIT) || 50000) : 50000;
 const MAX_PROVIDER_HEALTH_MINUTE_CELLS = process.env.NODE_ENV === 'test' ? Math.max(1, Number(process.env.CLINE_PASS_TEST_PROVIDER_HEALTH_CELL_LIMIT) || 50000) : 50000;
 const FORBIDDEN_STATISTIC_KEYS = new Set(['__proto__','prototype','constructor']);
 function validStatisticModelId(id) { return typeof id === 'string' && id.length > 0 && id.length <= 300 && !/[\x00-\x1f\x7f]/.test(id) && !FORBIDDEN_STATISTIC_KEYS.has(id); }
-function aggregateCell(map, key) {
-  if (!Object.hasOwn(map, key)) Object.defineProperty(map, key, { value: emptyAggregate(), enumerable: true, configurable: true, writable: true });
+function statisticCell(map, key, make) {
+  if (!Object.hasOwn(map, key)) Object.defineProperty(map, key, { value: make(), enumerable: true, configurable: true, writable: true });
   return map[key];
 }
+function aggregateCell(map, key) { return statisticCell(map, key, emptyAggregate); }
 function createStatistics(now = Date.now()) {
   const minute = Math.floor(now / 60000);
-  return { version: STATISTICS_VERSION, lifetime: { global: emptyAggregate(), accounts: {} }, minuteBuckets: [], recentCoverage: { droppedAccountMinuteCells: 0, accountIncompleteAt: {}, modelTrackingStartedMinute: minute, droppedModelMinuteCells: 0, modelIncompleteAt: {}, routingTrackingStartedMinute: minute, accountHealthTrackingStartedMinute: minute, accountHealthIncompleteAt: {}, droppedProviderHealthMinuteCells: 0, providerHealthTrackingStartedMinute: minute, providerHealthIncompleteAt: {} }, migration: { legacyStatsMigratedAt: now, legacyRequests: 0, accountLegacyRequests: {}, ambiguousNames: 0, unmappedNames: 0 } };
+  return { version: STATISTICS_VERSION, lifetime: { global: emptyAggregate(), accounts: {} }, minuteBuckets: [], recentCoverage: { droppedAccountMinuteCells: 0, accountIncompleteAt: {}, modelTrackingStartedMinute: minute, droppedModelMinuteCells: 0, modelIncompleteAt: {}, routingTrackingStartedMinute: minute, accountHealthTrackingStartedMinute: minute, accountHealthIncompleteAt: {}, droppedProviderHealthMinuteCells: 0, providerHealthTrackingStartedMinute: minute, providerHealthIncompleteAt: {}, usageTrackingStartedMinute: minute, droppedUsageMinuteCells: 0, usageIncompleteAt: {}, usageGlobalIncompleteAt: 0, droppedValuationMinuteCells: 0, valuationIncompleteAt: {}, valuationGlobalIncompleteAt: 0 }, priceVersions: {}, migration: { legacyStatsMigratedAt: now, legacyRequests: 0, accountLegacyRequests: {}, ambiguousNames: 0, unmappedNames: 0 } };
 }
 function validateStatistics(stats) {
-  if (!isPlainObject(stats) || ![1,2,3,STATISTICS_VERSION].includes(stats.version)) throw new Error(stats?.version > STATISTICS_VERSION ? 'unsupported statistics version' : 'invalid statistics version');
-  const hasModels = stats.version >= 2, hasRouting = stats.version >= 3, hasSuccessHealth = stats.version >= 4, aggregateFields = hasRouting ? AGG_FIELDS : LEGACY_AGG_FIELDS;
-  const coverageKeys = hasSuccessHealth
+  if (!isPlainObject(stats) || ![1,2,3,4,STATISTICS_VERSION].includes(stats.version)) throw new Error(stats?.version > STATISTICS_VERSION ? 'unsupported statistics version' : 'invalid statistics version');
+  const hasModels = stats.version >= 2, hasRouting = stats.version >= 3, hasSuccessHealth = stats.version >= 4, hasUsage = stats.version >= 5, aggregateFields = hasRouting ? AGG_FIELDS : LEGACY_AGG_FIELDS;
+  const coverageKeys = hasUsage ? ['droppedAccountMinuteCells','accountIncompleteAt','modelTrackingStartedMinute','droppedModelMinuteCells','modelIncompleteAt','routingTrackingStartedMinute','accountHealthTrackingStartedMinute','accountHealthIncompleteAt','droppedProviderHealthMinuteCells','providerHealthTrackingStartedMinute','providerHealthIncompleteAt','usageTrackingStartedMinute','droppedUsageMinuteCells','usageIncompleteAt','usageGlobalIncompleteAt','droppedValuationMinuteCells','valuationIncompleteAt','valuationGlobalIncompleteAt'] : hasSuccessHealth
     ? ['droppedAccountMinuteCells','accountIncompleteAt','modelTrackingStartedMinute','droppedModelMinuteCells','modelIncompleteAt','routingTrackingStartedMinute','accountHealthTrackingStartedMinute','accountHealthIncompleteAt','droppedProviderHealthMinuteCells','providerHealthTrackingStartedMinute','providerHealthIncompleteAt']
     : hasRouting ? ['droppedAccountMinuteCells','accountIncompleteAt','modelTrackingStartedMinute','droppedModelMinuteCells','modelIncompleteAt','routingTrackingStartedMinute']
       : hasModels ? ['droppedAccountMinuteCells','accountIncompleteAt','modelTrackingStartedMinute','droppedModelMinuteCells','modelIncompleteAt'] : ['droppedAccountMinuteCells','accountIncompleteAt'];
-  if (Object.keys(stats).some((key) => !['version','lifetime','minuteBuckets','recentCoverage','migration'].includes(key)) || !isPlainObject(stats.lifetime) || Object.keys(stats.lifetime).some((key) => !['global','accounts'].includes(key)) || !isPlainObject(stats.lifetime.accounts) || !Array.isArray(stats.minuteBuckets) || stats.minuteBuckets.length > 1440 || !isPlainObject(stats.recentCoverage) || Object.keys(stats.recentCoverage).length !== coverageKeys.length || coverageKeys.some((key) => !Object.hasOwn(stats.recentCoverage,key)) || !Number.isSafeInteger(stats.recentCoverage.droppedAccountMinuteCells) || stats.recentCoverage.droppedAccountMinuteCells < 0 || !isPlainObject(stats.recentCoverage.accountIncompleteAt) || !isPlainObject(stats.migration)) throw new Error('invalid statistics structure');
+  if (Object.keys(stats).length !== (hasUsage ? 6 : 5) || Object.keys(stats).some((key) => !['version','lifetime','minuteBuckets','recentCoverage','migration',...(hasUsage ? ['priceVersions'] : [])].includes(key)) || !isPlainObject(stats.lifetime) || Object.keys(stats.lifetime).some((key) => !['global','accounts'].includes(key)) || !isPlainObject(stats.lifetime.accounts) || !Array.isArray(stats.minuteBuckets) || stats.minuteBuckets.length > 1440 || !isPlainObject(stats.recentCoverage) || Object.keys(stats.recentCoverage).length !== coverageKeys.length || coverageKeys.some((key) => !Object.hasOwn(stats.recentCoverage,key)) || !Number.isSafeInteger(stats.recentCoverage.droppedAccountMinuteCells) || stats.recentCoverage.droppedAccountMinuteCells < 0 || !isPlainObject(stats.recentCoverage.accountIncompleteAt) || !isPlainObject(stats.migration)) throw new Error('invalid statistics structure');
   for (const [id, minute] of Object.entries(stats.recentCoverage.accountIncompleteAt)) if (!/^[A-Za-z0-9_-]{1,100}$/.test(id) || !Number.isSafeInteger(minute) || minute < 0) throw new Error('invalid statistics coverage');
   if (hasModels && (!Number.isSafeInteger(stats.recentCoverage.modelTrackingStartedMinute) || stats.recentCoverage.modelTrackingStartedMinute < 0 || !Number.isSafeInteger(stats.recentCoverage.droppedModelMinuteCells) || stats.recentCoverage.droppedModelMinuteCells < 0 || !isPlainObject(stats.recentCoverage.modelIncompleteAt))) throw new Error('invalid statistics model coverage');
   if (hasModels) for (const [id, minute] of Object.entries(stats.recentCoverage.modelIncompleteAt)) if (!validStatisticModelId(id) || !Number.isSafeInteger(minute) || minute < 0) throw new Error('invalid statistics model coverage');
@@ -881,14 +921,24 @@ function validateStatistics(stats) {
       for (const [provider, minute] of Object.entries(providers)) if (!/^[a-z0-9][a-z0-9._/-]{0,199}$/i.test(provider) || !Number.isSafeInteger(minute) || minute < 0) throw new Error('invalid statistics provider health coverage');
     }
   }
+  if (hasUsage) {
+    const c = stats.recentCoverage;
+    if (!isPlainObject(stats.priceVersions) || Object.keys(stats.priceVersions).length > MAX_PRICE_VERSIONS || !Number.isSafeInteger(c.usageTrackingStartedMinute) || c.usageTrackingStartedMinute < 0) throw new Error('invalid statistics usage coverage');
+    for (const key of ['droppedUsageMinuteCells','droppedValuationMinuteCells','usageGlobalIncompleteAt','valuationGlobalIncompleteAt']) if (!Number.isSafeInteger(c[key]) || c[key] < 0) throw new Error('invalid statistics cell loss');
+    for (const field of ['usageIncompleteAt','valuationIncompleteAt']) {
+      if (!isPlainObject(c[field]) || Object.keys(c[field]).length > MAX_USAGE_MINUTE_CELLS) throw new Error('invalid statistics coverage');
+      for (const [id, minute] of Object.entries(c[field])) if (!validStatisticModelId(id) || !Number.isSafeInteger(minute) || minute < 0) throw new Error('invalid statistics coverage');
+    }
+    for (const [version, snapshot] of Object.entries(stats.priceVersions)) { if (!validPriceVersion(version) || version !== snapshot?.version) throw new Error('invalid statistics price version'); validatePriceSnapshot(snapshot); if (version === REFERENCE_PRICE.version && !isDeepStrictEqual(snapshot, REFERENCE_PRICE)) throw new Error('invalid current reference price snapshot'); }
+  }
   if (Object.keys(stats.migration).some((key) => !['legacyStatsMigratedAt','legacyRequests','accountLegacyRequests','ambiguousNames','unmappedNames'].includes(key)) || !Number.isSafeInteger(stats.migration.legacyStatsMigratedAt) || stats.migration.legacyStatsMigratedAt < 0 || !Number.isSafeInteger(stats.migration.legacyRequests) || stats.migration.legacyRequests < 0 || !isPlainObject(stats.migration.accountLegacyRequests) || !Number.isSafeInteger(stats.migration.ambiguousNames) || stats.migration.ambiguousNames < 0 || !Number.isSafeInteger(stats.migration.unmappedNames) || stats.migration.unmappedNames < 0) throw new Error('invalid statistics migration');
   for (const [id, requests] of Object.entries(stats.migration.accountLegacyRequests)) if (!/^[A-Za-z0-9_-]{1,100}$/.test(id) || !Number.isSafeInteger(requests) || requests < 0) throw new Error('invalid statistics legacy account');
   validateAggregate(stats.lifetime.global, 'lifetime.global', aggregateFields);
   for (const [id, aggregate] of Object.entries(stats.lifetime.accounts)) { if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new Error('invalid statistics account id'); validateAggregate(aggregate, `lifetime.accounts.${id}`, aggregateFields); }
-  let previous = -1, accountCells = 0, modelCells = 0, providerHealthCells = 0;
+  let previous = -1, accountCells = 0, modelCells = 0, providerHealthCells = 0, usageCells = 0, valuationCells = 0;
   for (const bucket of stats.minuteBuckets) {
-    const bucketKeys = hasSuccessHealth ? ['minute','global','accounts','health','models','accountHealth','providerHealth'] : hasModels ? ['minute','global','accounts','health','models'] : ['minute','global','accounts','health'];
-    if (!isPlainObject(bucket) || Object.keys(bucket).length !== bucketKeys.length || bucketKeys.some((key) => !Object.hasOwn(bucket,key)) || !Number.isSafeInteger(bucket.minute) || bucket.minute < 0 || bucket.minute <= previous || !isPlainObject(bucket.global) || !isPlainObject(bucket.accounts) || !isPlainObject(bucket.health) || (hasModels && !isPlainObject(bucket.models)) || (hasSuccessHealth && (!isPlainObject(bucket.accountHealth) || !isPlainObject(bucket.providerHealth)))) throw new Error('invalid statistics minute bucket');
+    const bucketKeys = hasUsage ? ['minute','global','accounts','health','models','accountHealth','providerHealth','modelFinal','providerUsage','valuation'] : hasSuccessHealth ? ['minute','global','accounts','health','models','accountHealth','providerHealth'] : hasModels ? ['minute','global','accounts','health','models'] : ['minute','global','accounts','health'];
+    if (!isPlainObject(bucket) || Object.keys(bucket).length !== bucketKeys.length || bucketKeys.some((key) => !Object.hasOwn(bucket,key)) || !Number.isSafeInteger(bucket.minute) || bucket.minute < 0 || bucket.minute <= previous || !isPlainObject(bucket.global) || !isPlainObject(bucket.accounts) || !isPlainObject(bucket.health) || (hasModels && !isPlainObject(bucket.models)) || (hasSuccessHealth && (!isPlainObject(bucket.accountHealth) || !isPlainObject(bucket.providerHealth))) || (hasUsage && (!isPlainObject(bucket.modelFinal) || !isPlainObject(bucket.providerUsage) || !isPlainObject(bucket.valuation)))) throw new Error('invalid statistics minute bucket');
     previous = bucket.minute; validateAggregate(bucket.global, `bucket.${bucket.minute}.global`, aggregateFields);
     const ids = new Set([...Object.keys(bucket.accounts), ...Object.keys(bucket.health), ...(hasSuccessHealth ? Object.keys(bucket.accountHealth) : [])]); accountCells += ids.size;
     for (const [id, aggregate] of Object.entries(bucket.accounts)) { if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new Error('invalid statistics account id'); validateAggregate(aggregate, `bucket.${bucket.minute}.accounts.${id}`, aggregateFields); }
@@ -901,7 +951,22 @@ function validateStatistics(stats) {
         for (const [provider, health] of Object.entries(providers)) { if (!/^[a-z0-9][a-z0-9._/-]{0,199}$/i.test(provider)) throw new Error('invalid statistics provider health provider'); providerHealthCells++; validateSuccessHealth(health, `bucket.${bucket.minute}.providerHealth.${modelId}.${provider}`); }
       }
     }
+    if (hasUsage) {
+      for (const [id, final] of Object.entries(bucket.modelFinal)) { if (!validStatisticModelId(id) || !Object.hasOwn(bucket.models,id)) throw new Error('invalid statistics model final id'); validateFinal(final); }
+      for (const [model, providers] of Object.entries(bucket.providerUsage)) {
+        if (!validStatisticModelId(model) || !isPlainObject(providers)) throw new Error('invalid statistics usage model');
+        for (const [provider, delta] of Object.entries(providers)) { if (provider && !STAT_PROVIDER_ID.test(provider)) throw new Error('invalid statistics usage provider'); usageCells++; validateAggregate(delta, 'provider usage'); }
+      }
+      for (const [model, providers] of Object.entries(bucket.valuation)) {
+        if (!validStatisticModelId(model) || !isPlainObject(providers)) throw new Error('invalid statistics valuation model');
+        for (const [provider, versions] of Object.entries(providers)) {
+          if (provider && !STAT_PROVIDER_ID.test(provider) || !isPlainObject(versions)) throw new Error('invalid statistics valuation provider');
+          for (const [version, value] of Object.entries(versions)) { if (!Object.hasOwn(stats.priceVersions, version) || !Object.hasOwn(stats.priceVersions[version].models, model)) throw new Error('invalid statistics valuation version'); valuationCells++; validateValuation(value); }
+        }
+      }
+    }
   }
+  if (usageCells > MAX_USAGE_MINUTE_CELLS || valuationCells > MAX_VALUATION_MINUTE_CELLS) throw new Error('statistics usage/valuation cell limit exceeded');
   if (accountCells > MAX_ACCOUNT_MINUTE_CELLS) throw new Error('statistics account-minute cell limit exceeded');
   if (modelCells > MAX_MODEL_MINUTE_CELLS) throw new Error('statistics model-minute cell limit exceeded');
   if (providerHealthCells > MAX_PROVIDER_HEALTH_MINUTE_CELLS) throw new Error('statistics provider-health-minute cell limit exceeded');
@@ -938,6 +1003,14 @@ function normalizeStatistics() {
         providerHealthTrackingStartedMinute: minute,
         providerHealthIncompleteAt: {},
       });
+      META.statistics.version = 4;
+      dirty = true;
+    }
+    if (META.statistics.version === 4) {
+      const minute = Math.floor(Date.now() / 60000);
+      META.statistics.minuteBuckets = META.statistics.minuteBuckets.map((bucket) => ({ ...bucket, modelFinal: {}, providerUsage: {}, valuation: {} }));
+      Object.assign(META.statistics.recentCoverage, { usageTrackingStartedMinute: minute, droppedUsageMinuteCells: 0, usageIncompleteAt: {}, usageGlobalIncompleteAt: 0, droppedValuationMinuteCells: 0, valuationIncompleteAt: {}, valuationGlobalIncompleteAt: 0 });
+      META.statistics.priceVersions = {};
       META.statistics.version = STATISTICS_VERSION;
       dirty = true;
     }
@@ -2370,7 +2443,7 @@ function successHealthCell(map, key) {
   return map[key];
 }
 function providerSuccessHealthCell(bucket, modelId, provider) {
-  const byModel = (bucket.providerHealth[modelId] ||= {});
+  const byModel = statisticCell(bucket.providerHealth, modelId, () => ({}));
   return successHealthCell(byModel, provider);
 }
 function classifyHealth(trace, { success = false, clientDisconnect = false } = {}) {
@@ -2385,10 +2458,16 @@ function classifyHealth(trace, { success = false, clientDisconnect = false } = {
   if (status >= 400 && status <= 499) return null;
   return { penaltyUnits: 5, class: 'other', error: true };
 }
+function markStatisticsIncomplete(coverage,kind,model,minute) {
+  const map = coverage[`${kind}IncompleteAt`];
+  if (Object.hasOwn(map,model) || Object.keys(map).length < MAX_USAGE_MINUTE_CELLS) map[model] = Math.max(map[model] || 0,minute);
+  else coverage[`${kind}GlobalIncompleteAt`] = Math.max(coverage[`${kind}GlobalIncompleteAt`],minute);
+}
 function pruneStatistics(now = Date.now()) {
   const stats = META.statistics, coverage = stats.recentCoverage, minMinute = Math.floor(now / 60000) - 1439;
   stats.minuteBuckets = stats.minuteBuckets.filter((bucket) => bucket.minute >= minMinute);
-  for (const field of ['accountIncompleteAt','accountHealthIncompleteAt','modelIncompleteAt']) for (const [id, minute] of Object.entries(coverage[field] || {})) if (minute < minMinute) delete coverage[field][id];
+  for (const field of ['accountIncompleteAt','accountHealthIncompleteAt','modelIncompleteAt','usageIncompleteAt','valuationIncompleteAt']) for (const [id, minute] of Object.entries(coverage[field] || {})) if (minute < minMinute) delete coverage[field][id];
+  for (const field of ['usageGlobalIncompleteAt','valuationGlobalIncompleteAt']) if (coverage[field] < minMinute) coverage[field] = 0;
   for (const [modelId, providers] of Object.entries(coverage.providerHealthIncompleteAt || {})) {
     for (const [provider, minute] of Object.entries(providers)) if (minute < minMinute) delete providers[provider];
     if (!Object.keys(providers).length) delete coverage.providerHealthIncompleteAt[modelId];
@@ -2408,8 +2487,8 @@ function pruneStatistics(now = Date.now()) {
     if (modelCells <= MAX_MODEL_MINUTE_CELLS) break;
     for (const id of Object.keys(bucket.models)) {
       if (modelCells-- <= MAX_MODEL_MINUTE_CELLS) break;
-      delete bucket.models[id]; coverage.droppedModelMinuteCells++;
-      coverage.modelIncompleteAt[id] = Math.max(coverage.modelIncompleteAt[id] || 0, bucket.minute);
+      delete bucket.models[id]; delete bucket.modelFinal[id]; coverage.droppedModelMinuteCells++;
+      coverage.modelIncompleteAt[id] = Math.max(Object.hasOwn(coverage.modelIncompleteAt,id) ? coverage.modelIncompleteAt[id] : 0, bucket.minute);
     }
   }
   let providerCells = stats.minuteBuckets.reduce((sum,bucket) => sum + Object.values(bucket.providerHealth).reduce((count, providers) => count + Object.keys(providers).length, 0), 0);
@@ -2417,21 +2496,76 @@ function pruneStatistics(now = Date.now()) {
     if (providerCells <= MAX_PROVIDER_HEALTH_MINUTE_CELLS) break providerPrune;
     providerCells--;
     delete providers[provider]; coverage.droppedProviderHealthMinuteCells++;
-    const incomplete = (coverage.providerHealthIncompleteAt[modelId] ||= {});
-    incomplete[provider] = Math.max(incomplete[provider] || 0, bucket.minute);
+    const incomplete = statisticCell(coverage.providerHealthIncompleteAt,modelId,()=>({}));
+    incomplete[provider] = Math.max(Object.hasOwn(incomplete,provider) ? incomplete[provider] : 0, bucket.minute);
     if (!Object.keys(providers).length) delete bucket.providerHealth[modelId];
   }
+  const usageCount = () => stats.minuteBuckets.reduce((n,b) => n + Object.values(b.providerUsage).reduce((sum,p) => sum + Object.keys(p).length,0),0);
+  let usageCells = usageCount();
+  usagePrune: for (const bucket of stats.minuteBuckets) for (const [model, providers] of Object.entries(bucket.providerUsage)) for (const provider of Object.keys(providers)) {
+    if (usageCells <= MAX_USAGE_MINUTE_CELLS) break usagePrune;
+    usageCells--; delete providers[provider]; coverage.droppedUsageMinuteCells++;
+    markStatisticsIncomplete(coverage,'usage',model,bucket.minute);
+    if (!Object.keys(providers).length) delete bucket.providerUsage[model];
+  }
+  let valuationCells = stats.minuteBuckets.reduce((n,b) => n + Object.values(b.valuation).reduce((sum,p) => sum + Object.values(p).reduce((v,versions) => v + Object.keys(versions).length,0),0),0);
+  valuationPrune: for (const bucket of stats.minuteBuckets) for (const [model, providers] of Object.entries(bucket.valuation)) for (const [provider, versions] of Object.entries(providers)) for (const version of Object.keys(versions)) {
+    if (valuationCells <= MAX_VALUATION_MINUTE_CELLS) break valuationPrune;
+    valuationCells--; delete versions[version]; coverage.droppedValuationMinuteCells++;
+    markStatisticsIncomplete(coverage,'valuation',model,bucket.minute);
+    if (!Object.keys(versions).length) delete providers[provider];
+    if (!Object.keys(providers).length) delete bucket.valuation[model];
+  }
+  // Historical price versions are metadata only; retain versions referenced by a cell.
+  for (const version of Object.keys(stats.priceVersions)) if (version !== REFERENCE_PRICE.version && !stats.minuteBuckets.some((bucket) => Object.values(bucket.valuation).some((providers) => Object.values(providers).some((versions) => Object.hasOwn(versions,version))))) delete stats.priceVersions[version];
 }
-function commitStatistics({ ts = Date.now(), modelId = null, globalError = false, usage = null, segments = [], clientDisconnect = false, affinityConfidence = 'none' }) {
+function addReferenceValuation(bucket, modelId, provider, usage) {
+  const value = referenceValue(modelId, usage);
+  if (!value) return;
+  const stats = META.statistics;
+  if (!Object.hasOwn(stats.priceVersions, REFERENCE_PRICE.version)) {
+    if (Object.keys(stats.priceVersions).length >= MAX_PRICE_VERSIONS) {
+      const oldest = Object.keys(stats.priceVersions)[0];
+      for (const cell of stats.minuteBuckets) for (const [model, providers] of Object.entries(cell.valuation)) for (const [name, versions] of Object.entries(providers)) if (Object.hasOwn(versions,oldest)) {
+        delete versions[oldest]; stats.recentCoverage.droppedValuationMinuteCells++;
+        markStatisticsIncomplete(stats.recentCoverage,'valuation',model,cell.minute);
+        if (!Object.keys(versions).length) delete providers[name];
+        if (!Object.keys(providers).length) delete cell.valuation[model];
+      }
+      delete stats.priceVersions[oldest];
+    }
+    stats.priceVersions[REFERENCE_PRICE.version] = structuredClone(REFERENCE_PRICE);
+  }
+  const versions = statisticCell(statisticCell(bucket.valuation,modelId,()=>({})),provider,()=>({}));
+  const cell = statisticCell(versions,REFERENCE_PRICE.version,emptyValuation);
+  addCounter(cell,'pricedRequests');
+  for (const field of ['lowPicoUsd','highPicoUsd']) addCounter(cell,field,value[field] === null ? Number.MAX_SAFE_INTEGER + 1 : value[field]);
+}
+function commitStatistics({ ts = Date.now(), modelId = null, finalProvider = null, globalError = false, usage = null, segments = [], clientDisconnect = false, affinityConfidence = 'none' }) {
   const stats = META.statistics; pruneStatistics(ts);
   const minute = Math.floor(ts / 60000);
   let bucket = stats.minuteBuckets.at(-1);
-  if (!bucket || bucket.minute !== minute) { bucket = { minute, global: emptyAggregate(), accounts: {}, health: {}, models: {}, accountHealth: {}, providerHealth: {} }; stats.minuteBuckets.push(bucket); }
+  if (!bucket || bucket.minute !== minute) { bucket = { minute, global: emptyAggregate(), accounts: {}, health: {}, models: {}, accountHealth: {}, providerHealth: {}, modelFinal: {}, providerUsage: {}, valuation: {} }; stats.minuteBuckets.push(bucket); }
   const globalDelta = emptyAggregate(); addCounter(globalDelta, 'requests'); globalDelta.lastUsedAt = ts;
   if (globalError) { addCounter(globalDelta, 'errors'); globalDelta.lastErrorAt = ts; }
   const globalTrace = segments.flatMap((segment) => segment.trace || []);
   addUsage(globalDelta, usage); addRoutingSignals(globalDelta, affinityConfidence, globalTrace); mergeAggregate(stats.lifetime.global, globalDelta); mergeAggregate(bucket.global, globalDelta);
-  if (validStatisticModelId(modelId)) mergeAggregate(aggregateCell(bucket.models, modelId), globalDelta);
+  if (validStatisticModelId(modelId)) {
+    mergeAggregate(aggregateCell(bucket.models, modelId), globalDelta);
+    const succeeded = !globalError && !clientDisconnect && segments.some((s) => s.success);
+    if (!Object.hasOwn(bucket.modelFinal,modelId)) Object.defineProperty(bucket.modelFinal,modelId,{ value: emptyFinal(), enumerable: true, configurable: true, writable: true });
+    addCounter(bucket.modelFinal[modelId],clientDisconnect ? 'cancelled' : succeeded ? 'successes' : 'failures');
+    // Only the final successful attempt owns usage. Named attribution needs both
+    // an observed final Provider and a matching real named successful attempt.
+    if (succeeded) {
+      const last = globalTrace.at(-1);
+      const provider = last?.healthAction === 'success' && last.upstream && last.upstream === finalProvider ? last.upstream : '';
+      const byModel = statisticCell(bucket.providerUsage,modelId,()=>({}));
+      const delta = emptyAggregate(); addCounter(delta,'requests'); addUsage(delta,usage);
+      mergeAggregate(aggregateCell(byModel,provider),delta);
+      addReferenceValuation(bucket,modelId,provider,usage);
+    }
+  }
   const currentIds = new Set(config.accounts.map((account) => account.id));
   for (const segment of new Map(segments.filter((s) => currentIds.has(s.accountId)).map((s) => [s.accountId,s])).values()) {
     const delta = emptyAggregate(); addCounter(delta, 'requests'); delta.lastUsedAt = ts;
@@ -2475,6 +2609,45 @@ function modelCoverage(modelId, now = Date.now()) {
   const fromMinute = Math.max(min, coverage.modelTrackingStartedMinute, incompleteAt === null ? min : incompleteAt + 1);
   return { complete: coverage.modelTrackingStartedMinute <= min && incompleteAt === null, from: fromMinute * 60000 };
 }
+function providerUsageProjection(modelId, provider = null, now = Date.now()) {
+  const min = Math.floor(now / 60000) - 1439, c = META.statistics.recentCoverage;
+  const out = emptyAggregate(), versions = {};
+  for (const bucket of META.statistics.minuteBuckets) {
+    if (bucket.minute < min) continue;
+    const providers = Object.hasOwn(bucket.providerUsage,modelId) ? bucket.providerUsage[modelId] : {};
+    for (const [name, delta] of Object.entries(providers)) if (provider === null || name === provider) mergeAggregate(out,delta);
+    for (const [name, cells] of Object.entries(Object.hasOwn(bucket.valuation,modelId) ? bucket.valuation[modelId] : {})) if (provider === null || name === provider) for (const [version, delta] of Object.entries(cells)) {
+      const value = statisticCell(versions,version,emptyValuation);
+      for (const key of VALUATION_FIELDS) if (delta[key] === null) { value[key] = null; if (!value.overflowFields.includes(key)) value.overflowFields.push(key); } else addCounter(value,key,delta[key]);
+    }
+  }
+  const incomplete = Math.max(Object.hasOwn(c.usageIncompleteAt,modelId) ? c.usageIncompleteAt[modelId] : 0,c.usageGlobalIncompleteAt);
+  const valuationIncomplete = Math.max(Object.hasOwn(c.valuationIncompleteAt,modelId) ? c.valuationIncompleteAt[modelId] : 0,c.valuationGlobalIncompleteAt);
+  return { usage: projectAggregate(out), coverage: { complete: c.usageTrackingStartedMinute <= min && incomplete < min, from: Math.max(min,c.usageTrackingStartedMinute,incomplete < min ? min : incomplete + 1)*60000 },
+    valuation: { versions, complete: c.usageTrackingStartedMinute <= min && incomplete < min && valuationIncomplete < min,
+      from: Math.max(min,c.usageTrackingStartedMinute,incomplete < min ? min : incomplete + 1,valuationIncomplete < min ? min : valuationIncomplete + 1)*60000 } };
+}
+function modelProviderProjection(modelId, now = Date.now()) {
+  const providers = new Set();
+  for (const bucket of META.statistics.minuteBuckets) if (bucket.minute >= Math.floor(now/60000)-1439) {
+    for (const name of Object.keys(Object.hasOwn(bucket.providerUsage,modelId) ? bucket.providerUsage[modelId] : {})) providers.add(name);
+    for (const name of Object.keys(Object.hasOwn(bucket.providerHealth,modelId) ? bucket.providerHealth[modelId] : {})) providers.add(name);
+  }
+  const final = emptyFinal(), c = META.statistics.recentCoverage, min = Math.floor(now/60000)-1439;
+  const incomplete = Object.hasOwn(c.modelIncompleteAt,modelId) ? c.modelIncompleteAt[modelId] : undefined;
+  const finalCoverage = { complete: c.usageTrackingStartedMinute <= min && incomplete === undefined,
+    from: Math.max(min,c.usageTrackingStartedMinute,incomplete === undefined ? min : incomplete+1)*60000 };
+  for (const bucket of META.statistics.minuteBuckets) if (bucket.minute >= Math.floor(now/60000)-1439 && Object.hasOwn(bucket.modelFinal,modelId)) for (const key of FINAL_FIELDS) {
+    const n = bucket.modelFinal[modelId][key];
+    if (n === null) { final[key] = null; if (!final.overflowFields.includes(key)) final.overflowFields.push(key); }
+    else addCounter(final,key,n);
+  }
+  const samples = Number.isSafeInteger(final.successes) && Number.isSafeInteger(final.failures) && Number.isSafeInteger(final.successes+final.failures) ? final.successes+final.failures : null;
+  return { finalRequests: { ...final, samples, successRate: samples ? final.successes/samples : null }, finalCoverage,
+    ...providerUsageProjection(modelId,null,now),
+    providers: [...providers].sort().map((id) => ({ id: id || null, ...providerUsageProjection(modelId,id,now), health: id ? successHealthProjection('provider',modelId,id,now) : null })),
+  };
+}
 function routingCoverage(now = Date.now()) {
   const min = Math.floor(now / 60000) - 1439, start = META.statistics.recentCoverage.routingTrackingStartedMinute;
   return { complete: start <= min, from: Math.max(min, start) * 60000 };
@@ -2482,7 +2655,7 @@ function routingCoverage(now = Date.now()) {
 function statisticsModelIds() {
   const ids = new Set([...(config.knownModels || []), ...Object.keys(config.perModel || {})]);
   for (const account of config.accounts || []) for (const id of Object.keys(account.perModel || {})) ids.add(id);
-  for (const bucket of META.statistics.minuteBuckets) for (const id of Object.keys(bucket.models)) ids.add(id);
+  for (const bucket of META.statistics.minuteBuckets) for (const map of [bucket.models,bucket.modelFinal,bucket.providerUsage,bucket.valuation,bucket.providerHealth]) for (const id of Object.keys(map)) ids.add(id);
   return [...ids].filter(validStatisticModelId);
 }
 function ratio(numerator, denominator, valid = true) { return valid && Number.isSafeInteger(numerator) && Number.isSafeInteger(denominator) && denominator > 0 ? numerator / denominator : null; }
@@ -2493,7 +2666,7 @@ function aggregateSuccessHealth(scope, id, provider = null, now = Date.now()) {
   const out = emptySuccessHealth(), min = Math.floor(now / 60000) - 1439;
   for (const bucket of META.statistics.minuteBuckets) {
     if (bucket.minute < min) continue;
-    const delta = scope === 'account' ? bucket.accountHealth?.[id] : bucket.providerHealth?.[id]?.[provider];
+    const delta = scope === 'account' ? bucket.accountHealth?.[id] : Object.hasOwn(bucket.providerHealth,id) && Object.hasOwn(bucket.providerHealth[id],provider) ? bucket.providerHealth[id][provider] : null;
     if (delta) mergeSuccessHealth(out, delta);
   }
   return out;
@@ -2501,7 +2674,7 @@ function aggregateSuccessHealth(scope, id, provider = null, now = Date.now()) {
 function successHealthProjection(scope, id, provider = null, now = Date.now()) {
   const health = aggregateSuccessHealth(scope, id, provider, now), coverage = META.statistics.recentCoverage, min = Math.floor(now / 60000) - 1439;
   const start = scope === 'account' ? coverage.accountHealthTrackingStartedMinute : coverage.providerHealthTrackingStartedMinute;
-  const incompleteAt = scope === 'account' ? coverage.accountHealthIncompleteAt?.[id] : coverage.providerHealthIncompleteAt?.[id]?.[provider];
+  const incompleteAt = scope === 'account' ? coverage.accountHealthIncompleteAt?.[id] : Object.hasOwn(coverage.providerHealthIncompleteAt,id) && Object.hasOwn(coverage.providerHealthIncompleteAt[id],provider) ? coverage.providerHealthIncompleteAt[id][provider] : undefined;
   const coverageFromMinute = Math.max(min, start, incompleteAt === undefined ? min : incompleteAt + 1);
   const samples = health.successes === null || health.degrades === null || health.successes > Number.MAX_SAFE_INTEGER - health.degrades ? null : health.successes + health.degrades;
   return {
@@ -3704,7 +3877,7 @@ function classifyAttemptFailure(result, attempt, account, now = Date.now()) {
 
 function resolveModelConfig(account, modelId) {
   if (account?.perModel && Object.prototype.hasOwnProperty.call(account.perModel, modelId)) return account.perModel[modelId] || {};
-  return config.perModel[modelId] || {};
+  return Object.hasOwn(config.perModel, modelId) ? config.perModel[modelId] : {};
 }
 const MAX_RULE_FAILURE_TEXT = 16 * 1024;
 function normalizeFailureForRules(value, sensitiveValues = []) {
@@ -4264,7 +4437,7 @@ async function handleChat(req, res) {
       const normalizedStatus = requestResult === 'failed' ? (observed.error ? observed.normalizedStatus : 502) : requestResult === 'client_cancelled' ? 499 : 200;
       const safeStreamError = requestResult === 'failed' ? (streamError ? safeReason(streamError, sensitiveValues) : 'stream transport error') : null;
       const usage = requestResult === 'success' ? observed.usage : null;
-      finalizeStatistics({ globalError: requestResult === 'failed', usage, clientDisconnect: clientCancelled, segments: statisticsSegments(chain.trace, acc.id, usage, clientCancelled) });
+      finalizeStatistics({ globalError: requestResult === 'failed', finalProvider: observed.provider, usage, clientDisconnect: clientCancelled, segments: statisticsSegments(chain.trace, acc.id, usage, clientCancelled) });
       recordChat({ requestId, requestedModel, resolvedModel: modelId, provider: observed.provider, canonical: observed.canonical, ms: Date.now() - chain.t0, stream: true, result: requestResult, error: safeStreamError, upstreamStatus: providerAttempt?.upstreamStatus ?? null, normalizedStatus, account: acc.name, accountId: acc.id, attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, accountPath, accountActions, ...affinityFacts(usage), strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, providerPlanSource: targetSource, providerMode: targetMode, appliedHeaderNames: Object.keys(acc.headers || {}), proxyError: !!acc.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues });
     };
     forward = new Writable({
@@ -4306,7 +4479,7 @@ async function handleChat(req, res) {
   if (status === 200 && /^cline-pass\//.test(modelId) && !config.knownModels.includes(modelId)) { config.knownModels.push(modelId); saveConfig(); }
   const safeOut = status === 200 ? out : { ...out, error: { ...(out.error || {}), message: safeReason(out?.error?.message || 'upstream error', sensitiveValues) } };
   const usage = status === 200 && !disconnected ? normalizeUsage(routing.usage) : null;
-  finalizeStatistics({ globalError: status !== 200 && !disconnected, usage, clientDisconnect: disconnected, segments: statisticsSegments(chain.trace, acc?.id, usage, disconnected) });
+  finalizeStatistics({ globalError: status !== 200 && !disconnected, finalProvider: routing.finalProvider, usage, clientDisconnect: disconnected, segments: statisticsSegments(chain.trace, acc?.id, usage, disconnected) });
   recordChat({
     requestId, requestedModel, resolvedModel: modelId, provider: routing.finalProvider || null, canonical: routing.canonicalSlug || null, ms: Date.now() - chain.t0, stream: false, result: disconnected ? 'client_cancelled' : status === 200 ? 'success' : 'failed',
     attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, error: disconnected ? null : status !== 200 ? safeOut.error.message : null,
@@ -4578,8 +4751,8 @@ async function dispatch(req, res) {
       pruneStatistics();
       const generatedAt = Date.now(), recentGlobal = aggregateRange().aggregate;
       const accounts = config.accounts.map((account) => { const recent = aggregateRange(account.id).aggregate; return { id: account.id, name: account.name, enabled: account.enabled !== false, lifetime: projectAggregate(META.statistics.lifetime.accounts[account.id] || emptyAggregate()), recent24h: projectAggregate(recent), health: healthProjection(account), quota: statisticsQuotaProjection(account, generatedAt) }; });
-      const models = statisticsModelIds().map((id) => ({ id, recent24h: projectAggregate(aggregateModelRange(id, generatedAt)), coverage: modelCoverage(id, generatedAt) }));
-      return sendJSON(res, 200, { generatedAt, window: { kind: 'last-1440-minutes', from: (Math.floor(generatedAt/60000)-1439)*60000, to: generatedAt }, lifetime: { global: projectAggregate(META.statistics.lifetime.global) }, recent24h: { global: projectAggregate(recentGlobal) }, routingCoverage: routingCoverage(generatedAt), accounts, models, migration: META.statistics.migration });
+      const models = statisticsModelIds().map((id) => { const recent24h = projectAggregate(aggregateModelRange(id, generatedAt)); return { id, recent24h, coverage: modelCoverage(id, generatedAt), providerStatistics: modelProviderProjection(id,generatedAt) }; });
+      return sendJSON(res, 200, { generatedAt, window: { kind: 'last-1440-minutes', from: (Math.floor(generatedAt/60000)-1439)*60000, to: generatedAt }, lifetime: { global: projectAggregate(META.statistics.lifetime.global) }, recent24h: { global: projectAggregate(recentGlobal) }, routingCoverage: routingCoverage(generatedAt), accounts, models, referencePrices: { current: REFERENCE_PRICE, versions: META.statistics.priceVersions }, migration: META.statistics.migration });
     }
     if (req.method === 'GET' && p === '/api/accounts') {
       clearExpiredCooldowns();

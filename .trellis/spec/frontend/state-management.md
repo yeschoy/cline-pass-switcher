@@ -110,7 +110,15 @@ GET /api/statistics
         refresh: { eligible, reason, state, nextAttemptAt }
       }
     }],
-    models: [{ id, recent24h, coverage: { complete, from } }],
+    models: [{ id, recent24h, coverage: { complete, from },
+      providerStatistics: {
+        finalRequests: { successes, failures, cancelled, samples, successRate, overflowFields },
+        finalCoverage: { complete, from },
+        usage: AggregateProjection, coverage: { complete, from },
+        valuation: { versions: { [priceVersion]: { pricedRequests, lowPicoUsd, highPicoUsd, overflowFields } }, complete, from },
+        providers: [{ id: providerSlug | null, usage, coverage, valuation, health: SuccessHealthProjection | null }]
+      } }],
+    referencePrices: { current: PriceSnapshot, versions: { [internalVersion]: PriceSnapshot } },
     migration
   }
 
@@ -296,9 +304,13 @@ Preset selection owns a temporary draft only. Confirm submits the complete ordin
 
 Error-rule presets are separate from scheduling presets. The cache-hit preset preserves account identity, credentials, transport, Headers, routes, pipeline booleans, and custom rules while merging stable preset rule IDs. The five rule presets read the complete ordered rule draft; merge replaces matching IDs and preserves custom rules, replace computes deletions, clear is replace-only. Preview classifies preserve/add/modify/delete; cancel is a no-op, and confirm uses the ordinary authenticated full-account save.
 
-The top-level section is projected by `consolePanel.hidden`, `statisticsPanel.hidden`, `logPanel.hidden`, `detailsPanel.hidden`, and five navigation buttons' `aria-pressed` values. Console, statistics, request logs, error logs and detailed logs are mutually exclusive. Request and error navigation share one `logPanel`; `logType` remains the single selected-type owner, while the title and live status are projections of it.
+The top-level section is projected by `consolePanel.hidden`, `statisticsPanel.hidden`, `logPanel.hidden`, `detailsPanel.hidden`, `modelProvidersPanel.hidden`, and six navigation buttons' `aria-pressed` values. Console, statistics, request logs, error logs, detailed logs and model/Provider statistics are mutually exclusive. Request and error navigation share one `logPanel`; `logType` remains the single selected-type owner, while the title and live status are projections of it.
 
 `STATISTICS_QUERY_ID` is independent of log state. `loadStatistics()` may render only when its captured query/visit generation still matches and `statisticsPanel` is visible. A coverage count of zero, `null` overflow, missing ratio, missing quota window, or zero success samples must render as unknown/no data rather than numeric zero. The model table displays only rolling cache Token ratio (`cacheInputCachedTokens / cacheInputTokens`) plus paired-usage sample count and incomplete-window label; it does not display request hit rate. The account main table reads only each account object's stable-ID summary and never submits runtime health/statistics through `collectAccounts()`. All account/provider text is escaped, and raw quota/provider payloads never become frontend state.
+
+#### Model/Provider statistics read ownership
+
+The read-only `modelProvidersPanel` sits immediately after detailed logs in the top navigation. `MODEL_PROVIDER_QUERY_ID`, `MODEL_PROVIDER_CONTROLLER`, and `MODEL_PROVIDER_DATA` own only this feature's last accepted authenticated `/api/statistics` snapshot, in-flight query and filter projection. Navigation/pagehide aborts and increments its generation; pageshow restarts a read only while this panel is visible, so an aborted back-forward-cache visit is not stranded. Stale success, catch and finally cannot render a hidden or newer visit. Filter/redraw reuses the accepted snapshot without rehydrating `ACCS`, raw rules, routes or any other draft. The labelled search input, native refresh button and scrollable focusable table support narrow widths and keyboard access. Model final request success excludes cancellation; Provider health success counts named real attempts only. The model aggregate may include pre-v5 usage, while v5 Provider usage/valuation show separate tracking-start/loss coverage, explicit unknown Provider, known-count denominators, no-data, and USD reference snapshot metadata. Frozen costs use the four supported model IDs and a labelled DeepSeek peak/off-peak range; no value is rendered as an actual bill. Escape model/Provider/version text before `innerHTML`; values that are not covered or overflowed remain unavailable, not zero.
 
 #### Statistics quota visit ownership
 

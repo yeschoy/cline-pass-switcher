@@ -132,6 +132,7 @@
     <button id="navRequests" class="ghost" type="button" aria-pressed="false" aria-controls="logPanel" onclick="switchSection('requests')">请求日志</button>
     <button id="navErrors" class="ghost" type="button" aria-pressed="false" aria-controls="logPanel" onclick="switchSection('errors')">错误日志</button>
     <button id="navDetails" class="ghost" type="button" aria-pressed="false" aria-controls="detailsPanel" onclick="switchSection('details')">详细日志</button>
+    <button id="navModelProviders" class="ghost" type="button" aria-pressed="false" aria-controls="modelProvidersPanel" onclick="switchSection('modelProviders')">模型和渠道</button>
   </nav>
 
   <section id="statisticsPanel" aria-labelledby="statisticsTitle" hidden>
@@ -153,6 +154,17 @@
       </section>
       <div class="table-wrap"><table style="min-width:1500px"><thead><tr><th>账号</th><th>运行/健康</th><th>累计请求/错误</th><th>24h 请求/错误</th><th>累计 / 24h input·output·total</th><th>累计 / 24h 缓存 Token·占比·命中率</th><th>健康样本/分数</th><th>额度 5 小时/周/月</th><th>额度状态/路由池</th></tr></thead><tbody id="statisticsBody"><tr><td colspan="9" class="empty">进入统计板块后加载</td></tr></tbody></table></div>
       <div id="statisticsLegacy" class="dim" style="font-size:12px;margin-top:10px"></div>
+    </div>
+  </section>
+
+  <section id="modelProvidersPanel" aria-labelledby="modelProvidersTitle" hidden>
+    <div class="card">
+      <h2 id="modelProvidersTitle" tabindex="-1">模型和渠道 · 最近 24 小时</h2>
+      <p>模型成功率 = 最终成功请求 /（最终成功 + 失败请求），取消不计入分母（v5 起记录）；渠道成功率 = 具名真实尝试的成功 /（成功 + 降级），并非模型请求成功率。无样本显示无数据。各指标的迁移起点与容量丢失独立标注。</p>
+      <p>模型 Token 列含旧版已记录的最终成功 usage；渠道 Token 列从 v5 起记录，仅计最终成功请求上游明确返回的 usage；无法唯一确认时归入未知渠道，失败重试不重复计 Token。缓存 Token 占比 = 有明确 input/cached-read 配对的 cached / input；命中请求率 = 明确缓存字段的命中请求 / 已知缓存请求。0 与未知不同。total 不从 input + output 推算。</p>
+      <p><b>参考用量等值（USD），非实际扣费</b>。仅四个官网模型有冻结参考价格；不含包月实际扣费或社区额度。DeepSeek V4 Flash/Pro 无法判定峰谷，仅显示<b>峰谷参考区间</b>；usage 缺失、缓存读数大于 input、无支持价格均不可计算。部分覆盖金额仅为已计部分，不是完整费用。<a href="https://docs.cline.bot/getting-started/clinepass" target="_blank" rel="noopener noreferrer">ClinePass 官网参考价格表</a>；<span id="modelProvidersPrice">本项目价格快照待加载</span>；官方生效时间未知。</p>
+      <div class="toolbar"><label for="modelProvidersFilter">筛选模型或渠道 <input id="modelProvidersFilter" type="search" oninput="renderModelProviders()"></label><button class="ghost" type="button" onclick="loadModelProviders()">刷新统计</button><span id="modelProvidersStatus" role="status" aria-live="polite">尚未加载</span></div>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="模型和渠道统计表，可横向滚动"><table style="min-width:1120px"><thead><tr><th>模型 / 渠道</th><th>成功率（样本）</th><th>input / output / total / cached Token（已知请求）</th><th>缓存 Token 占比 / 命中请求率</th><th>参考用量等值（USD），非实际扣费</th><th>口径与覆盖</th></tr></thead><tbody id="modelProvidersBody"><tr><td colspan="6" class="empty">进入页面后加载</td></tr></tbody></table></div>
     </div>
   </section>
 
@@ -1339,19 +1351,69 @@ function statisticsRange(label,x,routingCoverage){return `<div><b>${label}</b><b
 function accountDisposition(health,quota){return health?.disabled?(quota?.protectionPersistence==='pending'?'已禁用 · 月额度封禁写盘待重试':'已禁用'):quota?.protectionMonthlyAt?(quota.protectionPersistence==='pending'?'月额度封禁（写盘待重试）':'月额度封禁'):quota?.protectionShortWindows?.length?'短窗口耗尽':quota?.protectionPendingUntil?'额度核验中':health?.hardQuarantined?'硬隔离':health?.cooling?'冷却中':'可调度';}
 function successHealthText(health){if(health?.successRate===null||health?.successRate===undefined)return `无数据${health?.coverageComplete===false?' · 统计积累中':''}`;return `${(Number(health.successRate)*100).toFixed(1)}% · ${Number(health.samples)||0} 样本（成功 ${Number(health.successes)||0} / 降级 ${Number(health.degrades)||0}）${health.coverageComplete===false?' · 统计积累中':''}`;}
 async function loadStatistics(visitId=STATISTICS_VISIT_ID,announce=true){const queryId=++STATISTICS_QUERY_ID;if(announce&&!$('#statisticsPanel').hidden)$('#statisticsStatus').textContent='加载统计中…';try{const data=await api('/api/statistics');if(queryId!==STATISTICS_QUERY_ID||visitId!==STATISTICS_VISIT_ID||$('#statisticsPanel').hidden)return null;const l=data.lifetime.global,r=data.recent24h.global;$('#statisticsSummary').innerHTML=statisticsRange('累计',l,data.routingCoverage)+statisticsRange('最近 24 小时',r,data.routingCoverage);renderStatisticsQuotaForecast(data);$('#statisticsBody').innerHTML=(data.accounts||[]).map(a=>`<tr><td>${escapeHtml(a.name)}<br><span class="mono dim">${escapeHtml(a.id)}</span></td><td>${escapeHtml(accountDisposition(a.health,a.quota))}</td><td>${statisticValue(a.lifetime.requests)} / ${statisticValue(a.lifetime.errors)}</td><td>${statisticValue(a.recent24h.requests)} / ${statisticValue(a.recent24h.errors)}</td><td>累计 ${statisticValue(a.lifetime.inputTokens,a.lifetime.inputKnownRequests)} · ${statisticValue(a.lifetime.outputTokens,a.lifetime.outputKnownRequests)} · ${statisticValue(a.lifetime.totalTokens,a.lifetime.totalKnownRequests)}<br>24h ${statisticValue(a.recent24h.inputTokens,a.recent24h.inputKnownRequests)} · ${statisticValue(a.recent24h.outputTokens,a.recent24h.outputKnownRequests)} · ${statisticValue(a.recent24h.totalTokens,a.recent24h.totalKnownRequests)}</td><td>累计 ${cacheMetrics(a.lifetime)}<br>24h ${cacheMetrics(a.recent24h)}</td><td>${escapeHtml(successHealthText(a.health))}</td><td>${quotaLimit(a.quota,'five_hour','5 小时')}<br>${quotaLimit(a.quota,'weekly','每周')}<br>${quotaLimit(a.quota,'monthly','每月')}</td><td>${quotaState(a,data.generatedAt)}</td></tr>`).join('')||'<tr><td colspan="9" class="empty">暂无账号统计</td></tr>';$('#statisticsLegacy').textContent=`旧版请求基线（可能含控制台测试，不计入精确聊天总量）：${Number(data.migration?.legacyRequests)||0}`;$('#statisticsStatus').textContent=`生成于 ${new Date(data.generatedAt).toLocaleString()}`;return data;}catch{if(queryId===STATISTICS_QUERY_ID&&visitId===STATISTICS_VISIT_ID&&!$('#statisticsPanel').hidden)$('#statisticsStatus').textContent='统计加载失败；已显示的数据未改变';return null;}}
+let MODEL_PROVIDER_QUERY_ID=0,MODEL_PROVIDER_CONTROLLER=null,MODEL_PROVIDER_DATA=null;
+function mpNumber(n){return Number.isSafeInteger(n)&&n>=0?n.toLocaleString():'无数据';}
+function mpRatio(n){return typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=1?`${(n*100).toFixed(1)}%`:'无数据';}
+function mpCoverage(c){return c?.complete===true?'24h 完整':`统计不完整 · 自 ${Number.isSafeInteger(c?.from)?escapeHtml(new Date(c.from).toLocaleString()):'未知'} 起`;}
+function mpHealthCoverage(health){return health?.coverageComplete===true?'24h 完整':mpCoverage({complete:false,from:health?.coverageFrom});}
+function mpMoney(v,prices,modelId,successful){
+  const entries=Object.entries(v?.versions||{}).filter(([id])=>Object.hasOwn(prices||{},id));
+  if(entries.some(([,x])=>!Number.isSafeInteger(x.pricedRequests)||x.pricedRequests<0))return '不可计算（覆盖计数溢出）';
+  const count=entries.reduce((n,[,x])=>n+BigInt(x.pricedRequests),0n);
+  if(count>BigInt(Number.MAX_SAFE_INTEGER))return '不可计算（覆盖计数溢出）';
+  const eligible=Number(count);
+  if(!eligible)return '不可计算（无完整 usage / 无支持价格）';
+  const low=entries.reduce((n,[,x])=>n+(Number.isSafeInteger(x.lowPicoUsd)?BigInt(x.lowPicoUsd):0n),0n),high=entries.reduce((n,[,x])=>n+(Number.isSafeInteger(x.highPicoUsd)?BigInt(x.highPicoUsd):0n),0n);
+  if(entries.some(([,x])=>x.lowPicoUsd===null||x.highPicoUsd===null))return '不可计算（金钱计数溢出）';
+  const format=pico=>`$${(pico/1000000n/1000000n).toString()}.${(pico%1000000000000n).toString().padStart(12,'0')}`;
+  const ranged=entries.some(([id])=>prices[id]?.models?.[modelId]?.tier==='peak/off-peak range');
+  const versions=entries.map(([id])=>{const snapshot=prices[id],rates=snapshot.models?.[modelId]?.rates;return `${id}（采集 ${snapshot.collectedAt}；${modelId}；${Array.isArray(rates)?rates.map(row=>row.map(n=>Number.isSafeInteger(n)?(n/1000).toString():'?').join('/')).join(' ～ '):'费率未知'} USD / 百万 input/output/cached-read）`;}).join('、');
+  return `${ranged?`${format(low)} – ${format(high)} · 峰谷参考区间`:format(low)} · 已计 ${mpNumber(eligible)} / ${mpNumber(successful)} 最终成功请求${Number.isSafeInteger(successful)&&successful>eligible?'（其余不可计算）':''}${v.complete?'':' · 历史覆盖不完整'} · ${versions}`;
+}
+function renderModelProviders(){
+  const body=$('#modelProvidersBody'),data=MODEL_PROVIDER_DATA,filter=$('#modelProvidersFilter').value.trim().toLowerCase();
+  if(!data)return;
+  const prices=data.referencePrices?.versions||{};
+  const rows=[];
+  for(const model of data.models||[]){
+    const p=model.providerStatistics||{},children=p.providers||[];
+    if(filter&&!String(model.id).toLowerCase().includes(filter)&&!children.some(child=>String(child.id||'未知渠道').toLowerCase().includes(filter)))continue;
+    const renderRow=(label,success,u,coverage,valuation,kind,successCoverage)=>{
+      const x=u||{},known=(value,count)=>`${Number.isSafeInteger(count)&&count>0?mpNumber(value):'无数据'}（${mpNumber(count)} 已知）`;
+      const rate=kind==='未知渠道'?'不适用（无具名尝试）':`${mpRatio(success?.successRate)} · ${mpNumber(success?.successes)} / ${mpNumber(success?.samples)} 样本`;
+      rows.push(`<tr><th scope="row">${escapeHtml(label)}</th><td>${escapeHtml(kind)}：${rate}</td><td>${known(x.inputTokens,x.inputKnownRequests)} / ${known(x.outputTokens,x.outputKnownRequests)} / ${known(x.totalTokens,x.totalKnownRequests)} / ${known(x.cachedTokens,x.cacheKnownRequests)}</td><td>${mpRatio(x.cacheTokenRatio)}（${mpNumber(x.cacheInputKnownRequests)} 配对） / ${mpRatio(x.cacheHitRequestRate)}（${mpNumber(x.cacheKnownRequests)} 已知）</td><td>${escapeHtml(mpMoney(valuation,prices,model.id,kind==='最终请求'?success?.successes:u?.requests))}</td><td>成功率 ${successCoverage} · Token ${mpCoverage(coverage)} · 费用 ${mpCoverage(valuation)}${kind==='渠道尝试'?' · 用量仅最终成功归属':' · 用量不包括失败请求'}</td></tr>`);
+    };
+    renderRow(model.id,p.finalRequests,model.recent24h,model.coverage,p.valuation,'最终请求',mpCoverage(p.finalCoverage));
+    for(const child of children){const health=child.health;renderRow(`↳ ${child.id||'未知渠道'}`,health,child.usage,child.coverage,child.valuation,health?'渠道尝试':'未知渠道',health?mpHealthCoverage(health):'不适用');}
+  }
+  body.innerHTML=rows.join('')||'<tr><td colspan="6" class="empty">没有匹配的模型或渠道数据</td></tr>';
+}
+async function loadModelProviders(){
+  const id=++MODEL_PROVIDER_QUERY_ID;
+  MODEL_PROVIDER_CONTROLLER?.abort();const controller=new AbortController();MODEL_PROVIDER_CONTROLLER=controller;
+  $('#modelProvidersStatus').textContent='加载模型和渠道统计中…';
+  try{const data=await api('/api/statistics',undefined,undefined,false,{signal:controller.signal});
+    if(id!==MODEL_PROVIDER_QUERY_ID||controller!==MODEL_PROVIDER_CONTROLLER||$('#modelProvidersPanel').hidden)return;
+    MODEL_PROVIDER_DATA=data;
+    $('#modelProvidersPrice').textContent=`本项目内部版本 ${data.referencePrices?.current?.version||'未知'} · 采集 ${data.referencePrices?.current?.collectedAt||'未知'} · USD / 百万 Token`;
+    renderModelProviders();$('#modelProvidersStatus').textContent=`生成于 ${new Date(data.generatedAt).toLocaleString()}`;
+  }catch(e){if(id===MODEL_PROVIDER_QUERY_ID&&controller===MODEL_PROVIDER_CONTROLLER&&!$('#modelProvidersPanel').hidden&&e?.name!=='AbortError')$('#modelProvidersStatus').textContent='加载失败；保留已显示数据';}
+  finally{if(controller===MODEL_PROVIDER_CONTROLLER)MODEL_PROVIDER_CONTROLLER=null;}
+}
+function stopModelProviders(){MODEL_PROVIDER_QUERY_ID++;MODEL_PROVIDER_CONTROLLER?.abort();MODEL_PROVIDER_CONTROLLER=null;}
 function quotaRefreshSummary(data){return `额度刷新完成：更新 ${Number(data.refreshed)||0} · 缓存 ${Number(data.cached)||0} · 延后 ${Number(data.deferred)||0} · 跳过 ${Number(data.skipped)||0} · 失败 ${Number(data.failed)||0} · 取消 ${Number(data.cancelled)||0}`;}
 async function refreshStatisticsQuota(force=false,visitId=STATISTICS_VISIT_ID){if($('#statisticsPanel').hidden||visitId!==STATISTICS_VISIT_ID)return null;if(STATISTICS_REFRESH_PROMISE&&STATISTICS_REFRESH_VISIT===visitId)return STATISTICS_REFRESH_PROMISE;const controller=new AbortController(),button=$('#statisticsRefresh');STATISTICS_REFRESH_CONTROLLER=controller;STATISTICS_REFRESH_VISIT=visitId;button.disabled=true;button.textContent='额度刷新中…';$('#statisticsStatus').textContent='额度刷新中…';const promise=(async()=>{try{const data=await api('/api/statistics/quota-refresh',{force},undefined,false,{signal:controller.signal});if(data.error)throw Error('额度刷新失败');if(visitId!==STATISTICS_VISIT_ID||controller!==STATISTICS_REFRESH_CONTROLLER||$('#statisticsPanel').hidden)return null;await loadStatistics(visitId,false);if(visitId===STATISTICS_VISIT_ID&&controller===STATISTICS_REFRESH_CONTROLLER&&!$('#statisticsPanel').hidden)$('#statisticsStatus').textContent=quotaRefreshSummary(data);return data;}catch(e){if(e?.name!=='AbortError'&&visitId===STATISTICS_VISIT_ID&&controller===STATISTICS_REFRESH_CONTROLLER&&!$('#statisticsPanel').hidden)$('#statisticsStatus').textContent='额度刷新失败；保留上次额度与时间';return null;}finally{if(visitId===STATISTICS_VISIT_ID&&controller===STATISTICS_REFRESH_CONTROLLER){STATISTICS_REFRESH_CONTROLLER=null;STATISTICS_REFRESH_PROMISE=null;button.disabled=false;button.textContent='↻ 手动刷新额度与统计';}}})();STATISTICS_REFRESH_PROMISE=promise;return promise;}
 function armStatisticsTimer(visitId){clearTimeout(STATISTICS_TIMER);STATISTICS_TIMER=setTimeout(async()=>{if(visitId!==STATISTICS_VISIT_ID||$('#statisticsPanel').hidden)return;await refreshStatisticsQuota(false,visitId);if(visitId===STATISTICS_VISIT_ID&&!$('#statisticsPanel').hidden)armStatisticsTimer(visitId);},STATISTICS_REFRESH_MS);}
 function stopStatisticsVisit(){STATISTICS_VISIT_ID++;STATISTICS_QUERY_ID++;clearTimeout(STATISTICS_TIMER);STATISTICS_TIMER=null;STATISTICS_REFRESH_CONTROLLER?.abort();STATISTICS_REFRESH_CONTROLLER=null;STATISTICS_REFRESH_PROMISE=null;const button=$('#statisticsRefresh');if(button){button.disabled=false;button.textContent='↻ 手动刷新额度与统计';}}
 async function startStatisticsVisit(){const visitId=++STATISTICS_VISIT_ID;armStatisticsTimer(visitId);await loadStatistics(visitId);if(visitId===STATISTICS_VISIT_ID&&!$('#statisticsPanel').hidden)return refreshStatisticsQuota(false,visitId);return null;}
 function restoreStatisticsVisit(){if(!$('#statisticsPanel').hidden&&STATISTICS_TIMER===null)return startStatisticsVisit();return null;}
-if(typeof window!=='undefined'){window.addEventListener('pagehide',stopStatisticsVisit);window.addEventListener('pageshow',restoreStatisticsVisit);}
+if(typeof window!=='undefined'){window.addEventListener('pagehide',()=>{stopStatisticsVisit();stopModelProviders();});window.addEventListener('pageshow',()=>!$('#statisticsPanel').hidden?restoreStatisticsVisit():!$('#modelProvidersPanel').hidden?loadModelProviders():null);}
 async function switchSection(section){
   const isConsole=section==='console',isStatistics=section==='statistics',type=section==='errors'?'errors':'requests';
-  stopStatisticsVisit();LOG_QUERY_ID++;STATISTICS_QUERY_ID++;DETAIL_LIST_ID++;DETAIL_SELECTION_ID++;DETAIL_NAV_ID++;
-  $('#consolePanel').hidden=!isConsole;$('#statisticsPanel').hidden=!isStatistics;$('#logPanel').hidden=isConsole||isStatistics||section==='details';$('#detailsPanel').hidden=section!=='details';
-  for(const [name,id] of [['console','navConsole'],['statistics','navStatistics'],['requests','navRequests'],['errors','navErrors'],['details','navDetails']])$('#'+id).setAttribute('aria-pressed',String(section===name));
-  if(isConsole)return;if(isStatistics)return startStatisticsVisit();if(section==='details'){const nav=DETAIL_NAV_ID;await loadDetailSettings();if(nav===DETAIL_NAV_ID&&detailVisible())return loadDetails();return;}
+  stopStatisticsVisit();stopModelProviders();LOG_QUERY_ID++;STATISTICS_QUERY_ID++;DETAIL_LIST_ID++;DETAIL_SELECTION_ID++;DETAIL_NAV_ID++;
+  $('#consolePanel').hidden=!isConsole;$('#statisticsPanel').hidden=!isStatistics;$('#modelProvidersPanel').hidden=section!=='modelProviders';$('#logPanel').hidden=isConsole||isStatistics||section==='details'||section==='modelProviders';$('#detailsPanel').hidden=section!=='details';
+  for(const [name,id] of [['console','navConsole'],['statistics','navStatistics'],['requests','navRequests'],['errors','navErrors'],['details','navDetails'],['modelProviders','navModelProviders']])$('#'+id).setAttribute('aria-pressed',String(section===name));
+  if(isConsole)return;if(isStatistics)return startStatisticsVisit();if(section==='modelProviders'){$('#modelProvidersTitle').focus?.();return loadModelProviders();}if(section==='details'){const nav=DETAIL_NAV_ID;await loadDetailSettings();if(nav===DETAIL_NAV_ID&&detailVisible())return loadDetails();return;}
   $('#logType').value=type;
   const title=type==='errors'?'上游失败尝试（同一请求可能多条）':'最终请求结果（每个请求一条）';
   $('#logTitle').textContent=title;$('#logSectionStatus').textContent=`当前板块：${type==='errors'?'错误日志':'请求日志'}`;

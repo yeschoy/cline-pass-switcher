@@ -4,3 +4,4 @@
 {"file": ".trellis/spec/frontend/index.md", "reason": "Relevant layer contract and verification boundary"}
 {"file": ".trellis/spec/frontend/state-management.md", "reason": "Relevant layer contract and verification boundary"}
 {"file": ".trellis/tasks/09-24-model-provider-statistics/research/official-pricing-and-usage.md", "reason": "Relevant layer contract and verification boundary"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "New navigation, rendered statistics and browser acceptance"}

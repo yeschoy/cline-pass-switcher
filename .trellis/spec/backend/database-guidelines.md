@@ -212,7 +212,7 @@ Account-level RPM runtime state is deliberately process-local and is never persi
   orModelsFetchedAt, orModelList,
   officialModelsFetch,
   statistics: {
-    version: 4,
+    version: 5,
     lifetime: { global: Aggregate, accounts: { [accountId]: Aggregate } },
     minuteBuckets: [{
       minute,
@@ -221,7 +221,10 @@ Account-level RPM runtime state is deliberately process-local and is never persi
       health: { [accountId]: LegacyHealthDelta }, // retained, no longer written
       models: { [resolvedModelId]: Aggregate },
       accountHealth: { [accountId]: SuccessDelta },
-      providerHealth: { [resolvedModelId]: { [provider]: SuccessDelta } }
+      providerHealth: { [resolvedModelId]: { [provider]: SuccessDelta } },
+      modelFinal: { [resolvedModelId]: { successes, failures, cancelled, overflowFields } },
+      providerUsage: { [resolvedModelId]: { [providerOrEmptyForUnknown]: Aggregate } },
+      valuation: { [resolvedModelId]: { [providerOrEmptyForUnknown]: { [priceVersion]: { pricedRequests, lowPicoUsd, highPicoUsd, overflowFields } } } }
     }],
     recentCoverage: {
       droppedAccountMinuteCells,
@@ -234,8 +237,12 @@ Account-level RPM runtime state is deliberately process-local and is never persi
       accountHealthIncompleteAt: { [accountId]: minute },
       droppedProviderHealthMinuteCells,
       providerHealthTrackingStartedMinute,
-      providerHealthIncompleteAt: { [resolvedModelId]: { [provider]: minute } }
+      providerHealthIncompleteAt: { [resolvedModelId]: { [provider]: minute } },
+      usageTrackingStartedMinute, droppedUsageMinuteCells,
+      usageIncompleteAt: { [resolvedModelId]: minute }, usageGlobalIncompleteAt,
+      droppedValuationMinuteCells, valuationIncompleteAt: { [resolvedModelId]: minute }, valuationGlobalIncompleteAt
     },
+    priceVersions: { [internalVersion]: { version, collectedAt, effectiveAt: null, source, currency: 'USD', models: { [pricedModel]: { tier, rates } } } },
     migration: {
       legacyStatsMigratedAt,
       legacyRequests,
@@ -269,7 +276,7 @@ Provider state is durable runtime metadata keyed by resolved model and Provider,
 
 `metadata.json` must not contain account keys, proxy credentials, custom Header values, account notes, raw session values, HMAC fingerprints, message text, or identity-source labels. Bounded identity-source labels such as `message_hmac` belong only to ordinary request-log projections. Reasons written to metadata are redacted and flattened; bounded model/provider health notes may be truncated, while complete redacted structured provider reasons belong to the separate error JSONL stream.
 
-`Aggregate` retains the existing request/usage/routing counters. `SuccessDelta` has only `successes`, `degrades`, and exact overflow markers. Statistics v4 retains at most 1,440 minute buckets, 50,000 union `(minute, accountId)` cells, 50,000 model aggregate cells, and an independent 50,000 `(minute, resolvedModelId, provider)` success cells. Account and Provider success tracking each have truthful migration starts and cell-loss coverage. v1/v2/v3 weighted health is retained as legacy bytes but is never converted into direct success samples or threshold labels. Any counter overflow becomes `null` with its exact marker.
+`Aggregate` retains the existing request/usage/routing counters. `SuccessDelta` has only `successes`, `degrades`, and exact overflow markers. Statistics v5 retains at most 1,440 minute buckets, 50,000 union `(minute, accountId)` cells, 50,000 model aggregate cells, and an independent 50,000 `(minute, resolvedModelId, provider)` success cells. It adds separate 50,000 provider-usage minute cells, 50,000 version-keyed valuation minute cells and at most eight persisted reference-price snapshots. Each new cell loss and pre-v5 tracking start is represented by independent per-model/global coverage, and exact numeric overflow is `null` with markers. `providerUsage` holds final-success usage only, including explicit unknown (`""`) Provider; a named Provider uses the same bounded slug grammar as Provider health (`[a-z0-9][a-z0-9._/-]{0,199}`), including `/` and `.`, so a valid attribution cannot make persisted v5 state fail on restart. Model/Provider IDs such as `toString` must use own-property checks for reference-price lookup, coverage reads/writes and health cells, including capacity eviction; an unpriced prototype-named model remains valid statistics data, never a failed finalizer or malformed coverage on restart. `modelFinal` counts terminal successes/failures/cancellations independently. Frozen picodollar amounts are never recomputed from the currently published table. v1–v4 migration creates empty v5 cells and never backfills historical Provider usage or valuations. Account and Provider success tracking each have truthful migration starts and cell-loss coverage. v1/v2/v3 weighted health is retained as legacy bytes but is never converted into direct success samples or threshold labels. Any counter overflow becomes `null` with its exact marker.
 
 Legacy name-keyed `stats` is migration input only. It moves once into the separately labelled `migration` baseline and never fabricates exact chat, token, cache, recent-window, or health facts. Unknown newer statistics versions, malformed aggregates, unordered buckets, excess cells, invalid IDs, and malformed quota snapshots fail startup before any save.
 
@@ -326,7 +333,7 @@ Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/
 | Persisted `cachePoolTargetSize` is missing/non-integer/below min/above max | normalize the effect to `clamp(value, cachePoolSize, cachePoolMaxSize)`; do not fail startup and do not write a member list |
 | Legacy provider health lacks new fields | normalize to bounded defaults while preserving safe status/note/timestamps |
 | Invalid provider-health timestamp/count/status | normalize to zero/unknown/bounded values; never copy raw payload data |
-| Valid statistics v1/v2/v3 | validate each old exact field set, migrate through model/routing versions, then add empty v4 account/provider success owners and independent tracking starts without converting legacy weighted health |
+| Valid statistics v1/v2/v3/v4 | validate each old exact field set, migrate through model/routing and v4 health versions, then add empty v5 final/Provider usage/valuation owners and independent tracking starts without converting legacy weighted health or backfilling past usage |
 | Existing statistics version is missing/unknown or its structure exceeds account/model bounds | startup fails; original metadata bytes remain |
 | Aggregate overflow marker and `null` field disagree | startup fails; original metadata bytes remain |
 | Quota percentage is outside 0-100, persisted reset time is not canonical millisecond UTC, or a state field is unknown | startup fails; original metadata bytes remain |

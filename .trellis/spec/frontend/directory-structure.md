@@ -13,6 +13,8 @@ test/account-draft.test.js
                            production-script VM tests for account/raw/quota state
 test/detailed-log-ui.test.js
                            production-script VM tests for detailed-log state
+test/model-provider-ui.test.js
+                           production-script VM tests for model/Provider statistics state
 server.js                 authenticated JSON APIs consumed by the console
 ```
 
@@ -26,7 +28,7 @@ Keep the existing order:
 2. semantic HTML for login, top navigation, console/statistics/log/detail panels, dialogs, and drawer;
 3. one inline `<script>` containing state owners, rendering, API calls, validation, and event handlers.
 
-The top-level UI has five mutually exclusive sections controlled by `switchSection()`. Native elements are preferred: `<button>`, `<input>`, `<select>`, `<textarea>`, `<details>`, and `<dialog>`. Wide tables use `.table-wrap` rather than shrinking content or overflowing the page.
+The top-level UI has six mutually exclusive sections controlled by `switchSection()` (console, statistics, request logs, error logs, detailed logs, model/Provider statistics). Native elements are preferred: `<button>`, `<input>`, `<select>`, `<textarea>`, `<details>`, and `<dialog>`. Wide tables use `.table-wrap` rather than shrinking content or overflowing the page.
 
 ## State and Feature Placement
 
@@ -35,7 +37,7 @@ State remains close to the feature that owns it:
 - `DATA`, `ACCS`, and `ALIASES` hold server snapshots.
 - `BULK_SELECTION` owns account object-reference selection.
 - `RAW_SCHEDULING` owns only the open raw-editor snapshot.
-- `STATISTICS_*`, `LOG_*`, and `DETAIL_*` generations/controllers prevent stale cross-section updates.
+- `STATISTICS_*`, `MODEL_PROVIDER_*`, `LOG_*`, and `DETAIL_*` generations/controllers prevent stale cross-section updates.
 
 Do not add a second generic store or reconstruct complete account objects from visible table cells. New browser behavior should reuse `api()`, existing snapshots, and the relevant generation owner.
 
@@ -69,7 +71,7 @@ The shared `api()` helper owns authentication headers, 401/login behavior, JSON/
 
 ```bash
 node --input-type=module -e 'import fs from "node:fs"; import vm from "node:vm"; const html=fs.readFileSync("public/index.html","utf8"); new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]);'
-node --test test/ui-contract.test.js test/account-draft.test.js test/detailed-log-ui.test.js
+node --test test/ui-contract.test.js test/account-draft.test.js test/detailed-log-ui.test.js test/model-provider-ui.test.js
 npm test
 git diff --check
 ```

@@ -45,14 +45,20 @@ test('account drawer key visibility is explicit, masked on every open, and exclu
   assert.match(openDrawer, /\$\('#drawerKey'\)\.type='password'/);
 });
 
-test('top navigation switches five mutually exclusive sections without anchor or scroll shortcuts', () => {
+test('top navigation switches six mutually exclusive sections without anchor or scroll shortcuts', () => {
   assert.match(html, /<nav class="section-nav" aria-label="顶层板块">/);
-  for (const [id, section, pressed, label] of [['navConsole','console','true','控制台'],['navStatistics','statistics','false','统计'],['navRequests','requests','false','请求日志'],['navErrors','errors','false','错误日志'],['navDetails','details','false','详细日志']]) {
+  for (const [id, section, pressed, label] of [['navConsole','console','true','控制台'],['navStatistics','statistics','false','统计'],['navRequests','requests','false','请求日志'],['navErrors','errors','false','错误日志'],['navDetails','details','false','详细日志'],['navModelProviders','modelProviders','false','模型和渠道']]) {
     assert.match(html, new RegExp(`<button id="${id}"[^>]+type="button"[^>]+aria-pressed="${pressed}"[^>]+onclick="switchSection\\('${section}'\\)"[^>]*>${label}<\\/button>`));
   }
   assert.equal((html.match(/id="consolePanel"/g) || []).length, 1);
   assert.equal((html.match(/id="statisticsPanel"/g) || []).length, 1);
   assert.equal((html.match(/id="detailsPanel"/g) || []).length, 1);
+  assert.equal((html.match(/id="modelProvidersPanel"/g) || []).length, 1);
+  assert.ok(html.indexOf('id="navDetails"') < html.indexOf('id="navModelProviders"'));
+  assert.match(html,/id="modelProvidersPanel"[^>]*hidden>/);
+  assert.match(html,/id="modelProvidersFilter" type="search"/);
+  assert.match(html,/id="modelProvidersStatus" role="status" aria-live="polite"/);
+  assert.match(html,/class="table-wrap" tabindex="0" role="region" aria-label="模型和渠道统计表，可横向滚动"/);
   assert.match(html, /<section id="detailsPanel" aria-labelledby="detailsTitle" hidden>/);
   assert.equal((html.match(/id="logPanel"/g) || []).length, 1);
   assert.match(html, /<section id="statisticsPanel" aria-labelledby="statisticsTitle" hidden>/);
@@ -75,7 +81,7 @@ test('request and error sections share one log view and reset the selected type 
   assert.match(html, /id="logResult"/);
   const switchSection = html.slice(html.indexOf('async function switchSection'), html.indexOf('async function loadLogs'));
   assert.match(switchSection, /LOG_QUERY_ID\+\+;STATISTICS_QUERY_ID\+\+;/);
-  assert.match(switchSection, /\$\('#consolePanel'\)\.hidden=!isConsole;\$\('#statisticsPanel'\)\.hidden=!isStatistics;\$\('#logPanel'\)\.hidden=isConsole\|\|isStatistics/);
+  assert.match(switchSection, /\$\('#consolePanel'\)\.hidden=!isConsole;\$\('#statisticsPanel'\)\.hidden=!isStatistics;\$\('#modelProvidersPanel'\)\.hidden=section!=='modelProviders';\$\('#logPanel'\)\.hidden=isConsole\|\|isStatistics/);
   assert.match(switchSection, /setAttribute\('aria-pressed',String\(section===name\)\)/);
   assert.match(switchSection, /\$\('#logType'\)\.value=type/);
   assert.match(switchSection, /await loadLogs\(false\)/);
@@ -165,7 +171,7 @@ test('statistics quota controls expose labelled lifecycle, truthful units and ca
   assert.match(statistics,/typeof value==='number'&&Number\.isFinite\(value\)&&value>=0&&value<=100/);
   assert.match(statistics,/\(100-used\)\.toFixed\(1\)/);assert.match(statistics,/api\('\/api\/statistics\/quota-refresh',\{force\}/);
   assert.match(statistics,/new AbortController\(\)/);assert.match(statistics,/signal:controller\.signal/);assert.match(html,/async function api\(path, body, method, asText=false, options=\{\}\)/);
-  assert.match(html,/STATISTICS_REFRESH_MS = 5 \* 60 \* 1000/);assert.match(statistics,/window\.addEventListener\('pagehide',stopStatisticsVisit\)/);assert.match(statistics,/window\.addEventListener\('pageshow',restoreStatisticsVisit\)/);
+  assert.match(html,/STATISTICS_REFRESH_MS = 5 \* 60 \* 1000/);assert.match(statistics,/window\.addEventListener\('pagehide',\(\)=>\{stopStatisticsVisit\(\);stopModelProviders\(\);\}\)/);assert.match(statistics,/window\.addEventListener\('pageshow',\(\)=>!\$\('#statisticsPanel'\)\.hidden\?restoreStatisticsVisit\(\):!\$\('#modelProvidersPanel'\)\.hidden\?loadModelProviders\(\):null\)/);
   assert.match(statistics,/STATISTICS_TIMER===null\)return startStatisticsVisit\(\)/);assert.match(statistics,/STATISTICS_REFRESH_CONTROLLER\?\.abort\(\)/);assert.match(statistics,/visitId!==STATISTICS_VISIT_ID/);
   assert.match(statistics,/controller!==STATISTICS_REFRESH_CONTROLLER/);assert.match(statistics,/STATISTICS_REFRESH_PROMISE&&STATISTICS_REFRESH_VISIT===visitId/);
 });
