@@ -814,3 +814,25 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 34: 独立额度耗尽探测与保护
+<!-- trellis-session: v=2 fp=57b12a30f4a66ca5 -->
+
+**Date**: 2026-09-24
+**Task**: 独立额度耗尽探测与保护
+**Branch**: `main`
+
+### Summary
+
+真实账号额度HTTP429与安全内容双信号触发既有额度作业；新成功月窗低于阈值才手动解封式持久封禁，5h/周耗尽用三窗新快照自动恢复；配置/管理UI/元数据严格迁移、磁盘失败待持久化告警及同一定时器重试。全量270/270、390px本地Chrome合成解封键盘/确认通过；未推送或部署。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d5d93ee` | feat: 增加独立账号额度耗尽保护 |
+
+### Status
+
+[OK] **Completed**
