@@ -880,3 +880,27 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 37: 五项集成记录与诊断版生产切换
+<!-- trellis-session: v=2 fp=e9fce0e13e986c49 -->
+
+**Date**: 2026-09-25
+**Task**: 五项集成记录与诊断版生产切换
+**Branch**: `main`
+
+### Summary
+
+完成父任务本地集成记录、512MiB容器诊断预算安全修复与部署规范更新；提交推送32a150e并切换生产镜像，机器门禁健康、原文关闭。管理员确认账号/统计/详细日志，部署记录仍待请求日志/模型渠道页和18:09低额度槽保存意图确认。按用户同意归档09-19及09-20旧部署任务；未清理运维备份或中间产物。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2a1b5fa` | docs(task): 记录五项本地集成评审与上线门禁 |
+| `32a150e` | fix: 限制脱敏诊断内存并门禁原文模式 |
+| `165755b` | docs: 明确部署切换与管理员验收状态 |
+
+### Status
+
+[OK] **Completed**
