@@ -142,7 +142,7 @@ test('bounded inventory fails closed without deleting roots and explicit clear r
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const seed = new DetailedLogStore({ dir }); await seed.queue;
   await publish(seed).done; await publish(seed).done; await seed.close();
-  const roots = (await fs.readdir(dir)).sort(); assert.equal(roots.length, 2);
+  const roots = (await fs.readdir(dir)).sort(); assert.equal(roots.length, 3); assert.ok(roots.includes('raw'));
 
   const limited = new DetailedLogStore({ dir, maxInventoryEntries: 1 }); t.after(() => limited.close()); await limited.queue;
   assert.equal(limited.inventoryOverflow, true); assert.ok(limited.health.failures >= 1);
@@ -176,11 +176,11 @@ test('safe failure health, reservation release, orphan recovery and path safety'
   const store = await setup(t, { io }); const item = publish(store);
   assert.equal(await item.done, false); assert.equal(item.released(), true); assert.equal(store.pending, 0);
   assert.equal(store.health.failures, 1); assert.doesNotMatch(JSON.stringify(store.health), /SECRET/);
-  assert.deepEqual(await fs.readdir(store.dir), []);
+  assert.deepEqual(await fs.readdir(store.dir), ['raw']);
   for (const id of ['../config.json', 'bad', randomUUID() + '/x']) await assert.rejects(store.detail(id), { statusCode: 400 });
   const orphan = path.join(store.dir, '.tmp-' + randomUUID()); await fs.mkdir(orphan); await fs.writeFile(path.join(orphan, randomUUID() + '.txt'), 'sanitized');
   const restarted = new DetailedLogStore({ dir: store.dir }); t.after(() => restarted.close()); await restarted.queue;
-  assert.deepEqual(await fs.readdir(store.dir), []);
+  assert.deepEqual(await fs.readdir(store.dir), ['raw']);
 });
 
 test('abandoned publication groups recover through clear or maintenance after rename and cleanup failures', async (t) => {
@@ -203,7 +203,7 @@ test('abandoned publication groups recover through clear or maintenance after re
     else assert.equal(await publish(store).done, true);
     assert.equal((await fs.readdir(store.dir)).some((name) => name.startsWith('.tmp-')), false, boundary);
     if (boundary !== 'clear') assert.equal(await store.body(successful.requestId, successful.bodyId), 'sanitized prompt', 'maintenance preserves successful records');
-    else assert.deepEqual(await fs.readdir(store.dir), []);
+    else assert.deepEqual(await fs.readdir(store.dir), ['raw']);
     assert.equal(await publish(store).done, true, 'released reservations and serial queue remain usable');
   }
 });
@@ -238,7 +238,7 @@ test('persistent temporary deletion failure rejects clear and maintenance safely
   await assert.rejects(store.query(), { statusCode: 503, message: 'detailed storage unavailable' });
   assert.ok(store.health.failures >= 4); assert.doesNotMatch(JSON.stringify(store.health), /PRIVATE/);
   assert.equal(failed.released(), true); assert.equal(store.pending, 0);
-  broken = false; assert.deepEqual(await store.clear(), { ok: true }); assert.deepEqual(await fs.readdir(store.dir), []);
+  broken = false; assert.deepEqual(await store.clear(), { ok: true }); assert.deepEqual(await fs.readdir(store.dir), ['raw']);
 });
 
 test('temporary cleanup preserves unknown files, corrupt groups and symlink targets at every boundary', async (t) => {

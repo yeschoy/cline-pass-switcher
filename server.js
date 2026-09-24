@@ -15,8 +15,8 @@ import { isDeepStrictEqual } from 'node:util';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { JsonlLogGroup } from './lib/jsonl-log-store.js';
-import { DetailRoot, DetailRedactor, detailContext, detailRoute, observeStream, MAX_BODY_BYTES, captureBudget } from './lib/detailed-log-capture.js';
-import { DetailedLogStore, parseDetailQuery, MAX_AGE_MS, MAX_TOTAL_BYTES } from './lib/detailed-log-store.js';
+import { DetailRoot, DetailRedactor, detailContext, detailRoute, observeStream, MAX_BODY_BYTES, MAX_RAW_BODY_BYTES, MAX_PAYLOAD_BYTES, captureBudget } from './lib/detailed-log-capture.js';
+import { DetailedLogStore, parseDetailQuery, MAX_AGE_MS, RAW_MAX_AGE_MS, MAX_TOTAL_BYTES } from './lib/detailed-log-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || __dirname;
@@ -33,6 +33,7 @@ const DEFAULT_CONFIG = {
   publicBaseUrl: '',
   detailedLogging: false,
   errorDetailLogging: false,
+  rawBodyLogging: false,
   exposeCatalog: false,    // true 时 /v1/models 合并完整目录模型（默认仅订阅模型）
   upstreamBase: 'https://api.cline.bot/api/v1',
   accounts: [],            // { id, name, key, enabled, maxConcurrent, maxRpm, perModel } —— Cline Pass 账号池（maxRpm：0=不限）
@@ -1089,7 +1090,7 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   let dirty = false;
   const protection = normalizeQuotaProtection(config.quotaProtection);
   if (JSON.stringify(config.quotaProtection) !== JSON.stringify(protection)) { config.quotaProtection = protection; dirty = true; }
-  for (const field of ['detailedLogging', 'errorDetailLogging']) if (config[field] !== true && config[field] !== false) { config[field] = false; dirty = true; }
+  for (const field of ['detailedLogging', 'errorDetailLogging', 'rawBodyLogging']) if (config[field] !== true && config[field] !== false) { config[field] = false; dirty = true; }
   if ((!Array.isArray(config.accounts) || config.accounts.length === 0) && config.apiKey) {
     config.accounts = [{ name: '默认账号', key: config.apiKey, enabled: true }];
     config.accountMode = 'single';
@@ -2778,12 +2779,12 @@ function record(modelId, info, detail = detailContext.getStore()) {
     retryAfter: Number.isSafeInteger(info.retryAfter) && info.retryAfter >= 0 ? Math.min(3600, info.retryAfter) : null,
     errorCategory: info.errorCategory || (result === 'failed' && info.error ? (info.proxyError ? 'proxy' : 'upstream') : null),
   };
-  if (detail?.requestId === request.requestId) { detail.result = result; if (detail.profile === 'error' && detail.status === null) detail.status = request.status; }
+  if (detail?.requestId === request.requestId) { detail.result = result; if (detail.errorOnly && detail.status === null) detail.status = request.status; }
   const writes = [requestLogs.append(request)];
   for (const [traceIndex, attempt] of (result === 'client_cancelled' ? [] : (info.trace || [])).entries()) {
     if (attempt.status === 200 && !attempt.action) continue;
     const attemptIndex = Number.isSafeInteger(attempt.attemptIndex) && attempt.attemptIndex >= 0 ? attempt.attemptIndex : traceIndex;
-    const detailProfile = ['error', 'full'].includes(attempt.detailProfile) && DETAIL_CALL_ID.test(attempt.callId || '') ? attempt.detailProfile : null;
+    const detailProfile = ['error', 'full', 'raw-error', 'raw-full'].includes(attempt.detailProfile) && DETAIL_CALL_ID.test(attempt.callId || '') ? attempt.detailProfile : null;
     const bounded = boundedReason(attempt.note, info.sensitiveValues);
     bounded.reasonTruncated ||= attempt.reasonTruncated === true;
     writes.push(errorLogs.append({ ts, requestId: request.requestId, requestedModel: request.requestedModel, resolvedModel: request.resolvedModel,
@@ -2806,7 +2807,7 @@ function record(modelId, info, detail = detailContext.getStore()) {
   }
   void Promise.all(writes);
   try { saveMeta(); } catch (error) { console.error(`[诊断] metadata 持久化失败：${safeReason(error.message)}`); }
-  if (detail?.requestId === request.requestId && detail.profile === 'error') detail.finalize();
+  if (detail?.requestId === request.requestId && detail.errorOnly) detail.finalize();
 }
 
 
@@ -3530,7 +3531,7 @@ function readBody(req, maxBytes = MAX_REQUEST_BODY_BYTES) {
       reject(error);
     };
     const onData = (chunk) => {
-      detail?.input?.add(chunk);
+      try { detail?.input?.add(chunk); } catch { if (detail?.input) { detail.input.limited = true; detail.input.limitReason ||= 'other'; detail.input.discard(); } }
       size += chunk.length;
       if (size > maxBytes) return rejectTooLarge();
       chunks.push(chunk);
@@ -4003,6 +4004,7 @@ function settleAttempt(modelId, attempt, result, account, { clientDisconnected =
     outcomeStatus: Number.isInteger(result.normalizedStatus) ? result.normalizedStatus : Number.isInteger(result.status) ? result.status : null,
     responseHeaders: result.responseHeaders || {},
     responseBody: failed ? result.detailResponseBody : null,
+    responseContentType: result.responseContentType,
     responseComplete: captureState !== 'stream-transport-failed',
     captureState: captureState || (failed ? 'response-error' : 'success'),
   });
@@ -4043,7 +4045,7 @@ function settleAttempt(modelId, attempt, result, account, { clientDisconnected =
 function traceAttempt(attempt, result, account, ms, diagnostic) {
   const candidate = result.attemptToken || (result.detailAttempt ? { attemptIndex: result.detailAttempt.attemptIndex, callId: result.detailAttempt.callId } : null);
   const token = candidate && Number.isSafeInteger(candidate.attemptIndex) && candidate.attemptIndex >= 0 && DETAIL_CALL_ID.test(candidate.callId || '') ? candidate : null;
-  const detailProfile = token && ['error', 'full'].includes(result.detailAttempt?.root?.profile) ? result.detailAttempt.root.profile : null;
+  const detailProfile = token && ['error', 'full', 'raw-error', 'raw-full'].includes(result.detailAttempt?.root?.profile) ? result.detailAttempt.root.profile : null;
   const note = boundedReason(diagnostic.policy?.ruleId ? `rule:${diagnostic.policy.ruleId}` : result.ordinaryReason || result.note);
   return {
     upstream: attempt.upstream, status: result.status, upstreamStatus: result.upstreamStatus, normalizedStatus: result.normalizedStatus,
@@ -4353,7 +4355,7 @@ async function handleChat(req, res) {
       'Content-Type': ctype, 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'Access-Control-Allow-Origin': '*',
       'X-Cline-Target-Upstream': targets.length ? targets.join('>') : targetSource === 'auto' ? 'auto' : 'none', 'X-Cline-Attempts': String(chain.trace.length), 'X-Cline-Account': headerSafe(acc.name),
     });
-    if (detail?.profile === 'error') detail.status = up.status;
+    if (detail?.errorOnly) detail.status = up.status;
     const observer = createSseObserver();
     let finalized = false;
     let heartbeat = null, blocked = false, atEventBoundary = true;
@@ -4536,11 +4538,11 @@ const server = http.createServer((req, res) => {
   const pathname = new URL(req.url, 'http://local').pathname;
   // Never retain detailed content while migration/recovery is awaiting the first independent password change.
   const profile = adminState?.initialized === true && config.detailedLogging === true && detailRoute(req.method, pathname)
-    ? 'full'
-    : adminState?.initialized === true && config.errorDetailLogging === true && req.method === 'POST' && CHAT_PATHS.has(pathname) ? 'error' : null;
+    ? (config.rawBodyLogging === true ? 'raw-full' : 'full')
+    : adminState?.initialized === true && config.errorDetailLogging === true && req.method === 'POST' && CHAT_PATHS.has(pathname) ? (config.rawBodyLogging === true ? 'raw-error' : 'error') : null;
   if (profile) {
     if (DetailRoot.active >= 128) { detailedLogs.recordDrop('activeLimit'); return dispatch(req, res); }
-    const secrets = [config.proxyKey, PROXY_KEY, ...config.accounts.flatMap((account) => [account.key, account.proxyUrl, ...Object.values(account.headers || {})])];
+    const secrets = profile.startsWith('raw-') ? [] : [config.proxyKey, PROXY_KEY, ...config.accounts.flatMap((account) => [account.key, account.proxyUrl, ...Object.values(account.headers || {})])];
     const root = new DetailRoot(req, res, detailedLogs, secrets, { profile });
     return detailContext.run(root, () => dispatch(req, res));
   }
@@ -4650,15 +4652,15 @@ async function dispatch(req, res) {
     }
     if (p === '/api/logs/settings' || p === '/api/logs/details' || p.startsWith('/api/logs/details/')) {
       if (p === '/api/logs/settings') {
-        if (req.method === 'GET') return sendJSON(res, 200, { detailedLogging: config.detailedLogging === true, errorDetailLogging: config.errorDetailLogging === true, authRequired: true, maxBodyBytes: MAX_BODY_BYTES, maxAgeMs: MAX_AGE_MS, maxTotalBytes: MAX_TOTAL_BYTES, health: { ...detailedLogs.health, captureDropped: captureBudget.dropped, retainedPayloadBytes: captureBudget.used } });
+        if (req.method === 'GET') return sendJSON(res, 200, { detailedLogging: config.detailedLogging === true, errorDetailLogging: config.errorDetailLogging === true, rawBodyLogging: config.rawBodyLogging === true, authRequired: true, maxBodyBytes: MAX_BODY_BYTES, rawMaxBodyBytes: MAX_RAW_BODY_BYTES, maxPayloadBytes: MAX_PAYLOAD_BYTES, maxAgeMs: MAX_AGE_MS, rawMaxAgeMs: RAW_MAX_AGE_MS, maxTotalBytes: MAX_TOTAL_BYTES, health: { ...detailedLogs.health, captureDropped: captureBudget.dropped, retainedPayloadBytes: captureBudget.used } });
         if (req.method === 'POST') {
           const body = await readJsonBody(req), keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : [];
-          if (!keys.length || keys.length > 2 || keys.some((key) => !['detailedLogging', 'errorDetailLogging'].includes(key) || typeof body[key] !== 'boolean')) return sendJSON(res, 400, { error: { message: 'expected one or both boolean logging settings' } });
-          const next = { detailedLogging: config.detailedLogging === true, errorDetailLogging: config.errorDetailLogging === true, ...body };
+          if (!keys.length || keys.length > 3 || keys.some((key) => !['detailedLogging', 'errorDetailLogging', 'rawBodyLogging'].includes(key) || typeof body[key] !== 'boolean')) return sendJSON(res, 400, { error: { message: 'expected one or both boolean logging settings' } });
+          const next = { detailedLogging: config.detailedLogging === true, errorDetailLogging: config.errorDetailLogging === true, rawBodyLogging: config.rawBodyLogging === true, ...body };
           try { atomicWriteJson(CONFIG_PATH, { ...config, ...next }); }
           catch { return sendJSON(res, 500, { error: { message: 'logging setting could not be saved' } }); }
-          config.detailedLogging = next.detailedLogging; config.errorDetailLogging = next.errorDetailLogging;
-          return sendJSON(res, 200, { ok: true, detailedLogging: config.detailedLogging, errorDetailLogging: config.errorDetailLogging });
+          config.detailedLogging = next.detailedLogging; config.errorDetailLogging = next.errorDetailLogging; config.rawBodyLogging = next.rawBodyLogging;
+          return sendJSON(res, 200, { ok: true, detailedLogging: config.detailedLogging, errorDetailLogging: config.errorDetailLogging, rawBodyLogging: config.rawBodyLogging });
         }
       }
       if (p === '/api/logs/details') {
@@ -4670,8 +4672,10 @@ async function dispatch(req, res) {
         if (url.search) return sendJSON(res, 400, { error: { message: 'invalid detailed log query' } });
         if (parts.length === 1) return sendJSON(res, 200, await detailedLogs.detail(parts[0]));
         if (parts.length === 3 && parts[1] === 'bodies') {
-          const text = await detailedLogs.body(parts[0], parts[2]);
-          res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'X-Content-Type-Options': 'nosniff' }); return res.end(text);
+          const { text, release } = await detailedLogs.body(parts[0], parts[2], { holdRaw: true });
+          res.once('finish', release); res.once('close', release);
+          try { res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'X-Content-Type-Options': 'nosniff' }); return res.end(text); }
+          catch (error) { release(); throw error; }
         }
         return sendJSON(res, 400, { error: { message: 'invalid detailed log identity' } });
       }

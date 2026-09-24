@@ -40,14 +40,15 @@ test('detailed health renders fixed nonzero reasons with safe old-server fallbac
 });
 
 test('five sections, toggle and detail reads preserve all account/bulk/raw draft owners', async () => {
-  const h = harness(), before = h.drafts(); let settings = { detailedLogging: false, errorDetailLogging: false, authRequired: false };
+  const h = harness(), before = h.drafts(); let settings = { detailedLogging: false, errorDetailLogging: false, rawBodyLogging: false, authRequired: true };
   h.context.handler = async (path, body) => { if (!path.includes('settings')) return page('row'); if (body) settings = { ...settings, ...body }; return settings; };
   await h.run("switchSection('details')");
   assert.equal(h.el('#detailsPanel').hidden, false);
   for (const id of ['#consolePanel', '#statisticsPanel', '#logPanel']) assert.equal(h.el(id).hidden, true);
   assert.equal(h.el('#navDetails').attrs['aria-pressed'], 'true'); assert.match(h.el('#detailsAuth').textContent, /独立管理员会话认证/);
   h.el('#detailedLogging').checked = true; await h.run('toggleDetailedLogging()');
-  assert.equal(h.el('#detailedLogging').checked, true); h.el('#errorDetailLogging').checked = true; await h.run('toggleErrorDetailLogging()'); assert.equal(h.el('#errorDetailLogging').checked, true); assert.equal(h.drafts(), before);
+  assert.equal(h.el('#detailedLogging').checked, true); h.el('#errorDetailLogging').checked = true; await h.run('toggleErrorDetailLogging()'); assert.equal(h.el('#errorDetailLogging').checked, true);
+  h.el('#rawBodyLogging').checked = true; await h.run('toggleRawBodyLogging()'); assert.equal(h.el('#rawBodyLogging').checked, true); assert.equal(h.drafts(), before);
   assert.ok(h.calls.every(([path]) => path.startsWith('/api/logs/')));
   await h.run("switchSection('console')"); assert.equal(h.el('#detailsPanel').hidden, true); assert.equal(h.el('#consolePanel').hidden, false);
 });
@@ -70,12 +71,24 @@ test('stale settings/list/selection/body reads cannot overwrite newer state; cop
   h.context.navigator.clipboard.writeText = async () => { throw Error('denied'); }; await h.run('copyDetailBody()');
   assert.equal(h.el('#detailsText').focused, true); assert.equal(h.el('#detailsText').selected, true);
   assert.match(h.el('#detailsStatus').textContent, /复制失败/);
+  h.el('#detailsPanel').hidden = false; await h.run("switchSection('console')");
+  assert.equal(h.el('#detailsText').value, ''); assert.equal(h.run('DETAIL_BODY_TEXT'), null);
+});
+
+test('raw body warning and session loss clear loaded text without touching account drafts', async () => {
+  const h = harness(), before = h.drafts(); h.el('#detailsPanel').hidden = false;
+  h.context.handler = async (route) => route.includes('/bodies/') ? 'fixture raw body key' : { request: { requestId: 'root', profile: 'raw-full', requestBody: 'body' }, attempts: [], bodies: [{ bodyId: 'body', state: 'complete', capturedBytes: 20, observedBytes: 20, redacted: false }] };
+  await h.run("selectDetail('root')"); assert.match(h.el('#detailsBodyWarning').textContent, /未脱敏.*密钥/);
+  await h.run("loadDetailBody('root','body','complete')"); assert.equal(h.el('#detailsText').value, 'fixture raw body key');
+  assert.equal(h.run('DETAIL_BODY_RAW'), true);
+  h.run('showLogin()'); assert.equal(h.el('#detailsText').value, ''); assert.equal(h.run('DETAIL_BODY_TEXT'), null); assert.equal(h.el('#detailsCopy').disabled, true);
+  assert.equal(h.drafts(), before);
 });
 
 test('toggle failures restore confirmed state, pending reads cannot undo a save, and stale clear does not reload', async () => {
   const h = harness(), before = h.drafts();
-  h.context.handler = async () => ({ error: { message: 'mock failure' } }); h.el('#detailedLogging').checked = true;
-  await h.run('toggleDetailedLogging()'); assert.equal(h.el('#detailedLogging').checked, false); assert.equal(h.el('#detailedLogging').disabled, false);
+  h.context.handler = async () => ({ error: { message: 'mock failure' } }); h.el('#detailedLogging').checked = true; h.el('#rawBodyLogging').checked = true;
+  await h.run('toggleDetailedLogging()'); assert.equal(h.el('#detailedLogging').checked, false); assert.equal(h.el('#rawBodyLogging').checked, false); assert.equal(h.el('#detailedLogging').disabled, false);
   const get = deferred(), post = deferred(); h.context.handler = (path, body) => body ? post.promise : get.promise;
   const pendingRead = h.run('loadDetailSettings()'); h.el('#detailedLogging').checked = true; const pendingSave = h.run('toggleDetailedLogging()');
   assert.equal(h.el('#detailedLogging').disabled, true); post.resolve({ detailedLogging: true }); await pendingSave;

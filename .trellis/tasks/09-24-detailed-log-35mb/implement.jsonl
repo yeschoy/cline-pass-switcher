@@ -5,3 +5,4 @@
 {"file": ".trellis/spec/frontend/index.md", "reason": "Relevant layer contract and verification boundary"}
 {"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Relevant layer contract and verification boundary"}
 {"file": ".trellis/spec/backend/admin-auth-guidelines.md", "reason": "Independent admin session and raw-detail access gate"}
+{"file": ".trellis/tasks/09-24-detailed-log-35mb/research/raw-security-gates.md", "reason": "Approved ownership-safe 48h raw cleanup and rollback fence"}

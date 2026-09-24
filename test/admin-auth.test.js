@@ -46,7 +46,7 @@ const adminRoutes = [
 
 test('independent admin bootstrap, route matrix, CSRF, revocation, restart and client rotation', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-admin-')); const p = await port();
-  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ port: p, proxyKey: 'stale-config-key', detailedLogging: true, accounts: [] }));
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ port: p, proxyKey: 'stale-config-key', detailedLogging: true, rawBodyLogging: true, accounts: [] }));
   let child;
   try {
     child = await run(dir, p);

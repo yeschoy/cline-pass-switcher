@@ -130,6 +130,7 @@ Only the four duration keys support `CLINE_PASS_TEST_INBOUND_KEEP_ALIVE_MS`, `CL
   modelAliases: { [clientAlias]: "cline-pass/<known model>" },
   detailedLogging: boolean,      // default false; full detailed capture
   errorDetailLogging: boolean,   // default false; failed chat attempts only
+  rawBodyLogging: boolean,       // default false; opt-in unredacted detail bodies for future captures only
   perModel: { [modelId]: RouteConfig }
 }
 
@@ -284,7 +285,7 @@ Quota snapshots are keyed by stable account ID and store only projected percenta
 
 Durable request/error diagnostics no longer grow `metadata.history`; they are separate bounded JSONL streams under `DATA_DIR/logs/` and follow `logging-guidelines.md`. The legacy history array remains compatibility-only.
 
-Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/` store described in `logging-guidelines.md`; metadata exclusions above remain unchanged. `detailedLogging` selects full capture and `errorDetailLogging` selects failed-chat-attempt capture; both default off and full wins when both are enabled. `POST /api/logs/settings` accepts a non-empty exact subset of those two boolean fields, so legacy `{ detailedLogging: boolean }` remains valid. Persist the complete candidate config with `atomicWriteJson(CONFIG_PATH, { ...config, ...candidate })` **before** changing either runtime mode. Failed writes return a safe 500 with both prior runtime values/file intact; rejected payloads return 400 without a write. The settings must not reuse destructive account saves or reload account drafts. Missing/invalid persisted values are off, not truthy enablement.
+Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/` store described in `logging-guidelines.md`; metadata exclusions above remain unchanged. `detailedLogging` selects full capture and `errorDetailLogging` selects failed-chat-attempt capture; both default off and full wins when both are enabled. `POST /api/logs/settings` accepts a non-empty exact subset of those two boolean fields and `rawBodyLogging`, so legacy `{ detailedLogging: boolean }` remains valid. `rawBodyLogging` defaults off for legacy files and is effective only after independent administrator initialization and when a full/error capture switch is enabled; no existing sanitized manifest silently changes profile. Persist the complete candidate config with `atomicWriteJson(CONFIG_PATH, { ...config, ...candidate })` **before** changing either runtime mode. Failed writes return a safe 500 with both prior runtime values/file intact; rejected payloads return 400 without a write. The settings must not reuse destructive account saves or reload account drafts. Missing/invalid persisted values are off, not truthy enablement.
 
 #### Independent administrator state
 

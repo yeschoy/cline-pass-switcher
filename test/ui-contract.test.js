@@ -171,7 +171,7 @@ test('statistics quota controls expose labelled lifecycle, truthful units and ca
   assert.match(statistics,/typeof value==='number'&&Number\.isFinite\(value\)&&value>=0&&value<=100/);
   assert.match(statistics,/\(100-used\)\.toFixed\(1\)/);assert.match(statistics,/api\('\/api\/statistics\/quota-refresh',\{force\}/);
   assert.match(statistics,/new AbortController\(\)/);assert.match(statistics,/signal:controller\.signal/);assert.match(html,/async function api\(path, body, method, asText=false, options=\{\}\)/);
-  assert.match(html,/STATISTICS_REFRESH_MS = 5 \* 60 \* 1000/);assert.match(statistics,/window\.addEventListener\('pagehide',\(\)=>\{stopStatisticsVisit\(\);stopModelProviders\(\);\}\)/);assert.match(statistics,/window\.addEventListener\('pageshow',\(\)=>!\$\('#statisticsPanel'\)\.hidden\?restoreStatisticsVisit\(\):!\$\('#modelProvidersPanel'\)\.hidden\?loadModelProviders\(\):null\)/);
+  assert.match(html,/STATISTICS_REFRESH_MS = 5 \* 60 \* 1000/);assert.match(statistics,/window\.addEventListener\('pagehide',\(\)=>\{stopStatisticsVisit\(\);stopModelProviders\(\);resetDetailSelection\(\);\}\)/);assert.match(statistics,/window\.addEventListener\('pageshow',\(\)=>!\$\('#statisticsPanel'\)\.hidden\?restoreStatisticsVisit\(\):!\$\('#modelProvidersPanel'\)\.hidden\?loadModelProviders\(\):null\)/);
   assert.match(statistics,/STATISTICS_TIMER===null\)return startStatisticsVisit\(\)/);assert.match(statistics,/STATISTICS_REFRESH_CONTROLLER\?\.abort\(\)/);assert.match(statistics,/visitId!==STATISTICS_VISIT_ID/);
   assert.match(statistics,/controller!==STATISTICS_REFRESH_CONTROLLER/);assert.match(statistics,/STATISTICS_REFRESH_PROMISE&&STATISTICS_REFRESH_VISIT===visitId/);
 });
@@ -222,9 +222,11 @@ test('raw scheduling editor uses a labelled native modal, draft guidance and ann
 test('detailed logs have independent labelled controls, privacy/retention guidance and safe on-demand text', () => {
   assert.match(html, /<label for="detailedLogging"><input id="detailedLogging" type="checkbox" disabled/);
   assert.match(html, /<label for="errorDetailLogging"><input id="errorDetailLogging" type="checkbox" disabled/);
+  assert.match(html, /<label for="rawBodyLogging"><input id="rawBodyLogging" type="checkbox" disabled/);
+  assert.match(html, /id="detailsBodyWarning" role="status" aria-live="polite"/);
   assert.match(html, /错误详情/); assert.match(html, /查看错误详情/); assert.match(html, /详情不可用（已过期、已清空、被容量边界丢弃或发布失败）/);
   assert.match(html, /attemptIndex/); assert.match(html, /detailCallId/);
-  assert.match(html, /5 MiB/); assert.match(html, /7 天 \/ 1 GiB/); assert.match(html, /不提交账号草稿/);
+  assert.match(html, /5 MiB/); assert.match(html, /7 天/); assert.match(html, /1 GiB/); assert.match(html, /35 MiB/); assert.match(html, /48 小时/); assert.match(html, /512 MiB/); assert.match(html, /不提交账号草稿/);
   assert.match(html, /id="detailsStatus" aria-live="polite"/);
   assert.match(html, /id="detailsDropReasons" aria-live="polite"/);
   assert.match(html, /<label for="detailsText">/); assert.match(html, /<textarea id="detailsText" readonly/);
