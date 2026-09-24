@@ -1,6 +1,7 @@
-# Monthly quota statistics — implementation checklist (planning)
+# Monthly quota statistics — implementation checklist
 
-- [ ] Trace quota parse/validation, `/api/statistics`, account projection, statistics visit refresh and UI forecast tests.
-- [ ] Implement labelled per-window reference remaining and separate monthly vs immediate totals, using validated snapshot and generatedAt without changing the quota-job or account-routing owner.
-- [ ] Test two unequal windows, multiple accounts, known 0/100, missing/partial/stale/disabled, reset before/inside/after forecast and aggregate round-trip; UI VM/static and real narrow-browser evidence.
-- [ ] Keep README/spec language explicit: $10/$25/$50 are community estimates for matching plan, not official balance; full relevant and project gates before approval to start.
+- [x] Trace quota parse/validation, `/api/statistics`, account projection, statistics visit refresh and UI forecast tests. Do not add an account plan field: the operator confirmed this pool is same-plan, while the reference caps are still estimates.
+- [x] Implement labelled per-window reference remaining and separate monthly-only vs three-window immediate totals, each with independent inclusion/exclusion counts and freshness checks. Reuse the accepted statistics snapshot and generatedAt; do not change the quota job, account-routing owner or persisted schema.
+- [x] Keep the existing four forecast horizons, apply the matching window cap after a validated reset and conservatively carry unknown resets; show the no-new-consumption assumption and incomplete-reset coverage for each estimate.
+- [x] Test two unequal windows, multiple accounts, known 0/100, monthly-only partial, missing/stale/failed/disabled, reset before/inside/after forecast, and existing refresh/draft ownership; UI VM/static, focused integration and real narrow-browser evidence in an isolated Chrome 390 CSS-pixel viewport with synthetic data. See `check-report.md` for browser and test limits.
+- [x] Keep README/spec language explicit: $10/$25/$50 are community estimates under the operator-confirmed same-plan pool assumption, not official balance. Narrow UI 46/46, full gate 258/258, syntax/UI compilation and diff check passed. Commit this child separately; no production deployment.

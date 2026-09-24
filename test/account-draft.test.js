@@ -220,7 +220,7 @@ test('model and account summaries render stable-id statistics without entering a
 test('quota rendering preserves known zero/full values and labels partial, stale, failed and ineligible snapshots', () => {
   const h=harness();
   h.context.known={limits:{five_hour:{percentUsed:0,resetsAt:'2026-09-15T00:00:00.000Z'},weekly:{percentUsed:100},monthly:{percentUsed:37.5}}};
-  assert.match(h.run("quotaLimit(known,'five_hour','5 小时')"),/^5 小时：剩余 100\.0%/);assert.match(h.run("quotaLimit(known,'weekly','每周')"),/^每周：剩余 0\.0%/);assert.match(h.run("quotaLimit(known,'monthly','每月')"),/^每月：剩余 62\.5%/);
+  assert.match(h.run("quotaLimit(known,'five_hour','5 小时')"),/^5 小时：剩余 100\.0% · 社区参考剩余 \$10\.00/);assert.match(h.run("quotaLimit(known,'weekly','每周')"),/^每周：剩余 0\.0% · 社区参考剩余 \$0\.00/);assert.match(h.run("quotaLimit(known,'monthly','每月')"),/^每月：剩余 62\.5% · 社区参考剩余 \$31\.25/);
   assert.doesNotMatch(h.run("quotaLimit(known,'monthly','每月')"),/已用/);
   h.context.invalid={limits:{five_hour:{percentUsed:'0',resetsAt:'bad'},weekly:{percentUsed:25,resetsAt:'2026-09-15'}}};assert.equal(h.run("quotaLimit(invalid,'five_hour','5 小时')"),'5 小时：未知 · 重置时间未提供');assert.match(h.run("quotaLimit(invalid,'weekly','每周')"),/重置时间 未提供/);
   const base={health:{status:'insufficient'},quota:{status:'unknown',pool:'unknown',fetchedAt:1000,lastAttemptAt:1000,lastSuccessAt:1000,limits:{weekly:{percentUsed:25}},errorCategory:null,refresh:{eligible:true,reason:null,state:'idle',nextAttemptAt:2000}}};
@@ -236,43 +236,74 @@ test('quota rendering preserves known zero/full values and labels partial, stale
   assert.doesNotMatch(h.run('quotaState(row,1000)'),/暂停路由/, 'low=0 can retain the recorded disposition without applying it');
 });
 
-test('quota forecast sums each account minimum and applies resets at fixed target boundaries', () => {
+test('monthly and immediate community estimates use separate window caps and reset boundaries', () => {
   const h=harness(),generatedAt=Date.parse('2026-09-15T00:00:00.000Z'),at=hours=>new Date(generatedAt+hours*60*60*1000).toISOString();
+  const quota=(limits,status='fresh')=>({status,limits,fetchedAt:generatedAt,lastAttemptAt:generatedAt,lastSuccessAt:generatedAt,errorCategory:null,refresh:{reason:null}});
   h.context.forecastData={generatedAt,accounts:[
-    {enabled:true,quota:{status:'fresh',limits:{five_hour:{percentUsed:20,resetsAt:at(2)},weekly:{percentUsed:40,resetsAt:at(8)},monthly:{percentUsed:10,resetsAt:at(24)}}}},
-    {enabled:true,quota:{status:'fresh',limits:{five_hour:{percentUsed:100,resetsAt:at(2)},weekly:{percentUsed:0,resetsAt:at(25)},monthly:{percentUsed:0,resetsAt:at(25)}}}}
+    {enabled:true,quota:quota({five_hour:{percentUsed:20,resetsAt:at(2)},weekly:{percentUsed:40,resetsAt:at(8)},monthly:{percentUsed:10,resetsAt:at(24)}})},
+    {enabled:true,quota:quota({five_hour:{percentUsed:100,resetsAt:at(2)},weekly:{percentUsed:0,resetsAt:at(25)},monthly:{percentUsed:0,resetsAt:at(25)}})}
   ]};
-  const forecast=JSON.parse(h.run('JSON.stringify(statisticsQuotaForecast(forecastData))'));
-  assert.deepEqual(forecast,{totals:{current:60,twoHours:160,eightHours:190,twentyFourHours:200},maximum:200,included:2,excluded:0,incompleteResets:0});
+  const result=JSON.parse(h.run('JSON.stringify(statisticsQuotaForecast(forecastData))'));
+  assert.deepEqual(result.monthly.totals,{current:95,twoHours:95,eightHours:95,twentyFourHours:100});
+  assert.deepEqual(result.immediate.totals,{current:8,twoHours:20,eightHours:20,twentyFourHours:20});
+  assert.equal(result.monthly.included,2);assert.equal(result.immediate.included,2);
+  assert.deepEqual(result.immediate.incompleteResets,{twoHours:0,eightHours:0,twentyFourHours:0});
+  h.run('renderStatisticsQuotaForecast(forecastData)');
+  assert.match(h.el('#statisticsQuotaCurrent').textContent,/当月剩余：约 \$95\.00\n当前可用：约 \$8\.00/);
+  assert.match(h.el('#statisticsQuota24h').textContent,/当月剩余：约 \$100\.00\n届时可用：约 \$20\.00/);
+  assert.match(h.el('#statisticsQuotaForecastTime').textContent,/统计生成 .*纳入快照获取/);
 });
 
-test('quota forecast excludes untrusted snapshots and conservatively carries incomplete resets', () => {
-  const h=harness(),generatedAt=Date.parse('2026-09-15T00:00:00.000Z'),at=hours=>new Date(generatedAt+hours*60*60*1000).toISOString(),complete={five_hour:{percentUsed:10,resetsAt:at(1)},weekly:{percentUsed:20,resetsAt:at(2)},monthly:{percentUsed:30,resetsAt:at(3)}};
+test('monthly-only partials, unknown/stale/failed/disabled and known zeros have independent coverage', () => {
+  const h=harness(),generatedAt=Date.parse('2026-09-15T00:00:00.000Z'),at=hours=>new Date(generatedAt+hours*60*60*1000).toISOString();
+  const quota=(limits,extra={})=>({status:'unknown',limits,fetchedAt:generatedAt,lastAttemptAt:generatedAt,lastSuccessAt:generatedAt,errorCategory:null,refresh:{reason:null},...extra});
+  const complete={five_hour:{percentUsed:80,resetsAt:at(0)},weekly:{percentUsed:60,resetsAt:at(1)},monthly:{percentUsed:40,resetsAt:at(1)}};
   h.context.forecastData={generatedAt,accounts:[
-    {enabled:true,quota:{status:'fresh',limits:{five_hour:{percentUsed:80,resetsAt:at(0)},weekly:{percentUsed:60,resetsAt:at(1)},monthly:{percentUsed:40,resetsAt:at(1)}}}},
-    {enabled:true,quota:{status:'fresh',limits:{five_hour:{percentUsed:70},weekly:{percentUsed:60,resetsAt:'invalid'},monthly:{percentUsed:50,resetsAt:at(1)}}}},
-    {enabled:false,quota:{status:'fresh',limits:complete}},
-    {enabled:true,quota:{status:'stale',limits:complete}},
-    {enabled:true,quota:{status:'fresh',limits:{five_hour:complete.five_hour,weekly:complete.weekly}}},
-    {enabled:true,quota:{status:'fresh',limits:{...complete,monthly:{percentUsed:'30',resetsAt:at(3)}}}}
+    {enabled:true,quota:quota(complete,{status:'fresh',lastAttemptAt:generatedAt-1})},
+    {enabled:true,quota:quota({monthly:{percentUsed:100,resetsAt:at(2)}})},
+    {enabled:true,quota:quota({monthly:{percentUsed:0}})},
+    {enabled:true,quota:quota({five_hour:{percentUsed:70},weekly:{percentUsed:60,resetsAt:'invalid'},monthly:{percentUsed:50,resetsAt:at(1)}},{status:'fresh'})},
+    {enabled:false,quota:quota(complete,{status:'fresh'})},
+    {enabled:true,quota:quota(complete,{fetchedAt:generatedAt-16*60*1000,lastAttemptAt:generatedAt-16*60*1000,lastSuccessAt:generatedAt-16*60*1000})},
+    {enabled:true,quota:quota(complete,{errorCategory:'rate_limit',lastAttemptAt:generatedAt+1})},
+    {enabled:true,quota:quota({five_hour:complete.five_hour,weekly:complete.weekly})},
+    {enabled:true,quota:quota({...complete,monthly:{percentUsed:'0'}})},
+    {enabled:true,quota:quota(complete,{refresh:{reason:'unconfigured'}})}
   ]};
-  const forecast=JSON.parse(h.run('JSON.stringify(statisticsQuotaForecast(forecastData))'));
-  assert.deepEqual(forecast,{totals:{current:50,twoHours:50,eightHours:50,twentyFourHours:50},maximum:200,included:2,excluded:4,incompleteResets:2});
-  h.context.invalidGeneratedAt={generatedAt:-1,accounts:[{enabled:true,quota:{status:'fresh',limits:complete}}]};
-  assert.deepEqual(JSON.parse(h.run('JSON.stringify(statisticsQuotaForecast(invalidGeneratedAt))')),{totals:{current:70,twoHours:70,eightHours:70,twentyFourHours:70},maximum:100,included:1,excluded:0,incompleteResets:1});
-  h.context.noEligible={generatedAt,accounts:[{enabled:false,quota:{status:'fresh',limits:complete}}]};h.run('renderStatisticsQuotaForecast(noEligible)');
-  for(const id of ['#statisticsQuotaCurrent','#statisticsQuota2h','#statisticsQuota8h','#statisticsQuota24h'])assert.equal(h.el(id).textContent,'无可用数据');
-  assert.equal(h.el('#statisticsQuotaForecastMeta').textContent,'纳入 0 个账号 · 排除 1 个账号 · 重置时间不完整 0 个账号');
+  const result=JSON.parse(h.run('JSON.stringify(statisticsQuotaForecast(forecastData))'));
+  assert.deepEqual(result.monthly.totals,{current:105,twoHours:200,eightHours:200,twentyFourHours:200});
+  assert.deepEqual(result.immediate.totals,{current:5,twoHours:5,eightHours:5,twentyFourHours:5});
+  assert.deepEqual([result.monthly.included,result.monthly.excluded,result.monthly.unknown],[4,6,5]);
+  assert.deepEqual([result.immediate.included,result.immediate.excluded,result.immediate.unknown],[2,8,7]);
+  assert.deepEqual(result.monthly.incompleteResets,{twoHours:1,eightHours:1,twentyFourHours:1});
+  assert.deepEqual(result.immediate.incompleteResets,{twoHours:2,eightHours:2,twentyFourHours:2});
+  h.run('renderStatisticsQuotaForecast(forecastData)');
+  assert.match(h.el('#statisticsQuota2h').textContent,/重置不完整 1 个账号，预测下限/);
+  assert.equal(h.el('#statisticsQuotaForecastMeta').textContent,'当月 纳入 4 个账号 · 排除 6 个账号（其中未知 5）；当前可用 纳入 2 个账号 · 排除 8 个账号（其中未知 7）');
+  h.context.freshBoundary={generatedAt,accounts:[{enabled:true,quota:quota(complete,{fetchedAt:generatedAt-15*60*1000,lastAttemptAt:generatedAt-15*60*1000,lastSuccessAt:generatedAt-15*60*1000})}]};
+  assert.equal(h.run('statisticsQuotaForecast(freshBoundary).monthly.included'),1,'15-minute boundary is inclusive');
+  h.context.futureSnapshot={generatedAt,accounts:[{enabled:true,quota:quota(complete,{fetchedAt:generatedAt+1,lastAttemptAt:generatedAt+1,lastSuccessAt:generatedAt+1})}]};
+  assert.equal(h.run('statisticsQuotaForecast(futureSnapshot).monthly.included'),0);
+  h.context.invalidGeneratedAt={generatedAt:-1,accounts:[{enabled:true,quota:quota(complete)}]};
+  const invalid=JSON.parse(h.run('JSON.stringify(statisticsQuotaForecast(invalidGeneratedAt))'));
+  assert.equal(invalid.monthly.included,0);assert.equal(invalid.immediate.unknown,1);
+  h.run('renderStatisticsQuotaForecast(invalidGeneratedAt)');assert.match(h.el('#statisticsQuotaForecastTime').textContent,/统计生成 未知 · 纳入快照获取 无可用数据/);
+  h.context.outOfDateRange={generatedAt:Number.MAX_SAFE_INTEGER,accounts:[{enabled:true,quota:quota(complete)}]};
+  h.run('renderStatisticsQuotaForecast(outOfDateRange)');assert.equal(h.run('statisticsQuotaForecast(outOfDateRange).monthly.unknown'),1);assert.match(h.el('#statisticsQuotaForecastTime').textContent,/统计生成 未知/);
+  h.context.noEligible={generatedAt,accounts:[{enabled:false,quota:quota(complete)}]};h.run('renderStatisticsQuotaForecast(noEligible)');
+  assert.match(h.el('#statisticsQuotaCurrent').textContent,/当月剩余：无可用数据\n当前可用：无可用数据/);
+  for(const id of ['#statisticsQuota2h','#statisticsQuota8h','#statisticsQuota24h'])assert.match(h.el(id).textContent,/当月剩余：无可用数据\n届时可用：无可用数据/);
+  assert.equal(h.el('#statisticsQuotaForecastMeta').textContent,'当月 纳入 0 个账号 · 排除 1 个账号（其中未知 0）；当前可用 纳入 0 个账号 · 排除 1 个账号（其中未知 0）');
 });
 
 test('statistics visit refreshes on entry/timer/manual, coalesces, aborts stale work and preserves every draft owner', async () => {
   const h=harness(),aggregate={requests:0,errors:0,inputTokens:0,inputKnownRequests:0,outputTokens:0,outputKnownRequests:0,totalTokens:0,totalKnownRequests:0,cachedTokens:0,cacheKnownRequests:0,cacheInputCachedTokens:0,cacheInputTokens:0,cacheTokenRatio:null,cacheHitRequestRate:null,cacheHitRequests:0};
-  h.context.statData={generatedAt:Date.now(),lifetime:{global:aggregate},recent24h:{global:aggregate},accounts:[{id:'id0',name:'<safe>',enabled:true,health:{successRate:null,samples:0,successes:0,degrades:0,coverageComplete:false,disabled:false,hardQuarantined:false,cooling:false},lifetime:aggregate,recent24h:aggregate,quota:{status:'fresh',pool:'hot',fetchedAt:Date.now(),lastAttemptAt:Date.now(),lastSuccessAt:Date.now(),limits:{five_hour:{percentUsed:0},weekly:{percentUsed:50},monthly:{percentUsed:100}},errorCategory:null,refresh:{eligible:true,reason:null,state:'idle',nextAttemptAt:Date.now()+300000}}}],migration:{legacyRequests:0}};
+  const snapshotTime=Date.now();h.context.statData={generatedAt:snapshotTime,lifetime:{global:aggregate},recent24h:{global:aggregate},accounts:[{id:'id0',name:'<safe>',enabled:true,health:{successRate:null,samples:0,successes:0,degrades:0,coverageComplete:false,disabled:false,hardQuarantined:false,cooling:false},lifetime:aggregate,recent24h:aggregate,quota:{status:'fresh',pool:'hot',fetchedAt:snapshotTime,lastAttemptAt:snapshotTime,lastSuccessAt:snapshotTime,limits:{five_hour:{percentUsed:0},weekly:{percentUsed:50},monthly:{percentUsed:100}},errorCategory:null,refresh:{eligible:true,reason:null,state:'idle',nextAttemptAt:Date.now()+300000}}}],migration:{legacyRequests:0}};
   h.el('#statisticsPanel').hidden=true;h.el('#logPanel').hidden=true;h.el('#detailsPanel').hidden=true;
   h.run("commitErrorRuleDraft([{id:'pending',scope:'account',action:'hard-quarantine',when:{statuses:[418],body_contains:'pending'}}]); openAdvancedErrorRules(); $('#advancedErrorRulesJson').value='{ pending'; markAdvancedErrorRulesDirty(); selectAccount(1,true); openRawScheduling(); openAccountDrawer(0); $('#drawerNote').value='unsaved drawer';");
   const before={accounts:h.snapshot(),bulk:h.run('BULK_SELECTION.size'),raw:h.el('#rawSchedulingJson').value,drawer:h.el('#drawerNote').value,rules:h.run('JSON.stringify(ERROR_RULE_DRAFT)'),advanced:h.el('#advancedErrorRulesJson').value};
   h.context.statCalls=[];h.run("api=async(path,body,method,asText,options={})=>{statCalls.push({path,body,options});return path==='/api/statistics'?statData:{ok:true,refreshed:1,cached:0,deferred:0,skipped:0,failed:0,cancelled:0};}");
-  await h.run("switchSection('statistics')");assert.deepEqual(h.context.statCalls.map(call=>[call.path,call.body?.force]),[['/api/statistics',undefined],['/api/statistics/quota-refresh',false],['/api/statistics',undefined]]);assert.match(h.el('#statisticsBody').innerHTML,/&lt;safe&gt;/);assert.equal(h.el('#statisticsQuotaCurrent').textContent,'可用 0.0 / 100.0 账号额度点（0.0%）');assert.match(h.el('#statisticsQuotaForecastMeta').textContent,/纳入 1 个账号.*重置时间不完整 1 个账号.*预测下限/);assert.match(h.el('#statisticsStatus').textContent,/额度刷新完成/);
+  await h.run("switchSection('statistics')");assert.deepEqual(h.context.statCalls.map(call=>[call.path,call.body?.force]),[['/api/statistics',undefined],['/api/statistics/quota-refresh',false],['/api/statistics',undefined]]);assert.match(h.el('#statisticsBody').innerHTML,/&lt;safe&gt;/);assert.match(h.el('#statisticsQuotaCurrent').textContent,/当月剩余：约 \$0\.00\n当前可用：约 \$0\.00/);assert.match(h.el('#statisticsQuotaForecastMeta').textContent,/当月 纳入 1.*当前可用 纳入 1/);assert.match(h.el('#statisticsStatus').textContent,/额度刷新完成/);
   let timer=[...h.timers.values()].find(value=>value.ms===5*60*1000);assert.ok(timer);await timer.fn();assert.equal(h.context.statCalls.filter(call=>call.path==='/api/statistics/quota-refresh'&&call.body.force===false).length,2);
   await h.run('refreshStatisticsQuota(true)');assert.equal(h.context.statCalls.filter(call=>call.path==='/api/statistics/quota-refresh'&&call.body.force===true).length,1);
   assert.equal(typeof h.windowListeners.pagehide,'function');assert.equal(typeof h.windowListeners.pageshow,'function');

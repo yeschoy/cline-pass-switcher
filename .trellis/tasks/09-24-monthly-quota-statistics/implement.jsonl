@@ -3,3 +3,4 @@
 {"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Relevant layer contract and verification boundary"}
 {"file": ".trellis/spec/frontend/index.md", "reason": "Relevant layer contract and verification boundary"}
 {"file": ".trellis/spec/frontend/state-management.md", "reason": "Relevant layer contract and verification boundary"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Statistics UI rendering, coverage and real-browser checks"}

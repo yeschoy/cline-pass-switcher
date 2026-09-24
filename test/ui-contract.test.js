@@ -152,9 +152,9 @@ test('statistics quota controls expose labelled lifecycle, truthful units and ca
   assert.match(html, /额度 5 小时\/周\/月/);assert.match(html, /table style="min-width:1500px"/);
   const statistics=html.slice(html.indexOf('function statisticValue'),html.indexOf('async function switchSection'));
   for(const label of ['剩余','重置时间','未提供','未知','部分可用','刷新失败','过期 · 上次快照','已禁用 · 上次额度','未配置','上次成功','等待刷新','刷新中'])assert.ok(statistics.includes(label),label);
-  const quotaLimit=html.slice(html.indexOf('function quotaLimit'),html.indexOf('const QUOTA_FORECAST_TYPES'));
+  const quotaLimit=html.slice(html.indexOf('function quotaLimit'),html.indexOf('function quotaEstimateFresh'));
   assert.doesNotMatch(quotaLimit,/已用/);
-  assert.match(statistics,/typeof used!==['"]number['"]\|\|!Number\.isFinite\(used\)\|\|used<0\|\|used>100/);
+  assert.match(statistics,/typeof value==='number'&&Number\.isFinite\(value\)&&value>=0&&value<=100/);
   assert.match(statistics,/\(100-used\)\.toFixed\(1\)/);assert.match(statistics,/api\('\/api\/statistics\/quota-refresh',\{force\}/);
   assert.match(statistics,/new AbortController\(\)/);assert.match(statistics,/signal:controller\.signal/);assert.match(html,/async function api\(path, body, method, asText=false, options=\{\}\)/);
   assert.match(html,/STATISTICS_REFRESH_MS = 5 \* 60 \* 1000/);assert.match(statistics,/window\.addEventListener\('pagehide',stopStatisticsVisit\)/);assert.match(statistics,/window\.addEventListener\('pageshow',restoreStatisticsVisit\)/);
@@ -162,15 +162,18 @@ test('statistics quota controls expose labelled lifecycle, truthful units and ca
   assert.match(statistics,/controller!==STATISTICS_REFRESH_CONTROLLER/);assert.match(statistics,/STATISTICS_REFRESH_PROMISE&&STATISTICS_REFRESH_VISIT===visitId/);
 });
 
-test('statistics quota forecast is a labelled responsive four-card projection with truthful units', () => {
+test('statistics quota forecast is a labelled responsive four-card community-reference projection', () => {
   assert.match(html,/class="quota-forecast" role="region" aria-labelledby="statisticsQuotaForecastTitle"/);
-  assert.match(html,/id="statisticsQuotaForecastTitle">总可用额度预测<\/h3>/);
+  assert.match(html,/id="statisticsQuotaForecastTitle">账号池当月剩余与当前可用（社区参考估算）<\/h3>/);
   assert.match(html,/id="statisticsQuotaForecast" class="quota-forecast-grid" aria-live="polite"/);
   for(const [id,label] of [['statisticsQuotaCurrent','当前'],['statisticsQuota2h','未来 2h'],['statisticsQuota8h','未来 8h'],['statisticsQuota24h','未来 24h']])assert.match(html,new RegExp(`<h4>${label}<\\/h4><p id="${id}">无可用数据<\\/p>`));
   assert.match(html,/\.quota-forecast-grid \{[^}]*grid-template-columns: repeat\(auto-fit,minmax\(/);
   assert.ok(html.indexOf('id="statisticsSummary"')<html.indexOf('id="statisticsQuotaForecast"'));
   assert.ok(html.indexOf('id="statisticsQuotaForecast"')<html.indexOf('<div class="table-wrap"><table style="min-width:1500px"'));
-  for(const wording of ['账号等效百分比容量','最多 100 账号额度点','不代表 Token、请求数、金额','无新增消耗','预测下限','重置时间不完整'])assert.ok(html.includes(wording),wording);
+  for(const wording of ['社区参考估算，非真实账单/官方承诺','社区实测截图','当前账号池均为同档','5 小时约 $10','每周约 $25','每月约 $50','percentUsed/100','混入其他档位','无新增消耗','预测下限','统计生成时间与纳入快照时间'])assert.ok(html.includes(wording),wording);
+  const projection=html.slice(html.indexOf('const QUOTA_FORECAST_TYPES'),html.indexOf('function quotaState'));
+  assert.match(projection,/QUOTA_REFERENCE_CAPS=\[10,25,50\]/);assert.match(projection,/quotaEstimateFresh\(q,generatedAt\)/);
+  assert.match(projection,/const hasMonthly=fresh&&validQuotaUsed\(used\[2\]\),hasImmediate=hasMonthly&&used\.every\(validQuotaUsed\)/);
   const renderer=html.slice(html.indexOf('function renderStatisticsQuotaForecast'),html.indexOf('function quotaState'));
   assert.match(renderer,/\.textContent=/);assert.doesNotMatch(renderer,/innerHTML/);
   const loadStatistics=html.slice(html.indexOf('async function loadStatistics'),html.indexOf('function quotaRefreshSummary'));
