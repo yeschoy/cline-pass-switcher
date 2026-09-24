@@ -792,3 +792,25 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 33: 月剩余与当前可用参考估算
+<!-- trellis-session: v=2 fp=edcfe5cbeee12880 -->
+
+**Date**: 2026-09-24
+**Task**: 月剩余与当前可用参考估算
+**Branch**: `main`
+
+### Summary
+
+当前池同档订阅作为操作员前提；统计页区分仅月窗与5h/周/月瓶颈的社区参考美元等值，独立覆盖数/新鲜度与未来重置保守预测。聚焦46/46、全量258/258、390px本地Chrome合成数据核验通过；未部署生产。代码、测试、README和英文spec独立提交并快进合入main。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `24e9e46` | feat: 区分月剩余与三窗口当前可用参考估算 |
+
+### Status
+
+[OK] **Completed**

@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 32
+- **Total Sessions**: 33
 - **Last Active**: 2026-09-24
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~794 | Active |
+| `journal-1.md` | ~816 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 33 | 2026-09-24 | 月剩余与当前可用参考估算 | `24e9e46` | `main` |
 | 32 | 2026-09-24 | 管理员登录生产验收与部署记录收尾 | `75158cb` | `main` |
 | 31 | 2026-09-23 | 详细日志丢弃分原因计数 | `87ee8a3`, `04aabb4`, `608045f` | `feat/detailed-log-drop-reasons` |
 | 30 | 2026-09-23 | 部署集成版本 2431d5b 到生产 Switcher | `2431d5b`, `31a2191` | `main` |
