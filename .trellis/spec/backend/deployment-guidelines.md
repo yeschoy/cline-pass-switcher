@@ -24,7 +24,7 @@ Service/container: cline-pass-console
 Runtime user:      1000:1000
 Release modes:     directories 0755; regular files 0644
 Local bind check: http://127.0.0.1:3123/api/meta
-Public check:     https://clinepass.yeschoy.com/api/meta
+Public check:     https://clinepass.yeschoy.io/api/meta
 ```
 
 ```bash
@@ -51,7 +51,8 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 - Never deploy uncommitted working-tree files. Build the upload with `git archive HEAD` from `main` and an explicit allowlist: `Dockerfile`, package manifests, `server.js`, `lib/`, `public/`, `README.md`, `LICENSE`, `.dockerignore`, and `config.example.json`.
 - Install the archive under `/opt/cline-pass-switcher/releases/<release>/`. Never overwrite an existing release directory.
 - A restrictive deployment `umask` must not make the Docker build context unreadable by the production runtime user. After extraction, normalize release directories to `0755` and regular files to `0644`, then verify those modes before building. `Dockerfile COPY` preserves context modes; root-owned `0600` application files make the hardened `1000:1000` container exit with `EACCES` before health checks can pass.
-- Preserve the existing hardened compose settings. Change only the `cline-pass-switcher:<release>` image tag and `build.context: ./releases/<release>`.
+- Preserve the existing hardened compose settings. Normally change only the `cline-pass-switcher:<release>` image tag and `build.context: ./releases/<release>`.
+- **One-time independent-admin migration exception:** the current Cloudflare Tunnel sends the verified `https://clinepass.yeschoy.io` hostname directly to host `http://127.0.0.1:3123`, without a proxy that can overwrite the administrator attestation Headers. Before deploying the new auth guard, a separately rehearsed candidate may move only the host-published application port to loopback `3124` (container target and `ai-internal` alias stay `3123`), add a root-private `env_file` for `PUBLIC_BASE_URL`, bootstrap/code and proxy token, and install a local Nginx gateway bound only to `127.0.0.1:3123` that forwards to the application on `127.0.0.1:3124` while **replacing** `X-Forwarded-Proto` and `X-Cline-Pass-Proxy-Token`. The tunnel target remains `3123`. Verify the actual public HTTPS route, response/proxy headers, fresh bootstrap/forced change, and client-key denial on copied data before switching. Never expose the secrets in Git, shell command arguments/output, service logs, Compose projections, or deployment reports. Back up both Compose and the relevant gateway configuration. If either proxy or app switch fails, keep/restore a working model path and leave old-image management ingress isolated; do not run a stop-first rollback on a preparation failure. Remove the one-time bootstrap/code environment entries after the first password change without losing the independent admin state. This exception is not permission to change other services, firewall rules or the Cloudflare dashboard.
 
 #### Data, switching, and rollback
 
