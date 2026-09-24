@@ -16,7 +16,7 @@ The persistence boundary must survive process interruption without replacing a v
 
 ```js
 loadJson(file, fallback)
-atomicWriteJson(file, obj)
+atomicWriteJson(file, obj, { pretty = true } = {}) // config/admin formatted; metadata compact
 normalizeRouteConfig(route)
 normalizePerModelMap(map)
 normalizeAccount(account, index, previousById, previousByName)
@@ -38,7 +38,7 @@ reconcileQuotaDisposition(id, snapshot)
 parseQuotaPayload(json, fetchedAt)
 normalizeConfigAndMeta({ persist = false })
 saveConfig() // atomicWriteJson(CONFIG_PATH, config)
-saveMeta()   // atomicWriteJson(META_PATH, META)
+saveMeta()   // atomicWriteJson(META_PATH, META, { pretty: false })
 ```
 
 Paths and environment:
@@ -295,7 +295,7 @@ Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/
 
 #### Atomic write and file mode
 
-`atomicWriteJson()` writes formatted JSON to a unique temporary file in the same directory and then calls `renameSync()` over the destination. The temporary file is removed in `finally`.
+`atomicWriteJson()` writes JSON to a unique temporary file in the same directory and then calls `renameSync()` over the destination. Configuration/admin state retains formatted JSON; `saveMeta()` encodes runtime metadata compactly (same JSON values, fewer bytes, same per-save atomic rename and fail-open chat behavior). Existing formatted metadata loads normally and is compacted on the next legitimate metadata save. The temporary file is removed in `finally`.
 
 - A newly created JSON file uses mode `0600`.
 - An existing destination's mode is preserved; the implementation does **not** force a pre-existing permissive file to `0600`.

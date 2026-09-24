@@ -1246,6 +1246,45 @@ test('all explicit usage aliases, precedence, cache ratios, stream snapshots, re
   stats=await(await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json();assert.equal(stats.accounts.some(x=>x.id==='b'),false);assert.deepEqual(stats.lifetime.global,globalBeforeRestart,'deleting an account retains global history');
 });
 
+test('terminal metadata uses compact atomic JSON without losing statistics on restart', async (t) => {
+  const upstream = http.createServer((req, res) => {
+    req.resume(); req.on('end', () => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }], usage: { prompt_tokens: 0, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } } }));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-compact-meta-'));
+  let running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'fixture-upstream-credential-unique', enabled: true, perModel: {} }], knownModels: ['cline-pass/kimi-k3'] }, dir);
+  t.after(async () => { if (running?.child) await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  assert.equal((await rawJson(port, '/v1/chat/completions', { model: 'cline-pass/kimi-k3', messages: [] }, { 'Session-Id': 'fixture-session-unique' })).status, 200);
+  const configBytes = fs.readFileSync(path.join(dir, 'config.json'), 'utf8');
+  assert.equal(configBytes, JSON.stringify(JSON.parse(configBytes), null, 2), 'operator configuration keeps its formatted encoding');
+  const metaPath = path.join(dir, 'metadata.json'), bytes = fs.readFileSync(metaPath, 'utf8'), persisted = JSON.parse(bytes);
+  assert.equal(bytes, JSON.stringify(persisted), 'metadata uses compact encoding, not a changed JSON schema');
+  for (const secret of ['fixture-upstream-credential-unique', 'fixture-session-unique']) assert.equal(bytes.includes(secret), false, 'encoding does not change metadata exclusions');
+  assert.equal(persisted.statistics.minuteBuckets.at(-1).models['cline-pass/kimi-k3'].requests, 1);
+  assert.equal(persisted.statistics.minuteBuckets.at(-1).providerUsage['cline-pass/kimi-k3'][''].inputTokens, 0, 'known zero remains known');
+  assert.equal(fs.readdirSync(dir).filter(name => name.startsWith('metadata.json.')).length, 0, 'atomic temporary file is removed');
+  const before = (await (await fetch(`http://127.0.0.1:${port}/api/statistics`)).json()).models;
+  await stop(running.child); running.child = null;
+  fs.writeFileSync(metaPath, JSON.stringify(persisted, null, 2), { mode: 0o600 });
+  running = await startSwitcher(null, dir);
+  const after = (await (await fetch(`http://127.0.0.1:${port}/api/statistics`)).json()).models;
+  assert.deepEqual(after, before, 'previously formatted metadata restores exact coverage and reference valuation');
+  assert.equal((await rawJson(port, '/v1/chat/completions', { model: 'cline-pass/kimi-k3', messages: [] })).status, 200);
+  const rewritten = fs.readFileSync(metaPath, 'utf8');
+  assert.equal(rewritten, JSON.stringify(JSON.parse(rewritten)), 'ordinary terminal write compacts legacy formatting');
+  await stop(running.child); running.child = null;
+  const invalid = Buffer.from('{"statistics":');
+  fs.writeFileSync(metaPath, invalid);
+  const failed = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: { ...process.env, DATA_DIR: dir, BIND_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = ''; failed.stdout.on('data', chunk => { output += chunk; }); failed.stderr.on('data', chunk => { output += chunk; });
+  const code = await new Promise(resolve => failed.once('exit', resolve));
+  assert.notEqual(code, 0);
+  assert.match(output, /cannot read metadata\.json/);
+  assert.deepEqual(fs.readFileSync(metaPath), invalid, 'malformed operator JSON must never be compacted or overwritten');
+});
+
 test('model/provider reference statistics attribute only final usage and freeze priced ranges', async (t) => {
   const upstream=http.createServer((req,res)=>{const chunks=[];req.on('data',c=>chunks.push(c));req.on('end',()=>{
     const body=JSON.parse(Buffer.concat(chunks).toString()),provider=body.provider?.only?.[0]||body.providerOptions?.gateway?.only?.[0];

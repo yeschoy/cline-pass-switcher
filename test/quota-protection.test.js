@@ -99,6 +99,8 @@ test('real account quota 429 verifies a new monthly-only snapshot; strict thresh
   assert.equal((await request(s, '/api/accounts/recover', { id:'a' })).status, 200);
   assert.equal((await chat(s)).status, 503);
   assert.equal((await request(s, '/api/accounts/quota-recover', {id:'a'})).status, 200);
+  const releasedBytes = fs.readFileSync(path.join(s.dir, 'metadata.json'), 'utf8');
+  assert.equal(releasedBytes, JSON.stringify(JSON.parse(releasedBytes)), 'persist-first manual release also uses compact atomic metadata');
   assert.equal((await request(s, '/api/accounts/quota-recover', {id:'a'})).status, 409);
   quota = limits({ monthly:99.4 });
   assert.equal((await chat(s)).status, 429);

@@ -1,0 +1,62 @@
+# Isolated whole-service performance investigation (partial coverage)
+
+## Reproduce and scope
+
+```bash
+# Node v26.8.1, local arm64; baseline is the explicit unmodified commit, not today's HEAD after future merges.
+env -u CLINE_PASS_KEY -u PROXY_KEY -u PUBLIC_BASE_URL -u PORT node .trellis/tasks/09-25-whole-service-performance/research/profile.mjs --ref=7883d5393a5b --extended
+env -u CLINE_PASS_KEY -u PROXY_KEY -u PUBLIC_BASE_URL -u PORT node .trellis/tasks/09-25-whole-service-performance/research/profile.mjs --extended
+```
+
+The script creates and removes a temporary `DATA_DIR` and temporary instrumented copy of `server.js`, symlinks only code/dependencies/static HTML, supplies **only** controlled child environment keys, uses synthetic credentials and local mock chat/catalog/quota, and never opens default operator data or contacts a paid service. Its source-section wrappers and the temporary atomic-write split are measurement-only, not production instrumentation. Output contains counts/durations/bytes, not payloads or credentials. The two runs use the same deterministic 1-account/4-model traffic order, a cloned valid 1,200-minute v5 corpus and 100-model mock catalog; four additional warmed six-read sweeps represent **server API** load, not browser rendering. The extended phase adds mock retry, detailed modes, cancellation, 49 MiB ingress and a 10-account sticky/health-sort capacity case. Both measured versions returned the expected status for all baseline samples; the extended mock checked 3 actual retry attempts, unauthenticated rejection before upstream, 2,101,310 SSE bytes after a 120 ms paused client, and a persisted 499 cancellation record. Detailed raw mode is deliberately not enabled.
+
+Numbers are one A/B pair with low sample counts, sequential phases except the six-read sweep and 12-request waiter burst. p99 is just the maximum for n ≤ 32, **not** a production tail estimate. `monitorEventLoopDelay` max and process CPU/RSS/heap are whole-child samples (including startup/shutdown), not per-route or simultaneous production capacity. Wrapped section times are inclusive; nested totals must not be added. Filesystem timings include local OS cache and do not assert power-loss/fsync durability. Startup includes spawn, startup normalization and local admin login. Catalog cold time includes loopback/upstream wait. The synthetic historical rows repeat identical bucket values and are not a real traffic distribution.
+
+## Measured baseline and same-harness result
+
+| Scenario | Baseline @ `7883d5393a5b` | Compact-meta working tree | Interpretation |
+|---|---:|---:|---|
+| 1-bucket metadata after phase | 23,742 B | 14,122 B | Same JSON values; different encoding |
+| 1-bucket small chat p50/p95 (n=32) | 2.18 / 3.10 ms | 2.14 / 3.18 ms | No clear sparse-state gain |
+| 1-bucket 512 KiB chat p50 (n=8) | 3.56 ms | 3.40 ms | Small difference |
+| 1-bucket statistics GET p50 (n=16) | 1.47 ms | 1.46 ms | Unchanged |
+| 1-bucket six parallel API reads p50 (n=4) | 2.11 ms | 2.10 ms | Backend only; no DOM work |
+| Cold `/api/models` once, then cached p50 (n=8) | 8.88 / 1.54 ms | 8.75 / 1.51 ms | Cold includes 100-item loopback catalog; not remote 60 s case |
+| 1,200-bucket metadata after phase | 14,275,075 B | 8,161,346 B | ~43% fewer bytes in this fixture |
+| 1,200-bucket small chat p50/p95 (n=32) | 19.82 / 21.60 ms | 14.35 / 15.67 ms | ~5.5 ms lower median; no SLA claim |
+| 1,200-bucket 512 KiB chat p50 (n=8) | 20.13 ms | 16.48 ms | Benefit dominated by metadata rewrite at this scale |
+| 1,200-bucket SSE p50 (n=8, local 5 ms mock wait) | 26.14 ms | 20.56 ms | Includes intentional wait and finalization |
+| 1,200-bucket statistics GET p50 (n=16) | 17.63 ms | 16.85 ms | Projection remains the dominant GET cost |
+| 1,200-bucket account GET p50 (n=8) | 2.35 ms | 2.18 ms | No material difference |
+| 1,200-bucket six parallel reads p50 (n=4) | 17.89 ms | 17.23 ms | Limited by statistics GET; UI unmeasured |
+| 1,200-bucket cold-start+admin login | 173.1 ms | 171.9 ms | No reliable difference at n=1 |
+| 1,200-bucket child CPU / max event-loop delay | 1,552 ms / 27.6 ms | 1,291 ms / 26.1 ms | Nonidentical runtime/GC; only suggestive |
+| 1,200-bucket child RSS / heap at shutdown | 265 / 44 MiB | 314 / 39 MiB | RSS is **not** improved in this sample |
+
+Other default-mode warmed endpoints: `/api/accounts` ~1.4 ms sparse/~2.2–2.4 ms dense, `/api/meta` ~1.3–1.4 ms, cached models ~1.5/1.9 ms, static `/` ~1.5–1.7 ms; ordinary first-page log query ~1–2 ms at only ~50 local records. One forced quota refresh ~3 ms sparse/~13–18 ms dense, of which metadata rewriting is a candidate; scheduler tick / timeout / large catalog latency were not isolated. The error log GET in the extended run was ~7.4 ms; full detail list ~1.9 ms with few roots, not a directory-saturation result.
+
+## Source attribution and priority
+
+At 1,200 buckets the temporary wrappers measured **50 total JSON writes** (mostly one per completed chat) and **49 `record()` calls**. Baseline mean per JSON write: stringify **12.62 ms**, same-directory temp write **2.87 ms**, rename **0.32 ms**; baseline mean `record()` inclusive **15.96 ms**, `commitStatistics()` inclusive **1.07 ms**, `pruneStatistics()` **0.52 ms/call** (119 calls). After compact metadata: stringify **8.64 ms**, write **2.38 ms**, rename **0.22 ms**, `record()` **11.37 ms**, prune **0.48 ms/call**. This attributes most *chat history-size regression* to synchronous serialization/writing of the whole metadata object, not double-pruning. The intervention changes the encoding and measured sections in the predicted direction but cannot attribute all client latency variance or GC causally. The source `sendJSON()` mean was ~0.07–0.08 ms; **statistics GET** still traverses many minute/model/provider cells: baseline `modelProviderProjection()` inclusive mean **2.50 ms per model**, `providerUsageProjection()` **0.72 ms per invocation**, `aggregateModelRange()` **0.88 ms per model** (nested; do not add their totals). This explains why the metadata-write change did not materially accelerate GET statistics.
+
+Priority by observed frequency × cost × impact in these synthetic workloads:
+
+1. **Per-chat metadata rewrite**, 49 completions in the dense phase; measured 12.62+2.87 ms per write in baseline, plus unrelated sections. Kept every terminal atomic save and fail-open semantics; compacted only runtime metadata, not operator config or admin files. Reversible one-owner change (`server.js`). Tradeoff: `metadata.json` is no longer human-indented; legacy formatted files remain valid and compact on next legitimate write.
+2. **Statistics projection**, occasional management read but 16–26 ms p50/p95 dense GET and limits six-read console initialization. Defer shared aggregation/refactor until representative model/provider/account cardinality, validated coverage equivalence and browser data justify its complexity. Zero/unknown, frozen old price versions and coverage must survive.
+3. **Near-limit ingress and large-body retry**: one 49 MiB request after disabling full capture took 213 ms baseline / 154 ms after, with an unoptimized measured `injectPrefs()` max ~35 ms in the extended phase; child peak/exit RSS in that phase exceeded 500 MiB. One run and different metadata size cannot isolate body copy cost. Defer until a controlled 1 vs 3-attempt large-body CPU/RSS profile; never delete provider-specific isolation just for timing.
+4. **10 accounts, sticky+healthSort, 12 simultaneous 40 ms mock calls at maxConcurrent=1**: baseline waiter p50/p95 421/719 ms, after 399/680 ms; `successHealthProjection()` ~1,448 calls, ~29–34 ms total vs 30 sync meta writes at ~12.1/8.45 ms stringify each. Both capacity waves and event-loop serialization contribute; not evidence for replacing the lease owner. Only this 10-account configuration was tested.
+5. **Infrequent or opt-in paths**: one cold 100-item catalog call ~9 ms vs warm ~1.5 ms; one 3-attempt 512 KiB retry 32/26 ms; 150 ms deliberate SSE upstream delay yielded 176/175 ms; error-only success/failure 24/23 vs 23/18 ms, full 512 KiB success 26 vs 20 ms (all single samples, confounded by history write). Do not optimize native keep-alive, bounded JSONL or detailed stores without scale-specific evidence.
+
+## Real-browser synthetic console smoke
+
+The installed `agent_browser` tool could not launch because its required binary was missing, so an already-installed Playwright Chromium 145 ran the actual production HTML against a loopback service with 10 synthetic accounts, 50 known models, 5000 catalog IDs, and a 390px viewport. Two repeated native-login runs finished nine requests through initial render (including exactly six admin reads), created 50 model rows / 400 visible catalog rows and ~5994 DOM elements. Browser `TaskDuration` over the login/read/render step was ~68 ms; filtering 5000 catalog IDs down to one row had no network request and ~11 ms browser task time; statistics navigation issued three requests and model/provider navigation one. Full local instructions, wall times and limits are in `research/browser-results.md`. These are **real browser DOM/request observations**, but sparse stats and Playwright automation overhead prevent a production loading/SLO claim; high-cardinality Provider rows and longer interaction traces remain to be measured after the UI child.
+
+## Additional whole-flow local probes
+
+A second independent synthetic harness (`research/remaining-flows.mjs`, results in `research/remaining-flows.md`) ran twice without changing business code. At 30,000 request + 3,000 error rows and 2,000 metadata-only detailed roots, ordinary store ready was ~54–55 ms, detailed inventory ready ~519–550 ms, ordinary absent-model query p50 ~25 ms, detail first page ~1.2 ms; an authenticated chat completed ~18–20 ms while log reconciliation remained in progress and ordinary log GET truthfully returned transient 503. At eight accounts with deliberately accelerated test quota scheduling (not production cadence), peak mock quota GET concurrency was 2 and paced small chats had p50 ~3.4–3.7 ms with or without quota scheduling; workload/process CPU increased, but no per-path cause is established. Direct, HTTP CONNECT and SOCKS5 local mocks each reused one upstream TCP connection across 24 serial chats, with warm p50 ~2.9–3.2 ms. These are well below max log inventory capacity and omit TLS proxy pressure; no new optimization is justified solely by those synthetic timings.
+
+## Regression checks and remaining evidence gaps
+
+New focused integration tests assert compact file encoding for terminal saves **and persist-first manual quota release**, same-directory temp cleanup, known numeric zero, formatted legacy restore, terminal rewrite and exact model/provider statistics across restart. Existing cases assert atomic rename failure removes the temp and preserves prior state, malformed metadata/config preserves bytes, per-request save count, provider retry, account permits, quota, detailed fail-open, SSE drain/cancel and 50,000-cell coverage. `node --test test/integration.test.js` **109/109**; `node --test test/quota-protection.test.js` **10/10**; env-scrubbed `npm test` **294/294** after the quota-release assertion; `node --check server.js`, every `lib/*.js`, profile script, inline production VM compile and `git diff --check` passed. No deployment.
+
+**Still unmeasured (do not mark acceptance fully complete):** dense-data browser long-task/keyboard and repeated filter/redraw distributions beyond the two-run sparse console smoke; cold recovery near 120k ordinary rows/100k detailed roots and slow disk/rename fault *performance* (correctness injection is tested); catalog slow upstream/concurrent cache miss; TLS proxy with concurrent socket pressure (serial HTTP CONNECT/SOCKS5 reuse was measured); quota timer under production cadence/large metadata with concurrent traffic (accelerated eight-account test was measured); high-cardinality provider projections and saturated store maintenance; 5 MiB sanitizer CPU at current HEAD; many-waiter/different scheduling-mode distributions; external CPU profile / causal event-loop attribution; independent production-sized sustained/burst/300 RPM throughput. No production data, live traffic, raw diagnostic mode, deployment or universal capacity claim. The fallback real-browser smoke is not an accessibility or real-operator-data review; follow-up should re-profile after the pricing/key/UI children integrate.

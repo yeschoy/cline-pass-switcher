@@ -109,13 +109,13 @@ function loadJson(file, fallback) {
     throw new Error(`cannot read ${path.basename(file)}: ${e.message}`);
   }
 }
-function atomicWriteJson(file, obj) {
+function atomicWriteJson(file, obj, { pretty = true } = {}) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
   let mode = 0o600;
   try { mode = fs.statSync(file).mode & 0o777; } catch (e) { if (e?.code !== 'ENOENT') throw e; }
   try {
-    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), { mode });
+    fs.writeFileSync(tmp, JSON.stringify(obj, null, pretty ? 2 : undefined), { mode });
     fs.renameSync(tmp, file);
   } finally {
     try { fs.unlinkSync(tmp); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
@@ -146,7 +146,7 @@ const config = { ...DEFAULT_CONFIG, ...loadedConfig };
 const META = loadJson(META_PATH, { models: {}, history: [], catalog: null, orModelsFetchedAt: 0, orModelList: null });
 const saveConfig = () => atomicWriteJson(CONFIG_PATH, config);
 const saveMeta = () => {
-  atomicWriteJson(META_PATH, META);
+  atomicWriteJson(META_PATH, META, { pretty: false });
   // A successful write of the current META also commits any confirmed monthly bans.
   for (const [id, pending] of quotaProvisional) if (pending.persistRetryAt !== undefined) quotaProvisional.delete(id);
 };
@@ -4887,7 +4887,7 @@ async function dispatch(req, res) {
       const state = getAccountState(body.id);
       if (!state?.protectionMonthlyAt) return sendJSON(res, 409, { error: { message: 'account has no monthly quota ban' } });
       const accountStates = { ...META.accountStates, [body.id]: { ...state, protectionMonthlyAt: 0 } };
-      atomicWriteJson(META_PATH, { ...META, accountStates });
+      atomicWriteJson(META_PATH, { ...META, accountStates }, { pretty: false });
       META.accountStates = accountStates;
       for (const [id, pending] of quotaProvisional) if (id === body.id || pending.persistRetryAt !== undefined) quotaProvisional.delete(id);
       reconcileSessionBindings(); notifyCapacityWaiters();
