@@ -858,3 +858,25 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 36: 原文详细日志子任务本地实现验收
+<!-- trellis-session: v=2 fp=f071585c35d8b93b -->
+
+**Date**: 2026-09-25
+**Task**: 原文详细日志子任务本地实现验收
+**Branch**: `main`
+
+### Summary
+
+子任务已合入main并归档；默认关闭的35 MiB/512 MiB原文模式、48h失效与归属清理、管理员按需访问；本地290/290、浏览器/目标容器及备份回滚门禁仍待另行验收；无推送部署。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `607e327` | feat: 增加35 MiB原文详细日志与48小时清理 |
+
+### Status
+
+[OK] **Completed**

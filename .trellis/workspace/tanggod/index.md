@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 35
-- **Last Active**: 2026-09-24
+- **Total Sessions**: 36
+- **Last Active**: 2026-09-25
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~860 | Active |
+| `journal-1.md` | ~882 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 36 | 2026-09-25 | 原文详细日志子任务本地实现验收 | `607e327` | `main` |
 | 35 | 2026-09-24 | 模型与渠道统计及参考用量等值 | `fe6e131` | `main` |
 | 34 | 2026-09-24 | 独立额度耗尽探测与保护 | `d5d93ee` | `main` |
 | 33 | 2026-09-24 | 月剩余与当前可用参考估算 | `24e9e46` | `main` |
