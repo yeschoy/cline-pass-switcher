@@ -1,5 +1,7 @@
 # Production deployment preflight — independent administrator login
 
+> Historical pre-switch snapshot. The `.io` correction and subsequent live migration are recorded in `deployment-handoff-20260924.md`; do not treat the earlier `.com` DNS failure or prior-release status below as current.
+
 ## Status
 
 **Read-only baseline; no production mutation yet.** The initial DNS blocker below was traced to an incorrect `.com` hostname. The operator corrected the actual public address to `https://clinepass.yeschoy.io` and reiterated deployment authorization; see the correction section below. A trusted proxy and private bootstrap delivery remain mandatory before switching. Production Compose, data, image, container and proxy configuration were not changed. Do not reinterpret `curl -k` or a local loopback login as a trusted public-admin check.
