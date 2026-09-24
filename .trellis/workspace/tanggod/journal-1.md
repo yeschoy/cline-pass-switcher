@@ -836,3 +836,25 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 35: 模型与渠道统计及参考用量等值
+<!-- trellis-session: v=2 fp=5a6d0c28f8303bd6 -->
+
+**Date**: 2026-09-24
+**Task**: 模型与渠道统计及参考用量等值
+**Branch**: `main`
+
+### Summary
+
+新增统计v5有界渠道最终usage/价格版本冻结和未知渠道归属；官网Kimi K3/GLM-5.3单价与DeepSeek V4 Flash/Pro峰谷区间，官方生效时间未知。六导航只读页、覆盖/缓存/Token/安全渲染，277/277全量和390px本地Chrome键盘/焦点/横向滚动通过。独立提交并快进合入main，未推送或部署。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `fe6e131` | feat: 新增模型与渠道统计及参考用量等值 |
+
+### Status
+
+[OK] **Completed**
