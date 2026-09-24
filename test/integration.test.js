@@ -1348,6 +1348,79 @@ test('model/provider reference statistics attribute only final usage and freeze 
   assert.equal(stats.models.find(row=>row.id==='cline-pass/glm-5.3').providerStatistics.usage.inputKnownRequests,2,'streamed explicit zero remains known');
 });
 
+test('statistics projection preserves provider cells, frozen price versions and unknown coverage across historical buckets', async (t) => {
+  const upstream = http.createServer((req, res) => { req.resume(); req.on('end', () => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ message: { content: 'ok', provider_metadata: { gateway: { routing: { finalProvider: 'one' } } } } }], usage: { prompt_tokens: 10, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 3 } } }));
+  }); });
+  const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-stat-read-'));
+  const id = 'cline-pass/kimi-k3', current = 'clinepass-2026-09-24-v1', older = 'clinepass-old-synthetic';
+  let running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'synthetic', enabled: true, perModel: {} }], knownModels: [id], perModel: { [id]: { upstreams: ['one'] } } }, dir);
+  t.after(async () => { if (running?.child) await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  assert.equal((await rawJson(port, '/v1/chat/completions', { model: id, messages: [] })).status, 200);
+  await stop(running.child); running.child = null;
+  const metaPath = path.join(dir, 'metadata.json'), meta = JSON.parse(fs.readFileSync(metaPath));
+  const latest = meta.statistics.minuteBuckets.at(-1);
+  const historical = structuredClone(latest), zero = structuredClone(latest), unknown = structuredClone(latest);
+  const renameProvider = (bucket, name) => {
+    for (const field of ['providerUsage', 'providerHealth', 'valuation']) {
+      bucket[field][id][name] = bucket[field][id].one;
+      delete bucket[field][id].one;
+    }
+  };
+  historical.minute--; renameProvider(historical, 'old');
+  historical.valuation[id].old[older] = historical.valuation[id].old[current];
+  delete historical.valuation[id].old[current];
+  zero.minute -= 2; renameProvider(zero, 'zero');
+  const zeroUsage = zero.providerUsage[id].zero;
+  for (const field of ['inputTokens', 'outputTokens', 'cachedTokens', 'cacheHitRequests', 'cacheInputTokens', 'cacheInputCachedTokens']) zeroUsage[field] = 0;
+  for (const field of ['lowPicoUsd', 'highPicoUsd']) zero.valuation[id].zero[current][field] = 0;
+  unknown.minute -= 3; renameProvider(unknown, 'toString');
+  const missingUsage = unknown.providerUsage[id].toString;
+  for (const field of ['inputKnownRequests', 'inputTokens', 'cacheKnownRequests', 'cacheHitRequests', 'cachedTokens', 'cacheInputKnownRequests', 'cacheInputTokens', 'cacheInputCachedTokens']) missingUsage[field] = 0;
+  delete unknown.valuation[id]; // Output is known, but input and cache are missing: cannot price this success.
+  meta.statistics.priceVersions[older] = { ...structuredClone(meta.statistics.priceVersions[current]), version: older, collectedAt: '2026-01-01' };
+  meta.statistics.priceVersions[older].models[id].rates[0][0] = 1000;
+  const c = meta.statistics.recentCoverage;
+  for (const field of ['modelTrackingStartedMinute', 'routingTrackingStartedMinute', 'accountHealthTrackingStartedMinute', 'providerHealthTrackingStartedMinute', 'usageTrackingStartedMinute']) c[field] = Math.min(c[field], unknown.minute);
+  c.usageIncompleteAt[id] = unknown.minute;
+  c.valuationIncompleteAt[id] = unknown.minute;
+  c.providerHealthIncompleteAt[id] = { toString: unknown.minute };
+  meta.statistics.minuteBuckets = [unknown, zero, historical, latest];
+  fs.writeFileSync(metaPath, JSON.stringify(meta));
+  running = await startSwitcher(null, dir);
+  const read = async () => { const response = await fetch(`http://127.0.0.1:${port}/api/statistics`); assert.equal(response.status, 200); return response.json(); };
+  const before = await read(), row = before.models.find(model => model.id === id), projection = row.providerStatistics;
+  assert.equal(row.recent24h.requests, 4);
+  assert.equal(projection.finalRequests.successes, 4);
+  assert.deepEqual(projection.providers.map(provider => provider.id), ['old', 'one', 'toString', 'zero']);
+  const providers = Object.fromEntries(projection.providers.map(provider => [provider.id, provider]));
+  assert.equal(projection.usage.requests, 4);
+  assert.equal(projection.usage.inputKnownRequests, 3);
+  assert.equal(providers.one.usage.inputTokens, 10);
+  assert.equal(providers.zero.usage.requests, 1);
+  assert.equal(providers.zero.usage.inputKnownRequests, 1, 'explicit zero remains known');
+  assert.equal(providers.zero.usage.inputTokens, 0);
+  assert.equal(providers.zero.usage.cacheInputKnownRequests, 1);
+  assert.equal(providers.zero.valuation.versions[current].lowPicoUsd, 0, 'known zero is priced zero');
+  assert.equal(providers.toString.usage.requests, 1);
+  assert.equal(providers.toString.usage.inputKnownRequests, 0, 'missing input remains unknown rather than a known zero');
+  assert.deepEqual(providers.toString.valuation.versions, {}, 'missing input never creates a zero-valued price');
+  assert.equal(providers.toString.health.coverageComplete, false);
+  assert.equal(projection.coverage.complete, false);
+  assert.equal(projection.valuation.complete, false);
+  assert.equal(before.referencePrices.versions[older].models[id].rates[0][0], 1000);
+  assert.equal(projection.valuation.versions[older].lowPicoUsd, 51900000, 'old amount stays frozen despite a different old input rate');
+  assert.equal(projection.valuation.versions[current].lowPicoUsd, 51900000);
+  assert.equal(providers.old.valuation.versions[older].pricedRequests, 1);
+  assert.equal(providers.one.valuation.versions[current].pricedRequests, 1);
+  await stop(running.child); running.child = null;
+  running = await startSwitcher(null, dir);
+  const after = await read();
+  assert.deepEqual(after.models, before.models, 'full projections and coverage survive restart without read-time mutation');
+  assert.equal(JSON.parse(fs.readFileSync(metaPath)).statistics.minuteBuckets.length, 4);
+});
+
 test('prototype-named model/provider cell eviction records valid coverage and survives restart',async(t)=>{
   const upstream=http.createServer((req,res)=>{const chunks=[];req.on('data',chunk=>chunks.push(chunk));req.on('end',()=>{
     const body=JSON.parse(Buffer.concat(chunks).toString()),provider=body.providerOptions?.gateway?.only?.[0]||body.provider?.only?.[0];
