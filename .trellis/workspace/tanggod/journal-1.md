@@ -992,3 +992,25 @@ Implemented exclusive account ownership for multiple client keys, scoped chat/ca
 ### Status
 
 [OK] **Completed**
+
+
+## Session 42: Integrated pricing, console, client-key and performance acceptance
+<!-- trellis-session: v=2 fp=d2fdca8f388d54a1 -->
+
+**Date**: 2026-09-25
+**Task**: Integrated pricing, console, client-key and performance acceptance
+**Branch**: `feat/pricing-console-keys-integration`
+
+### Summary
+
+Verified four archived deliverables together via synthetic dual-key priced-use integration/restart/redaction test, same-workload server A/B and interleaved 390px Chromium HTML A/B; env-scrubbed 334/334 passed. Kept sustained 300 RPM and production TLS/slow disk unverified; old image on v2 account owners remains an unsafe rollback requiring full pre-upgrade DATA_DIR restore. No push or deployment.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `8dc1584` | test: verify integrated pricing and client-key routing |
+
+### Status
+
+[OK] **Completed**

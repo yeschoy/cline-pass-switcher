@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 41
+- **Total Sessions**: 42
 - **Last Active**: 2026-09-25
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~994 | Active |
+| `journal-1.md` | ~1016 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 42 | 2026-09-25 | Integrated pricing, console, client-key and performance acceptance | `8dc1584` | `feat/pricing-console-keys-integration` |
 | 41 | 2026-09-25 | Multi-client key ownership and isolated routing | `4250d88` | `feat/multi-client-key-routing` |
 | 40 | 2026-09-25 | 完成模型与渠道统计页面拆分 | `19c952d` | `feat/simplify-model-provider-console` |
 | 39 | 2026-09-25 | 修复归档价格研究脚本复现路径 | `3196657` | `main` |
