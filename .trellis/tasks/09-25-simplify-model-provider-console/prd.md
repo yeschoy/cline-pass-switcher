@@ -11,7 +11,7 @@ Split the current dense “模型和渠道” view into two sub-tabs with short 
 ## Requirements
 
 - Keep the top-level “模型和渠道” navigation; add native “模型” and “渠道” child buttons, each with its own table or projection. Default model view. Model rows show `请求成功率` (`xx.x% · N 样本`), channel rows `渠道尝试成功率` (`xx.x% · N 样本`); no sample -> `无数据 · 0 样本`, not 0%.
-- Retain useful compact Token/cache/reference USD columns with short labels and a scannable no-data state. Move verbose formulas, price versions, source/date, coverage/migration/incomplete explanations to a concise help disclosure and row-level details. Unknown-Provider usage stays marked `未知渠道` and has no invented attempt-success rate. Channel rows retain model ID.
+- Retain useful compact Token/cache/**reference consumption equivalent (USD)** columns with short labels and a scannable no-data state. This amount comes from final successful explicit Token usage × the frozen model reference tariff, **not** from or deducted against the separate account monthly `$50 × remaining-percent` forecast. Move verbose formulas, price versions, source/date, coverage/migration/incomplete explanations to a concise help disclosure and row-level details. Unknown-Provider usage stays marked `未知渠道` and has no invented attempt-success rate. Channel rows retain model ID.
 - Search/filter and tab switching do not reload unrelated data unnecessarily, overwrite account drafts or allow an older async fetch to replace newer state; semantic controls, keyboard focus, `aria-live` and narrow-width scrolling remain usable.
 
 ## Acceptance criteria

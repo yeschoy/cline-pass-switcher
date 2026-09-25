@@ -2,3 +2,4 @@
 {"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Preserve unknown/zero and accepted API snapshot semantics"}
 {"file":".trellis/tasks/09-25-pricing-console-keys-300rpm/research/current-contract-and-hotpaths.md","reason":"Existing UI and statistics field owners"}
 {"file": ".trellis/tasks/archive/2026-09/09-25-whole-service-performance/research/browser-provider-density.md", "reason": "Measured dense mixed-table DOM scaling; retest after splitting model and Provider tabs"}
+{"file": ".trellis/tasks/09-25-expand-reference-prices/research/deepseek-prices-2026-09-25.md", "reason": "Preserve model consumption versus account quota separation in UI"}

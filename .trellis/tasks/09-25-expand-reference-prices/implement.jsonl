@@ -3,3 +3,4 @@
 {"file":".trellis/tasks/archive/2026-09/09-24-model-provider-statistics/research/official-pricing-and-usage.md","reason":"Verified official reference tariff and known usage limitations"}
 {"file":".trellis/tasks/09-25-pricing-console-keys-300rpm/research/current-contract-and-hotpaths.md","reason":"Current owner, version and precision facts"}
 {"file": ".trellis/tasks/09-25-expand-reference-prices/research/price-source-drift-2026-09-25.md", "reason": "Live official table changed after user screenshot; preserve explicit source decision"}
+{"file": ".trellis/tasks/09-25-expand-reference-prices/research/deepseek-prices-2026-09-25.md", "reason": "User-directed DeepSeek direct rates, tiers, alias caveat and quota separation"}

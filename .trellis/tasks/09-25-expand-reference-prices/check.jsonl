@@ -3,3 +3,4 @@
 {"file":".trellis/tasks/archive/2026-09/09-24-model-provider-statistics/research/official-pricing-and-usage.md","reason":"Review exact source prices and non-billing caveat"}
 {"file": ".trellis/tasks/archive/2026-09/09-25-whole-service-performance/research/results.md", "reason": "Frozen reference valuation and hot-path regression after price expansion"}
 {"file": ".trellis/tasks/09-25-expand-reference-prices/research/price-source-drift-2026-09-25.md", "reason": "Check source version, model inventory and non-billing attribution"}
+{"file": ".trellis/tasks/09-25-expand-reference-prices/research/deepseek-prices-2026-09-25.md", "reason": "Verify DeepSeek peak/off-peak exactness and billing wording"}
