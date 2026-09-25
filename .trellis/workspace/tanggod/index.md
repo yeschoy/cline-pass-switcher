@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 37
+- **Total Sessions**: 38
 - **Last Active**: 2026-09-25
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~906 | Active |
+| `journal-1.md` | ~928 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 38 | 2026-09-25 | 完成模型参考价格扩展 | `741db20` | `feat/expand-reference-prices` |
 | 37 | 2026-09-25 | 五项集成记录与诊断版生产切换 | `2a1b5fa`, `32a150e`, `165755b` | `main` |
 | 36 | 2026-09-25 | 原文详细日志子任务本地实现验收 | `607e327` | `main` |
 | 35 | 2026-09-24 | 模型与渠道统计及参考用量等值 | `fe6e131` | `main` |

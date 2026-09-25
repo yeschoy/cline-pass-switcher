@@ -904,3 +904,25 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 38: 完成模型参考价格扩展
+<!-- trellis-session: v=2 fp=4e54b46ef5762fe0 -->
+
+**Date**: 2026-09-25
+**Task**: 完成模型参考价格扩展
+**Branch**: `feat/expand-reference-prices`
+
+### Summary
+
+按当前 ClinePass 12 模型与指定 DeepSeek 直连峰谷费率记录 v2 冻结参考价格；维持 v1 旧金额和账号月限 0×剩余百分比独立。聚焦 158/158、全量 297/297、本地 Chromium 窄屏键盘与合成 v2→v1 备份回滚演练通过。未验证实际订阅扣费、生产容量或部署。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `741db20` | feat: extend frozen model reference pricing and consumption coverage |
+
+### Status
+
+[OK] **Completed**
