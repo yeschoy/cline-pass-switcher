@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 42
-- **Last Active**: 2026-09-25
+- **Total Sessions**: 43
+- **Last Active**: 2026-09-26
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1016 | Active |
+| `journal-1.md` | ~1038 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 43 | 2026-09-26 | Read-only production error-log follow-up | `6a7eba2` | `docs/remote-errors-followup-20260925` |
 | 42 | 2026-09-25 | Integrated pricing, console, client-key and performance acceptance | `8dc1584` | `feat/pricing-console-keys-integration` |
 | 41 | 2026-09-25 | Multi-client key ownership and isolated routing | `4250d88` | `feat/multi-client-key-routing` |
 | 40 | 2026-09-25 | 完成模型与渠道统计页面拆分 | `19c952d` | `feat/simplify-model-provider-console` |

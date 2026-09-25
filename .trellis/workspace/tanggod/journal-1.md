@@ -1014,3 +1014,25 @@ Verified four archived deliverables together via synthetic dual-key priced-use i
 ### Status
 
 [OK] **Completed**
+
+
+## Session 43: Read-only production error-log follow-up
+<!-- trellis-session: v=2 fp=29a9c88f4ff4ed19 -->
+
+**Date**: 2026-09-26
+**Task**: Read-only production error-log follow-up
+**Branch**: `docs/remote-errors-followup-20260925`
+
+### Summary
+
+On 2026-09-25, audited bounded ordinary logs in place on the canonical production host without writes or credential exposure: 6181 final requests, 246 failures versus 268 failed attempts, 254 ambiguous short HTML DeepSeek 429 attempts and 100 local capacity 429s; current one-hour slice had zero final failures. Container/config/deployment hashes unchanged; exact upstream 429 origin/NewAPI mapping remain unverified. No production repair, push or deployment.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6a7eba2` | docs(task): diagnose current remote error burst |
+
+### Status
+
+[OK] **Completed**
