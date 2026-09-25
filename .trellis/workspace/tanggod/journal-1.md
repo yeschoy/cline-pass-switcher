@@ -926,3 +926,25 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 39: 修复归档价格研究脚本复现路径
+<!-- trellis-session: v=2 fp=4425c4e023d39cb9 -->
+
+**Date**: 2026-09-25
+**Task**: 修复归档价格研究脚本复现路径
+**Branch**: `main`
+
+### Summary
+
+价格子任务归档后研究脚本的固定相对路径和 HEAD 基线失效；改为向上定位仓库根目录并固定旧版 08f27f8，更新归档复现命令。归档路径下本地回滚与 Chromium 390px 浏览器检查再次通过；无业务代码改动。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3196657` | test(task): preserve archived pricing research repros |
+
+### Status
+
+[OK] **Completed**
