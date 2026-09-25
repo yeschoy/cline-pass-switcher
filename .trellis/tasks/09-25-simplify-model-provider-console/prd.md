@@ -16,9 +16,9 @@ Split the current dense “模型和渠道” view into two sub-tabs with short 
 
 ## Acceptance criteria
 
-- [ ] Same fixture containing a successful model request, failed Provider retry, unknown attribution, known zero and missing usage displays correct but distinct model/Provider rates and usage without duplicated tokens.
-- [ ] Default table is visibly shorter/less dense; full caveats remain accessible when needed and model source still says non-actual-billing. No result labelled `最终请求` ambiguously in a row.
-- [ ] Production VM/static tests plus real-browser focus, keyboard, search, tab and narrow-width checks; stale requests and unsaved drafts survive navigation.
+- [x] Same fixture containing a successful model request, failed Provider retry, unknown attribution, known zero and missing usage displays correct but distinct model/Provider rates and usage without duplicated tokens.
+- [x] Default table is visibly shorter/less dense; full caveats remain accessible when needed and model source still says non-actual-billing. No result labelled `最终请求` ambiguously in a row.
+- [x] Production VM/static tests plus real-browser focus, keyboard, search, tab and narrow-width checks; stale requests and unsaved drafts survive navigation.
 
 ## Out of scope
 

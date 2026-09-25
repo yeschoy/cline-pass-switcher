@@ -23,7 +23,13 @@
   button.ghost:hover { border-color: var(--accent); }
   button:disabled { opacity: .5; cursor: wait; }
   .section-nav { display:flex; gap:8px; margin-bottom:18px; flex-wrap:wrap; }
-  .section-nav button[aria-pressed="true"] { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .section-nav button[aria-pressed="true"], .model-provider-nav button[aria-pressed="true"] { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .model-provider-nav { display:flex; gap:8px; margin:12px 0; }
+  .model-provider-table { min-width:780px; }
+  .model-provider-table th[scope="row"] { max-width:260px; white-space:normal; overflow-wrap:anywhere; color:var(--text); }
+  .model-provider-table td { white-space:nowrap; }
+  .model-provider-table td:last-child { white-space:normal; min-width:170px; }
+  .model-provider-table details div { color:var(--dim); font-size:12px; line-height:1.7; overflow-wrap:anywhere; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 18px; overflow-x:auto; }
   .card h2 { font-size: 15px; margin-bottom: 12px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -160,12 +166,17 @@
   <section id="modelProvidersPanel" aria-labelledby="modelProvidersTitle" hidden>
     <div class="card">
       <h2 id="modelProvidersTitle" tabindex="-1">模型和渠道 · 最近 24 小时</h2>
-      <p>模型成功率 = 最终成功请求 /（最终成功 + 失败请求），取消不计入分母（v5 起记录）；渠道成功率 = 具名真实尝试的成功 /（成功 + 降级），并非模型请求成功率。无样本显示无数据。各指标的迁移起点与容量丢失独立标注。</p>
-      <p>模型 Token 列含旧版已记录的最终成功 usage；渠道 Token 列从 v5 起记录，仅计最终成功请求上游明确返回的 usage；无法唯一确认时归入未知渠道，失败重试不重复计 Token。缓存 Token 占比 = 有明确 input/cached-read 配对的 cached / input；命中请求率 = 明确缓存字段的命中请求 / 已知缓存请求。0 与未知不同。total 不从 input + output 推算。</p>
-      <p><b>参考消费等值（USD），非订阅实际扣费</b>。只计算最终成功且用量可证明的请求；DeepSeek V4 Pro / V4.1 Flash 仅显示<b>峰谷参考区间</b>（节假日/适用档位未知）；ClinePass 表仅列 V4.1 Flash 高峰单价，低峰单价取自 DeepSeek 直连官网，其费率不代表 ClinePass 实际扣费。缓存写计数与上下文档位缺失时不推算完整金额；未计请求及历史覆盖缺口不是零费用。<a href="https://docs.cline.bot/getting-started/clinepass" target="_blank" rel="noopener noreferrer">ClinePass 参考表</a> · <a href="https://api-docs.deepseek.com/quick_start/pricing/" target="_blank" rel="noopener noreferrer">DeepSeek 直连价格</a>；<span id="modelProvidersPrice">本项目价格快照待加载</span>；采集日期非官方生效日期，官方生效时间未知。</p>
+      <p><b>参考消费等值（USD），非订阅实际扣费或余额</b>；仅按最终成功请求的明确 Token 用量和请求时冻结的模型参考单价计算，不从账号月额度参考剩余（$50 × 月剩余百分比）扣除。</p>
+      <details><summary>指标口径、覆盖和价格限制</summary><div class="dim" style="font-size:12px;line-height:1.7">
+        <p>请求成功率 = 最终成功 /（最终成功 + 失败），取消不计入；渠道尝试成功率 = 具名真实尝试成功 /（成功 + 降级）。同一请求可有失败重试，但 Token/参考金额仅归属最终成功，不重复计入失败尝试。未知渠道只代表最终成功用量无法唯一归属，不推测尝试率。</p>
+        <p>模型 Token 可含旧版成功 usage；渠道用量自 v5 起跟踪。各字段仅累计上游明确返回的用量，已知 0 不等于缺失；total 不从 input + output 推算。缓存 Token 占比须有 input/cached-read 配对；命中请求率另以已知缓存请求为分母。迁移、容量丢失和未计价请求可能使覆盖不完整；金额只涵盖已计价请求，不能视为完整账单。</p>
+        <p>DeepSeek V4 Pro / V4.1 Flash 仅显示峰谷参考区间（节假日/适用档位未知）；ClinePass 表仅列 V4.1 Flash 高峰单价，低峰单价取自 DeepSeek 直连官网，其费率不代表 ClinePass 实际扣费。缓存写计数与 Qwen 上下文档位缺失时不推算完整金额。<a href="https://docs.cline.bot/getting-started/clinepass" target="_blank" rel="noopener noreferrer">ClinePass 参考表</a> · <a href="https://api-docs.deepseek.com/quick_start/pricing/" target="_blank" rel="noopener noreferrer">DeepSeek 直连价格</a>；<span id="modelProvidersPrice">本项目价格快照待加载</span>；采集日期非官方生效日期，官方生效时间未知。</p>
+      </div></details>
       <details><summary>当前模型参考单价（USD / 百万 Token）与来源</summary><div class="table-wrap" tabindex="0" role="region" aria-label="当前模型参考单价，可横向滚动"><table><thead><tr><th>模型</th><th>档位</th><th>输入 / 输出 / 缓存读 / 缓存写</th><th>来源 / 本项目快照</th></tr></thead><tbody id="modelProvidersTariffs"></tbody></table></div></details>
+      <div class="model-provider-nav" role="group" aria-label="模型和渠道视图"><button id="modelProvidersModelTab" type="button" aria-pressed="true" aria-controls="modelProvidersModelView" onclick="selectModelProviderView('model')">模型</button><button id="modelProvidersChannelTab" class="ghost" type="button" aria-pressed="false" aria-controls="modelProvidersChannelView" onclick="selectModelProviderView('channel')">渠道</button></div>
       <div class="toolbar"><label for="modelProvidersFilter">筛选模型或渠道 <input id="modelProvidersFilter" type="search" oninput="renderModelProviders()"></label><button class="ghost" type="button" onclick="loadModelProviders()">刷新统计</button><span id="modelProvidersStatus" role="status" aria-live="polite">尚未加载</span></div>
-      <div class="table-wrap" tabindex="0" role="region" aria-label="模型和渠道统计表，可横向滚动"><table style="min-width:1120px"><thead><tr><th>模型 / 渠道</th><th>成功率（样本）</th><th>input / output / total / cached Token（已知请求）</th><th>缓存 Token 占比 / 命中请求率</th><th>参考消费等值（USD），非订阅实际扣费</th><th>口径与覆盖</th></tr></thead><tbody id="modelProvidersBody"><tr><td colspan="6" class="empty">进入页面后加载</td></tr></tbody></table></div>
+      <div id="modelProvidersModelView" class="table-wrap" tabindex="0" role="region" aria-label="模型统计表，可横向滚动"><table class="model-provider-table"><thead><tr><th>模型</th><th>请求成功率</th><th>输入 / 输出 Token</th><th>缓存读 · Token 占比</th><th>参考消费等值（USD）</th><th>详情</th></tr></thead><tbody id="modelProvidersBody"><tr><td colspan="6" class="empty">进入页面后加载</td></tr></tbody></table></div>
+      <div id="modelProvidersChannelView" class="table-wrap" tabindex="0" role="region" aria-label="渠道统计表，可横向滚动" hidden><table class="model-provider-table"><thead><tr><th>模型</th><th>渠道</th><th>渠道尝试成功率</th><th>输入 / 输出 Token</th><th>缓存读 · Token 占比</th><th>参考消费等值（USD）</th><th>详情</th></tr></thead><tbody id="modelProvidersChannelBody"><tr><td colspan="7" class="empty">进入页面后加载</td></tr></tbody></table></div>
     </div>
   </section>
 
@@ -1355,7 +1366,7 @@ function statisticsRange(label,x,routingCoverage){return `<div><b>${label}</b><b
 function accountDisposition(health,quota){return health?.disabled?(quota?.protectionPersistence==='pending'?'已禁用 · 月额度封禁写盘待重试':'已禁用'):quota?.protectionMonthlyAt?(quota.protectionPersistence==='pending'?'月额度封禁（写盘待重试）':'月额度封禁'):quota?.protectionShortWindows?.length?'短窗口耗尽':quota?.protectionPendingUntil?'额度核验中':health?.hardQuarantined?'硬隔离':health?.cooling?'冷却中':'可调度';}
 function successHealthText(health){if(health?.successRate===null||health?.successRate===undefined)return `无数据${health?.coverageComplete===false?' · 统计积累中':''}`;return `${(Number(health.successRate)*100).toFixed(1)}% · ${Number(health.samples)||0} 样本（成功 ${Number(health.successes)||0} / 降级 ${Number(health.degrades)||0}）${health.coverageComplete===false?' · 统计积累中':''}`;}
 async function loadStatistics(visitId=STATISTICS_VISIT_ID,announce=true){const queryId=++STATISTICS_QUERY_ID;if(announce&&!$('#statisticsPanel').hidden)$('#statisticsStatus').textContent='加载统计中…';try{const data=await api('/api/statistics');if(queryId!==STATISTICS_QUERY_ID||visitId!==STATISTICS_VISIT_ID||$('#statisticsPanel').hidden)return null;const l=data.lifetime.global,r=data.recent24h.global;$('#statisticsSummary').innerHTML=statisticsRange('累计',l,data.routingCoverage)+statisticsRange('最近 24 小时',r,data.routingCoverage);renderStatisticsQuotaForecast(data);$('#statisticsBody').innerHTML=(data.accounts||[]).map(a=>`<tr><td>${escapeHtml(a.name)}<br><span class="mono dim">${escapeHtml(a.id)}</span></td><td>${escapeHtml(accountDisposition(a.health,a.quota))}</td><td>${statisticValue(a.lifetime.requests)} / ${statisticValue(a.lifetime.errors)}</td><td>${statisticValue(a.recent24h.requests)} / ${statisticValue(a.recent24h.errors)}</td><td>累计 ${statisticValue(a.lifetime.inputTokens,a.lifetime.inputKnownRequests)} · ${statisticValue(a.lifetime.outputTokens,a.lifetime.outputKnownRequests)} · ${statisticValue(a.lifetime.totalTokens,a.lifetime.totalKnownRequests)}<br>24h ${statisticValue(a.recent24h.inputTokens,a.recent24h.inputKnownRequests)} · ${statisticValue(a.recent24h.outputTokens,a.recent24h.outputKnownRequests)} · ${statisticValue(a.recent24h.totalTokens,a.recent24h.totalKnownRequests)}</td><td>累计 ${cacheMetrics(a.lifetime)}<br>24h ${cacheMetrics(a.recent24h)}</td><td>${escapeHtml(successHealthText(a.health))}</td><td>${quotaLimit(a.quota,'five_hour','5 小时')}<br>${quotaLimit(a.quota,'weekly','每周')}<br>${quotaLimit(a.quota,'monthly','每月')}</td><td>${quotaState(a,data.generatedAt)}</td></tr>`).join('')||'<tr><td colspan="9" class="empty">暂无账号统计</td></tr>';$('#statisticsLegacy').textContent=`旧版请求基线（可能含控制台测试，不计入精确聊天总量）：${Number(data.migration?.legacyRequests)||0}`;$('#statisticsStatus').textContent=`生成于 ${new Date(data.generatedAt).toLocaleString()}`;return data;}catch{if(queryId===STATISTICS_QUERY_ID&&visitId===STATISTICS_VISIT_ID&&!$('#statisticsPanel').hidden)$('#statisticsStatus').textContent='统计加载失败；已显示的数据未改变';return null;}}
-let MODEL_PROVIDER_QUERY_ID=0,MODEL_PROVIDER_CONTROLLER=null,MODEL_PROVIDER_DATA=null;
+let MODEL_PROVIDER_QUERY_ID=0,MODEL_PROVIDER_CONTROLLER=null,MODEL_PROVIDER_DATA=null,MODEL_PROVIDER_VIEW='model';
 function mpNumber(n){return Number.isSafeInteger(n)&&n>=0?n.toLocaleString():'无数据';}
 function mpRatio(n){return typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=1?`${(n*100).toFixed(1)}%`:'无数据';}
 function mpCoverage(c){return c?.complete===true?'24h 完整':`统计不完整 · 自 ${Number.isSafeInteger(c?.from)?escapeHtml(new Date(c.from).toLocaleString()):'未知'} 起`;}
@@ -1370,40 +1381,72 @@ function mpTariffRows(snapshot){
   });
   return rows.join('')||'<tr><td colspan="4" class="empty">暂无价格快照</td></tr>';
 }
-function mpMoney(v,prices,modelId,successful){
+function mpMoney(v,prices,modelId,successful,compact=false,complete=true){
   const entries=Object.entries(v?.versions||{}).filter(([id])=>Object.hasOwn(prices||{},id));
-  if(entries.some(([,x])=>!Number.isSafeInteger(x.pricedRequests)||x.pricedRequests<0))return '不可计算（覆盖计数溢出）';
+  if(entries.some(([,x])=>!Number.isSafeInteger(x.pricedRequests)||x.pricedRequests<0))return compact?'不可计算':'不可计算（覆盖计数溢出）';
   const count=entries.reduce((n,[,x])=>n+BigInt(x.pricedRequests),0n);
-  if(count>BigInt(Number.MAX_SAFE_INTEGER))return '不可计算（覆盖计数溢出）';
+  if(count>BigInt(Number.MAX_SAFE_INTEGER))return compact?'不可计算':'不可计算（覆盖计数溢出）';
   const eligible=Number(count);
-  if(!eligible){const price=Object.values(prices||{}).find(snapshot=>Object.hasOwn(snapshot?.models||{},modelId))?.models[modelId];return price?.tier==='context-band'?'不可计算（上下文档位与缓存写计数未知）':price?.rates?.some(row=>row.length===4&&row[3]!==null)?'不可计算（缓存写计数未知）':'不可计算（无完整 usage / 无支持价格）';}
+  if(!eligible){const price=Object.values(prices||{}).find(snapshot=>Object.hasOwn(snapshot?.models||{},modelId))?.models[modelId];return compact?'不可计算':price?.tier==='context-band'?'不可计算（上下文档位与缓存写计数未知）':price?.rates?.some(row=>row.length===4&&row[3]!==null)?'不可计算（缓存写计数未知）':'不可计算（无完整 usage / 无支持价格）';}
   const low=entries.reduce((n,[,x])=>n+(Number.isSafeInteger(x.lowPicoUsd)?BigInt(x.lowPicoUsd):0n),0n),high=entries.reduce((n,[,x])=>n+(Number.isSafeInteger(x.highPicoUsd)?BigInt(x.highPicoUsd):0n),0n);
-  if(entries.some(([,x])=>x.lowPicoUsd===null||x.highPicoUsd===null))return '不可计算（金钱计数溢出）';
+  if(entries.some(([,x])=>x.lowPicoUsd===null||x.highPicoUsd===null))return compact?'不可计算':'不可计算（金钱计数溢出）';
   const format=pico=>`$${(pico/1000000n/1000000n).toString()}.${(pico%1000000000000n).toString().padStart(12,'0')}`;
   const ranged=entries.some(([id])=>prices[id]?.models?.[modelId]?.tier==='peak/off-peak range');
-  const versions=entries.map(([id])=>{const snapshot=prices[id],rates=snapshot.models?.[modelId]?.rates;return `${id}（采集 ${snapshot.collectedAt}；${modelId}；${Array.isArray(rates)?rates.map(row=>row.map(n=>mpRate(n,snapshot.rateScale)).join('/')).join(' ～ '):'费率未知'} USD / 百万 input/output/cached-read${snapshot.rateScale===10000?'/cached-write':''}）`;}).join('、');
+  const amount=ranged?`${format(low)} – ${format(high)} · 峰谷参考区间`:format(low);
+  if(compact)return `${amount}${v?.complete===true&&complete&&Number.isSafeInteger(successful)&&successful===eligible?'':' · 部分'}`;
+  const versions=entries.map(([id])=>{const snapshot=prices[id],rates=snapshot.models?.[modelId]?.rates;return `${id}（采集 ${snapshot.collectedAt}；${modelId}；${Array.isArray(rates)?rates.map(row=>row.map(n=>mpRate(n,snapshot.rateScale)).join('/')).join(' ～ '):'费率未知'} USD / 百万 input/output/cached-read${snapshot.rateScale===10000?'/cached-write':''}；来源 ${snapshot.models?.[modelId]?.source||snapshot.source||'未知'}；官方生效时间未知）`;}).join('、');
   const coverage=Number.isSafeInteger(successful)&&successful>=eligible
     ? `已计 ${mpNumber(eligible)} / ${mpNumber(successful)} 最终成功请求${successful>eligible?'（其余不可计算）':''}`
     : `已计 ${mpNumber(eligible)} 请求 · 最终成功请求数 ${mpNumber(successful)}（覆盖不一致或计数溢出，不代表完整费用）`;
-  return `${ranged?`${format(low)} – ${format(high)} · 峰谷参考区间`:format(low)} · ${coverage}${v.complete?'':' · 历史覆盖不完整'} · ${versions}`;
+  return `${amount} · ${coverage}${v.complete?'':' · 历史覆盖不完整'} · ${versions}`;
+}
+function mpSampleRate(success){
+  const samples=success?.samples;
+  return samples===0?'无数据 · 0 样本':Number.isSafeInteger(samples)&&samples>0?`${mpRatio(success.successRate)} · ${mpNumber(samples)} 样本`:'无数据 · 样本未知';
+}
+function mpKnown(value,count){return Number.isSafeInteger(count)&&count>0?mpNumber(value):'无数据';}
+function mpUsageCells(x){
+  return `<td>${mpKnown(x?.inputTokens,x?.inputKnownRequests)} / ${mpKnown(x?.outputTokens,x?.outputKnownRequests)}</td><td>${mpKnown(x?.cachedTokens,x?.cacheKnownRequests)} · ${mpRatio(x?.cacheTokenRatio)}</td>`;
+}
+function mpRowDetails(success,usage,coverage,valuation,successCoverage,prices,modelId,channel=false){
+  const x=usage||{},known=(value,count)=>`${mpKnown(value,count)}（${mpNumber(count)} 已知）`;
+  const money=mpMoney(valuation,prices,modelId,channel?x.requests:success?.successes);
+  return `<details><summary>查看口径与覆盖</summary><div>${channel?'渠道成功率按具名尝试计算；用量与金额仅按最终成功请求归属，不包含失败重试。':'模型成功率按最终成功及失败请求计算，取消不计；历史模型 Token 可能早于 v5。'}<br>${channel&&!success?'渠道尝试成功率不适用（无具名尝试）':`成功 ${mpNumber(success?.successes)} / ${mpNumber(success?.samples)} 样本 · 成功率覆盖 ${successCoverage}`}<br>${channel?'最终成功归属用量请求':'模型累计用量请求（可含 v5 前记录）'} ${mpNumber(x.requests)} · input ${known(x.inputTokens,x.inputKnownRequests)} · output ${known(x.outputTokens,x.outputKnownRequests)} · total ${known(x.totalTokens,x.totalKnownRequests)} · cached-read ${known(x.cachedTokens,x.cacheKnownRequests)}<br>缓存 Token 占比 ${mpRatio(x.cacheTokenRatio)}（${mpNumber(x.cacheInputCachedTokens)} / ${mpNumber(x.cacheInputTokens)} Token，${mpNumber(x.cacheInputKnownRequests)} 配对请求）；命中请求率 ${mpRatio(x.cacheHitRequestRate)}（${mpNumber(x.cacheHitRequests)} / ${mpNumber(x.cacheKnownRequests)} 已知请求）<br>Token 覆盖 ${mpCoverage(coverage)} · 金额覆盖 ${mpCoverage(valuation)}<br>参考消费等值（USD），非订阅实际扣费：${escapeHtml(money)}。未计价请求与历史缺口不是零费用。</div></details>`;
+}
+function selectModelProviderView(view){
+  if(view!=='model'&&view!=='channel')return;
+  MODEL_PROVIDER_VIEW=view;
+  $('#modelProvidersModelTab').setAttribute('aria-pressed',String(view==='model'));
+  $('#modelProvidersChannelTab').setAttribute('aria-pressed',String(view==='channel'));
+  $('#modelProvidersModelView').hidden=view!=='model';
+  $('#modelProvidersChannelView').hidden=view!=='channel';
+  renderModelProviders();
+  $('#modelProvidersStatus').textContent=`${view==='model'?'模型':'渠道'}视图 · ${MODEL_PROVIDER_DATA?`生成于 ${new Date(MODEL_PROVIDER_DATA.generatedAt).toLocaleString()}`:'尚未加载'}`;
 }
 function renderModelProviders(){
-  const body=$('#modelProvidersBody'),data=MODEL_PROVIDER_DATA,filter=$('#modelProvidersFilter').value.trim().toLowerCase();
+  const data=MODEL_PROVIDER_DATA,filter=$('#modelProvidersFilter').value.trim().toLowerCase();
   if(!data)return;
   const prices={...(data.referencePrices?.versions||{})};if(data.referencePrices?.current?.version)prices[data.referencePrices.current.version]=data.referencePrices.current;
-  const rows=[];
+  const models=[],channels=[];
   for(const model of data.models||[]){
     const p=model.providerStatistics||{},children=p.providers||[];
-    if(filter&&!String(model.id).toLowerCase().includes(filter)&&!children.some(child=>String(child.id||'未知渠道').toLowerCase().includes(filter)))continue;
-    const renderRow=(label,success,u,coverage,valuation,kind,successCoverage)=>{
-      const x=u||{},known=(value,count)=>`${Number.isSafeInteger(count)&&count>0?mpNumber(value):'无数据'}（${mpNumber(count)} 已知）`;
-      const rate=kind==='未知渠道'?'不适用（无具名尝试）':`${mpRatio(success?.successRate)} · ${mpNumber(success?.successes)} / ${mpNumber(success?.samples)} 样本`;
-      rows.push(`<tr><th scope="row">${escapeHtml(label)}</th><td>${escapeHtml(kind)}：${rate}</td><td>${known(x.inputTokens,x.inputKnownRequests)} / ${known(x.outputTokens,x.outputKnownRequests)} / ${known(x.totalTokens,x.totalKnownRequests)} / ${known(x.cachedTokens,x.cacheKnownRequests)}</td><td>${mpRatio(x.cacheTokenRatio)}（${mpNumber(x.cacheInputKnownRequests)} 配对） / ${mpRatio(x.cacheHitRequestRate)}（${mpNumber(x.cacheKnownRequests)} 已知）</td><td>${escapeHtml(mpMoney(valuation,prices,model.id,kind==='最终请求'?success?.successes:u?.requests))}</td><td>成功率 ${successCoverage} · Token ${mpCoverage(coverage)} · 费用 ${mpCoverage(valuation)}${kind==='渠道尝试'?' · 用量仅最终成功归属':' · 用量不包括失败请求'}</td></tr>`);
-    };
-    renderRow(model.id,p.finalRequests,model.recent24h,model.coverage,p.valuation,'最终请求',mpCoverage(p.finalCoverage));
-    for(const child of children){const health=child.health;renderRow(`↳ ${child.id||'未知渠道'}`,health,child.usage,child.coverage,child.valuation,health?'渠道尝试':'未知渠道',health?mpHealthCoverage(health):'不适用');}
+    if(MODEL_PROVIDER_VIEW==='model'){
+      if(filter&&!String(model.id).toLowerCase().includes(filter))continue;
+      models.push(`<tr><th scope="row">${escapeHtml(model.id)}</th><td>${mpSampleRate(p.finalRequests)}</td>${mpUsageCells(model.recent24h)}<td>${escapeHtml(mpMoney(p.valuation,prices,model.id,p.finalRequests?.successes,true,p.finalCoverage?.complete===true&&model.coverage?.complete===true))}</td><td>${mpRowDetails(p.finalRequests,model.recent24h,model.coverage,p.valuation,mpCoverage(p.finalCoverage),prices,model.id)}</td></tr>`);
+    }else for(const child of children){
+      const name=child.id||'未知渠道';
+      if(filter&&!String(model.id).toLowerCase().includes(filter)&&!String(name).toLowerCase().includes(filter))continue;
+      channels.push(`<tr><th scope="row">${escapeHtml(model.id)}</th><td>${escapeHtml(name)}</td><td>${child.id&&child.health?mpSampleRate(child.health):'不适用（无具名尝试）'}</td>${mpUsageCells(child.usage)}<td>${escapeHtml(mpMoney(child.valuation,prices,model.id,child.usage?.requests,true))}</td><td>${mpRowDetails(child.health,child.usage,child.coverage,child.valuation,child.id?mpHealthCoverage(child.health):'不适用',prices,model.id,true)}</td></tr>`);
+    }
   }
-  body.innerHTML=rows.join('')||'<tr><td colspan="6" class="empty">没有匹配的模型或渠道数据</td></tr>';
+  // Keep only the selected projection mounted; the accepted snapshot reconstructs either table on demand.
+  if(MODEL_PROVIDER_VIEW==='model'){
+    $('#modelProvidersChannelBody').replaceChildren();
+    $('#modelProvidersBody').innerHTML=models.join('')||'<tr><td colspan="6" class="empty">没有匹配的模型数据</td></tr>';
+  }else{
+    $('#modelProvidersBody').replaceChildren();
+    $('#modelProvidersChannelBody').innerHTML=channels.join('')||'<tr><td colspan="7" class="empty">没有匹配的渠道数据</td></tr>';
+  }
 }
 async function loadModelProviders(){
   const id=++MODEL_PROVIDER_QUERY_ID;
@@ -1414,7 +1457,7 @@ async function loadModelProviders(){
     MODEL_PROVIDER_DATA=data;
     $('#modelProvidersPrice').textContent=`本项目内部版本 ${data.referencePrices?.current?.version||'未知'} · 采集 ${data.referencePrices?.current?.collectedAt||'未知'} · USD / 百万 Token`;
     $('#modelProvidersTariffs').innerHTML=mpTariffRows(data.referencePrices?.current);
-    renderModelProviders();$('#modelProvidersStatus').textContent=`生成于 ${new Date(data.generatedAt).toLocaleString()}`;
+    renderModelProviders();$('#modelProvidersStatus').textContent=`${MODEL_PROVIDER_VIEW==='model'?'模型':'渠道'}视图 · 生成于 ${new Date(data.generatedAt).toLocaleString()}`;
   }catch(e){if(id===MODEL_PROVIDER_QUERY_ID&&controller===MODEL_PROVIDER_CONTROLLER&&!$('#modelProvidersPanel').hidden&&e?.name!=='AbortError')$('#modelProvidersStatus').textContent='加载失败；保留已显示数据';}
   finally{if(controller===MODEL_PROVIDER_CONTROLLER)MODEL_PROVIDER_CONTROLLER=null;}
 }

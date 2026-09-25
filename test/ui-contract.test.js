@@ -58,7 +58,16 @@ test('top navigation switches six mutually exclusive sections without anchor or 
   assert.match(html,/id="modelProvidersPanel"[^>]*hidden>/);
   assert.match(html,/id="modelProvidersFilter" type="search"/);
   assert.match(html,/id="modelProvidersStatus" role="status" aria-live="polite"/);
-  assert.match(html,/class="table-wrap" tabindex="0" role="region" aria-label="模型和渠道统计表，可横向滚动"/);
+  assert.match(html,/id="modelProvidersModelTab"[^>]+aria-pressed="true" aria-controls="modelProvidersModelView"[^>]+>模型<\/button>/);
+  assert.match(html,/id="modelProvidersChannelTab"[^>]+aria-pressed="false" aria-controls="modelProvidersChannelView"[^>]+>渠道<\/button>/);
+  assert.match(html,/id="modelProvidersModelView" class="table-wrap" tabindex="0" role="region" aria-label="模型统计表，可横向滚动"/);
+  assert.match(html,/id="modelProvidersChannelView" class="table-wrap" tabindex="0" role="region" aria-label="渠道统计表，可横向滚动" hidden/);
+  assert.match(html,/请求成功率<\/th>[^]*参考消费等值（USD）<\/th>/);
+  assert.match(html,/渠道尝试成功率<\/th>[^]*参考消费等值（USD）<\/th>[^]*id="modelProvidersChannelBody"/);
+  assert.match(html,/参考消费等值（USD），非订阅实际扣费或余额/);
+  assert.match(html,/指标口径、覆盖和价格限制/);
+  assert.match(html,/class="model-provider-table"/);
+  assert.match(html,/MODEL_PROVIDER_VIEW='model'/);
   assert.match(html, /<section id="detailsPanel" aria-labelledby="detailsTitle" hidden>/);
   assert.equal((html.match(/id="logPanel"/g) || []).length, 1);
   assert.match(html, /<section id="statisticsPanel" aria-labelledby="statisticsTitle" hidden>/);
