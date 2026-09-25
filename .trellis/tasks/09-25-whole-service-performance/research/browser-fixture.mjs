@@ -22,20 +22,31 @@ const upstream = http.createServer((req, res) => {
 let child, stopped = false;
 async function stop() {
   if (stopped) return; stopped = true;
-  if (child?.exitCode === null) {
-    const process = child; child = null; process.kill('SIGTERM');
-    await Promise.race([new Promise((resolve) => process.once('exit', resolve)), new Promise((resolve) => setTimeout(() => { process.kill('SIGKILL'); resolve(); }, 4000))]);
+  try {
+    if (child?.exitCode === null && child.signalCode === null) {
+      const running = child;
+      running.kill('SIGTERM');
+      await new Promise(resolve => {
+        const timer = setTimeout(() => running.kill('SIGKILL'), 4000);
+        running.once('exit', () => { clearTimeout(timer); resolve(); });
+      });
+    }
+    if (upstream.listening) await new Promise(resolve => upstream.close(resolve));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
-  await new Promise((resolve) => upstream.close(resolve));
-  fs.rmSync(dir, { recursive: true, force: true });
 }
+// Also cover uncaught errors and normal exit; SIGKILL cannot be handled by any process.
+process.once('exit', () => { if (child?.exitCode === null) child.kill('SIGKILL'); fs.rmSync(dir, { recursive: true, force: true }); });
 process.once('SIGTERM', () => { void stop().then(() => process.exit(0)); });
 process.once('SIGINT', () => { void stop().then(() => process.exit(0)); });
 try {
   const upstreamPort = await listen(upstream);
   const portReservation = http.createServer(), port = await listen(portReservation);
   await new Promise((resolve) => portReservation.close(resolve));
-  const models = Array.from({ length: 50 }, (_, i) => `synthetic-model-${i}`);
+  const requestedCount = Number(process.env.CPS_LOCAL_MODEL_COUNT || 50);
+  if (!Number.isInteger(requestedCount) || requestedCount < 1 || requestedCount > 300) throw Error('CPS_LOCAL_MODEL_COUNT must be 1..300');
+  const models = Array.from({ length: requestedCount }, (_, i) => `synthetic-model-${i}`);
   const accounts = Array.from({ length: 10 }, (_, i) => ({ id: `synthetic-${i}`, name: `Synthetic ${i}`, key: `synthetic-upstream-${i}`, enabled: true, maxConcurrent: 0, maxRpm: 0, perModel: {} }));
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ port, proxyKey: 'synthetic-client-key', upstreamBase: `http://127.0.0.1:${upstreamPort}/api/v1`, knownModels: models, accounts, accountMode: 'roundrobin', accountPipeline: { quotaPool: false, healthSort: false, sticky: false } }));
   prepareAdminFixture(dir);
