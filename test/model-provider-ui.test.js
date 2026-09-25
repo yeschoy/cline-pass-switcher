@@ -38,6 +38,34 @@ test('model/provider page renders safe reference range, unknown totals and prese
   await h.run("switchSection('console')");assert.equal(h.el('#modelProvidersPanel').hidden,true);assert.equal(h.drafts(),before);
 });
 
+test('v2 tariffs show all rates and source safely even without priced requests',async()=>{
+  const h=harness(),v2='clinepass-2026-09-25-v2',source='https://docs.cline.bot/getting-started/clinepass',deepseek='https://api-docs.deepseek.com/quick_start/pricing/';
+  const current={version:v2,collectedAt:'2026-09-25',rateScale:10000,source,models:{
+    'cline-pass/mimo-v2.5':{tier:'single',rates:[[1400,2800,28,null]],source},
+    'cline-pass/qwen3.7-plus':{tier:'context-band',rates:[[4000,16000,400,5000],[12000,48000,1200,15000]],source},
+    'cline-pass/qwen3.7-max':{tier:'single',rates:[[25000,75000,5000,31250]],source},
+    'cline-pass/deepseek-v4.1-flash':{tier:'peak/off-peak range',rates:[[1500,6000,30,null],[3000,12000,60,null]],source:deepseek},
+    '<img src=x onerror=alert(1)>':{tier:'single',rates:[[0,0,0,null]],source:'<script>evil</script>'},
+  }};
+  h.context.handler=async()=>({...data,referencePrices:{current,versions:{[v2]:current}},models:[{id:'cline-pass/qwen3.7-plus',recent24h:aggregate,coverage:{complete:true,from:0},providerStatistics:{...data.models[0].providerStatistics,valuation:{versions:{},complete:true,from:0},providers:[]}}]});
+  await h.run("switchSection('modelProviders')");
+  const tariffs=h.el('#modelProvidersTariffs').innerHTML,rows=h.el('#modelProvidersBody').innerHTML;
+  assert.match(tariffs,/0\.0028/);assert.match(tariffs,/3\.125/);assert.match(tariffs,/0\.003/);
+  assert.match(tariffs,/上下文档位与缓存写计数未知/);assert.match(tariffs,/低峰 \/ 高峰/);
+  assert.match(tariffs,/低峰：0\.15 \/ 0\.6 \/ 0\.003 \/ —；高峰：0\.3 \/ 1\.2 \/ 0\.006 \/ —/);
+  assert.match(tariffs,/api-docs\.deepseek\.com\/quick_start\/pricing/);assert.match(tariffs,/官方生效时间未知/);
+  assert.match(html,/ClinePass 表仅列 V4\.1 Flash 高峰单价，低峰单价取自 DeepSeek 直连官网/);
+  assert.match(tariffs,/&lt;img src=x onerror=alert\(1\)&gt;/);assert.doesNotMatch(tariffs,/<img src=x/);
+  assert.match(rows,/不可计算（上下文档位与缓存写计数未知）/);
+  assert.match(h.run(`mpMoney({versions:{[${JSON.stringify(v2)}]:{pricedRequests:1,lowPicoUsd:2259000,highPicoUsd:4518000}},complete:true},{[${JSON.stringify(v2)}]:${JSON.stringify(current)}},'cline-pass/deepseek-v4.1-flash',2)`),/已计 1 \/ 2 最终成功请求（其余不可计算）/);
+  const zero=h.run(`mpMoney({versions:{[${JSON.stringify(v2)}]:{pricedRequests:1,lowPicoUsd:0,highPicoUsd:0}},complete:true},{[${JSON.stringify(v2)}]:${JSON.stringify(current)}},'cline-pass/deepseek-v4.1-flash',1)`);
+  assert.match(zero,/\$0\.000000000000/);assert.match(zero,/input\/output\/cached-read\/cached-write/);
+  const inconsistent=h.run(`mpMoney({versions:{[${JSON.stringify(v2)}]:{pricedRequests:2,lowPicoUsd:0,highPicoUsd:0}},complete:false},{[${JSON.stringify(v2)}]:${JSON.stringify(current)}},'cline-pass/deepseek-v4.1-flash',1)`);
+  assert.match(inconsistent,/已计 2 请求 · 最终成功请求数 1（覆盖不一致或计数溢出，不代表完整费用）/);
+  assert.doesNotMatch(inconsistent,/已计 2 \/ 1 最终成功请求/);
+  assert.match(h.run(`mpMoney({versions:{[${JSON.stringify(v2)}]:{pricedRequests:1,lowPicoUsd:0,highPicoUsd:0}},complete:true},{[${JSON.stringify(v2)}]:${JSON.stringify(current)}},'cline-pass/deepseek-v4.1-flash',null)`),/最终成功请求数 无数据（覆盖不一致或计数溢出/);
+});
+
 test('model/provider older read cannot overwrite current visit or navigate into another panel',async()=>{
   const h=harness(),old=deferred(),newer=deferred();let count=0;
   h.context.handler=()=>++count===1?old.promise:newer.promise;

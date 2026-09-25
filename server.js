@@ -870,15 +870,33 @@ function validateSuccessHealth(value, label) {
     if ((overflowed && value[key] !== null) || (!overflowed && (!Number.isSafeInteger(value[key]) || value[key] < 0))) throw new Error(`invalid statistics ${label}.${key}`);
   }
 }
-// Frozen ClinePass reference rates, USD per 1M tokens in integer thousandths.
-// Collection date is ours; the official table does not publish an effective date.
-const REFERENCE_PRICE = Object.freeze({ version: 'clinepass-2026-09-24-v1', collectedAt: '2026-09-24', effectiveAt: null,
+// Historical v1 rates use integer thousandths USD/1M; never reprice its frozen cells.
+const LEGACY_REFERENCE_PRICE = Object.freeze({ version: 'clinepass-2026-09-24-v1', collectedAt: '2026-09-24', effectiveAt: null,
   source: 'https://docs.cline.bot/getting-started/clinepass', currency: 'USD',
   models: {
     'cline-pass/kimi-k3': { tier: 'single', rates: [[3000,15000,300]] },
     'cline-pass/glm-5.3': { tier: 'single', rates: [[1400,4400,260]] },
     'cline-pass/deepseek-v4-flash': { tier: 'peak/off-peak range', rates: [[220,660,7],[440,1320,14]] },
     'cline-pass/deepseek-v4-pro': { tier: 'peak/off-peak range', rates: [[660,1980,22],[1320,3960,44]] },
+  },
+});
+// Current ClinePass reference table (collected by this project, not an official effective date).
+// DeepSeek direct API supplies the off-peak Flash row; neither source proves the billed tier.
+const REFERENCE_PRICE = Object.freeze({ version: 'clinepass-2026-09-25-v2', collectedAt: '2026-09-25', effectiveAt: null,
+  source: 'https://docs.cline.bot/getting-started/clinepass', currency: 'USD', rateScale: 10000,
+  models: {
+    'cline-pass/glm-5.3': { tier: 'single', rates: [[14000,44000,2600,null]], source: 'https://docs.cline.bot/getting-started/clinepass' },
+    'cline-pass/glm-5.3-flash': { tier: 'single', rates: [[1500,5000,300,null]], source: 'https://docs.cline.bot/getting-started/clinepass' },
+    'cline-pass/kimi-k3': { tier: 'single', rates: [[30000,150000,3000,null]], source: 'https://docs.cline.bot/getting-started/clinepass' },
+    'cline-pass/deepseek-v4-pro': { tier: 'peak/off-peak range', rates: [[6600,19800,220,null],[13200,39600,440,null]], source: 'https://api-docs.deepseek.com/quick_start/pricing/' },
+    'cline-pass/deepseek-v4.1-flash': { tier: 'peak/off-peak range', rates: [[1500,6000,30,null],[3000,12000,60,null]], source: 'https://api-docs.deepseek.com/quick_start/pricing/' },
+    'cline-pass/mimo-v2.5': { tier: 'single', rates: [[1400,2800,28,null]], source: 'https://docs.cline.bot/getting-started/clinepass' },
+    'cline-pass/mimo-v2.5-pro': { tier: 'single', rates: [[17400,34800,145,null]], source: 'https://docs.cline.bot/getting-started/clinepass' },
+    'cline-pass/minimax-m3': { tier: 'single', rates: [[3000,12000,600,null]], source: 'https://docs.cline.bot/getting-started/clinepass' },
+    'cline-pass/muse-spark-1.3-contributor': { tier: 'single', rates: [[1000,2000,20,null]], source: 'https://docs.cline.bot/getting-started/clinepass' },
+    'cline-pass/qwen3.8-max': { tier: 'single', rates: [[20000,60000,2500,25000]], source: 'https://docs.cline.bot/getting-started/clinepass' },
+    'cline-pass/qwen3.7-max': { tier: 'single', rates: [[25000,75000,5000,31250]], source: 'https://docs.cline.bot/getting-started/clinepass' },
+    'cline-pass/qwen3.7-plus': { tier: 'context-band', rates: [[4000,16000,400,5000],[12000,48000,1200,15000]], source: 'https://docs.cline.bot/getting-started/clinepass' },
   },
 });
 const STATISTICS_VERSION = 5;
@@ -900,13 +918,16 @@ function validateValuation(value) {
   for (const key of VALUATION_FIELDS) if (value.overflowFields.includes(key) ? value[key] !== null : !Number.isSafeInteger(value[key]) || value[key] < 0) throw new Error('invalid statistics valuation counter');
 }
 function validatePriceSnapshot(snapshot) {
-  if (!isPlainObject(snapshot) || Object.keys(snapshot).sort().join(',') !== 'collectedAt,currency,effectiveAt,models,source,version' || !validPriceVersion(snapshot.version) || !/^\d{4}-\d{2}-\d{2}$/.test(snapshot.collectedAt) || snapshot.effectiveAt !== null || snapshot.source !== REFERENCE_PRICE.source || snapshot.currency !== 'USD' || !isPlainObject(snapshot.models) || Object.keys(snapshot.models).length > 16) throw new Error('invalid statistics price snapshot');
-  for (const [id, price] of Object.entries(snapshot.models)) if (!/^cline-pass\/[a-z0-9._-]{1,200}$/.test(id) || !isPlainObject(price) || Object.keys(price).sort().join(',') !== 'rates,tier' || !['single','peak/off-peak range'].includes(price.tier) || !Array.isArray(price.rates) || price.rates.length !== (price.tier === 'single' ? 1 : 2) || price.rates.some((row) => !Array.isArray(row) || row.length !== 3 || row.some((rate) => !Number.isSafeInteger(rate) || rate < 0 || rate > 10000000))) throw new Error('invalid statistics price rates');
+  const v2 = snapshot && Object.hasOwn(snapshot, 'rateScale');
+  if (!isPlainObject(snapshot) || Object.keys(snapshot).sort().join(',') !== (v2 ? 'collectedAt,currency,effectiveAt,models,rateScale,source,version' : 'collectedAt,currency,effectiveAt,models,source,version') || !validPriceVersion(snapshot.version) || !/^\d{4}-\d{2}-\d{2}$/.test(snapshot.collectedAt) || snapshot.effectiveAt !== null || snapshot.source !== LEGACY_REFERENCE_PRICE.source || snapshot.currency !== 'USD' || (v2 && snapshot.rateScale !== 10000) || !isPlainObject(snapshot.models) || Object.keys(snapshot.models).length > 16) throw new Error('invalid statistics price snapshot');
+  for (const [id, price] of Object.entries(snapshot.models)) {
+    if (!/^cline-pass\/[a-z0-9._-]{1,200}$/.test(id) || !isPlainObject(price) || Object.keys(price).sort().join(',') !== (v2 ? 'rates,source,tier' : 'rates,tier') || !['single','peak/off-peak range',...(v2 ? ['context-band'] : [])].includes(price.tier) || (v2 && ![snapshot.source,'https://api-docs.deepseek.com/quick_start/pricing/'].includes(price.source)) || !Array.isArray(price.rates) || price.rates.length !== (price.tier === 'single' ? 1 : 2) || price.rates.some((row) => !Array.isArray(row) || row.length !== (v2 ? 4 : 3) || row.some((rate,index) => v2 && index === 3 && rate === null ? false : !Number.isSafeInteger(rate) || rate < 0 || rate > 10000000))) throw new Error('invalid statistics price rates');
+  }
 }
 function referenceValue(modelId, usage) {
   const price = Object.hasOwn(REFERENCE_PRICE.models, modelId) ? REFERENCE_PRICE.models[modelId] : null;
-  if (!price || !usage || ![usage.inputTokens,usage.outputTokens,usage.cachedTokens].every((n) => Number.isSafeInteger(n) && n >= 0) || usage.cachedTokens > usage.inputTokens) return null;
-  const amounts = price.rates.map(([input,output,cached]) => (BigInt(usage.inputTokens - usage.cachedTokens) * BigInt(input) + BigInt(usage.outputTokens) * BigInt(output) + BigInt(usage.cachedTokens) * BigInt(cached)) * 1000n);
+  if (!price || price.tier === 'context-band' || price.rates.some((row) => row[3] !== null) || !usage || ![usage.inputTokens,usage.outputTokens,usage.cachedTokens].every((n) => Number.isSafeInteger(n) && n >= 0) || usage.cachedTokens > usage.inputTokens) return null;
+  const amounts = price.rates.map(([input,output,cached]) => (BigInt(usage.inputTokens - usage.cachedTokens) * BigInt(input) + BigInt(usage.outputTokens) * BigInt(output) + BigInt(usage.cachedTokens) * BigInt(cached)) * 100n);
   return { lowPicoUsd: amounts[0] <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(amounts[0]) : null, highPicoUsd: amounts.at(-1) <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(amounts.at(-1)) : null };
 }
 const MAX_ACCOUNT_MINUTE_CELLS = process.env.NODE_ENV === 'test' ? Math.max(1, Number(process.env.CLINE_PASS_TEST_ACCOUNT_MINUTE_CELL_LIMIT) || 50000) : 50000;
@@ -952,7 +973,7 @@ function validateStatistics(stats) {
       if (!isPlainObject(c[field]) || Object.keys(c[field]).length > MAX_USAGE_MINUTE_CELLS) throw new Error('invalid statistics coverage');
       for (const [id, minute] of Object.entries(c[field])) if (!validStatisticModelId(id) || !Number.isSafeInteger(minute) || minute < 0) throw new Error('invalid statistics coverage');
     }
-    for (const [version, snapshot] of Object.entries(stats.priceVersions)) { if (!validPriceVersion(version) || version !== snapshot?.version) throw new Error('invalid statistics price version'); validatePriceSnapshot(snapshot); if (version === REFERENCE_PRICE.version && !isDeepStrictEqual(snapshot, REFERENCE_PRICE)) throw new Error('invalid current reference price snapshot'); }
+    for (const [version, snapshot] of Object.entries(stats.priceVersions)) { if (!validPriceVersion(version) || version !== snapshot?.version) throw new Error('invalid statistics price version'); validatePriceSnapshot(snapshot); if ((version === REFERENCE_PRICE.version && !isDeepStrictEqual(snapshot, REFERENCE_PRICE)) || (version === LEGACY_REFERENCE_PRICE.version && !isDeepStrictEqual(snapshot, LEGACY_REFERENCE_PRICE))) throw new Error('invalid current reference price snapshot'); }
   }
   if (Object.keys(stats.migration).some((key) => !['legacyStatsMigratedAt','legacyRequests','accountLegacyRequests','ambiguousNames','unmappedNames'].includes(key)) || !Number.isSafeInteger(stats.migration.legacyStatsMigratedAt) || stats.migration.legacyStatsMigratedAt < 0 || !Number.isSafeInteger(stats.migration.legacyRequests) || stats.migration.legacyRequests < 0 || !isPlainObject(stats.migration.accountLegacyRequests) || !Number.isSafeInteger(stats.migration.ambiguousNames) || stats.migration.ambiguousNames < 0 || !Number.isSafeInteger(stats.migration.unmappedNames) || stats.migration.unmappedNames < 0) throw new Error('invalid statistics migration');
   for (const [id, requests] of Object.entries(stats.migration.accountLegacyRequests)) if (!/^[A-Za-z0-9_-]{1,100}$/.test(id) || !Number.isSafeInteger(requests) || requests < 0) throw new Error('invalid statistics legacy account');

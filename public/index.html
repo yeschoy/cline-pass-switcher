@@ -162,9 +162,10 @@
       <h2 id="modelProvidersTitle" tabindex="-1">模型和渠道 · 最近 24 小时</h2>
       <p>模型成功率 = 最终成功请求 /（最终成功 + 失败请求），取消不计入分母（v5 起记录）；渠道成功率 = 具名真实尝试的成功 /（成功 + 降级），并非模型请求成功率。无样本显示无数据。各指标的迁移起点与容量丢失独立标注。</p>
       <p>模型 Token 列含旧版已记录的最终成功 usage；渠道 Token 列从 v5 起记录，仅计最终成功请求上游明确返回的 usage；无法唯一确认时归入未知渠道，失败重试不重复计 Token。缓存 Token 占比 = 有明确 input/cached-read 配对的 cached / input；命中请求率 = 明确缓存字段的命中请求 / 已知缓存请求。0 与未知不同。total 不从 input + output 推算。</p>
-      <p><b>参考用量等值（USD），非实际扣费</b>。仅四个官网模型有冻结参考价格；不含包月实际扣费或社区额度。DeepSeek V4 Flash/Pro 无法判定峰谷，仅显示<b>峰谷参考区间</b>；usage 缺失、缓存读数大于 input、无支持价格均不可计算。部分覆盖金额仅为已计部分，不是完整费用。<a href="https://docs.cline.bot/getting-started/clinepass" target="_blank" rel="noopener noreferrer">ClinePass 官网参考价格表</a>；<span id="modelProvidersPrice">本项目价格快照待加载</span>；官方生效时间未知。</p>
+      <p><b>参考消费等值（USD），非订阅实际扣费</b>。只计算最终成功且用量可证明的请求；DeepSeek V4 Pro / V4.1 Flash 仅显示<b>峰谷参考区间</b>（节假日/适用档位未知）；ClinePass 表仅列 V4.1 Flash 高峰单价，低峰单价取自 DeepSeek 直连官网，其费率不代表 ClinePass 实际扣费。缓存写计数与上下文档位缺失时不推算完整金额；未计请求及历史覆盖缺口不是零费用。<a href="https://docs.cline.bot/getting-started/clinepass" target="_blank" rel="noopener noreferrer">ClinePass 参考表</a> · <a href="https://api-docs.deepseek.com/quick_start/pricing/" target="_blank" rel="noopener noreferrer">DeepSeek 直连价格</a>；<span id="modelProvidersPrice">本项目价格快照待加载</span>；采集日期非官方生效日期，官方生效时间未知。</p>
+      <details><summary>当前模型参考单价（USD / 百万 Token）与来源</summary><div class="table-wrap" tabindex="0" role="region" aria-label="当前模型参考单价，可横向滚动"><table><thead><tr><th>模型</th><th>档位</th><th>输入 / 输出 / 缓存读 / 缓存写</th><th>来源 / 本项目快照</th></tr></thead><tbody id="modelProvidersTariffs"></tbody></table></div></details>
       <div class="toolbar"><label for="modelProvidersFilter">筛选模型或渠道 <input id="modelProvidersFilter" type="search" oninput="renderModelProviders()"></label><button class="ghost" type="button" onclick="loadModelProviders()">刷新统计</button><span id="modelProvidersStatus" role="status" aria-live="polite">尚未加载</span></div>
-      <div class="table-wrap" tabindex="0" role="region" aria-label="模型和渠道统计表，可横向滚动"><table style="min-width:1120px"><thead><tr><th>模型 / 渠道</th><th>成功率（样本）</th><th>input / output / total / cached Token（已知请求）</th><th>缓存 Token 占比 / 命中请求率</th><th>参考用量等值（USD），非实际扣费</th><th>口径与覆盖</th></tr></thead><tbody id="modelProvidersBody"><tr><td colspan="6" class="empty">进入页面后加载</td></tr></tbody></table></div>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="模型和渠道统计表，可横向滚动"><table style="min-width:1120px"><thead><tr><th>模型 / 渠道</th><th>成功率（样本）</th><th>input / output / total / cached Token（已知请求）</th><th>缓存 Token 占比 / 命中请求率</th><th>参考消费等值（USD），非订阅实际扣费</th><th>口径与覆盖</th></tr></thead><tbody id="modelProvidersBody"><tr><td colspan="6" class="empty">进入页面后加载</td></tr></tbody></table></div>
     </div>
   </section>
 
@@ -1359,24 +1360,37 @@ function mpNumber(n){return Number.isSafeInteger(n)&&n>=0?n.toLocaleString():'�
 function mpRatio(n){return typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=1?`${(n*100).toFixed(1)}%`:'无数据';}
 function mpCoverage(c){return c?.complete===true?'24h 完整':`统计不完整 · 自 ${Number.isSafeInteger(c?.from)?escapeHtml(new Date(c.from).toLocaleString()):'未知'} 起`;}
 function mpHealthCoverage(health){return health?.coverageComplete===true?'24h 完整':mpCoverage({complete:false,from:health?.coverageFrom});}
+function mpRate(n,scale){return n===null?'—':Number.isSafeInteger(n)&&n>=0&&scale===10000?(n/10000).toString():Number.isSafeInteger(n)&&n>=0?(n/1000).toString():'?';}
+function mpTariffRows(snapshot){
+  const rows=Object.entries(snapshot?.models||{}).map(([id,price])=>{
+    const tier=price.tier==='peak/off-peak range'?'低峰 / 高峰（仅参考区间）':price.tier==='context-band'?'≤256K / >256K（档位未知）':'单档';
+    const rates=(price.rates||[]).map((row,index)=>`${price.tier==='peak/off-peak range'?(index===0?'低峰：':'高峰：'):price.tier==='context-band'?(index===0?'≤256K：':'>256K：'):''}${Array.isArray(row)?row.map(n=>mpRate(n,snapshot.rateScale)).join(' / '):'费率未知'}`).join('；');
+    const reason=price.tier==='context-band'?' · 上下文档位与缓存写计数未知，金额不可计算':price.rates?.some(row=>row[3]!==null&&row[3]!==undefined)?' · 缓存写计数未知，金额不可计算':'';
+    return `<tr><th scope="row">${escapeHtml(id)}</th><td>${escapeHtml(tier)}</td><td>${escapeHtml(rates+reason)}</td><td>${escapeHtml(price.source||snapshot.source||'来源未知')} · ${escapeHtml(snapshot.version||'版本未知')} · 采集 ${escapeHtml(snapshot.collectedAt||'未知')} · 官方生效时间未知</td></tr>`;
+  });
+  return rows.join('')||'<tr><td colspan="4" class="empty">暂无价格快照</td></tr>';
+}
 function mpMoney(v,prices,modelId,successful){
   const entries=Object.entries(v?.versions||{}).filter(([id])=>Object.hasOwn(prices||{},id));
   if(entries.some(([,x])=>!Number.isSafeInteger(x.pricedRequests)||x.pricedRequests<0))return '不可计算（覆盖计数溢出）';
   const count=entries.reduce((n,[,x])=>n+BigInt(x.pricedRequests),0n);
   if(count>BigInt(Number.MAX_SAFE_INTEGER))return '不可计算（覆盖计数溢出）';
   const eligible=Number(count);
-  if(!eligible)return '不可计算（无完整 usage / 无支持价格）';
+  if(!eligible){const price=Object.values(prices||{}).find(snapshot=>Object.hasOwn(snapshot?.models||{},modelId))?.models[modelId];return price?.tier==='context-band'?'不可计算（上下文档位与缓存写计数未知）':price?.rates?.some(row=>row.length===4&&row[3]!==null)?'不可计算（缓存写计数未知）':'不可计算（无完整 usage / 无支持价格）';}
   const low=entries.reduce((n,[,x])=>n+(Number.isSafeInteger(x.lowPicoUsd)?BigInt(x.lowPicoUsd):0n),0n),high=entries.reduce((n,[,x])=>n+(Number.isSafeInteger(x.highPicoUsd)?BigInt(x.highPicoUsd):0n),0n);
   if(entries.some(([,x])=>x.lowPicoUsd===null||x.highPicoUsd===null))return '不可计算（金钱计数溢出）';
   const format=pico=>`$${(pico/1000000n/1000000n).toString()}.${(pico%1000000000000n).toString().padStart(12,'0')}`;
   const ranged=entries.some(([id])=>prices[id]?.models?.[modelId]?.tier==='peak/off-peak range');
-  const versions=entries.map(([id])=>{const snapshot=prices[id],rates=snapshot.models?.[modelId]?.rates;return `${id}（采集 ${snapshot.collectedAt}；${modelId}；${Array.isArray(rates)?rates.map(row=>row.map(n=>Number.isSafeInteger(n)?(n/1000).toString():'?').join('/')).join(' ～ '):'费率未知'} USD / 百万 input/output/cached-read）`;}).join('、');
-  return `${ranged?`${format(low)} – ${format(high)} · 峰谷参考区间`:format(low)} · 已计 ${mpNumber(eligible)} / ${mpNumber(successful)} 最终成功请求${Number.isSafeInteger(successful)&&successful>eligible?'（其余不可计算）':''}${v.complete?'':' · 历史覆盖不完整'} · ${versions}`;
+  const versions=entries.map(([id])=>{const snapshot=prices[id],rates=snapshot.models?.[modelId]?.rates;return `${id}（采集 ${snapshot.collectedAt}；${modelId}；${Array.isArray(rates)?rates.map(row=>row.map(n=>mpRate(n,snapshot.rateScale)).join('/')).join(' ～ '):'费率未知'} USD / 百万 input/output/cached-read${snapshot.rateScale===10000?'/cached-write':''}）`;}).join('、');
+  const coverage=Number.isSafeInteger(successful)&&successful>=eligible
+    ? `已计 ${mpNumber(eligible)} / ${mpNumber(successful)} 最终成功请求${successful>eligible?'（其余不可计算）':''}`
+    : `已计 ${mpNumber(eligible)} 请求 · 最终成功请求数 ${mpNumber(successful)}（覆盖不一致或计数溢出，不代表完整费用）`;
+  return `${ranged?`${format(low)} – ${format(high)} · 峰谷参考区间`:format(low)} · ${coverage}${v.complete?'':' · 历史覆盖不完整'} · ${versions}`;
 }
 function renderModelProviders(){
   const body=$('#modelProvidersBody'),data=MODEL_PROVIDER_DATA,filter=$('#modelProvidersFilter').value.trim().toLowerCase();
   if(!data)return;
-  const prices=data.referencePrices?.versions||{};
+  const prices={...(data.referencePrices?.versions||{})};if(data.referencePrices?.current?.version)prices[data.referencePrices.current.version]=data.referencePrices.current;
   const rows=[];
   for(const model of data.models||[]){
     const p=model.providerStatistics||{},children=p.providers||[];
@@ -1399,6 +1413,7 @@ async function loadModelProviders(){
     if(id!==MODEL_PROVIDER_QUERY_ID||controller!==MODEL_PROVIDER_CONTROLLER||$('#modelProvidersPanel').hidden)return;
     MODEL_PROVIDER_DATA=data;
     $('#modelProvidersPrice').textContent=`本项目内部版本 ${data.referencePrices?.current?.version||'未知'} · 采集 ${data.referencePrices?.current?.collectedAt||'未知'} · USD / 百万 Token`;
+    $('#modelProvidersTariffs').innerHTML=mpTariffRows(data.referencePrices?.current);
     renderModelProviders();$('#modelProvidersStatus').textContent=`生成于 ${new Date(data.generatedAt).toLocaleString()}`;
   }catch(e){if(id===MODEL_PROVIDER_QUERY_ID&&controller===MODEL_PROVIDER_CONTROLLER&&!$('#modelProvidersPanel').hidden&&e?.name!=='AbortError')$('#modelProvidersStatus').textContent='加载失败；保留已显示数据';}
   finally{if(controller===MODEL_PROVIDER_CONTROLLER)MODEL_PROVIDER_CONTROLLER=null;}

@@ -1298,6 +1298,7 @@ test('model/provider reference statistics attribute only final usage and freeze 
     res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'ok',provider_metadata:{gateway:{routing:{finalProvider:body.model==='unsupported'?'mismatch':provider||'unknown'}}}}}],usage}));
   });});
   const upstreamPort=await listen(upstream),port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-provider-values-'));
+  const current='clinepass-2026-09-25-v2';
   const models=['cline-pass/kimi-k3','cline-pass/glm-5.3','cline-pass/deepseek-v4-flash','cline-pass/deepseek-v4-pro','unsupported','toString','provider-path','provider-prototype'];
   let running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts:[{id:'a',name:'A',key:'local',enabled:true,perModel:{}}],accountMode:'single',activeAccount:0,knownModels:models,perModel:Object.fromEntries(models.map(model=>[model,model==='cline-pass/glm-5.3'?{}:{upstreams:model==='provider-path'?['vendor/path']:model==='provider-prototype'?['toString']:['first','second']}]))},dir);
   t.after(async()=>{if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
@@ -1307,9 +1308,9 @@ test('model/provider reference statistics attribute only final usage and freeze 
   const find=id=>stats.models.find(row=>row.id===id).providerStatistics;
   const kimi=find('cline-pass/kimi-k3');assert.equal(kimi.finalRequests.samples,2);assert.equal(kimi.finalRequests.successes,2);assert.equal(kimi.usage.inputTokens,10,'stream without usage cannot fabricate Token');
   assert.equal(kimi.providers.find(p=>p.id==='second').usage.inputTokens,10);assert.ok(kimi.providers.find(p=>p.id==='first').health.degrades>=1);assert.equal(kimi.providers.find(p=>p.id==='first').usage.requests,0,'failed retries own health but no final usage');
-  assert.equal(kimi.valuation.versions['clinepass-2026-09-24-v1'].lowPicoUsd,51900000);assert.equal(kimi.valuation.versions['clinepass-2026-09-24-v1'].pricedRequests,1);
-  const glm=find('cline-pass/glm-5.3');assert.equal(glm.providers.find(p=>p.id===null).usage.inputTokens,0);assert.equal(glm.valuation.versions['clinepass-2026-09-24-v1'].lowPicoUsd,0,'explicit zero is priced zero');
-  const flash=find('cline-pass/deepseek-v4-flash').valuation.versions['clinepass-2026-09-24-v1'];assert.equal(flash.lowPicoUsd,2881000);assert.equal(flash.highPicoUsd,5762000);
+  assert.equal(kimi.valuation.versions[current].lowPicoUsd,51900000);assert.equal(kimi.valuation.versions[current].pricedRequests,1);
+  const glm=find('cline-pass/glm-5.3');assert.equal(glm.providers.find(p=>p.id===null).usage.inputTokens,0);assert.equal(glm.valuation.versions[current].lowPicoUsd,0,'explicit zero is priced zero');
+  assert.deepEqual(find('cline-pass/deepseek-v4-flash').valuation.versions,{},'old Flash ID must not borrow V4.1 rates');
   assert.deepEqual(find('cline-pass/deepseek-v4-pro').valuation.versions,{},'inconsistent cached read is not priced');assert.deepEqual(find('unsupported').valuation.versions,{},'unsupported model is unpriced');
   assert.equal(find('unsupported').providers.find(p=>p.id===null).usage.inputTokens,10,'a named attempt with mismatched reported Provider goes to unknown, not the attempted Provider');
   assert.equal(find('unsupported').providers.find(p=>p.id==='second').usage.requests,0);
@@ -1323,14 +1324,14 @@ test('model/provider reference statistics attribute only final usage and freeze 
   assert.equal(find('provider-prototype').providers.find(p=>p.id==='toString').usage.inputTokens,10,'prototype-named Provider has its own usage cell');
   assert.ok(Number.isSafeInteger(find('provider-prototype').providers.find(p=>p.id==='toString').health.coverageFrom));
   assert.doesNotMatch(running.output(),/\[统计\] 更新失败/,'unpriced/prototype-named models do not interrupt statistics finalization');
-  assert.equal(stats.referencePrices.current.effectiveAt,null);assert.equal(stats.referencePrices.versions['clinepass-2026-09-24-v1'].collectedAt,'2026-09-24');
+  assert.equal(stats.referencePrices.current.effectiveAt,null);assert.equal(stats.referencePrices.versions[current].collectedAt,'2026-09-25');
   const before=structuredClone(stats.models),metaPath=path.join(dir,'metadata.json');await stop(running.child);running.child=null;
-  const metadata=JSON.parse(fs.readFileSync(metaPath));assert.equal(metadata.statistics.version,5);assert.equal(metadata.statistics.minuteBuckets.at(-1).valuation['cline-pass/kimi-k3'].second['clinepass-2026-09-24-v1'].lowPicoUsd,51900000);
+  const metadata=JSON.parse(fs.readFileSync(metaPath));assert.equal(metadata.statistics.version,5);assert.equal(metadata.statistics.minuteBuckets.at(-1).valuation['cline-pass/kimi-k3'].second[current].lowPicoUsd,51900000);
   running=await startSwitcher(null,dir);stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();assert.deepEqual(stats.models,before);
   await stop(running.child);running.child=null;
-  const older=JSON.parse(fs.readFileSync(metaPath)),version='clinepass-older-v1',current='clinepass-2026-09-24-v1';
+  const older=JSON.parse(fs.readFileSync(metaPath)),version='clinepass-older-v2';
   older.statistics.priceVersions[version]={...older.statistics.priceVersions[current],version,collectedAt:'2026-01-01',models:structuredClone(older.statistics.priceVersions[current].models)};
-  older.statistics.priceVersions[version].models['cline-pass/kimi-k3'].rates[0][0]=1000;
+  older.statistics.priceVersions[version].models['cline-pass/kimi-k3'].rates[0][0]=10000;
   delete older.statistics.priceVersions[current];
   for(const bucket of older.statistics.minuteBuckets)for(const providers of Object.values(bucket.valuation))for(const cells of Object.values(providers))if(cells[current]){cells[version]=cells[current];delete cells[current];}
   fs.writeFileSync(metaPath,JSON.stringify(older));running=await startSwitcher(null,dir);
@@ -1338,7 +1339,7 @@ test('model/provider reference statistics attribute only final usage and freeze 
   stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();const frozen=stats.models.find(row=>row.id==='cline-pass/kimi-k3').providerStatistics.valuation.versions;
   assert.equal(frozen[version].lowPicoUsd,51900000,'old frozen valuation must not be repriced');
   assert.equal(frozen[current].lowPicoUsd,51900000,'new requests use the current snapshot');
-  assert.equal(stats.referencePrices.versions[version].models['cline-pass/kimi-k3'].rates[0][0],1000);
+  assert.equal(stats.referencePrices.versions[version].models['cline-pass/kimi-k3'].rates[0][0],10000);
   assert.equal((await rawJson(port,'/api/model-aliases',{aliases:{'alias-kimi':'cline-pass/kimi-k3'}})).status,200);
   assert.equal((await rawJson(port,'/v1/chat/completions',{model:'alias-kimi',messages:[]})).status,200);
   assert.equal((await rawJson(port,'/v1/chat/completions',{model:'cline-pass/glm-5.3',stream:true,messages:[]})).status,200);
@@ -1354,7 +1355,7 @@ test('statistics projection preserves provider cells, frozen price versions and 
     res.end(JSON.stringify({ choices: [{ message: { content: 'ok', provider_metadata: { gateway: { routing: { finalProvider: 'one' } } } } }], usage: { prompt_tokens: 10, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 3 } } }));
   }); });
   const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-stat-read-'));
-  const id = 'cline-pass/kimi-k3', current = 'clinepass-2026-09-24-v1', older = 'clinepass-old-synthetic';
+  const id = 'cline-pass/kimi-k3', current = 'clinepass-2026-09-25-v2', older = 'clinepass-old-synthetic';
   let running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'synthetic', enabled: true, perModel: {} }], knownModels: [id], perModel: { [id]: { upstreams: ['one'] } } }, dir);
   t.after(async () => { if (running?.child) await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
   assert.equal((await rawJson(port, '/v1/chat/completions', { model: id, messages: [] })).status, 200);
@@ -1380,7 +1381,7 @@ test('statistics projection preserves provider cells, frozen price versions and 
   for (const field of ['inputKnownRequests', 'inputTokens', 'cacheKnownRequests', 'cacheHitRequests', 'cachedTokens', 'cacheInputKnownRequests', 'cacheInputTokens', 'cacheInputCachedTokens']) missingUsage[field] = 0;
   delete unknown.valuation[id]; // Output is known, but input and cache are missing: cannot price this success.
   meta.statistics.priceVersions[older] = { ...structuredClone(meta.statistics.priceVersions[current]), version: older, collectedAt: '2026-01-01' };
-  meta.statistics.priceVersions[older].models[id].rates[0][0] = 1000;
+  meta.statistics.priceVersions[older].models[id].rates[0][0] = 10000;
   const c = meta.statistics.recentCoverage;
   for (const field of ['modelTrackingStartedMinute', 'routingTrackingStartedMinute', 'accountHealthTrackingStartedMinute', 'providerHealthTrackingStartedMinute', 'usageTrackingStartedMinute']) c[field] = Math.min(c[field], unknown.minute);
   c.usageIncompleteAt[id] = unknown.minute;
@@ -1409,7 +1410,7 @@ test('statistics projection preserves provider cells, frozen price versions and 
   assert.equal(providers.toString.health.coverageComplete, false);
   assert.equal(projection.coverage.complete, false);
   assert.equal(projection.valuation.complete, false);
-  assert.equal(before.referencePrices.versions[older].models[id].rates[0][0], 1000);
+  assert.equal(before.referencePrices.versions[older].models[id].rates[0][0], 10000);
   assert.equal(projection.valuation.versions[older].lowPicoUsd, 51900000, 'old amount stays frozen despite a different old input rate');
   assert.equal(projection.valuation.versions[current].lowPicoUsd, 51900000);
   assert.equal(providers.old.valuation.versions[older].pricedRequests, 1);
@@ -1419,6 +1420,106 @@ test('statistics projection preserves provider cells, frozen price versions and 
   const after = await read();
   assert.deepEqual(after.models, before.models, 'full projections and coverage survive restart without read-time mutation');
   assert.equal(JSON.parse(fs.readFileSync(metaPath)).statistics.minuteBuckets.length, 4);
+});
+
+test('current 12-model reference snapshot prices only evidenced final usage and preserves v1 on restart', async (t) => {
+  const v1='clinepass-2026-09-24-v1',v2='clinepass-2026-09-25-v2';
+  const upstream=http.createServer((req,res)=>{const chunks=[];req.on('data',c=>chunks.push(c));req.on('end',()=>{
+    const body=JSON.parse(Buffer.concat(chunks).toString()),provider=body.providerOptions?.gateway?.only?.[0]||body.provider?.only?.[0];
+    if(provider==='first'){res.writeHead(500,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:'failed',status:500}}));}
+    const usage=body.model==='cline-pass/mimo-v2.5'?{prompt_tokens:10,completion_tokens:2,prompt_tokens_details:{cached_tokens:3}}
+      :body.model==='cline-pass/glm-5.3-flash'?{prompt_tokens:0,completion_tokens:0,prompt_tokens_details:{cached_tokens:0}}
+      :body.model==='cline-pass/minimax-m3'?{prompt_tokens:10,completion_tokens:2}
+      :body.model==='cline-pass/muse-spark-1.3-contributor'?{prompt_tokens:2,completion_tokens:0,prompt_tokens_details:{cached_tokens:3}}
+      :{prompt_tokens:10,completion_tokens:2,prompt_tokens_details:{cached_tokens:3}};
+    res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'ok',provider_metadata:{gateway:{routing:{finalProvider:body.model==='cline-pass/mimo-v2.5-pro'?'different':provider||'unknown'}}}}}],usage}));
+  });});
+  const upstreamPort=await listen(upstream),port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-price-v2-'));
+  const ids=['glm-5.3','glm-5.3-flash','kimi-k3','deepseek-v4-pro','deepseek-v4.1-flash','mimo-v2.5','mimo-v2.5-pro','minimax-m3','muse-spark-1.3-contributor','qwen3.8-max','qwen3.7-max','qwen3.7-plus'].map(id=>`cline-pass/${id}`);
+  let running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts:[{id:'a',name:'A',key:'local',enabled:true,perModel:{}}],knownModels:[...ids,'cline-pass/deepseek-v4-flash','cline-pass/glm-5.2'],perModel:Object.fromEntries(ids.map(id=>[id,{upstreams:['first','second']}]))},dir);
+  t.after(async()=>{if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
+  const get=async()=> (await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json());
+  const prices=(await get()).referencePrices.current;
+  assert.equal(prices.version,v2);assert.equal(prices.rateScale,10000);assert.equal(prices.effectiveAt,null);assert.deepEqual(Object.keys(prices.models).sort(),ids.sort());
+  const cline='https://docs.cline.bot/getting-started/clinepass',deepseek='https://api-docs.deepseek.com/quick_start/pricing/';
+  const expected={
+    'glm-5.3':[[14000,44000,2600,null]],'glm-5.3-flash':[[1500,5000,300,null]],'kimi-k3':[[30000,150000,3000,null]],
+    'deepseek-v4-pro':[[6600,19800,220,null],[13200,39600,440,null]],'deepseek-v4.1-flash':[[1500,6000,30,null],[3000,12000,60,null]],
+    'mimo-v2.5':[[1400,2800,28,null]],'mimo-v2.5-pro':[[17400,34800,145,null]],'minimax-m3':[[3000,12000,600,null]],
+    'muse-spark-1.3-contributor':[[1000,2000,20,null]],'qwen3.8-max':[[20000,60000,2500,25000]],
+    'qwen3.7-max':[[25000,75000,5000,31250]],'qwen3.7-plus':[[4000,16000,400,5000],[12000,48000,1200,15000]],
+  };
+  for(const [short,rates] of Object.entries(expected)){
+    const row=prices.models[`cline-pass/${short}`];assert.deepEqual(row.rates,rates,short);
+    assert.equal(row.source,short.startsWith('deepseek-')?deepseek:cline);
+    assert.equal(row.tier,short.startsWith('deepseek-')?'peak/off-peak range':short==='qwen3.7-plus'?'context-band':'single');
+  }
+  for(const id of [...ids,'cline-pass/deepseek-v4-flash','cline-pass/glm-5.2'])assert.equal((await rawJson(port,'/v1/chat/completions',{model:id,messages:[]})).status,200);
+  let stats=await get(),row=id=>stats.models.find(m=>m.id===`cline-pass/${id}`).providerStatistics;
+  assert.equal(row('mimo-v2.5').valuation.versions[v2].lowPicoUsd,1548400,'0.0028 cache read is exact');
+  assert.equal(row('mimo-v2.5-pro').valuation.versions[v2].lowPicoUsd,19183500,'0.0145 cache read is exact');
+  assert.equal(row('glm-5.3-flash').valuation.versions[v2].lowPicoUsd,0,'explicit zero is priced');
+  assert.equal(row('glm-5.3-flash').valuation.versions[v2].pricedRequests,1);
+  assert.equal(row('deepseek-v4-pro').valuation.versions[v2].lowPicoUsd,8646000);
+  assert.equal(row('deepseek-v4-pro').valuation.versions[v2].highPicoUsd,17292000);
+  assert.equal(row('deepseek-v4.1-flash').valuation.versions[v2].lowPicoUsd,2259000);
+  assert.equal(row('deepseek-v4.1-flash').valuation.versions[v2].highPicoUsd,4518000);
+  for(const id of ['qwen3.8-max','qwen3.7-max','qwen3.7-plus','minimax-m3','muse-spark-1.3-contributor','deepseek-v4-flash','glm-5.2']){
+    assert.deepEqual(row(id).valuation.versions,{},`${id} must not invent missing evidence or inherit a nearby rate`);
+    assert.equal(row(id).usage.requests,1);
+  }
+  assert.equal(row('mimo-v2.5').providers.find(p=>p.id==='first').usage.requests,0,'failed retry has no usage');
+  assert.equal(row('mimo-v2.5').providers.find(p=>p.id==='second').valuation.versions[v2].pricedRequests,1);
+  assert.equal(row('mimo-v2.5-pro').providers.find(p=>p.id===null).valuation.versions[v2].pricedRequests,1,'mismatched final provider remains unknown');
+  assert.equal(row('mimo-v2.5-pro').providers.find(p=>p.id==='second').usage.requests,0);
+  assert.equal(row('minimax-m3').usage.inputKnownRequests,1);
+  assert.equal(row('minimax-m3').usage.cacheKnownRequests,0,'missing cached read remains unknown');
+  const before=structuredClone(stats.models),metaPath=path.join(dir,'metadata.json');await stop(running.child);running.child=null;
+  const meta=JSON.parse(fs.readFileSync(metaPath));
+  const historical={version:v1,collectedAt:'2026-09-24',effectiveAt:null,source:cline,currency:'USD',models:{
+    'cline-pass/kimi-k3':{tier:'single',rates:[[3000,15000,300]]},'cline-pass/glm-5.3':{tier:'single',rates:[[1400,4400,260]]},
+    'cline-pass/deepseek-v4-flash':{tier:'peak/off-peak range',rates:[[220,660,7],[440,1320,14]]},
+    'cline-pass/deepseek-v4-pro':{tier:'peak/off-peak range',rates:[[660,1980,22],[1320,3960,44]]},
+  }};
+  meta.statistics.priceVersions[v1]=historical;
+  const bucket=meta.statistics.minuteBuckets.at(-1);
+  bucket.valuation['cline-pass/kimi-k3'].second[v1]={pricedRequests:1,lowPicoUsd:51900000,highPicoUsd:51900000,overflowFields:[]};
+  bucket.valuation['cline-pass/deepseek-v4-flash']={'':{[v1]:{pricedRequests:1,lowPicoUsd:2881000,highPicoUsd:5762000,overflowFields:[]}}};
+  const bytes=Buffer.from(JSON.stringify(meta));fs.writeFileSync(metaPath,bytes);
+  running=await startSwitcher(null,dir);stats=await get();
+  assert.equal(stats.models.find(m=>m.id==='cline-pass/kimi-k3').providerStatistics.valuation.versions[v1].lowPicoUsd,51900000,'v1 frozen amount survives v2 restart');
+  assert.deepEqual(stats.models.find(m=>m.id==='cline-pass/deepseek-v4-flash').providerStatistics.valuation.versions[v1],bucket.valuation['cline-pass/deepseek-v4-flash'][''][v1],'retired Flash keeps only its historical interval');
+  assert.equal(stats.models.find(m=>m.id==='cline-pass/mimo-v2.5').providerStatistics.valuation.versions[v2].lowPicoUsd,1548400);
+  assert.equal(stats.models.length,before.length);
+  assert.equal(stats.referencePrices.versions[v1].models['cline-pass/kimi-k3'].rates[0][0],3000);
+  assert.equal(stats.referencePrices.versions[v2].models['cline-pass/mimo-v2.5'].rates[0][2],28);
+  await stop(running.child);running.child=null;
+  const countBoundary=JSON.parse(fs.readFileSync(metaPath));
+  countBoundary.statistics.minuteBuckets.at(-1).valuation['cline-pass/kimi-k3'].second[v2].pricedRequests=Number.MAX_SAFE_INTEGER;
+  fs.writeFileSync(metaPath,JSON.stringify(countBoundary));running=await startSwitcher(null,dir);
+  assert.equal((await rawJson(port,'/v1/chat/completions',{model:'cline-pass/kimi-k3',messages:[]})).status,200);
+  stats=await get();const countOverflow=stats.models.find(m=>m.id==='cline-pass/kimi-k3').providerStatistics.valuation.versions[v2];
+  assert.equal(countOverflow.pricedRequests,null);assert.deepEqual(countOverflow.overflowFields,['pricedRequests'],'priced request overflow must not wrap to a complete count');
+  assert.equal(stats.models.find(m=>m.id==='cline-pass/kimi-k3').providerStatistics.valuation.versions[v1].lowPicoUsd,51900000,'v1 frozen amount is unaffected');
+  await stop(running.child);running.child=null;
+  const corrupt=JSON.parse(fs.readFileSync(metaPath));corrupt.statistics.priceVersions[v2].models['cline-pass/mimo-v2.5'].rates[0][2]=29;
+  const invalid=Buffer.from(JSON.stringify(corrupt));fs.writeFileSync(metaPath,invalid);
+  const failed=spawn(process.execPath,['server.js'],{cwd:path.resolve('.'),env:{...process.env,DATA_DIR:dir,BIND_HOST:'127.0.0.1'},stdio:['ignore','pipe','pipe']});
+  let stderr='';failed.stderr.on('data',c=>{stderr+=c;});assert.notEqual(await new Promise(resolve=>failed.once('exit',resolve)),0);
+  assert.match(stderr,/invalid current reference price snapshot/);assert.deepEqual(fs.readFileSync(metaPath),invalid);
+  for(const mutate of [
+    m=>{m.statistics.priceVersions[v2].rateScale=1000;},
+    m=>{m.statistics.priceVersions[v2].models['cline-pass/mimo-v2.5'].rates[0][0]=null;},
+    m=>{m.statistics.priceVersions[v2].models['cline-pass/mimo-v2.5'].source='https://example.invalid/';},
+    m=>{m.statistics.priceVersions[v1].rateScale=10000;},
+    m=>{m.statistics.priceVersions[v1].models['cline-pass/kimi-k3'].rates[0][0]=30000;},
+    m=>{m.statistics.priceVersions[v2].models.__proto__=null;m.statistics.priceVersions[v2].models['__proto__']={tier:'single',rates:[[0,0,0,null]],source:cline};},
+  ]){
+    const bad=structuredClone(meta);mutate(bad);const original=Buffer.from(JSON.stringify(bad));fs.writeFileSync(metaPath,original);
+    const child=spawn(process.execPath,['server.js'],{cwd:path.resolve('.'),env:{...process.env,DATA_DIR:dir,BIND_HOST:'127.0.0.1'},stdio:['ignore','pipe','pipe']});
+    let error='';child.stderr.on('data',c=>{error+=c;});assert.notEqual(await new Promise(resolve=>child.once('exit',resolve)),0);
+    assert.match(error,/invalid statistics price|invalid current reference price snapshot/);assert.deepEqual(fs.readFileSync(metaPath),original);
+  }
 });
 
 test('prototype-named model/provider cell eviction records valid coverage and survives restart',async(t)=>{
@@ -1461,10 +1562,10 @@ test('v4 statistics migrate without backfill, provider usage loss and money over
   assert.equal(persisted.statistics.recentCoverage.droppedValuationMinuteCells,1);
   assert.equal(stats.models.find(row=>row.id===models[0]).providerStatistics.coverage.complete,false);
   assert.equal(stats.models.find(row=>row.id===models[0]).providerStatistics.valuation.complete,false);
-  const overflow=stats.models.find(row=>row.id===models[1]).providerStatistics.valuation.versions['clinepass-2026-09-24-v1'];
+  const overflow=stats.models.find(row=>row.id===models[1]).providerStatistics.valuation.versions['clinepass-2026-09-25-v2'];
   assert.equal(overflow.lowPicoUsd,null);assert.deepEqual(overflow.overflowFields,['lowPicoUsd','highPicoUsd']);assert.equal(overflow.pricedRequests,1);
   await stop(running.child);running.child=null;
-  const capped=JSON.parse(fs.readFileSync(metaPath)),current='clinepass-2026-09-24-v1',cell=capped.statistics.minuteBuckets.at(-1).valuation['cline-pass/glm-5.3'].second;
+  const capped=JSON.parse(fs.readFileSync(metaPath)),current='clinepass-2026-09-25-v2',cell=capped.statistics.minuteBuckets.at(-1).valuation['cline-pass/glm-5.3'].second;
   for(let i=1;i<=8;i++){const version=`clinepass-historical-${i}`;capped.statistics.priceVersions[version]={...structuredClone(capped.statistics.priceVersions[current]),version,collectedAt:'2026-01-01'};cell[version]=structuredClone(cell[current]);}
   delete capped.statistics.priceVersions[current];delete cell[current];fs.writeFileSync(metaPath,JSON.stringify(capped));
   running=await startSwitcher(null,dir);assert.equal((await rawJson(port,'/v1/chat/completions',{model:models[1],messages:[]})).status,200);
