@@ -1,2 +1,3 @@
 {"file":".trellis/spec/frontend/index.md","reason":"Follow production VM and real-browser accessibility checks"}
 {"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Trace model vs Provider denominator and draft preservation"}
+{"file": ".trellis/tasks/archive/2026-09/09-25-whole-service-performance/research/browser-provider-density.md", "reason": "Real-browser before/after fixture and interpretation limits"}

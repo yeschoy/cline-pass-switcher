@@ -1,3 +1,4 @@
 {"file":".trellis/spec/backend/index.md","reason":"Follow backend quality and persistence scenario guides in full before review"}
 {"file":".trellis/spec/frontend/index.md","reason":"Follow production browser verification when price UI changes"}
 {"file":".trellis/tasks/archive/2026-09/09-24-model-provider-statistics/research/official-pricing-and-usage.md","reason":"Review exact source prices and non-billing caveat"}
+{"file": ".trellis/tasks/archive/2026-09/09-25-whole-service-performance/research/results.md", "reason": "Frozen reference valuation and hot-path regression after price expansion"}
