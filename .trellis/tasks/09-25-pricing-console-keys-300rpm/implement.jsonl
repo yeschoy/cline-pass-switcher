@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/client-key-guidelines.md", "reason": "Multi-key migration, scoped scheduling and unsafe old-image rollback invariant"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Static console ownership and targeted UI spec links; read state-management sections on demand"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "End-to-end acceptance and persistence/security boundaries"}
+{"file": ".trellis/tasks/archive/2026-09/09-25-whole-service-performance/research/results.md", "reason": "Post-optimization synthetic performance baseline and limitations"}
