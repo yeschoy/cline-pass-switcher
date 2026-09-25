@@ -6,11 +6,11 @@ import vm from 'node:vm';
 const script = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8').match(/<script>([\s\S]*?)<\/script>/)[1];
 const DEFAULT_PIPELINE_ORDER = ['quotaPool','healthSort','sticky'];
 const DEFAULT_PIPELINE = {quotaPool:false,healthSort:false,sticky:false,order:[...DEFAULT_PIPELINE_ORDER],cachePoolSize:0,cachePoolMaxSize:0,cachePoolLowQuotaSize:0,sessionBindingExplicitTtlMs:7200000,sessionBindingFallbackTtlMs:900000,sessionBindingMaxEntries:50000};
-const fixture = () => ({mode:'single', active:1, concurrencyWaitMs:2000, errorRules:[], accountPipeline:{...DEFAULT_PIPELINE,order:[...DEFAULT_PIPELINE_ORDER]}, cachePool:{minSize:0,maxSize:0,targetSize:0,binding:{enabled:false,size:0,maxEntries:50000}}, accounts:[0,1,2].map(i => ({id:`id${i}`, name:i < 2 ? 'duplicate <name>' : 'other', note:`note${i}`, key:`fake${i}`, enabled:i !== 1, maxConcurrent:i+1, maxRpm:i*5, weight:i+1, priority:10+i, proxyUrl:'http://localhost:1234', headers:{'X-Test':'fixture'}, perModel:{model:{upstreams:['mock']}}, activeCount:0, cachePoolRole:i===0?'active':i===1?'standby':null}))});
+const fixture = () => ({mode:'single', active:1, concurrencyWaitMs:2000, errorRules:[], accountPipeline:{...DEFAULT_PIPELINE,order:[...DEFAULT_PIPELINE_ORDER]}, cachePool:{minSize:0,maxSize:0,targetSize:0,binding:{enabled:false,size:0,maxEntries:50000}}, accounts:[0,1,2].map(i => ({id:`id${i}`, clientKeyId:'legacy', name:i < 2 ? 'duplicate <name>' : 'other', note:`note${i}`, key:`fake${i}`, enabled:i !== 1, maxConcurrent:i+1, maxRpm:i*5, weight:i+1, priority:10+i, proxyUrl:'http://localhost:1234', headers:{'X-Test':'fixture'}, perModel:{model:{upstreams:['mock']}}, activeCount:0, cachePoolRole:i===0?'active':i===1?'standby':null}))});
 function harness() {
   const elements = new Map(), calls = [], timers = new Map(), windowListeners = {};
   let timerId = 0;
-  const el = id => { if (!elements.has(id)) elements.set(id, {value:'',checked:false,hidden:false,disabled:false,style:{},attrs:{},textContent:'',innerHTML:'',listeners:{},setAttribute(name,value){this.attrs[name]=value;},addEventListener(name,fn){this.listeners[name]=fn;},focus(){this.focused=true;},showModal(){this.open=true;},close(){this.open=false;}}); return elements.get(id); };
+  const el = id => { if (!elements.has(id)) elements.set(id, {value:'',checked:false,hidden:false,disabled:false,style:{},attrs:{},textContent:'',innerHTML:'',listeners:{},setAttribute(name,value){this.attrs[name]=value;},addEventListener(name,fn){this.listeners[name]=fn;},focus(){this.focused=true;},select(){this.selected=true;},showModal(){this.open=true;},close(){this.open=false;}}); return elements.get(id); };
   const context = vm.createContext({document:{querySelector:el,addEventListener(){},activeElement:null},window:{addEventListener(name,fn){windowListeners[name]=fn;}},localStorage:{getItem(){return '';}},fetch:(...args)=>{calls.push(args);return new Promise(()=>{});},setTimeout(fn,ms){const id=++timerId;timers.set(id,{fn,ms});return id;},clearTimeout(id){timers.delete(id);},confirm:()=>true,AbortController,URL,URLSearchParams,console});
   const run = code => vm.runInContext(code, context);
   run(script); calls.length = 0;
@@ -18,12 +18,216 @@ function harness() {
   const classList=()=>{const values=new Set();return{add(...names){for(const name of names)values.add(name);},remove(...names){for(const name of names)values.delete(name);},contains(name){return values.has(name);}};};
   pipelineList.children=DEFAULT_PIPELINE_ORDER.map((step,index)=>{const position={textContent:String(index+1),attrs:{},setAttribute(name,value){this.attrs[name]=value;}},button=()=>({disabled:false,focusCalls:0,focus(){if(!this.disabled){this.focused=true;this.focusCalls++;}}}),up=button(),down=button();return{dataset:{pipelineStep:step},attrs:{},classList:classList(),position,up,down,setAttribute(name,value){this.attrs[name]=value;},querySelector(selector){return selector==='.pipeline-position'?position:selector==='.pipeline-move-up'?up:selector==='.pipeline-move-down'?down:null;},getBoundingClientRect(){return{top:0,height:20};}};});
   pipelineList.appendChild=node=>{const index=pipelineList.children.indexOf(node);if(index>=0)pipelineList.children.splice(index,1);pipelineList.children.push(node);return node;};
+  el('#newAccountOwner').value='legacy';
   el('#accMode').options = ['single','roundrobin','sticky','least-connections','weighted-roundrobin','priority-failover'].map(value=>({value}));
   context.snapshot = fixture();
   run("ACCS = snapshot; $('#monthlyQuotaThreshold').value='0.20'; $('#accMode').value='single'; $('#concurrencyWaitMs').value='2000'; $('#cachePoolSize').value='0'; $('#cachePoolMaxSize').value='0'; $('#cachePoolLowQuotaSize').value='0'; $('#sessionBindingExplicitTtlMs').value='7200000'; $('#sessionBindingFallbackTtlMs').value='900000'; $('#sessionBindingMaxEntries').value='50000'; hydrateErrorRuleDraft(snapshot.errorRules); renderAccounts();");
   const snapshot = () => JSON.parse(run('JSON.stringify(ACCS)'));
   return {run,el,calls,snapshot,context,timers,windowListeners,pipelineList};
 }
+
+test('client-key list and account owner draft round-trip stay escaped and complete', async () => {
+  const h=harness();
+  h.context.responses={'/api/models':{},'/api/accounts':fixture(),'/api/security':{proxyKey:'legacy-secret'},'/api/security/client-keys':{keys:[{id:'legacy',name:'Legacy'},{id:'team',name:'Team <script> "'}]},'/api/meta':{configured:true},'/api/model-aliases':{aliases:{}}};
+  h.run('render=()=>{}; api=async path=>responses[path]');
+  await h.run('loadAll()');
+  assert.match(h.el('#clientKeyBody').innerHTML,/Team &lt;script&gt; &quot;/);
+  assert.doesNotMatch(h.el('#clientKeyBody').innerHTML,/legacy-secret|<script>/);
+  h.run("ACCS.accounts[1].clientKeyId='team'; renderAccounts()");
+  assert.match(h.el('#accBody').innerHTML,/Team &lt;script&gt;/);
+  h.el('#accSearch').value='note0';h.run('renderAccounts(); openAccountDrawer(0)');
+  assert.match(h.el('#drawerClientKeyId').innerHTML,/Team &lt;script&gt;/);
+  h.el('#drawerClientKeyId').value='team';h.run('saveDrawer()');
+  assert.equal(h.snapshot().accounts[0].clientKeyId,'team');
+  assert.equal(h.run('collectAccounts().accounts[1].clientKeyId'),'team','filtered-out account retains owner');
+  h.el('#newAccountOwner').value='team';h.run('addAccountRow()');
+  assert.equal(h.run('collectAccounts().accounts[3].clientKeyId'),'team');
+  assert.equal(h.run('collectAccounts().accounts[3].maxRpm'),0);
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(collectAccounts().accounts[0].perModel)')),{model:{upstreams:['mock']}});
+  h.el('#preset').value='safe';h.run('previewPreset()');
+  assert.equal(h.run('PENDING_PRESET.accounts[0].clientKeyId'),'team');
+});
+
+test('key writes require confirmation, reload accepted state, and disclose generated secret only until dismissed', async () => {
+  const h=harness(), calls=[], confirmations=[];
+  h.context.sent=calls;h.context.confirm=message=>{confirmations.push(message);return false;};
+  h.run("CLIENT_KEYS=[{id:'legacy',name:'Legacy'},{id:'team',name:'Team'}]; renderClientKeys(); api=async(path,body,method)=>{sent.push({path,body,method});return path.endsWith('/rotate')?{id:'team',key:'generated-rotate-secret'}:path==='/api/security/client-keys'?{id:'other',name:body.name,key:'generated-create-secret'}:{ok:false,error:{message:'reassign owned accounts before revoking this key'}}}; loadAll=async()=>{CLIENT_KEYS=[{id:'legacy',name:'Legacy'},{id:'team',name:'Team'}];renderClientKeys();};");
+  h.el('#newClientKeyName').value='New team';h.el('#secProxyKey').value='legacy-key';
+  await h.run('createClientKey()');
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0])),{path:'/api/security/client-keys',body:{name:'New team'}});
+  assert.equal(h.el('#clientKeySecret').value,'generated-create-secret');
+  assert.doesNotMatch(h.el('#clientKeyBody').innerHTML,/generated-create-secret/);
+  h.run('closeClientKeySecret()');assert.equal(h.el('#clientKeySecret').value,'');
+  await h.run("rotateClientKey('team')");await h.run("revokeClientKey('team')");
+  assert.equal(calls.length,1,'cancelled operations never write');assert.match(confirmations.join(' '),/Team/);
+  h.context.confirm=()=>true;
+  h.context.document.getElementById=id=>h.el('#'+id);
+  await h.run("rotateClientKey('team')");
+  assert.equal(calls[1].path,'/api/security/client-keys/team/rotate');assert.equal(calls[1].method,undefined);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[1].body)),{});
+  assert.equal(h.el('#clientKeySecret').value,'generated-rotate-secret');
+  h.run('closeClientKeySecret()');
+  assert.equal(h.el('#clientKeyRotate-team').focused,true,'dismissal focuses the accepted re-rendered rotate button');
+  await h.run("revokeClientKey('team')");
+  assert.equal(calls[2].method,'DELETE');assert.equal(h.el('#clientKeySecret').value,'','revocation clears prior one-time material');
+  assert.match(h.el('#clientKeysStatus').textContent,/reassign owned accounts/);
+  assert.equal(h.run('CLIENT_KEYS.length'),2,'409 cannot optimistically delete');
+  h.context.prompt=()=> 'Renamed team';await h.run("renameClientKey('team')");
+  assert.equal(calls[3].method,'PATCH');assert.deepEqual(JSON.parse(JSON.stringify(calls[3].body)),{name:'Renamed team'});
+  h.run("showClientKeySecret('copy-once', $('#newClientKeyName'))");
+  h.context.navigator={clipboard:{writeText:async()=>{throw Error('denied');}}};
+  await h.run('copyClientKeySecret()');assert.equal(h.el('#clientKeySecret').selected,true);
+  assert.match(h.el('#clientKeyCopyStatus').textContent,/手动复制/);
+  let prevented=false;h.el('#clientKeySecretDialog').listeners.cancel({preventDefault(){prevented=true;}});
+  assert.equal(prevented,true);assert.equal(h.el('#clientKeySecret').value,'');
+});
+
+test('create and rotate reveal their one-time secret before a failed list refresh, without replaying the write', async () => {
+  for (const action of ['create','rotate']) {
+    const h=harness(), writes=[];
+    h.context.writes=writes;
+    h.context.refresh=()=>new Promise((resolve,reject)=>{h.context.rejectRefresh=reject;});
+    h.run("CLIENT_KEYS=[{id:'legacy',name:'Legacy'},{id:'team',name:'Team'}]; api=async(path,body,method)=>{writes.push({path,body,method});return {id:'team',key:'only-once-secret'};}; loadAll=refresh;");
+    h.el('#secProxyKey').value='configured-legacy';h.el('#newClientKeyName').value='New team';
+    if(action==='rotate'){h.context.document.getElementById=id=>h.el('#'+id);h.context.confirm=()=>true;}
+    const pending=h.run(action==='create'?'createClientKey()':"rotateClientKey('team')");
+    await Promise.resolve();
+    assert.equal(writes.length,1,`${action} must write only once`);
+    assert.equal(h.el('#clientKeySecretDialog').open,true,`${action} must reveal before refresh settles`);
+    assert.equal(h.el('#clientKeySecret').value,'only-once-secret');
+    h.context.navigator={clipboard:{writeText:async()=>{throw Error('denied');}}};
+    await h.run('copyClientKeySecret()');
+    assert.equal(h.el('#clientKeySecret').selected,true);
+    h.context.rejectRefresh(Error('network unavailable'));
+    await pending;
+    assert.equal(h.el('#clientKeySecret').value,'only-once-secret','failed refresh must preserve manual-copy value');
+    assert.equal(h.el('#clientKeySecret').selected,true);
+    assert.match(h.el('#clientKeyCopyStatus').textContent,/手动复制/);
+    assert.match(h.el('#clientKeysStatus').textContent,/操作已生效但列表刷新失败.*请先复制.*之后刷新.*不要重复提交/);
+    assert.doesNotMatch(h.el('#clientKeysStatus').textContent,/only-once-secret|操作失败/);
+    assert.doesNotMatch(h.el('#clientKeyBody').innerHTML,/only-once-secret/);
+    assert.doesNotMatch(h.run('JSON.stringify(CLIENT_KEYS)+JSON.stringify(ACCS)'),/only-once-secret/);
+    assert.equal(writes.length,1,'a failed read must not repeat a successful write');
+    h.run('closeClientKeySecret()');assert.equal(h.el('#clientKeySecret').value,'');
+  }
+});
+
+test('successful key rename and revoke do not report write failure when list refresh fails', async () => {
+  for (const action of ['rename','revoke']) {
+    const h=harness(), writes=[];
+    h.context.writes=writes;h.context.prompt=()=> 'Renamed team';h.context.confirm=()=>true;
+    h.run("CLIENT_KEYS=[{id:'legacy',name:'Legacy'},{id:'team',name:'Team'}]; api=async(path,body,method)=>{writes.push({path,body,method});return {ok:true};}; loadAll=async()=>{throw Error('network unavailable');};");
+    await h.run(action==='rename'?"renameClientKey('team')":"revokeClientKey('team')");
+    assert.equal(writes.length,1);
+    assert.equal(writes[0].method,action==='rename'?'PATCH':'DELETE');
+    assert.match(h.el('#clientKeysStatus').textContent,/操作已生效但列表刷新失败.*重新核对服务端状态.*不要重复提交/);
+    assert.doesNotMatch(h.el('#clientKeysStatus').textContent,/操作失败/);
+    assert.equal(h.el('#clientKeySecret').value,'');
+    assert.equal(h.run('CLIENT_KEYS.length'),2,'do not optimistically change accepted labels');
+  }
+});
+
+test('refresh 401 clears the revealed key, and navigation during refresh cannot revive it', async () => {
+  const h=harness(), writes=[];
+  h.context.writes=writes;h.context.seenBefore401=null;
+  h.run("const originalApi=api; api=async(path,body,method)=>path==='/api/security/client-keys'?(writes.push(path),{id:'team',key:'only-once-secret'}):originalApi(path,body,method); loadAll=async()=>{seenBefore401=$('#clientKeySecret').value;return api('/api/accounts');};");
+  h.context.fetch=async()=>({status:401});
+  h.el('#newClientKeyName').value='New team';h.el('#secProxyKey').value='configured-legacy';
+  await h.run('createClientKey()');
+  assert.equal(writes.length,1);
+  assert.equal(h.context.seenBefore401,'only-once-secret');
+  assert.equal(h.el('#clientKeySecret').value,'');
+  assert.equal(h.el('#clientKeySecretDialog').open,false);
+  assert.equal(h.el('#loginOverlay').style.display,'flex');
+  assert.doesNotMatch(h.el('#clientKeysStatus').textContent,/列表刷新失败/);
+
+  const nav=harness();nav.context.refresh=()=>new Promise((resolve,reject)=>{nav.context.rejectRefresh=reject;});
+  nav.run("api=async()=>({id:'team',key:'stale-secret'});loadAll=refresh;");
+  nav.el('#newClientKeyName').value='New team';nav.el('#secProxyKey').value='configured-legacy';
+  const pending=nav.run('createClientKey()');
+  await Promise.resolve();
+  assert.equal(nav.el('#clientKeySecret').value,'stale-secret','write is displayed before pending read');
+  await nav.run("switchSection('console')");
+  nav.context.rejectRefresh(Error('network unavailable'));
+  await pending;
+  assert.equal(nav.el('#clientKeySecret').value,'');
+  assert.equal(nav.el('#clientKeySecretDialog').open,false);
+  assert.doesNotMatch(nav.el('#clientKeysStatus').textContent,/列表刷新失败/,'stale read cannot overwrite status');
+});
+
+test('closing a generated key before list reload restores a replaced row button focus without reviving the secret', async () => {
+  for(const fallback of ['body','closed-dialog']){
+    const h=harness();h.context.confirm=()=>true;
+    h.context.document.getElementById=id=>h.el('#'+id);
+    h.context.document.body={};
+    h.context.refresh=()=>new Promise(resolve=>{h.context.resolveRefresh=resolve;});
+    h.run("CLIENT_KEYS=[{id:'legacy',name:'Legacy'},{id:'team',name:'Team'}];api=async()=>({id:'team',key:'one-time-secret'});loadAll=refresh;");
+    const pending=h.run("rotateClientKey('team')");
+    await Promise.resolve();
+    assert.equal(h.el('#clientKeySecret').value,'one-time-secret');
+    h.run('closeClientKeySecret(false)');
+    assert.equal(h.el('#clientKeySecret').value,'');
+    // A real loadAll replaces the focused row button; Chromium may focus body or the closed dialog's button.
+    h.el('#clientKeyRotate-team').focused=false;
+    const focused={isConnected:true};
+    h.context.document.activeElement=fallback==='body'?h.context.document.body:focused;
+    h.el('#clientKeySecretDialog').contains=node=>node===focused;
+    h.context.resolveRefresh();await pending;
+    assert.equal(h.el('#clientKeyRotate-team').focused,true,fallback);
+    assert.equal(h.el('#clientKeySecret').value,'');
+    assert.equal(h.el('#clientKeySecretDialog').open,false);
+  }
+});
+
+test('refresh after one-time dismissal never steals focus from another control or a navigated/401 view', async () => {
+  for (const transition of ['other-control','navigation','401']) {
+    const h=harness();h.context.confirm=()=>true;
+    h.context.document.getElementById=id=>h.el('#'+id);
+    h.context.document.body={};
+    h.context.refresh=()=>new Promise((resolve,reject)=>{h.context.finishRefresh=transition==='401'?reject:resolve;});
+    h.run("CLIENT_KEYS=[{id:'legacy',name:'Legacy'},{id:'team',name:'Team'}];const originalApi=api;api=async()=>({id:'team',key:'one-time-secret'});loadAll=refresh;");
+    const pending=h.run("rotateClientKey('team')");await Promise.resolve();
+    if(transition==='other-control')h.run('closeClientKeySecret(false)');
+    const opener=h.el('#clientKeyRotate-team');opener.focused=false;
+    const other={isConnected:true};h.context.document.activeElement=other;
+    if(transition==='navigation')await h.run("switchSection('console')");
+    if(transition==='401'){
+      h.context.fetch=async()=>({status:401});
+      await h.run("originalApi('/api/accounts').catch(()=>{})");
+      assert.equal(h.el('#loginOverlay').style.display,'flex');
+    }
+    h.context.finishRefresh(transition==='401'?Error('unauthorized'):undefined);await pending;
+    assert.equal(opener.focused,false,`${transition} must not refocus the old opener`);
+    assert.equal(h.context.document.activeElement,other);
+    assert.equal(h.el('#clientKeySecret').value,'');
+    assert.equal(h.el('#clientKeySecretDialog').open,false);
+  }
+});
+
+test('empty Legacy with other keys defaults new accounts to a valid non-anonymous owner', () => {
+  const h=harness();h.run("CLIENT_KEYS=[{id:'legacy',name:'Legacy'},{id:'other',name:'Other'}];renderSecurity({proxyKey:''})");
+  assert.equal(h.el('#newAccountOwner').value,'other');
+  assert.equal(h.el('#secBadge').textContent,'Legacy 匿名模式');
+  assert.doesNotMatch(h.el('#secBadge').textContent,/全部|关闭鉴权/);
+  h.el('#newAccountOwner').value='legacy';h.run('addAccountRow()');
+  assert.equal(h.snapshot().accounts.length,3);assert.match(h.el('#accMsg').textContent,/Legacy/);
+  h.el('#newAccountOwner').value='other';h.run('addAccountRow()');
+  assert.equal(h.snapshot().accounts[3].clientKeyId,'other');
+});
+
+test('legacy-only snapshots and in-flight key responses cannot revive one-time secrets after navigation', async () => {
+  const h=harness();h.context.responses={'/api/models':{},'/api/accounts':fixture(),'/api/security':{proxyKey:''},'/api/security/client-keys':{error:{message:'old server'}},'/api/meta':{},'/api/model-aliases':{aliases:{}}};
+  h.run('render=()=>{}; api=async path=>responses[path]');await h.run('loadAll()');
+  assert.equal(h.run('CLIENT_KEYS.length'),1);assert.equal(h.el('#newAccountOwner').value,'legacy');
+  h.el('#newClientKeyName').value='New team';await h.run('createClientKey()');
+  assert.match(h.el('#clientKeysStatus').textContent,/Legacy/);
+  h.context.resolveWrite=null;h.context.sent=[];
+  h.run("api=async(path,body,method)=>{sent.push({path,body,method});return new Promise(resolve=>{resolveWrite=resolve});}");
+  h.el('#secProxyKey').value='configured-legacy';
+  const pending=h.run('createClientKey()');assert.equal(h.context.sent.length,1);
+  await h.run("switchSection('console')");h.context.resolveWrite({id:'other',key:'stale-secret'});await pending;
+  assert.equal(h.el('#clientKeySecret').value,'');assert.equal(h.el('#clientKeySecretDialog').open,undefined);
+});
 
 test('monthly threshold draft and exact recovery preserve account state and require explicit confirmation', async () => {
   const h = harness(); h.context.sent = [];
@@ -388,7 +592,7 @@ test('successful raw save hydrates persisted values and clears obsolete draft fe
   const before=h.snapshot();
   assert.match(h.el('#rawSchedulingFeedback').textContent,/尚未生效/);
   h.context.sent=[];
-  h.context.responses={'/api/models':{},'/api/security':{},'/api/meta':{configured:true},'/api/model-aliases':{aliases:{}},'/api/statistics':{models:[]}};
+  h.context.responses={'/api/models':{},'/api/security':{},'/api/security/client-keys':{keys:[{id:'legacy',name:'Legacy'}]},'/api/meta':{configured:true},'/api/model-aliases':{aliases:{}},'/api/statistics':{models:[]}};
   // Only unrelated model rendering and the API are stubbed; saveAccounts/loadAll are production functions.
   h.run(`render=()=>{}; api=async(path,body)=>{
     sent.push({path,body});
@@ -398,7 +602,7 @@ test('successful raw save hydrates persisted values and clears obsolete draft fe
   await h.run('saveAccounts()');
   assert.equal(h.context.sent.filter(call=>call.body).length,1);
   assert.equal(h.context.sent[0].path,'/api/accounts');
-  assert.equal(h.context.sent.filter(call=>!call.body).length,6);
+  assert.equal(h.context.sent.filter(call=>!call.body).length,7);
   assert.deepEqual(h.snapshot().accounts,before.accounts.map(({activeCount,cachePoolRole,...a})=>a));
   assert.equal(h.snapshot().active,1); assert.equal(h.snapshot().accounts[1].maxConcurrent,42);
   assert.equal(h.el('#accMode').value,draft.accountMode);
@@ -634,9 +838,9 @@ test('low quota slots share the live pipeline draft, raw editor and server runti
   assert.equal(h.el('#cachePoolLowQuotaSize').value,'0');
   h.el('#cachePoolLowQuotaSize').value='3';
   await h.run('saveAccounts()');assert.match(h.el('#accMsg').textContent,/不得大于/);assert.equal(h.calls.length,0);
-  const loaded=fixture();loaded.accountPipeline={...loaded.accountPipeline,cachePoolSize:2,cachePoolMaxSize:4,cachePoolLowQuotaSize:1};loaded.cachePool={minSize:2,maxSize:4,lowSize:1,targetSize:3,actual:{high:1,low:1,unknown:1},binding:{enabled:false,size:0,maxEntries:50000}};
+  const loaded=fixture();loaded.accountPipeline={...loaded.accountPipeline,cachePoolSize:2,cachePoolMaxSize:4,cachePoolLowQuotaSize:1};loaded.cachePool={scope:'per-client-key',minSize:2,maxSize:4,lowSize:1,targetSize:3,actual:{high:1,low:1,unknown:1},binding:{enabled:false,size:0,maxEntries:50000}};
   h.context.next=loaded;h.run("render=()=>{};api=async(path)=>path==='/api/accounts'?next:path==='/api/models'?{subscription:[]}:path==='/api/statistics'?{models:[]}:path==='/api/model-aliases'?{aliases:{}}:{};");
   await h.run('loadAll()');
   assert.equal(h.el('#cachePoolLowQuotaSize').value,1);
-  assert.match(h.el('#cachePoolRuntime').textContent,/低额度槽 1.*实际高 1 \/ 低 1 \/ 未知 1/);
+  assert.match(h.el('#cachePoolRuntime').textContent,/低额度槽 1.*分别应用于各密钥池.*实际高 1 \/ 低 1 \/ 未知 1（各池合计）/);
 });

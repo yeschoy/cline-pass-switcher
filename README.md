@@ -17,7 +17,7 @@ Node.js 本地/服务器代理 + 网页控制台，用于 [Cline Pass](https://c
 - 🌡️ **可排序调度流水线** —— 可拖动排序 Cline 额度热池、账号成功率和会话粘性；成功率仅排序账号且不设置隐式淘汰阈值，全部关闭时六种账号模式保持原行为
 - 📋 **观测** —— 独立滚动请求/错误 JSONL 日志，支持筛选、分页和清空；记录安全的亲和键类型、上游 key 是否提供、缓存命中三态、调度原因与供应商路径，但绝不记录实际会话键
 - 🏷️ **模型别名** —— 批量把 `cline-pass/*` 生成客户端短别名，原始模型仍保留
-- 🔑 **代理密钥与管理员登录分离** —— 客户端密钥仅供模型接口；独立管理员密码与可吊销会话保护管理 API
+- 🔑 **多客户端密钥与管理员登录分离** —— 每个下游密钥只调度专属上游账号池；独立管理员密码与可吊销会话保护管理 API
 - 🌐 **OpenAI 兼容** —— 任何 OpenAI 客户端 / Cline 扩展把 Base URL 指向代理即可，无侵入
 
 ![控制台截图](docs/screenshot-top.png)
@@ -44,7 +44,7 @@ node server.js        # Node ≥ 18；完成首次改密后移除初始化变量
 
 ```
 Base URL: http://127.0.0.1:3123/v1
-API Key:  （在控制台「访问与安全」里设置代理密钥；本地留空 = 不鉴权）
+API Key:  （在控制台「访问与安全」里设置 Legacy 或独立客户端密钥；单密钥模式留空 = Legacy 模型接口开放）
 Model:    cline-pass/glm-5.2 等
 ```
 
@@ -94,14 +94,32 @@ location / {
 
 管理脚本必须改用 `POST /api/auth/login` 获取 `HttpOnly; SameSite=Strict` Cookie 和响应中的 CSRF token；非 GET 管理请求带 `X-CSRF-Token`。`GET /api/auth/session` 可在同一会话取 token；`POST /api/auth/logout`（JSON `{}`、CSRF）吊销单个会话；`POST /api/auth/password`（`currentPassword`/`newPassword`、CSRF）保存并吊销所有会话。会话最多 8 小时，重启也吊销；密码和会话只在受信反代（公网 HTTPS Origin、覆盖的 TLS Header 和独立反代 token 均匹配）或本机 loopback HTTP 受理。重启时如生效 `PROXY_KEY`（包括环境覆盖）等于已设的管理员密码，服务会拒绝启动；应在隔离状态下改正客户端 key，再启动。`GET /api/meta` 公开；`/v1/models`、`/api/v1/models`、`/models` 与聊天别名仅认客户端 key（为空时延续开放模型代理）；`/api/*` 其余端点仅认管理员会话。旧 `Authorization`/`X-Admin-Key` 不再授权管理 API。请先验证首次改密、管理读写与脚本改造，再开放详细日志。
 
-备份 `admin-auth.json` 时必须作为敏感状态与 `config.json` 一起保留，不要放入 release archive。丢失/损坏时管理端**不**自动从当前代理密钥重建：损坏文件启动报错并保持原字节；丢失状态要由有权访问 DATA_DIR 的运维先隔离服务，恢复安全备份，或在保留其他数据的情况下通过受信恢复流程重新设置上述一次性标志和独立码，重新完成首次改密并吊销旧浏览器会话。升级前在隔离副本演练该流程并保留原 release/配置/管理员文件备份。旧版本回滚后其旧共享代理 key 管理边界会恢复，**不得**在回滚期间启用详细正文日志或公网管理入口；优先隔离管理流量、保留原始管理员文件、恢复旧版本镜像和文件哈希，排查后再按新版本迁回，不能把回滚当作独立鉴权仍在生效。
+备份 `admin-auth.json` 时必须作为敏感状态与 `config.json` 一起保留，不要放入 release archive。丢失/损坏时管理端**不**自动从当前代理密钥重建：损坏文件启动报错并保持原字节；丢失状态要由有权访问 DATA_DIR 的运维先隔离服务，恢复安全备份，或在保留其他数据的情况下通过受信恢复流程重新设置上述一次性标志和独立码，重新完成首次改密并吊销旧浏览器会话。升级前在隔离副本演练该流程并保留原 release/配置/管理员文件备份。**多密钥升级/回滚阻断：不能让旧镜像直接启动或保存 v2 的 DATA_DIR。** 隔离合成演练中，旧镜像启动 v2 配置会丢失账号 `clientKeyId`，且旧密钥请求确实能到达原本归属新密钥的上游账号；旧版完整账号保存也会继续丢失归属。升级前应在停写、隔离状态私有备份**整个** pre-upgrade DATA_DIR（包括 `config.json`、`metadata.json`、`admin-auth.json` 与适用日志/详情），另保留升级后整个 v2 状态的独立私有备份。需要回滚时先隔离入口并停止写入、保存 v2 全状态供以后恢复，**在启动旧镜像之前**完整恢复 pre-upgrade DATA_DIR，核验权限和文件/镜像哈希，再仅对已隔离的旧版环境验证；不得把旧镜像接到任何仍可写的 v2 数据，也不得以 v1 恢复后能读到 v2 新增密钥、归属或升级后历史为前提。旧共享密钥版本还须隔离管理入口及原文详情目录，不得在回滚期间启用详细正文或公网管理入口。合成演练不证明生产备份时序、真实 Docker/TLS/反代或实际镜像身份；本项目没有获得生产升级/轮换/回滚授权。
+
+### 多客户端密钥与账号归属（先在隔离环境演练）
+
+`config.json` 中 `proxyKey` 是 ID 固定为 `legacy` 的**唯一持久化** Legacy 密钥；`clientKeys` 只存额外密钥的 `{ id, name, key }`，均为私有明文配置，不是管理员密码，也不是账号的上游 `accounts[].key`。普通日志、公开元数据与默认脱敏详情不得显示客户端密钥；**显式开启的原文正文模式不保证去除用户自行嵌入的任意密钥文本**。每个上游账号的 `clientKeyId` 恰好指向一个有效下游密钥 ID。旧配置中的账号、旧 `apiKey` 迁移账号及 `CLINE_PASS_KEY` 注入账号均归 `legacy`，稳定账号 ID 不变；当 Legacy 为空且已有额外密钥时，新注入的 Legacy 账号会使启动拒绝（先设置非空 Legacy 密钥/`PROXY_KEY` 或移除注入）。旧客户端完整 `POST /api/accounts` 省略 `clientKeyId` 时，已存在账号按稳定 ID 保留原归属，新增账号由服务端分配当前有效默认归属（Legacy 有密钥或仅有 Legacy 时选 Legacy，否则选首个额外密钥）。新客户端应显式提交有效归属，不要靠省略字段猜测。未知归属/重复 ID、名字或密钥在保存前拒绝，损坏的既有配置不能被默认值覆盖；完整账号保存要带回隐藏的 `id`、`clientKeyId`、`perModel`、代理及 Header 等字段。
+
+管理接口仅对**已初始化管理员 Cookie 会话**开放，写请求须带会话 `X-CSRF-Token`；Bearer 或旧 `X-Admin-Key` 客户端密钥只能认证模型接口，不能管理。所有新密钥接口响应均为 `Cache-Control: no-store`；正常列表只含名称/ID，只有创建和轮换的当次响应给新值，无法再次读取。旧 `GET/POST /api/security` 仍向**管理员**返回 Legacy 的 `proxyKey` 明文，是特意保留的兼容例外，不应误当成额外密钥的安全列表。请求/响应要点（`<id>` 为额外密钥 ID，非账号 ID）：
+
+| 操作 | 请求 | 成功响应 |
+|---|---|---|
+| 列表 | `GET /api/security/client-keys` | `{ "keys": [{ "id": "legacy", "name": "Legacy" }, { "id": "<id>", "name": "<label>" }] }`（不含密钥） |
+| 创建 | `POST /api/security/client-keys`，JSON `{ "name": "<label>" }` | `{ "id": "<id>", "name": "<label>", "key": "<一次性值>" }` |
+| 重命名 | `PATCH /api/security/client-keys/<id>`，JSON `{ "name": "<new label>" }` | `{ "id": "<id>", "name": "<new label>" }` |
+| 轮换 | `POST /api/security/client-keys/<id>/rotate`，JSON `{}` | `{ "id": "<id>", "key": "<新一次性值>" }` |
+| 撤销 | `DELETE /api/security/client-keys/<id>` | `{ "ok": true }`；仍有归属账号时 `409`，不修改配置 |
+
+操作顺序：① 备份私有 DATA_DIR，完成独立管理员登录/CSRF；若 Legacy 为空且有 Legacy 归属账号，**先保存一个非空 Legacy 密钥**，否则创建额外密钥会被拒绝（不会把匿名旧用户悄悄改成新密钥用户）；② 在「访问与安全」创建并安全复制新密钥，关闭一次性弹窗后无法再次查看，丢失只能轮换；③ 在「账号管理」新建账号时选择归属，或在抽屉中修改旧账号归属，点击**保存账号配置**并核对已接受状态，再给客户端分发对应 Bearer 密钥（兼容 `X-Admin-Key` 模型请求）；④ 轮换前通知客户端，确认后旧值立即拒绝**新准入**，生成值当次复制并更新客户端；⑤ 撤销前先保存所有归属账号的重分配，核对后确认撤销。已获 lease 的工作可继续使用原账号完成；等待中的旧密钥请求不允许在轮换/撤销后新获 lease。密钥操作成功会重新拉取服务器快照，未保存的账号草稿可能被覆盖，请先保存或自行留存；确认对话框不能代替服务器验证。
+
+`/chat/completions`、`/v1/chat/completions`、`/api/v1/chat/completions` 在认证后仅能调度该密钥归属的账号：单账号、轮询、HRW、成功率流水线、会话绑定、缓存活跃/备用、同账号 Provider 重试及首包前允许的一次换号都不得跨归属；空/不可用归属池安全失败，不借其他池。`/models`、`/v1/models`、`/api/v1/models` 的静态已知 ID/别名可共享，但 `exposeCatalog` 抓取只能使用当前客户端归属的账号，空池不能用管理员目录缓存或外池回退。`/v1/responses` 认证后仍返回 501，不发上游。管理员 `/api/models` 和明确 `accountId` 的探测/测试独立于客户端池，管理员不指定 ID 时保留现有全局选择能力。缓存池在各归属内**分别派生**活跃/备用集合，但共享 `metadata.json.cachePoolTargetSize` 这**一个数字**；某池扩容可能使其他池的派生活跃集扩大，实际角色计数是所有归属池的合计，不是每密钥独立配置/限流。`maxRpm` 仍按上游账号分别统计；月参考额度与模型参考消费等值也按原机制分别估算，绝不是每客户端密钥独立配额、账单或相互抵扣。
 
 ### 环境变量
 
 | 变量 | 说明 |
 |---|---|
 | `CLINE_PASS_KEY` | 上游 Cline Pass API Key（无 config 时自动创建账号） |
-| `PROXY_KEY` | 下游代理密钥（仅客户端访问模型代理的凭据） |
+| `PROXY_KEY` | 非空时**启动/重启**覆盖 Legacy 下游密钥；运行中管理员保存 `/api/security` 可改变当前密钥，下次重启仍重新应用该环境值（仅模型客户端凭据） |
 | `CLINE_PASS_ADMIN_BOOTSTRAP` | 仅首次/受信恢复时设置 `1`，允许创建独立管理员状态（已有状态不重置） |
 | `CLINE_PASS_ADMIN_INIT_CODE` | 独立于代理密钥的随机一次性码，至少 16 字符；从运维环境/私有配置注入，不要写入 config、命令历史或日志 |
 | `CLINE_PASS_ADMIN_INITIAL_PASSWORD` | 仅当生效客户端密钥为空时所需的非空初始密码；仍必须搭配一次性码，首次改密后失效 |
@@ -110,7 +128,7 @@ location / {
 | `CLINE_PASS_RAW_BODY_READY` | 默认不设置；仅在已单独验收原文备份/回滚、容器内存和大正文负载后由运维明确设置 `1`。还须检测到至少 2 GiB 可用内存限制才能接受 `rawBodyLogging: true`；这是准入下限，不是内存安全证明 |
 | `PORT` / `BIND_HOST` / `DATA_DIR` | 端口 / 绑定地址（容器内为 0.0.0.0）/ 配置目录 |
 
-`PROXY_KEY` 等现有代理/账号变量在启动时覆盖 `config.json`；管理员首次初始化环境变量只用于独立鉴权，不写入 config/metadata。以下连接/流运行参数只从环境变量读取，不写入配置文件；非法值回退各自默认值，单位均为 **毫秒或连接数**，不猜测秒数。
+`PROXY_KEY` 等现有代理/账号变量在启动时覆盖 `config.json`；其中非空 `PROXY_KEY` 不是运行期锁定：管理员保存 Legacy 密钥会立即改变当前值，下次重启又应用环境值。管理员首次初始化环境变量只用于独立鉴权，不写入 config/metadata。以下连接/流运行参数只从环境变量读取，不写入配置文件；非法值回退各自默认值，单位均为 **毫秒或连接数**，不猜测秒数。
 
 | 运行变量 | 默认值 | 合法范围 |
 |---|---:|---:|
@@ -129,7 +147,7 @@ location / {
 
 | 字段 | 说明 |
 |---|---|
-| `accounts` | 账号池：`[{ id, name, note, key, enabled, maxConcurrent, maxRpm, weight, priority, proxyUrl, headers, perModel }]`；备注不进入上游/日志，`maxConcurrent: 0` 表示不限 |
+| `accounts` | 账号池：`[{ id, clientKeyId, name, note, key, enabled, maxConcurrent, maxRpm, weight, priority, proxyUrl, headers, perModel }]`；`clientKeyId` 是下游密钥的稳定归属 ID，`key` 是**上游**凭据；每个账号只归属一个客户端密钥。备注不进入上游/普通日志，`maxConcurrent: 0` 表示不限 |
 | `maxRpm` | 账号级每分钟真实上游请求上限（整数 0～100000，`0` 表示不限）。按每个实际发往 Cline `/chat/completions` 的 native attempt 计数（含 Provider retry；`/api/test`、`/api/probe`、`/api/validate-upstreams`、绑定已保存 accountId 的 `/api/accounts/test` 与 `/api/accounts/proxy-test` 均计数；models/catalog/quota 与无持久 accountId 的临时 credential 测试不计）。使用单进程精确滚动 60 秒窗口：重启清空、多副本各自独立，不是跨进程硬上限 |
 | `accountMode` | `single` / `roundrobin` / `sticky` / `least-connections` / `weighted-roundrobin` / `priority-failover` |
 | `activeAccount` | 单账号模式下使用的下标 |
@@ -138,12 +156,13 @@ location / {
 | `retryRules` | 唯一权威的有序“停止重试”数组；每条含稳定 `id`、固定 `decision: "stop"`，以及同时存在的 `when.statuses` 与 `when.body_contains`。两类条件 AND、body 数组 ANY、大小写不敏感普通文本（不支持正则/Header）；首条命中即停止本请求剩余 Provider 与账号替换。缺失默认 `[]`；最多 100 条/64 KiB。普通日志只投影 `retryRuleId`/`retryDecision`/`retryMatchedBy` 枚举，不记录 needle 或匹配片段 |
 | `accountErrorRules` / `accountContentErrorRules` | 只读兼容镜像。旧配置启动时按“内容规则在前、状态规则在后”迁移；旧客户端不提交 `errorRules` 时只能原样回传镜像，试图修改会得到 409 |
 | `accountPipeline` | 可选叠加层：三个开关与 `order`，缓存池 min/max，以及显式/消息回退会话绑定 TTL 和 LRU 上限。`0 <= cachePoolLowQuotaSize <= cachePoolSize <= cachePoolMaxSize <= 100000`；默认 TTL 为 2h/15m、上限 50,000。旧配置缺 max 时自动取 min，不会升级后自动扩容 |
-| `proxyKey` | 下游模型代理密钥；空仅表示客户端模型接口不鉴权，管理接口始终要求独立管理员会话 |
+| `proxyKey` | **仅** Legacy（固定 ID `legacy`）的持久化下游密钥；非空 `PROXY_KEY` 只在启动/重启覆盖其生效值。Legacy 为空保留旧版匿名模型访问 Legacy 账号池；管理接口仍要求独立管理员会话 |
+| `clientKeys` | 仅额外密钥的私有数组 `[{ id, name, key }]`，不重复存 Legacy；`id` 为稳定归属 ID，`key` 为明文私有凭据，不会出现在普通列表、公开 metadata 或日志中。最多 16 个，勿把真实或生成密钥放入示例/仓库；当前存储并不加密 |
 | `publicBaseUrl` | 公网代理地址，也是管理员远程 HTTPS Origin 校验值（应与浏览器域名一致） |
 | `detailedLogging` | 默认 `false`；完整详细捕获，也可在“详细日志”页面即时保存 |
 | `errorDetailLogging` | 默认 `false`；仅捕获真实失败聊天 attempt 的详情；完整模式同时开启时优先 |
 | `rawBodyLogging` | 默认 `false`；独立显式选择新详情正文未脱敏（必须另行启用完整/错误详情；需已完成管理员首次改密）。风险及备份前置条件见下文 |
-| `exposeCatalog` | `true` 时代理的 `/v1/models` 会合并 Cline 公开目录模型；默认 `false` 只返回订阅模型（避免客户端模型列表被淹没） |
+| `exposeCatalog` | `true` 时代理的 `/models`、`/v1/models`、`/api/v1/models` 会合并目录模型；上游目录只用该客户端归属的合格账号抓取，空池不会用其他客户端账号或合成回退。静态已知模型/别名 ID 仍可全局可见；默认 `false` 不抓取目录 |
 | `knownModels` | 订阅模型清单（控制台主表） |
 | `modelAliases` | 客户端别名到现有 `cline-pass/*` 模型的映射；路由按解析后的模型执行 |
 | `perModel` | 每模型路由：`{ upstreams, exclude, pinMode, sort, maxRetries, providerCooldownMs }`。`upstreams` 非空时是权威来源顺序，否则使用探测到的渠道顺序；`pinMode: "strict"` 首次固定来源顺序首个可用渠道，失败后从剩余渠道按 Provider-model 24h 成功率回退；`pinMode: "preferred"` 从首次起就用同一健康顺序。每次 named HTTP attempt 只注入一个 provider。`maxRetries` 是首试后的外层重试次数，`providerCooldownMs` 为 0～300000（0 关闭）并在首包前确定性失败后短暂跳过该 Provider。账号内同名配置整项覆盖全局配置，不逐字段合并 |
@@ -201,7 +220,7 @@ Cline Pass 订阅模型在 Cline 网关之后分成两条管道，钉住上游�
 |---|---|
 | 账号管理 | 六种调度模式、缓存活跃/备用池、24h 缓存 Token/成功率/失败摘要、三步可排序流水线、双维度统一规则可视化表格与高级 JSON、请求级停止重试规则与手动配对预设、快捷预设、名称/备注搜索、右侧设置抽屉和代理测试 |
 | 统计 | 累计/最近 24 小时真实 usage Token 与缓存覆盖、账号直接成功率/样本/覆盖、Cline 5h/周/月剩余百分比及池状态；分别展示当月剩余与三窗瓶颈的社区参考美元等值估算 |
-| 访问与安全 | 修改下游代理密钥（即时生效）、公网代理地址、鉴权开关 |
+| 访问与安全 | 修改 Legacy 下游密钥（运行中即时生效）、创建/重命名/轮换/撤销独立客户端密钥及标签、显示账号归属、公网代理地址；新增密钥只显示一次 |
 | 订阅模型 | 背后模型 / 渠道发现状态 / 最近实际渠道 / 24h 缓存 Token 占比与样本；渠道下拉（带可用性标注）；首选固定+健康回退 / Switcher 健康自动选择；排序 |
 | 操作按钮 | 探测（刷新渠道清单）、测试（单次钉住验证）、校验（固定账号全渠道实测）、一键配置（生成三种策略预览；确认后才保存） |
 | 测试台 | 任选模型+渠道发一条小请求，直接看网关是否采纳 |
@@ -296,7 +315,7 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 ## 安全提醒
 
 - `config.json` / `data/` 含明文密钥，已在 `.gitignore` 排除，**不要提交或分享**；
-- 对外部署务必设置 `proxyKey`（控制台可随时轮换）；
+- 对外开放模型服务前务必确认非空有效 Legacy 密钥和各账号归属；若环境设置非空 `PROXY_KEY`，重启后的 Legacy 值以环境变量为准，不能把控制台运行时轮换当作永久替代；
 - `maxRetries > 0` 会放大外层供应商尝试数量，注意额度消耗；缺失或 `null` 表示走完已配置候选序列。
 - 实际缓存命中必须以真实响应中的 `usage.prompt_tokens_details.cached_tokens`（或供应商等价字段）为准；本项目不会仅凭粘性配置宣称缓存成功。
 

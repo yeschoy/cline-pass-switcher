@@ -38,7 +38,8 @@
   .drawer-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:70; display:none; }
   .drawer { position:absolute; right:0; top:0; height:100%; width:min(520px,100%); overflow:auto; background:var(--card); padding:24px; border-left:1px solid var(--border); }
   .drawer label { display:block; color:var(--dim); font-size:12px; margin:14px 0 5px; }
-  .drawer input:not([type=checkbox]),.drawer textarea { width:100%; background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px; }
+  .drawer input:not([type=checkbox]),.drawer textarea,.drawer select { width:100%; max-width:100%; background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px; }
+  #clientKeySecret { width:100%; background:var(--card2); color:var(--text); border:1px solid var(--border); padding:8px; overflow-wrap:anywhere; }
   .modal { position:fixed; inset:0; z-index:80; background:rgba(0,0,0,.65); display:none; align-items:center; justify-content:center; }
   .modal-box { width:min(680px,calc(100% - 24px)); max-height:80vh; overflow:auto; background:var(--card); border:1px solid var(--border); border-radius:10px; padding:20px; }
   @media(max-width:600px){ body{padding:12px}.card{padding:12px}.drawer{padding:16px} }
@@ -253,12 +254,13 @@
       <select id="preset"><option value="">策略预设…</option><option value="cache">缓存命中优先</option><option value="stable">会话稳定</option><option value="throughput">最大吞吐</option><option value="even">均匀分摊</option><option value="quota">按额度分摊</option><option value="failover">主备容灾</option><option value="safe">保守防封</option></select>
       <button class="ghost" onclick="previewPreset()">预览应用</button>
       <input id="accSearch" placeholder="搜索名称或备注" oninput="clearBulkSelection()" style="background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px">
+      <label for="newAccountOwner" class="dim">新账号归属 <select id="newAccountOwner" aria-label="新账号归属客户端密钥"><option value="legacy">Legacy</option></select></label>
       <button class="ghost" onclick="addAccountRow()">＋ 添加账号</button>
       <button onclick="saveAccounts()">保存账号配置</button>
       <span class="dim" style="font-size:12px" id="accMsg" aria-live="polite"></span>
     </div>
     <p class="dim" style="font-size:12px">仅真实上游 429 且明确账号额度不足、刷新后月参考余额严格低于阈值才手动解封式隔离；以社区参考月上限 $50 估算，非真实账单。5 小时/每周耗尽由新鲜完整额度快照确认恢复。解封前请确认额度；解封后可能再次失败。</p>
-    <p id="cachePoolHelp" class="dim" style="font-size:12px;margin-bottom:6px">缓存池最小总数 0 = 关闭，低额度槽 0 = 保持旧调度；仅在 sticky 模式或启用会话粘性步骤时生效。正数低额度槽优先消耗已用 80%–&lt;95% 的账号，已用 &lt;80% 作高额度兜底，≥95% 不入池，未知最后补位；仅在同角色内应用健康/会话排序。低额度账号级降级会等待真实额度刷新，耗尽状态按窗口重置重评；人工恢复只清规则状态。只有全部活跃账号有限并发满载且 RPM 未耗尽，等待超时后才 grow-one 高额度目标；压力下降不缩容。max=min 可关闭自动扩容。</p>
+    <p id="cachePoolHelp" class="dim" style="font-size:12px;margin-bottom:6px">缓存池最小总数 0 = 关闭，低额度槽 0 = 保持旧调度；多客户端密钥时同一目标数分别用于各归属池，实际高/低/未知为各池合计，不是每 Key 独立配额。仅在 sticky 模式或启用会话粘性步骤时生效。正数低额度槽优先消耗已用 80%–&lt;95% 的账号，已用 &lt;80% 作高额度兜底，≥95% 不入池，未知最后补位；仅在同角色内应用健康/会话排序。低额度账号级降级会等待真实额度刷新，耗尽状态按窗口重置重评；人工恢复只清规则状态。只有全部活跃账号有限并发满载且 RPM 未耗尽，等待超时后才 grow-one 高额度目标；压力下降不缩容。max=min 可关闭自动扩容。</p>
     <p id="cachePoolRuntime" class="dim" aria-live="polite" style="font-size:12px;margin-bottom:10px">当前目标与会话绑定状态加载中…</p>
     <div class="toolbar">
       <label><input id="bulkSelectAll" type="checkbox" onchange="selectAllAccounts(this.checked)"> 选择当前搜索结果全部账号</label>
@@ -269,8 +271,8 @@
     <p class="dim">批量应用仅更新草稿，尚未生效；请点击“保存账号配置”使其生效。更改搜索条件会清空选择，不会丢弃草稿。</p>
     <div id="bulkFeedback" aria-live="polite"></div>
     <div class="table-wrap"><table style="min-width:1250px">
-      <thead><tr><th>批量选择</th><th>使用</th><th>名称</th><th>备注</th><th>启用</th><th>并发</th><th>权重/优先级</th><th>代理</th><th>运行/健康</th><th>累计请求</th><th>24h 缓存 Token</th><th>失败 24h/累计</th><th>操作</th></tr></thead>
-      <tbody id="accBody"><tr><td colspan="13" class="empty">加载中…</td></tr></tbody>
+      <thead><tr><th>批量选择</th><th>使用</th><th>名称</th><th>备注</th><th>客户端密钥归属</th><th>启用</th><th>并发</th><th>权重/优先级</th><th>代理</th><th>运行/健康</th><th>累计请求</th><th>24h 缓存 Token</th><th>失败 24h/累计</th><th>操作</th></tr></thead>
+      <tbody id="accBody"><tr><td colspan="14" class="empty">加载中…</td></tr></tbody>
     </table></div>
     <section id="errorRulesEditor" style="margin-top:12px" aria-labelledby="errorRulesTitle">
       <h3 id="errorRulesTitle" style="font-size:14px;margin-bottom:8px">统一双维度错误规则</h3>
@@ -316,7 +318,7 @@
     <div id="rawSchedulingFeedback" aria-live="polite"></div>
     <dialog id="rawSchedulingDialog" aria-labelledby="rawSchedulingTitle" aria-describedby="rawSchedulingHelp" style="width:min(760px,calc(100% - 24px));max-height:90vh;overflow:auto;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:16px">
       <h2 id="rawSchedulingTitle">原始调度配置 · 当前页面草稿</h2>
-      <p id="rawSchedulingHelp" class="dim">策略全局适用于账号池；accountNames 为全部账号的只读参考名称（可重复），不可修改。低额度槽为 0 时成员按 priority/稳定 ID 派生；正数时按已知低剩余升序、高剩余降序，再 priority/稳定 ID，未知最后补位；reserve/硬状态会替换。全活跃池有限并发满载且 RPM 可用、等待超时后才 grow-one。sticky+healthSort 是“绑定命中条件门”，未命中才按额度/成功率相对顺序选择。实际选择仍受启用状态、健康和容量影响。应用不会立即生效；请另行保存账号配置。</p>
+      <p id="rawSchedulingHelp" class="dim">策略全局统一，分别作用于各客户端密钥归属的账号池；accountNames 为全部账号的只读参考名称（可重复），不可修改。低额度槽为 0 时成员按 priority/稳定 ID 派生；正数时按已知低剩余升序、高剩余降序，再 priority/稳定 ID，未知最后补位；reserve/硬状态会替换。全活跃池有限并发满载且 RPM 可用、等待超时后才 grow-one。sticky+healthSort 是“绑定命中条件门”，未命中才按额度/成功率相对顺序选择。实际选择仍受启用状态、健康和容量影响。应用不会立即生效；请另行保存账号配置。</p>
       <label for="rawSchedulingJson">调度草稿 JSON</label>
       <textarea id="rawSchedulingJson" rows="20" spellcheck="false" style="width:100%;max-width:100%;background:var(--card2);color:var(--text);font-family:Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere"></textarea>
       <div id="rawSchedulingError" aria-live="polite"></div>
@@ -328,8 +330,8 @@
   <div class="card">
     <h2>访问与安全（下游密钥）</h2>
     <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-      <label class="dim" style="font-size:13px">代理密钥：</label>
-      <input id="secProxyKey" type="password" placeholder="空 = 关闭鉴权" style="width:340px; background:var(--card2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:7px 10px; font-family:Consolas, monospace; font-size:13px">
+      <label class="dim" style="font-size:13px" for="secProxyKey">旧版客户端密钥（Legacy）：</label>
+      <input id="secProxyKey" type="password" placeholder="空 = Legacy 匿名（仅 Legacy 账号池）" style="width:340px; background:var(--card2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:7px 10px; font-family:Consolas, monospace; font-size:13px">
       <label class="dim" style="font-size:12px"><input type="checkbox" id="secShow" onchange="$('#secProxyKey').type=this.checked?'text':'password'"> 显示</label>
       <span id="secBadge" class="badge"></span>
     </div>
@@ -340,8 +342,16 @@
     <div style="display:flex; gap:10px; align-items:center; margin-top:12px; flex-wrap:wrap;">
       <button onclick="saveSecurity()">保存访问设置</button>
       <span class="dim" style="font-size:12px">修改代理密钥仅影响模型客户端，不影响管理员登录。</span>
-      <span class="dim" style="font-size:12px" id="secMsg"></span>
+      <span class="dim" style="font-size:12px" id="secMsg" aria-live="polite"></span>
     </div>
+    <p class="dim" style="font-size:12px;margin-top:8px">非空环境变量 PROXY_KEY 仅在启动/重启时覆盖 Legacy 密钥；管理员在运行中保存可暂时改变当前值，下次重启会重新应用环境变量。Legacy 为空且仍有归属旧账号时，需先设置非空密钥才能新增其他客户端密钥。管理员会话与所有客户端密钥独立。</p>
+    <section aria-labelledby="clientKeysTitle" style="margin-top:16px">
+      <h3 id="clientKeysTitle">独立客户端密钥（仅显示标签与账号归属）</h3>
+      <p class="dim">每个账号只归属一个密钥。撤销前须保存账号重分配；密钥操作成功后会刷新服务端状态，未保存的账号草稿将丢失。轮换会立即阻止旧密钥的新请求，已开始的请求仍可完成。生成值只显示一次，请及时复制。</p>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="客户端密钥列表，可横向滚动"><table style="min-width:560px"><thead><tr><th>名称</th><th>ID</th><th>账号数（当前草稿）</th><th>操作</th></tr></thead><tbody id="clientKeyBody"></tbody></table></div>
+      <div class="toolbar"><label for="newClientKeyName">新密钥名称</label><input id="newClientKeyName" maxlength="80" autocomplete="off"><button type="button" onclick="createClientKey()">创建并显示一次密钥</button></div>
+      <p id="clientKeysStatus" role="status" aria-live="polite"></p>
+    </section>
   </div>
   <div class="card"><h2>管理员会话</h2>
     <label for="currentAdminPassword">当前管理员密码</label><input id="currentAdminPassword" type="password" autocomplete="current-password">
@@ -401,7 +411,8 @@
 <div id="accountDrawerBackdrop" class="drawer-backdrop" onclick="if(event.target===this)closeAccountDrawer()">
   <aside id="accountDrawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
     <h2 id="drawerTitle">账号设置</h2><label for="drawerName">账号名称</label><input id="drawerName"><label for="drawerNote">备注（最多 500 字符）</label><textarea id="drawerNote" rows="5"></textarea>
-    <label for="drawerKey">API Key</label><input id="drawerKey" type="password"><label><input id="drawerShowKey" type="checkbox" onchange="$('#drawerKey').type=this.checked?'text':'password'"> 显示 API Key</label><label>并发上限（0=不限）</label><input id="drawerMax" type="number" min="0" max="100000">
+    <label for="drawerClientKeyId">归属客户端密钥（保存账号配置后生效）</label><select id="drawerClientKeyId"></select>
+    <label for="drawerKey">上游 API Key</label><input id="drawerKey" type="password"><label><input id="drawerShowKey" type="checkbox" onchange="$('#drawerKey').type=this.checked?'text':'password'"> 显示 API Key</label><label>并发上限（0=不限）</label><input id="drawerMax" type="number" min="0" max="100000">
     <label for="drawerRpm">每分钟真实上游请求上限 RPM（0=不限，按实际发往 Cline 的 chat attempt 计数）</label><input id="drawerRpm" type="number" min="0" max="100000">
     <label>权重（1-100）</label><input id="drawerWeight" type="number" min="1" max="100"><label>优先级（1-100，越小越优先）</label><input id="drawerPriority" type="number" min="1" max="100">
     <label>出站代理 URL（认证值默认掩码）</label><input id="drawerProxy" type="password" placeholder="http:// / https:// / socks5:// / socks5h://"><button class="ghost" onclick="testDraftProxy()" style="margin-top:6px">测试代理连通性</button>
@@ -409,6 +420,13 @@
     <p class="dim" id="drawerRoutes" style="margin-top:12px"></p><div class="toolbar" style="margin-top:18px"><button onclick="saveDrawer()">保存草案</button><button class="ghost" onclick="closeAccountDrawer()">关闭</button></div>
   </aside>
 </div>
+<dialog id="clientKeySecretDialog" aria-labelledby="clientKeySecretTitle" aria-describedby="clientKeySecretHelp" style="width:min(540px,calc(100% - 24px));max-height:90vh;overflow:auto;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:18px">
+  <h2 id="clientKeySecretTitle">新客户端密钥（仅显示一次）</h2>
+  <p id="clientKeySecretHelp">复制并安全保存。关闭后无法再次查看；丢失只能轮换。此值不得当作管理员密码。</p>
+  <label for="clientKeySecret">仅此一次的密钥值</label><input id="clientKeySecret" type="text" readonly autocomplete="off" spellcheck="false">
+  <div class="toolbar"><button type="button" onclick="copyClientKeySecret()">复制密钥</button><button type="button" class="ghost" onclick="closeClientKeySecret(false)">关闭并清除</button></div>
+  <p id="clientKeyCopyStatus" role="status" aria-live="polite"></p>
+</dialog>
 <div id="presetModal" class="modal"><div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="presetTitle"><h2 id="presetTitle">预设变更预览</h2><div id="presetDiff" style="white-space:pre-wrap;margin:14px 0"></div><div id="presetAdjust"></div><button onclick="applyPreset()">确认并保存</button> <button class="ghost" onclick="closePreset()">取消</button></div></div>
 <div id="errorPresetModal" class="modal"><div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="errorPresetTitle"><h2 id="errorPresetTitle">错误规则预设变更预览</h2><div id="errorPresetDiff" style="white-space:pre-wrap;margin:14px 0"></div><button onclick="applyErrorPreset()">确认并通过账号配置保存</button> <button class="ghost" onclick="closeErrorPreset()">取消</button></div></div>
 <div id="retryPresetModal" class="modal"><div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="retryPresetTitle"><h2 id="retryPresetTitle">请求停止重试预设变更预览</h2><div id="retryPresetDiff" style="white-space:pre-wrap;margin:14px 0"></div><p class="dim" style="font-size:12px">同时加入 502 + 正文“system message must have content”的停止重试规则与同条件的 Provider-model 忽略健康规则；取消不产生任何变化。</p><button onclick="applyRetryPreset()">确认并通过账号配置保存</button> <button class="ghost" onclick="closeRetryPreset()">取消</button></div></div>
@@ -419,6 +437,7 @@ try { localStorage.removeItem('cps_key'); } catch {}
 let ADMIN_CSRF = null;
 let ADMIN_PENDING = false;
 let ADMIN_BOOTSTRAP = false;
+let CLIENT_KEYS = [{id:'legacy',name:'Legacy'}], CLIENT_KEY_ACTION_ID = 0, CLIENT_KEY_RETURN = null;
 const $ = (s) => document.querySelector(s);
 const escapeHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 const jsArg = (s) => escapeHtml(JSON.stringify(String(s ?? '')));
@@ -429,12 +448,13 @@ async function api(path, body, method, asText=false, options={}) {
   const verb = method || (body ? 'POST' : 'GET');
   if (!['GET', 'HEAD'].includes(verb) && ADMIN_CSRF) headers['X-CSRF-Token'] = ADMIN_CSRF;
   const res = await fetch(path, { method: verb, headers, credentials: 'same-origin', ...(body ? { body: JSON.stringify(body) } : {}), ...(options.signal ? { signal: options.signal } : {}) });
-  if (res.status === 401) { ADMIN_CSRF = null; resetDetailSelection(); showLogin(); throw new Error('unauthorized'); }
+  if (res.status === 401) { ADMIN_CSRF = null; closeClientKeySecret(true,false); resetDetailSelection(); showLogin(); throw new Error('unauthorized'); }
   if(asText){if(!res.ok)throw Error('正文已过期、清空或暂不可用');return res.text();}
   return res.json();
 }
 
 function showLogin() {
+  closeClientKeySecret(true,false);
   resetDetailSelection();
   $('#loginOverlay').style.display = 'flex';
   $('#bootstrapFields').hidden = !ADMIN_BOOTSTRAP || ADMIN_PENDING;
@@ -473,14 +493,15 @@ async function changeAdminPassword() {
   try {
     const res = await api('/api/auth/password', { currentPassword: $('#currentAdminPassword').value, newPassword: $('#changedAdminPassword').value });
     $('#adminStatus').textContent = res.ok ? '已修改，请重新登录' : '修改失败';
-    if (res.ok) { $('#currentAdminPassword').value = ''; $('#changedAdminPassword').value = ''; ADMIN_CSRF = null; resetDetailSelection(); showLogin(); }
+    if (res.ok) { $('#currentAdminPassword').value = ''; $('#changedAdminPassword').value = ''; ADMIN_CSRF = null; closeClientKeySecret(true,false); resetDetailSelection(); showLogin(); }
   } catch { $('#adminStatus').textContent = '修改失败'; }
 }
 async function logoutAdmin() {
+  closeClientKeySecret(true,false);
   try {
     const result = await api('/api/auth/logout', {});
     if (!result.ok) throw new Error('logout failed');
-    ADMIN_CSRF = null; resetDetailSelection(); DATA = null; ACCS = null; $('#currentAdminPassword').value = ''; $('#changedAdminPassword').value = '';
+    ADMIN_CSRF = null; closeClientKeySecret(true,false); resetDetailSelection(); DATA = null; ACCS = null; $('#currentAdminPassword').value = ''; $('#changedAdminPassword').value = '';
     location.reload();
   } catch { $('#adminStatus').textContent = '退出未确认，请重试'; }
 }
@@ -649,10 +670,11 @@ function renderCatalog() {
 
 async function loadAll() {
   const accountId = $('#routeScope')?.value || '';
-  const [models, accs, sec, meta, aliases, statistics] = await Promise.all([api('/api/models' + (accountId ? '?accountId=' + encodeURIComponent(accountId) : '')), api('/api/accounts'), api('/api/security'), api('/api/meta'), api('/api/model-aliases'), api('/api/statistics')]);
+  const [models, accs, sec, meta, aliases, statistics, keyList] = await Promise.all([api('/api/models' + (accountId ? '?accountId=' + encodeURIComponent(accountId) : '')), api('/api/accounts'), api('/api/security'), api('/api/meta'), api('/api/model-aliases'), api('/api/statistics'), api('/api/security/client-keys')]);
   const modelStatistics=new Map((statistics?.models||[]).map(item=>[item.id,item]));
   DATA = {...models,subscription:(models.subscription||[]).map(item=>({...item,statistics:modelStatistics.get(item.id)||null}))};
   ACCS = accs; ALIASES = aliases;
+  CLIENT_KEYS = Array.isArray(keyList?.keys) && keyList.keys.some(k => k.id === 'legacy') ? keyList.keys.map(({id,name}) => ({id,name})) : [{id:'legacy',name:'Legacy'}];
   $('#accMode').value = ACCS.mode; $('#concurrencyWaitMs').value = ACCS.concurrencyWaitMs ?? 2000;
   $('#monthlyQuotaThreshold').value = (ACCS.quotaProtection?.monthlyThresholdUsd ?? 0.20).toFixed(2);
   const pipeline=ACCS.accountPipeline||{},cacheMin=pipeline.cachePoolSize??0;
@@ -660,7 +682,7 @@ async function loadAll() {
   $('#sessionBindingExplicitTtlMs').value=pipeline.sessionBindingExplicitTtlMs??7200000;$('#sessionBindingFallbackTtlMs').value=pipeline.sessionBindingFallbackTtlMs??900000;$('#sessionBindingMaxEntries').value=pipeline.sessionBindingMaxEntries??50000;
   const runtime=ACCS.cachePool||{},binding=runtime.binding||{};
   const actual=runtime.actual||{};
-  $('#cachePoolRuntime').textContent=`当前目标 ${runtime.targetSize??cacheMin}（最小 ${runtime.minSize??cacheMin} / 上限 ${runtime.maxSize??pipeline.cachePoolMaxSize??cacheMin} / 低额度槽 ${runtime.lowSize??pipeline.cachePoolLowQuotaSize??0}）；实际高 ${actual.high??0} / 低 ${actual.low??0} / 未知 ${actual.unknown??0}；会话绑定 ${binding.enabled?'已启用':'未启用'}，当前 ${binding.size??0} / ${binding.maxEntries??pipeline.sessionBindingMaxEntries??50000} 条`;
+  $('#cachePoolRuntime').textContent=`当前目标 ${runtime.targetSize??cacheMin}（最小 ${runtime.minSize??cacheMin} / 上限 ${runtime.maxSize??pipeline.cachePoolMaxSize??cacheMin} / 低额度槽 ${runtime.lowSize??pipeline.cachePoolLowQuotaSize??0}）${runtime.scope==='per-client-key'?'，分别应用于各密钥池':''}；实际高 ${actual.high??0} / 低 ${actual.low??0} / 未知 ${actual.unknown??0}${runtime.scope==='per-client-key'?'（各池合计）':''}；会话绑定 ${binding.enabled?'已启用':'未启用'}，当前 ${binding.size??0} / ${binding.maxEntries??pipeline.sessionBindingMaxEntries??50000} 条`;
   hydrateErrorRuleDraft(ACCS.errorRules || []);
   hydrateRetryRuleDraft(ACCS.retryRules || []);
   setPipelineOrder(ACCS.accountPipeline?.order || PIPELINE_DEFAULT_ORDER);
@@ -673,19 +695,113 @@ async function loadAll() {
   const scope = $('#routeScope');
   if (scope) { scope.innerHTML = '<option value="">全局默认</option>' + accs.accounts.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`).join(''); scope.value = accountId; }
   render();
-  renderAccounts();
   renderSecurity(sec);
+  renderAccounts();
   $('#noKeyBanner').style.display = meta.configured ? 'none' : 'block';
+}
+
+function clientKeyOptions(selected) {
+  const keys=CLIENT_KEYS.some(k=>k.id===selected)?CLIENT_KEYS:[...CLIENT_KEYS,{id:selected,name:'未知归属（请重新选择）',missing:true}];
+  return keys.map(k=>`<option value="${escapeHtml(k.id)}" ${k.id===selected?'selected':''} ${k.missing?'disabled':''}>${escapeHtml(k.name)} (${escapeHtml(k.id)})</option>`).join('');
+}
+function renderClientKeys() {
+  $('#clientKeyBody').innerHTML=CLIENT_KEYS.map(k=>{
+    const count=(ACCS?.accounts||[]).filter(a=>(a.clientKeyId??'legacy')===k.id).length;
+    return `<tr><td>${escapeHtml(k.name)}</td><td class="mono">${escapeHtml(k.id)}</td><td>${count}</td><td>${k.id==='legacy'?'旧版密钥在上方设置':`<div class="row-actions"><button type="button" class="ghost" onclick="renameClientKey(${jsArg(k.id)})">重命名</button><button id="clientKeyRotate-${escapeHtml(k.id)}" type="button" class="ghost" onclick="rotateClientKey(${jsArg(k.id)})">轮换</button><button type="button" class="ghost" onclick="revokeClientKey(${jsArg(k.id)})">撤销</button></div>`}</td></tr>`;
+  }).join('');
+}
+function closeClientKeySecret(invalidateAction=true, restoreFocus=true) {
+  if(invalidateAction)CLIENT_KEY_ACTION_ID++;
+  const dialog=$('#clientKeySecretDialog'),opened=dialog.open;
+  $('#clientKeySecret').value=''; $('#clientKeyCopyStatus').textContent='';
+  if(opened)dialog.close();
+  if(opened&&restoreFocus)(typeof CLIENT_KEY_RETURN==='function'?CLIENT_KEY_RETURN():CLIENT_KEY_RETURN)?.focus?.();
+  CLIENT_KEY_RETURN=null;
+}
+function showClientKeySecret(secret, opener) {
+  CLIENT_KEY_RETURN=opener||$('#newClientKeyName');
+  $('#clientKeySecretDialog').showModal();
+  $('#clientKeySecret').value=secret;
+  $('#clientKeySecret').focus();
+}
+async function copyClientKeySecret() {
+  const field=$('#clientKeySecret');
+  if(!$('#clientKeySecretDialog').open||!field.value)return;
+  try {
+    if(!navigator.clipboard?.writeText)throw Error('clipboard unavailable');
+    await navigator.clipboard.writeText(field.value);
+    if($('#clientKeySecretDialog').open)$('#clientKeyCopyStatus').textContent='已复制，请安全保存';
+  } catch {
+    if($('#clientKeySecretDialog').open){field.focus();field.select();$('#clientKeyCopyStatus').textContent='自动复制失败，已选中密钥，请手动复制';}
+  }
+}
+$('#clientKeySecretDialog').addEventListener('cancel',e=>{e.preventDefault();closeClientKeySecret(false);});
+function clientKeyStatus(message) { $('#clientKeysStatus').textContent=message; }
+async function clientKeyWrite(path,body,method,opener) {
+  closeClientKeySecret();
+  const generation=CLIENT_KEY_ACTION_ID;
+  try {
+    const result=await api(path,body,method);
+    if(generation!==CLIENT_KEY_ACTION_ID)return;
+    if(result.error){clientKeyStatus(result.error.message||'操作失败');return;}
+    if(result.key)showClientKeySecret(result.key,opener);
+    clientKeyStatus(result.key?'操作成功：请立即复制一次性密钥':'操作已生效，正在刷新密钥列表');
+    try {
+      await loadAll();
+    } catch(e) {
+      if(generation!==CLIENT_KEY_ACTION_ID)return;
+      if(e.message==='unauthorized'){closeClientKeySecret(true,false);return;}
+      clientKeyStatus(result.key?'操作已生效但列表刷新失败，请先复制，之后刷新；不要重复提交':'操作已生效但列表刷新失败，请刷新并重新核对服务端状态；不要重复提交');
+      return;
+    }
+    if(generation!==CLIENT_KEY_ACTION_ID)return;
+    // Closing the one-time dialog may focus a row button that loadAll() then replaces.
+    // Restore only a lost focus, never steal it from a newer user action or navigation.
+    const focused=document.activeElement,dialog=$('#clientKeySecretDialog');
+    if(result.key&&!dialog.open&&!$('#consolePanel').hidden&&
+       (!focused||focused===document.body||focused.isConnected===false||dialog.contains?.(focused))){
+      (typeof opener==='function'?opener():opener)?.focus?.();
+    }
+    if(!result.key)clientKeyStatus('已按服务端状态更新密钥列表');
+  } catch(e) { if(generation===CLIENT_KEY_ACTION_ID&&e.message!=='unauthorized')clientKeyStatus('操作失败，请刷新并确认服务端状态'); }
+}
+async function createClientKey() {
+  const name=$('#newClientKeyName').value.trim();
+  if(!name||name.length>80){clientKeyStatus('请输入 1–80 字符的名称');return;}
+  if(!$('#secProxyKey').value.trim()&&(ACCS?.accounts||[]).some(a=>(a.clientKeyId??'legacy')==='legacy')){
+    clientKeyStatus('请先保存非空 Legacy 客户端密钥，再创建独立密钥');return;
+  }
+  await clientKeyWrite('/api/security/client-keys',{name},undefined,$('#newClientKeyName'));
+}
+async function renameClientKey(id) {
+  const item=CLIENT_KEYS.find(k=>k.id===id&&id!=='legacy');if(!item)return;
+  const name=prompt(`重命名客户端密钥「${item.name}」为：`,item.name);
+  if(name===null)return;
+  await clientKeyWrite(`/api/security/client-keys/${encodeURIComponent(id)}`,{name:name.trim()},'PATCH');
+}
+async function rotateClientKey(id) {
+  const item=CLIENT_KEYS.find(k=>k.id===id&&id!=='legacy');
+  if(!item||!confirm(`确认轮换客户端密钥「${item.name}」？旧密钥立即停止新请求，新的密钥只显示一次。`))return;
+  await clientKeyWrite(`/api/security/client-keys/${encodeURIComponent(id)}/rotate`,{},undefined,()=>document.getElementById?.(`clientKeyRotate-${id}`));
+}
+async function revokeClientKey(id) {
+  const item=CLIENT_KEYS.find(k=>k.id===id&&id!=='legacy');
+  if(!item||!confirm(`确认撤销客户端密钥「${item.name}」？请先保存所有归属账号的重分配。撤销后旧密钥立即失效。`))return;
+  await clientKeyWrite(`/api/security/client-keys/${encodeURIComponent(id)}`,null,'DELETE');
 }
 
 function renderSecurity(sec) {
   $('#secProxyKey').value = sec.proxyKey || '';
   $('#secPublicBase').value = sec.publicBaseUrl || '';
   const badge = $('#secBadge');
-  badge.textContent = sec.authRequired ? '鉴权已开启' : '鉴权已关闭';
+  badge.textContent = sec.authRequired ? 'Legacy 鉴权已开启' : 'Legacy 匿名模式';
   badge.className = sec.authRequired ? 'badge green' : 'badge orange';
   const ec = $('#exposeCatalog');
   if (ec) ec.checked = !!sec.exposeCatalog;
+  const owner=$('#newAccountOwner'),previous=owner.value;
+  owner.innerHTML=clientKeyOptions(previous);
+  owner.value=previous!=='legacy'&&CLIENT_KEYS.some(k=>k.id===previous)?previous:(!sec.proxyKey&&CLIENT_KEYS.length>1?CLIENT_KEYS[1].id:'legacy');
+  renderClientKeys();
 }
 
 async function saveExposeCatalog(v) {
@@ -705,7 +821,7 @@ async function saveSecurity() {
     renderSecurity(r);
     DATA.proxyBase = r.proxyBase;
     $('#proxyBase').textContent = '代理地址：' + r.proxyBase + '（点击复制）';
-    secMsg('已保存' + (r.authRequired ? '，鉴权开启' : '，鉴权已关闭（任何客户端都可访问代理）'));
+    secMsg('已保存' + (r.authRequired ? '，Legacy 鉴权开启' : '，Legacy 匿名模式（仅限 Legacy 账号池；其他密钥仍须认证）'));
   } else secMsg(r.error?.message || '保存失败', true);
 }
 
@@ -1105,6 +1221,7 @@ function applyBulkConcurrency() {
 function renderAccounts() {
   if (!ACCS) return;
   updateBulkSelection();
+  renderClientKeys();
   const rows = visibleAccountRows().map(({a,i}) => {
     const checked=$('#accMode').value==='single'&&i===ACCS.active,statistics=a.statistics||{},recent=statistics.recent24h||{},health=a.health||{};
     const roleAware=(ACCS.accountPipeline?.cachePoolLowQuotaSize??0)>0&&(ACCS.accountPipeline?.cachePoolSize??0)>0&&(ACCS.mode==='sticky'||ACCS.accountPipeline?.sticky===true);
@@ -1120,9 +1237,9 @@ function renderAccounts() {
     const cacheSummary=modelCacheMetric({recent24h:recent,coverage:{complete:health.coverageComplete!==false}});
     let proxy='直连'; try { if(a.proxyUrl) proxy=new URL(a.proxyUrl).protocol.replace(':','').toUpperCase(); } catch {}
     const note=String(a.note||'').replace(/\s+/g,' ').slice(0,50);
-    return `<tr><td><input type="checkbox" aria-label="批量选择 ${escapeHtml(a.name)}" ${BULK_SELECTION.has(a)?'checked':''} onchange="selectAccount(${i},this.checked)"></td><td><input type="radio" name="accActive" data-i="${i}" ${checked?'checked':''} ${$('#accMode').value!=='single'?'disabled':''} onchange="ACCS.active=${i}"></td><td class="account-name" title="${escapeHtml(a.name)}">${escapeHtml(a.name)}</td><td class="dim">${escapeHtml(note||'—')}</td><td><input type="checkbox" ${a.enabled!==false?'checked':''} onchange="ACCS.accounts[${i}].enabled=this.checked"></td><td>${a.maxConcurrent||0} / ${a.activeCount||0}<div class="dim" style="font-size:11px">${escapeHtml(rpmSummary)}</div></td><td>${a.weight||1} / ${a.priority||100}</td><td><span class="badge">${escapeHtml(proxy)}</span></td><td><span class="badge ${state==='可调度'?'green':'orange'}">${escapeHtml(state)}</span><div class="dim" style="font-size:11px">24h 成功率 ${escapeHtml(rate)} · ${escapeHtml(samples)}${health.coverageComplete===false?' · 统计积累中':''}</div>${health.disabled&&a.quota?.protectionPersistence==='pending'?'<div class="dim">月额度封禁写盘待重试 · 重启前确认持久化</div>':''}${cacheRole?` <span class="badge">${cacheRole}</span>`:''}${quotaRole?` <span class="badge">${quotaRole}</span>`:''}${nextRefresh?`<div class="dim">${escapeHtml(nextRefresh)}</div>`:''}</td><td>${statisticValue(statistics.lifetimeRequests)}</td><td>${cacheSummary}</td><td>${statisticValue(recent.errors)} / ${statisticValue(statistics.lifetimeErrors)}</td><td><div class="row-actions"><button class="ghost" onclick="openAccountDrawer(${i},this)">设置</button><button class="ghost" onclick="testAccount(${i},this)">测试</button>${a.state?.hardQuarantined||a.state?.banned||a.state?.cooldownUntil>Date.now()?`<button class="ghost" onclick="recoverAccount(${jsArg(a.id)})">恢复规则状态</button>`:''}${a.state?.protectionMonthlyAt?`<button class="ghost" onclick="recoverMonthlyQuota(${jsArg(a.id)})">解除月额度封禁</button>`:''}<button class="ghost" onclick="delAccount(${i})">删除</button></div></td></tr>`;
+    return `<tr><td><input type="checkbox" aria-label="批量选择 ${escapeHtml(a.name)}" ${BULK_SELECTION.has(a)?'checked':''} onchange="selectAccount(${i},this.checked)"></td><td><input type="radio" name="accActive" data-i="${i}" ${checked?'checked':''} ${$('#accMode').value!=='single'?'disabled':''} onchange="ACCS.active=${i}"></td><td class="account-name" title="${escapeHtml(a.name)}">${escapeHtml(a.name)}</td><td class="dim">${escapeHtml(note||'—')}</td><td>${escapeHtml(CLIENT_KEYS.find(k=>k.id===(a.clientKeyId??'legacy'))?.name||'未知归属')}</td><td><input type="checkbox" ${a.enabled!==false?'checked':''} onchange="ACCS.accounts[${i}].enabled=this.checked"></td><td>${a.maxConcurrent||0} / ${a.activeCount||0}<div class="dim" style="font-size:11px">${escapeHtml(rpmSummary)}</div></td><td>${a.weight||1} / ${a.priority||100}</td><td><span class="badge">${escapeHtml(proxy)}</span></td><td><span class="badge ${state==='可调度'?'green':'orange'}">${escapeHtml(state)}</span><div class="dim" style="font-size:11px">24h 成功率 ${escapeHtml(rate)} · ${escapeHtml(samples)}${health.coverageComplete===false?' · 统计积累中':''}</div>${health.disabled&&a.quota?.protectionPersistence==='pending'?'<div class="dim">月额度封禁写盘待重试 · 重启前确认持久化</div>':''}${cacheRole?` <span class="badge">${cacheRole}</span>`:''}${quotaRole?` <span class="badge">${quotaRole}</span>`:''}${nextRefresh?`<div class="dim">${escapeHtml(nextRefresh)}</div>`:''}</td><td>${statisticValue(statistics.lifetimeRequests)}</td><td>${cacheSummary}</td><td>${statisticValue(recent.errors)} / ${statisticValue(statistics.lifetimeErrors)}</td><td><div class="row-actions"><button class="ghost" onclick="openAccountDrawer(${i},this)">设置</button><button class="ghost" onclick="testAccount(${i},this)">测试</button>${a.state?.hardQuarantined||a.state?.banned||a.state?.cooldownUntil>Date.now()?`<button class="ghost" onclick="recoverAccount(${jsArg(a.id)})">恢复规则状态</button>`:''}${a.state?.protectionMonthlyAt?`<button class="ghost" onclick="recoverMonthlyQuota(${jsArg(a.id)})">解除月额度封禁</button>`:''}<button class="ghost" onclick="delAccount(${i})">删除</button></div></td></tr>`;
   }).join('');
-  $('#accBody').innerHTML=rows||'<tr><td colspan="13" class="empty">无匹配账号</td></tr>';
+  $('#accBody').innerHTML=rows||'<tr><td colspan="14" class="empty">无匹配账号</td></tr>';
 }
 function cloneRuleDraft(value=ERROR_RULE_DRAFT){return JSON.parse(JSON.stringify(value));}
 function ruleObject(value){return value!==null&&typeof value==='object'&&!Array.isArray(value);}
@@ -1301,18 +1418,18 @@ function applyRawScheduling() {
   $('#rawSchedulingFeedback').textContent = '草稿已更新，尚未生效；请保存账号配置';
 }
 function monthlyQuotaDraft(){const text=$('#monthlyQuotaThreshold').value.trim(),amount=Number(text);if(!/^\d+(?:\.\d{1,2})?$/.test(text)||amount<0.01||amount>50)throw Error('月参考余额阈值必须是 $0.01–$50.00，最多两位小数');return {monthlyThresholdUsd:amount};}
-function collectAccounts(){validateErrorRuleDraft(ERROR_RULE_DRAFT);validateRetryRuleDraft(RETRY_RULE_DRAFT);const rules=cloneRuleDraft(),retryRules=cloneRetryRuleDraft();return {quotaProtection:monthlyQuotaDraft(),accounts:ACCS.accounts.map(a=>({id:a.id,name:a.name,note:a.note||'',key:a.key||'',enabled:a.enabled!==false,maxConcurrent:Number(a.maxConcurrent)||0,maxRpm:Number(a.maxRpm)||0,weight:Number(a.weight)||1,priority:Number(a.priority)||100,proxyUrl:a.proxyUrl||'',headers:a.headers||{},perModel:a.perModel||{}})),mode:$('#accMode').value,active:ACCS.active||0,errorRules:rules,retryRules,accountPipeline:{quotaPool:$('#pipelineQuotaPool').checked,healthSort:$('#pipelineHealthSort').checked,sticky:$('#pipelineSticky').checked,order:pipelineOrder(),...pipelineNumberDraft()}};}
+function collectAccounts(){validateErrorRuleDraft(ERROR_RULE_DRAFT);validateRetryRuleDraft(RETRY_RULE_DRAFT);const rules=cloneRuleDraft(),retryRules=cloneRetryRuleDraft();return {quotaProtection:monthlyQuotaDraft(),accounts:ACCS.accounts.map(a=>({id:a.id,name:a.name,note:a.note||'',key:a.key||'',enabled:a.enabled!==false,maxConcurrent:Number(a.maxConcurrent)||0,maxRpm:Number(a.maxRpm)||0,weight:Number(a.weight)||1,priority:Number(a.priority)||100,proxyUrl:a.proxyUrl||'',headers:a.headers||{},perModel:a.perModel||{},clientKeyId:a.clientKeyId??'legacy'})),mode:$('#accMode').value,active:ACCS.active||0,errorRules:rules,retryRules,accountPipeline:{quotaPool:$('#pipelineQuotaPool').checked,healthSort:$('#pipelineHealthSort').checked,sticky:$('#pipelineSticky').checked,order:pipelineOrder(),...pipelineNumberDraft()}};}
 async function saveAccounts(payload=null){if(!payload){try{payload=collectAccounts();}catch(e){return accMsg(e.message,true);}}payload.concurrencyWaitMs=Number($('#concurrencyWaitMs').value);if(payload.errorRules===undefined)payload.errorRules=cloneRuleDraft();if(!payload.accounts.some(a=>a.key))return accMsg('至少需要一个 key 非空的账号',true);const r=await api('/api/accounts',payload);if(!r.ok)return accMsg(r.error?.message||'保存失败',true);accMsg(`已保存：${r.accounts} 个账号 · ${r.mode}`);await loadAll();}
 async function recoverAccount(id){const r=await api('/api/accounts/recover',{id});if(r.ok){accMsg('账号已恢复');await loadAll();}}
 async function recoverMonthlyQuota(id){if(!confirm('确定解除月额度封禁？该账号可能再次额度不足并产生失败请求。请先核对额度。'))return;const r=await api('/api/accounts/quota-recover',{id});if(!r.ok)return accMsg(r.error?.message||'解除失败',true);accMsg('月额度封禁已解除，请注意后续失败');await loadAll();}
 async function recoverProvider(model,provider){const r=await api('/api/providers/recover',{model,provider});if(!r.ok){$('#accLive').textContent=r.error?.message||'Provider 恢复失败';return;}$('#accLive').textContent=`已恢复 ${model} / ${provider}`;await loadAll();}
-function addAccountRow(){ACCS.accounts.push({name:`账号${ACCS.accounts.length+1}`,note:'',key:'',enabled:true,maxConcurrent:0,maxRpm:0,weight:1,priority:100,proxyUrl:'',headers:{},perModel:{}});renderAccounts();openAccountDrawer(ACCS.accounts.length-1);}
+function addAccountRow(){const owner=$('#newAccountOwner').value;if(!CLIENT_KEYS.some(k=>k.id===owner))return accMsg('请先选择有效的客户端密钥归属',true);if(owner==='legacy'&&!$('#secProxyKey').value.trim()&&CLIENT_KEYS.length>1)return accMsg('请先保存非空 Legacy 客户端密钥，或选择其他归属',true);ACCS.accounts.push({clientKeyId:owner,name:`账号${ACCS.accounts.length+1}`,note:'',key:'',enabled:true,maxConcurrent:0,maxRpm:0,weight:1,priority:100,proxyUrl:'',headers:{},perModel:{}});renderAccounts();openAccountDrawer(ACCS.accounts.length-1);}
 function delAccount(i){if(!confirm('确认删除该账号？'))return;ACCS.accounts.splice(i,1);ACCS.active=Math.min(ACCS.active,Math.max(0,ACCS.accounts.length-1));renderAccounts();}
 async function testAccount(i,btn){const a=ACCS.accounts[i];if(!a.key)return accMsg('请先在设置中填写 key',true);btn.disabled=true;const r=await api('/api/accounts/test',{accountId:a.id,key:a.key,proxyUrl:a.proxyUrl||''});btn.disabled=false;accMsg(r.ok?`✔ ${a.name} 可用（${r.ms} ms）`:`✘ ${a.name}：${r.error}`,!r.ok);}
-function drawerValue(){return JSON.stringify([$('#drawerName').value,$('#drawerNote').value,$('#drawerKey').value,$('#drawerMax').value,$('#drawerRpm').value,$('#drawerWeight').value,$('#drawerPriority').value,$('#drawerProxy').value,$('#drawerHeaders').value]);}
-function openAccountDrawer(i,button){const a=ACCS.accounts[i];DRAWER_INDEX=i;DRAWER_RETURN=button||document.activeElement;[['drawerName',a.name],['drawerNote',a.note||''],['drawerKey',a.key||''],['drawerMax',a.maxConcurrent||0],['drawerRpm',a.maxRpm||0],['drawerWeight',a.weight||1],['drawerPriority',a.priority||100],['drawerProxy',a.proxyUrl||''],['drawerHeaders',JSON.stringify(a.headers||{},null,2)]].forEach(([id,v])=>$('#'+id).value=v);$('#drawerShowKey').checked=false;$('#drawerKey').type='password';$('#drawerRoutes').textContent=`账号专属模型路由：${Object.keys(a.perModel||{}).length} 条（可在模型表切换作用域编辑）`;$('#drawerError').textContent='';$('#accountDrawerBackdrop').style.display='block';DRAWER_SNAPSHOT=drawerValue();setTimeout(()=>$('#drawerName').focus(),0);}
+function drawerValue(){return JSON.stringify([$('#drawerName').value,$('#drawerNote').value,$('#drawerKey').value,$('#drawerMax').value,$('#drawerRpm').value,$('#drawerWeight').value,$('#drawerPriority').value,$('#drawerProxy').value,$('#drawerHeaders').value,$('#drawerClientKeyId').value]);}
+function openAccountDrawer(i,button){const a=ACCS.accounts[i];DRAWER_INDEX=i;DRAWER_RETURN=button||document.activeElement;[['drawerName',a.name],['drawerNote',a.note||''],['drawerKey',a.key||''],['drawerMax',a.maxConcurrent||0],['drawerRpm',a.maxRpm||0],['drawerWeight',a.weight||1],['drawerPriority',a.priority||100],['drawerProxy',a.proxyUrl||''],['drawerHeaders',JSON.stringify(a.headers||{},null,2)]].forEach(([id,v])=>$('#'+id).value=v);$('#drawerClientKeyId').innerHTML=clientKeyOptions(a.clientKeyId??'legacy');$('#drawerClientKeyId').value=a.clientKeyId??'legacy';$('#drawerShowKey').checked=false;$('#drawerKey').type='password';$('#drawerRoutes').textContent=`账号专属模型路由：${Object.keys(a.perModel||{}).length} 条（可在模型表切换作用域编辑）`;$('#drawerError').textContent='';$('#accountDrawerBackdrop').style.display='block';DRAWER_SNAPSHOT=drawerValue();setTimeout(()=>$('#drawerName').focus(),0);}
 function closeAccountDrawer(force=false){if(!force&&DRAWER_INDEX>=0&&drawerValue()!==DRAWER_SNAPSHOT&&!confirm('存在未保存变更，确认关闭？'))return;$('#accountDrawerBackdrop').style.display='none';DRAWER_INDEX=-1;DRAWER_RETURN?.focus?.();DRAWER_RETURN=null;}
-function saveDrawer(){try{const a=ACCS.accounts[DRAWER_INDEX],headers=JSON.parse($('#drawerHeaders').value||'{}');Object.assign(a,{name:$('#drawerName').value.trim(),note:$('#drawerNote').value,key:$('#drawerKey').value.trim(),maxConcurrent:Number($('#drawerMax').value),maxRpm:Math.max(0,Math.min(100000,Math.floor(Number($('#drawerRpm').value)||0))),weight:Number($('#drawerWeight').value),priority:Number($('#drawerPriority').value),proxyUrl:$('#drawerProxy').value.trim(),headers});DRAWER_SNAPSHOT=drawerValue();closeAccountDrawer(true);renderAccounts();accMsg('草案已更新，请点击“保存账号配置”持久化');}catch{$('#drawerError').textContent='请求头必须是有效 JSON';}}
+function saveDrawer(){try{const a=ACCS.accounts[DRAWER_INDEX],headers=JSON.parse($('#drawerHeaders').value||'{}');if(!CLIENT_KEYS.some(k=>k.id===$('#drawerClientKeyId').value)){$('#drawerError').textContent='请选择有效的客户端密钥归属';return;}Object.assign(a,{clientKeyId:$('#drawerClientKeyId').value,name:$('#drawerName').value.trim(),note:$('#drawerNote').value,key:$('#drawerKey').value.trim(),maxConcurrent:Number($('#drawerMax').value),maxRpm:Math.max(0,Math.min(100000,Math.floor(Number($('#drawerRpm').value)||0))),weight:Number($('#drawerWeight').value),priority:Number($('#drawerPriority').value),proxyUrl:$('#drawerProxy').value.trim(),headers});DRAWER_SNAPSHOT=drawerValue();closeAccountDrawer(true);renderAccounts();accMsg('草案已更新，请点击“保存账号配置”持久化');}catch{$('#drawerError').textContent='请求头必须是有效 JSON';}}
 async function testDraftProxy(){const a=ACCS.accounts[DRAWER_INDEX];if(!a.id)return $('#drawerError').textContent='请先保存新账号再测试代理';const r=await api('/api/accounts/proxy-test',{accountId:a.id,proxyUrl:$('#drawerProxy').value.trim()});$('#drawerError').style.color=r.ok?'var(--green)':'var(--red)';$('#drawerError').textContent=r.ok?`代理可达：${r.proxyType} · ${r.ms}ms`:`代理失败：${r.reason||r.error?.message}`;}
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('#accountDrawerBackdrop').style.display==='block')closeAccountDrawer();});
 const accountCooldownRule=(id,duration,statuses=[429])=>({id,scope:'account',action:'cooldown',when:{statuses},reset:{fallback:duration,max:duration}});
@@ -1468,9 +1585,10 @@ function armStatisticsTimer(visitId){clearTimeout(STATISTICS_TIMER);STATISTICS_T
 function stopStatisticsVisit(){STATISTICS_VISIT_ID++;STATISTICS_QUERY_ID++;clearTimeout(STATISTICS_TIMER);STATISTICS_TIMER=null;STATISTICS_REFRESH_CONTROLLER?.abort();STATISTICS_REFRESH_CONTROLLER=null;STATISTICS_REFRESH_PROMISE=null;const button=$('#statisticsRefresh');if(button){button.disabled=false;button.textContent='↻ 手动刷新额度与统计';}}
 async function startStatisticsVisit(){const visitId=++STATISTICS_VISIT_ID;armStatisticsTimer(visitId);await loadStatistics(visitId);if(visitId===STATISTICS_VISIT_ID&&!$('#statisticsPanel').hidden)return refreshStatisticsQuota(false,visitId);return null;}
 function restoreStatisticsVisit(){if(!$('#statisticsPanel').hidden&&STATISTICS_TIMER===null)return startStatisticsVisit();return null;}
-if(typeof window!=='undefined'){window.addEventListener('pagehide',()=>{stopStatisticsVisit();stopModelProviders();resetDetailSelection();});window.addEventListener('pageshow',()=>!$('#statisticsPanel').hidden?restoreStatisticsVisit():!$('#modelProvidersPanel').hidden?loadModelProviders():null);}
+if(typeof window!=='undefined'){window.addEventListener('pagehide',()=>{closeClientKeySecret(true,false);stopStatisticsVisit();stopModelProviders();resetDetailSelection();});window.addEventListener('pageshow',()=>!$('#statisticsPanel').hidden?restoreStatisticsVisit():!$('#modelProvidersPanel').hidden?loadModelProviders():null);}
 async function switchSection(section){
   const isConsole=section==='console',isStatistics=section==='statistics',type=section==='errors'?'errors':'requests';
+  closeClientKeySecret(true,false);
   stopStatisticsVisit();stopModelProviders();LOG_QUERY_ID++;STATISTICS_QUERY_ID++;DETAIL_LIST_ID++;DETAIL_NAV_ID++;resetDetailSelection();
   $('#consolePanel').hidden=!isConsole;$('#statisticsPanel').hidden=!isStatistics;$('#modelProvidersPanel').hidden=section!=='modelProviders';$('#logPanel').hidden=isConsole||isStatistics||section==='details'||section==='modelProviders';$('#detailsPanel').hidden=section!=='details';
   for(const [name,id] of [['console','navConsole'],['statistics','navStatistics'],['requests','navRequests'],['errors','navErrors'],['details','navDetails'],['modelProviders','navModelProviders']])$('#'+id).setAttribute('aria-pressed',String(section===name));

@@ -2,6 +2,7 @@
   "port": 3123,
   "apiKey": "",
   "proxyKey": "",
+  "clientKeys": [],
   "publicBaseUrl": "",
   "exposeCatalog": false,
   "detailedLogging": false,
@@ -11,6 +12,7 @@
   "accounts": [
     {
       "id": "replace-with-stable-account-id",
+      "clientKeyId": "legacy",
       "name": "账号1",
       "note": "可选备注（不会发送到上游或日志）",
       "key": "",

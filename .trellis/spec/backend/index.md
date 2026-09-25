@@ -16,6 +16,7 @@ The backend is an ESM Node service centered on `server.js`, with cohesive storag
 | [Persistence Guidelines](./database-guidelines.md) | JSON configuration, metadata, migration, identity, atomic writes |
 | [Error Handling](./error-handling.md) | API errors, upstream classification, cancellation, fail-open diagnostics |
 | [Administrator Authentication](./admin-auth-guidelines.md) | Independent console login, bootstrap, sessions, CSRF, route/transport gates and rollback |
+| [Client-Key Account Pools](./client-key-guidelines.md) | Private key inventory, owner migration, exclusive chat/catalog routing, management API and old-image rollback gate |
 | [Quality Guidelines](./quality-guidelines.md) | Account routing, transport, statistics, quota jobs, security, integration tests |
 | [Logging Guidelines](./logging-guidelines.md) | Ordinary JSONL logs and opt-in detailed capture/storage/APIs |
 | [Deployment Guidelines](./deployment-guidelines.md) | Canonical production host, key-path safety, versioned releases, verification, rollback |

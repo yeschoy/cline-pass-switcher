@@ -34,8 +34,28 @@ test('provider setup preview and cooldown controls preserve explicit confirmatio
   assert.match(html, /Provider 冷却\(ms\)/); assert.match(html, /providerCooldownMs/);
 });
 
+test('client-key console uses authenticated labels, native owner/secret controls and one-time disclosure', () => {
+  assert.match(html, /api\('\/api\/security\/client-keys'\)/);
+  assert.match(html, /非空环境变量 PROXY_KEY 仅在启动\/重启时覆盖 Legacy/);
+  assert.match(html, /Legacy 匿名模式（仅限 Legacy 账号池；其他密钥仍须认证）/);
+  assert.match(html, /id="secProxyKey"[^>]*placeholder="空 = Legacy 匿名（仅 Legacy 账号池）"/);
+  assert.doesNotMatch(html, /鉴权已关闭（任何客户端都可访问代理）/);
+  assert.match(html, /id="newAccountOwner"[^>]*><option value="legacy"/);
+  assert.match(html, /<label for="drawerClientKeyId">归属客户端密钥/);
+  assert.match(html, /<select id="drawerClientKeyId">/);
+  assert.match(html, /id="clientKeySecretDialog" aria-labelledby="clientKeySecretTitle" aria-describedby="clientKeySecretHelp"/);
+  assert.match(html, /id="clientKeySecret" type="text" readonly autocomplete="off"/);
+  assert.match(html, /addEventListener\('cancel',e=>\{e.preventDefault\(\);closeClientKeySecret\(false\)/);
+  assert.match(html, /onclick="closeClientKeySecret\(false\)">关闭并清除/);
+  assert.match(html, /navigator.clipboard.writeText\(field.value\)/);
+  const list=html.slice(html.indexOf('function renderClientKeys'),html.indexOf('function closeClientKeySecret'));
+  assert.match(list,/escapeHtml\(k\.name\)/);assert.match(list,/jsArg\(k\.id\)/);assert.doesNotMatch(list,/k\.key/);
+  const collect=html.slice(html.indexOf('function collectAccounts'),html.indexOf('async function saveAccounts'));
+  assert.match(collect,/clientKeyId:a\.clientKeyId\?\?'legacy'/);
+});
+
 test('account drawer key visibility is explicit, masked on every open, and excluded from dirty state', () => {
-  assert.match(html, /<label for="drawerKey">API Key<\/label><input id="drawerKey" type="password">/);
+  assert.match(html, /<label for="drawerKey">上游 API Key<\/label><input id="drawerKey" type="password">/);
   assert.match(html, /<input id="drawerShowKey" type="checkbox"[^>]+> 显示 API Key<\/label>/);
   assert.match(html, /onchange="\$\('#drawerKey'\)\.type=this\.checked\?'text':'password'"/);
   const drawerValue = html.slice(html.indexOf('function drawerValue'), html.indexOf('function openAccountDrawer'));
@@ -180,7 +200,7 @@ test('statistics quota controls expose labelled lifecycle, truthful units and ca
   assert.match(statistics,/typeof value==='number'&&Number\.isFinite\(value\)&&value>=0&&value<=100/);
   assert.match(statistics,/\(100-used\)\.toFixed\(1\)/);assert.match(statistics,/api\('\/api\/statistics\/quota-refresh',\{force\}/);
   assert.match(statistics,/new AbortController\(\)/);assert.match(statistics,/signal:controller\.signal/);assert.match(html,/async function api\(path, body, method, asText=false, options=\{\}\)/);
-  assert.match(html,/STATISTICS_REFRESH_MS = 5 \* 60 \* 1000/);assert.match(statistics,/window\.addEventListener\('pagehide',\(\)=>\{stopStatisticsVisit\(\);stopModelProviders\(\);resetDetailSelection\(\);\}\)/);assert.match(statistics,/window\.addEventListener\('pageshow',\(\)=>!\$\('#statisticsPanel'\)\.hidden\?restoreStatisticsVisit\(\):!\$\('#modelProvidersPanel'\)\.hidden\?loadModelProviders\(\):null\)/);
+  assert.match(html,/STATISTICS_REFRESH_MS = 5 \* 60 \* 1000/);assert.match(statistics,/window\.addEventListener\('pagehide',\(\)=>\{closeClientKeySecret\(true,false\);stopStatisticsVisit\(\);stopModelProviders\(\);resetDetailSelection\(\);\}\)/);assert.match(statistics,/window\.addEventListener\('pageshow',\(\)=>!\$\('#statisticsPanel'\)\.hidden\?restoreStatisticsVisit\(\):!\$\('#modelProvidersPanel'\)\.hidden\?loadModelProviders\(\):null\)/);
   assert.match(statistics,/STATISTICS_TIMER===null\)return startStatisticsVisit\(\)/);assert.match(statistics,/STATISTICS_REFRESH_CONTROLLER\?\.abort\(\)/);assert.match(statistics,/visitId!==STATISTICS_VISIT_ID/);
   assert.match(statistics,/controller!==STATISTICS_REFRESH_CONTROLLER/);assert.match(statistics,/STATISTICS_REFRESH_PROMISE&&STATISTICS_REFRESH_VISIT===visitId/);
 });
@@ -223,7 +243,7 @@ test('raw scheduling editor uses a labelled native modal, draft guidance and ann
   assert.match(html, /id="rawSchedulingJson"[^>]+overflow-wrap:anywhere/);
   for (const id of ['rawSchedulingError','rawSchedulingFeedback']) assert.match(html,new RegExp(`id="${id}" aria-live="polite"`));
   assert.match(html,/accountNames 为全部账号的只读参考名称（可重复），不可修改/);
-  assert.match(html,/策略全局适用于账号池/);assert.match(html,/priority\/稳定 ID/);assert.match(html,/reserve/);assert.match(html,/grow-one/);assert.match(html,/sticky\+healthSort 是“绑定命中条件门”/);
+  assert.match(html,/策略全局统一，分别作用于各客户端密钥归属的账号池/);assert.match(html,/priority\/稳定 ID/);assert.match(html,/reserve/);assert.match(html,/grow-one/);assert.match(html,/sticky\+healthSort 是“绑定命中条件门”/);
   const raw=html.slice(html.indexOf('const RAW_PIPELINE_CONTROLS'),html.indexOf('function collectAccounts'));
   assert.match(raw,/accountPipeline\.order=pipelineOrder\(\)/);assert.match(raw,/const PIPELINE_NUMBER_CONTROLS/);for(const field of ['cachePoolSize','cachePoolMaxSize','sessionBindingExplicitTtlMs','sessionBindingFallbackTtlMs','sessionBindingMaxEntries'])assert.ok(raw.includes(field),field);assert.match(raw,/value\.accountPipeline\.cachePoolMaxSize/); assert.match(raw,/validPipelineOrder\(value\.accountPipeline\.order\)/); assert.match(raw,/setPipelineOrder\(value\.accountPipeline\.order\)/);
 });
@@ -283,7 +303,7 @@ test('account maxRpm control is a bounded labelled input and renders only safe n
   assert.match(drawer, /\['drawerRpm',a\.maxRpm\|\|0\]/);
   const saveDrawer = html.slice(html.indexOf('function saveDrawer'), html.indexOf('const PRESETS='));
   assert.match(saveDrawer, /maxRpm:Math\.max\(0,Math\.min\(100000,/, 'the drawer clamps the draft to the canonical range');
-  assert.match(html, /function addAccountRow\(\)\{ACCS\.accounts\.push\(\{[^;]*?maxRpm:0/);
+  assert.match(html, /function addAccountRow\(\).*ACCS\.accounts\.push\(\{[^;]*?maxRpm:0/);
   const render = html.slice(html.indexOf('function renderAccounts'), html.indexOf('function cloneRuleDraft'));
   assert.match(render, /const rpm=a\.rpm\|\|\{\}/);
   assert.match(render, /Number\.isSafeInteger\(rpm\.retryAt\)/);

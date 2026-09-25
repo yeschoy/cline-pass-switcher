@@ -52,6 +52,7 @@ const DEFAULT_CONFIG = {
   port: 3123,
   apiKey: '',
   proxyKey: '',
+  clientKeys: [],       // additional downstream credentials; legacy secret stays in proxyKey
   publicBaseUrl: '',
   detailedLogging: false,
   errorDetailLogging: false,
@@ -143,6 +144,48 @@ const loadedConfig = loadJson(CONFIG_PATH, {});
 const configHadCanonicalErrorRules = Object.hasOwn(loadedConfig, 'errorRules');
 const configHadCanonicalRetryRules = Object.hasOwn(loadedConfig, 'retryRules');
 const config = { ...DEFAULT_CONFIG, ...loadedConfig };
+// Retain only credentials of live model responses, so a rotation during an in-flight
+// upstream failure cannot remove their redaction seeds before finalization.
+const activeClientSecrets = new Map();
+const CLIENT_KEY_ID = /^[A-Za-z0-9_-]{1,100}$/;
+const CLIENT_KEY_MAX = 16;
+function clientKeyInventory(candidate = config, legacyKey = candidate.proxyKey) {
+  return [{ id: 'legacy', name: 'Legacy', key: legacyKey }, ...candidate.clientKeys];
+}
+function defaultClientKeyId() { return PROXY_KEY || !config.clientKeys.length ? 'legacy' : config.clientKeys[0].id; }
+function validateClientKeys(candidate, { persisted = false } = {}) {
+  if (!Array.isArray(candidate.clientKeys) || candidate.clientKeys.length > CLIENT_KEY_MAX) throw new Error('invalid clientKeys inventory');
+  const ids = new Set(['legacy']), names = new Set(['legacy']), secrets = new Set();
+  const legacy = String(candidate.proxyKey || '').trim();
+  if (legacy) secrets.add(legacy);
+  for (const row of candidate.clientKeys) {
+    if (!isPlainObject(row) || Object.keys(row).sort().join(',') !== 'id,key,name' || typeof row.id !== 'string' || !CLIENT_KEY_ID.test(row.id) || ids.has(row.id) ||
+        typeof row.name !== 'string' || !row.name.trim() || row.name !== row.name.trim() || row.name.length > 80 || /[\x00-\x1f\x7f]/.test(row.name) ||
+        typeof row.key !== 'string' || row.key.length < 16 || row.key.length > 256 || row.key !== row.key.trim() || /[\x00-\x1f\x7f]/.test(row.key) ||
+        names.has(row.name.toLowerCase()) || secrets.has(row.key)) throw new Error('invalid or duplicate client key');
+    ids.add(row.id); names.add(row.name.toLowerCase()); secrets.add(row.key);
+  }
+  if (candidate.clientKeys.length && !legacy && (candidate.accounts || []).some((a) => (a?.clientKeyId ?? 'legacy') === 'legacy')) throw new Error('configure the legacy key before adding other client keys');
+  if (persisted && Array.isArray(candidate.accounts)) for (const account of candidate.accounts) {
+    if (account?.clientKeyId !== undefined && !ids.has(account.clientKeyId)) throw new Error('unknown client key owner');
+  }
+  return ids;
+}
+// Validate new canonical data before migration can rewrite any operator-owned bytes.
+// A startup env override must not conceal a duplicate secret in the stored inventory:
+// otherwise removing the override would make a previously accepted file unbootable.
+if (config.proxyKey && Array.isArray(config.clientKeys) && config.clientKeys.some((row) => row?.key === String(config.proxyKey).trim())) throw new Error('invalid or duplicate client key');
+validateClientKeys({ ...config, proxyKey: String(process.env.PROXY_KEY || '').trim() || config.proxyKey }, { persisted: true });
+// The injected upstream account is Legacy-owned. Reject anonymous Legacy injection
+// alongside additional keys before any startup migration can persist operator data.
+const injectedKey = String(process.env.CLINE_PASS_KEY || '').trim();
+if (config.clientKeys.length && !(String(process.env.PROXY_KEY || '').trim() || String(config.proxyKey || '').trim()) &&
+    injectedKey && !(config.accounts || []).some((account) => account?.key === injectedKey))
+  throw new Error('configure the legacy key before injecting a legacy account alongside other client keys');
+if (loadedAdminState !== MISSING_ADMIN && loadedAdminState.initialized) for (const item of clientKeyInventory(config, String(process.env.PROXY_KEY || '').trim() || config.proxyKey)) {
+  if (item.key && item.key.length <= 1024 && crypto.timingSafeEqual(crypto.scryptSync(item.key, Buffer.from(loadedAdminState.salt, 'hex'), 64), Buffer.from(loadedAdminState.hash, 'hex')))
+    throw new Error('client key must differ from the administrator password');
+}
 const META = loadJson(META_PATH, { models: {}, history: [], catalog: null, orModelsFetchedAt: 0, orModelList: null });
 const saveConfig = () => atomicWriteJson(CONFIG_PATH, config);
 const saveMeta = () => {
@@ -181,7 +224,7 @@ function safeProviderTimestamp(value) {
 }
 function boundedProviderNote(value) {
   let note = String(value || '').replace(/[\r\n\t]+/g, ' ');
-  const secrets = [config.apiKey, config.proxyKey, process.env.CLINE_PASS_KEY, process.env.PROXY_KEY, ...(config.accounts || []).flatMap((account) => {
+  const secrets = [config.apiKey, ...clientKeyInventory().map((item) => item.key), ...activeClientSecrets.keys(), process.env.CLINE_PASS_KEY, process.env.PROXY_KEY, ...(config.accounts || []).flatMap((account) => {
     const values = [account.key, account.proxyUrl, ...Object.values(account.headers || {})];
     try { const url = new URL(account.proxyUrl); values.push(decodeURIComponent(url.username), decodeURIComponent(url.password)); } catch {}
     return values;
@@ -726,6 +769,7 @@ function normalizeAccount(a, i, prevById = new Map(), prevByName = new Map()) {
     maxConcurrent: Math.max(0, Math.floor(Number(a?.maxConcurrent) || 0)),
     // maxRpm: 0 = 不限。旧客户端完整保存但省略该字段时按 stable id 保留旧值，新账号缺失为 0。
     maxRpm: normalizeMaxRpm(a?.maxRpm === undefined ? previous.maxRpm : a.maxRpm),
+    clientKeyId: a?.clientKeyId === undefined ? (previous.clientKeyId || 'legacy') : a.clientKeyId,
     weight: Number.isInteger(Number(a?.weight)) && Number(a.weight) >= 1 && Number(a.weight) <= 100 ? Number(a.weight) : 1,
     priority: Number.isInteger(Number(a?.priority)) && Number(a.priority) >= 1 && Number(a.priority) <= 100 ? Number(a.priority) : 100,
     proxyUrl: normalizeProxyUrl(a?.proxyUrl),
@@ -1164,6 +1208,8 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   const byId = new Map(old.filter((a) => a?.id).map((a) => [String(a.id), a]));
   const byName = new Map(old.filter((a) => a?.name).map((a) => [String(a.name).slice(0, 50), a]));
   const accs = old.map((a, i) => normalizeAccount(a, i, byId, byName)).filter((a) => a.key);
+  const owners = validateClientKeys({ ...config, accounts: accs, proxyKey: String(process.env.PROXY_KEY || '').trim() || config.proxyKey }, { persisted: true });
+  for (const account of accs) if (!owners.has(account.clientKeyId)) throw new Error('unknown client key owner');
   if (JSON.stringify(accs) !== JSON.stringify(old)) { config.accounts = accs; dirty = true; }
   const activeAccount = Math.floor(Math.min(Math.max(0, Number(config.activeAccount) || 0), Math.max(0, config.accounts.length - 1)));
   if (config.activeAccount !== activeAccount) { config.activeAccount = activeAccount; dirty = true; }
@@ -1313,6 +1359,9 @@ function invalidateSessionBindingsForAccount(accountId) {
   for (const [fingerprint, entry] of sessionBindings) if (entry.accountId === accountId) changed = deleteSessionBinding(fingerprint, entry) || changed;
   if (changed) notifyCapacityWaiters();
 }
+function invalidateSessionBindingsForOwner(clientKeyId) {
+  for (const account of config.accounts) if (account.clientKeyId === clientKeyId) invalidateSessionBindingsForAccount(account.id);
+}
 function invalidateSessionBindingsOutside(validIds) {
   let changed = false;
   for (const [fingerprint, entry] of sessionBindings) if (!validIds.has(entry.accountId)) changed = deleteSessionBinding(fingerprint, entry) || changed;
@@ -1321,7 +1370,9 @@ function invalidateSessionBindingsOutside(validIds) {
 function reconcileSessionBindings() {
   pruneSessionBindings(Date.now(), { full: true });
   if (!sessionBindingConfigured()) return invalidateSessionBindingsOutside(new Set());
-  invalidateSessionBindingsOutside(bindingSelectionContext(new Set()).activeIds);
+  const valid = new Set();
+  for (const owner of clientKeyInventory()) for (const id of bindingSelectionContext(new Set(), owner.id).activeIds) valid.add(id);
+  invalidateSessionBindingsOutside(valid);
 }
 function sessionBindingSummary() {
   reconcileSessionBindings();
@@ -1365,10 +1416,10 @@ function clearExpiredCooldowns() {
   if (dirty) try { saveMeta(); }
   catch (error) { console.error(`[账号] 过期冷却状态持久化失败：${safeReason(error.message)}`); }
 }
-function enabledAccounts({ excludeIds = new Set() } = {}) {
+function enabledAccounts({ excludeIds = new Set(), clientKeyId = null } = {}) {
   clearExpiredCooldowns();
   return (config.accounts || []).filter((a) => {
-    if (!a || !a.key || a.enabled === false || excludeIds.has(a.id)) return false;
+    if (!a || !a.key || a.enabled === false || excludeIds.has(a.id) || (clientKeyId !== null && a.clientKeyId !== clientKeyId)) return false;
     const st = getAccountState(a.id);
     if (st?.hardQuarantined || st?.banned || st?.protectionMonthlyAt || st?.protectionShortAt || (quotaProvisional.get(a.id)?.until || 0) > Date.now()) return false;
     if (st?.cooldownUntil && st.cooldownUntil > Date.now()) return false;
@@ -1400,7 +1451,8 @@ function createLease(account, firstPermit) {
   };
 }
 // 固定准入顺序：hard eligibility（上层）→ maxConcurrent → RPM。并发失败绝不消费或预留 RPM。
-function tryLeaseResult(a, now = Date.now()) {
+function tryLeaseResult(a, now = Date.now(), clientKeyId = null) {
+  if (clientKeyId !== null && !enabledAccounts({ clientKeyId }).some((current) => current === a)) return { lease: null, blockedBy: 'unavailable', retryAt: null };
   if (!a || getAccountState(a.id)?.protectionMonthlyAt || getAccountState(a.id)?.protectionShortAt || (quotaProvisional.get(a.id)?.until || 0) > now) return { lease: null, blockedBy: 'unavailable', retryAt: null };
   if (!accountHasCapacity(a)) return { lease: null, blockedBy: 'concurrency', retryAt: null };
   const reserved = reserveRpmPermit(a, now);
@@ -1408,7 +1460,7 @@ function tryLeaseResult(a, now = Date.now()) {
   activeCounts.set(a.id, (activeCounts.get(a.id) || 0) + 1);
   return { lease: createLease(a, reserved.permit), blockedBy: null, retryAt: null };
 }
-function tryLease(a, now = Date.now()) { return tryLeaseResult(a, now).lease; }
+function tryLease(a, now = Date.now(), clientKeyId = null) { return tryLeaseResult(a, now, clientKeyId).lease; }
 async function waitForCapacity(ms) {
   if (ms <= 0) return;
   let wake;
@@ -1419,14 +1471,15 @@ async function waitForCapacity(ms) {
   finally { clearTimeout(timer); waiters.delete(wake); }
 }
 // 复用现有全局 waiter 和 deadline；等待目标取"最早 RPM 窗口恢复"与剩余预算的较小值，不新增 refill 定时器。
-async function waitForLease(accounts, waitMs) {
+async function waitForLease(accounts, waitMs, clientKeyId = null) {
   const deadline = Date.now() + waitMs;
   let facts = selectionBlockFacts(accounts);
   while (true) {
     for (const account of accounts) {
-      const result = tryLeaseResult(account);
+      const result = tryLeaseResult(account, Date.now(), clientKeyId);
       if (result.lease) return { lease: result.lease, blockedBy: null, retryAt: null };
     }
+    if (clientKeyId !== null && !accounts.some((account) => enabledAccounts({ clientKeyId }).includes(account))) return { lease: null, blockedBy: 'unavailable', retryAt: null };
     facts = selectionBlockFacts(accounts);
     const wait = waitDurationForBlock(deadline, facts);
     if (wait <= 0) return { lease: null, ...facts };
@@ -1477,26 +1530,27 @@ function selectionResult(lease, mode, preferred, reason, identity, overflow = fa
   };
 }
 async function acquireLegacyAccountLease(identity, { excludeIds = new Set(), allowOverflow = true } = {}) {
+  const clientKeyId = identity?.clientKeyId ?? null;
   const waitMs = Math.min(30000, Math.max(0, Number(config.concurrencyWaitMs) || 0));
-  const list = enabledAccounts({ excludeIds });
+  const list = enabledAccounts({ excludeIds, clientKeyId });
   if (!list.length) return { error: 'no available upstream account', strategy: config.accountMode };
   const mode = config.accountMode;
   if (mode === 'sticky' && identity?.fingerprint) {
     const ranked = hrwRank(list, identity.fingerprint);
     const primary = ranked[0];
-    let waited = tryLeaseResult(primary);
+    let waited = tryLeaseResult(primary, Date.now(), clientKeyId);
     if (waited.lease) return selectionResult(waited.lease, mode, primary, 'sticky-primary', identity);
-    waited = await waitForLease([primary], waitMs);
+    waited = await waitForLease([primary], waitMs, clientKeyId);
     if (waited.lease) return selectionResult(waited.lease, mode, primary, 'sticky-primary', identity);
     if (allowOverflow) {
-      const overflow = await waitForLease(ranked.slice(1), 0);
+      const overflow = await waitForLease(ranked.slice(1), 0, clientKeyId);
       if (overflow.lease) return selectionResult(overflow.lease, mode, primary, 'sticky-overflow', identity, true);
     }
     return busyFailure(waited.blockedBy, waited.retryAt, mode, waitMs, 'all upstream accounts are busy');
   }
   if (mode === 'single') {
     const preferred = singlePreferred(list);
-    const waited = await waitForLease([preferred], waitMs);
+    const waited = await waitForLease([preferred], waitMs, clientKeyId);
     if (waited.lease) return selectionResult(waited.lease, mode, preferred, 'single-selected', identity);
     return busyFailure(waited.blockedBy, waited.retryAt, mode, waitMs, 'upstream account is busy');
   }
@@ -1504,13 +1558,13 @@ async function acquireLegacyAccountLease(identity, { excludeIds = new Set(), all
   const deadline = Date.now() + waitMs;
   let facts = selectionBlockFacts(list);
   while (true) {
-    const current = enabledAccounts({ excludeIds });
+    const current = enabledAccounts({ excludeIds, clientKeyId });
     if (!current.length) return { error: 'no available upstream account', strategy: mode };
     // 先跳过并发或 RPM 耗尽的候选；只有全部当前候选不可准入时才等待。
     const available = current.filter((account) => accountHasCapacity(account) && rpmAvailable(account));
     if (available.length) {
       const ranked = strategyRank(mode, available);
-      const result = tryLeaseResult(ranked[0]);
+      const result = tryLeaseResult(ranked[0], Date.now(), clientKeyId);
       if (result.lease) return selectionResult(result.lease, mode, ranked[0], reasons[mode], identity);
     }
     facts = selectionBlockFacts(current);
@@ -1626,9 +1680,21 @@ function rpmProjection(account, now = Date.now()) {
   return { limit, used: limit ? used : 0, reserved: limit ? reserved : 0, retryAt: limit && Number.isSafeInteger(retryAt) ? retryAt : null };
 }
 function cachePoolRoles() {
-  const list = enabledAccounts(), membership = cachePoolMembership(list), eligibleIds = new Set(list.map((account) => account.id));
-  if (!membership) return new Map();
-  return new Map(config.accounts.map((account) => [account.id, eligibleIds.has(account.id) ? (membership.activeIds.has(account.id) ? 'active' : 'standby') : null]));
+  const roles = new Map();
+  for (const owner of clientKeyInventory()) {
+    const list = enabledAccounts({ clientKeyId: owner.id }), membership = cachePoolMembership(list);
+    if (!membership) continue;
+    for (const account of list) roles.set(account.id, membership.activeIds.has(account.id) ? 'active' : 'standby');
+  }
+  return roles;
+}
+function cachePoolActualByOwner() {
+  const actual = { high: 0, low: 0, unknown: 0 };
+  for (const owner of clientKeyInventory()) {
+    const counts = cachePoolMembership(enabledAccounts({ clientKeyId: owner.id }))?.actual;
+    if (counts) for (const role of Object.keys(actual)) actual[role] += counts[role];
+  }
+  return actual;
 }
 function cachePoolRank(accounts, identity, mode) {
   if (identity?.fingerprint) return hrwRank(accounts, identity.fingerprint);
@@ -1673,7 +1739,7 @@ function tryPipelinePlanLease(plan, identity, mode, { excludeId = null } = {}) {
     for (const account of ranked) {
       if (account.id === excludeId || !accountHasCapacity(account) || !rpmAvailable(account)) continue;
       capacityPreferred ||= account;
-      const result = tryLeaseResult(account);
+      const result = tryLeaseResult(account, Date.now(), identity?.clientKeyId ?? null);
       if (result.lease) return { lease: result.lease, account, group, groupIndex, preferred: (rankedPreferred ? preferred : capacityPreferred) || account };
     }
   }
@@ -1704,8 +1770,8 @@ function growCachePoolOne(membership) {
   }
   return growth;
 }
-function bindingSelectionContext(excludeIds) {
-  const list = enabledAccounts({ excludeIds });
+function bindingSelectionContext(excludeIds, clientKeyId = null) {
+  const list = enabledAccounts({ excludeIds, clientKeyId });
   const candidates = pipelineCandidates(list), membership = cachePoolMembership(list, candidates);
   const activeCandidates = membership ? membership.activeCandidates : candidates.filter((candidate) => candidate.quota.pool !== 'reserve');
   return { list, candidates, membership, activeCandidates, activeIds: new Set(activeCandidates.map((candidate) => candidate.account.id)) };
@@ -1713,7 +1779,7 @@ function bindingSelectionContext(excludeIds) {
 function growAndLeaseCachePoolOne(membership, identity, mode, excludeIds, { skipSticky = false } = {}) {
   const growth = growCachePoolOne(membership);
   if (!growth) return null;
-  const context = bindingSelectionContext(excludeIds);
+  const context = bindingSelectionContext(excludeIds, identity.clientKeyId ?? null);
   const plan = buildPipelineGroups(context.activeCandidates.map((candidate) => candidate.account), identity, context.activeCandidates, { skipSticky });
   const candidate = context.activeCandidates.find((item) => !growth.previousActiveIds.has(item.account.id)) || null;
   let preferred = null, groupIndex = -1;
@@ -1722,7 +1788,7 @@ function growAndLeaseCachePoolOne(membership, identity, mode, excludeIds, { skip
     preferred ||= ranked[0] || null;
     if (candidate && plan.groups[index].accounts.some((account) => account.id === candidate.account.id)) groupIndex = index;
   }
-  const lease = candidate ? tryLease(candidate.account) : null;
+  const lease = candidate ? tryLease(candidate.account, Date.now(), identity?.clientKeyId ?? null) : null;
   return { growth, context, plan, candidate, lease, preferred: preferred || candidate?.account || null, groupIndex };
 }
 function bindingPipelineFacts(plan, context, candidate, capacityFallback = false) {
@@ -1745,13 +1811,13 @@ function attachBindingMiss(result, identity, ownerRequestId, missResult) {
 async function acquireStatefulBindingAccountLease(identity, { excludeIds = new Set(), allowOverflow = true, ownerRequestId, bindingDeadline = null } = {}) {
   const mode = config.accountMode, waitMs = Math.min(30000, Math.max(0, Number(config.concurrencyWaitMs) || 0));
   const deadline = bindingDeadline ?? Date.now() + waitMs;
-  let context = bindingSelectionContext(excludeIds);
+  let context = bindingSelectionContext(excludeIds, identity.clientKeyId ?? null);
   if (!context.list.length) return { error: 'no available upstream account', strategy: mode, bindingSource: sessionBindingSource(identity), bindingResult: 'miss' };
   let lookup = findSessionBinding(identity, context.activeIds);
   if (lookup.entry) {
     const entry = lookup.entry;
     while (true) {
-      context = bindingSelectionContext(excludeIds);
+      context = bindingSelectionContext(excludeIds, identity.clientKeyId ?? null);
       const current = sessionBindings.get(identity.fingerprint);
       if (!current || current.generation !== entry.generation || !context.activeIds.has(entry.accountId)) {
         if (current === entry) deleteSessionBinding(identity.fingerprint, entry);
@@ -1781,7 +1847,7 @@ async function acquireStatefulBindingAccountLease(identity, { excludeIds = new S
           }
         }
       }
-      const boundLease = tryLease(bound?.account);
+      const boundLease = tryLease(bound?.account, Date.now(), identity.clientKeyId ?? null);
       if (boundLease) {
         const reason = context.membership ? 'cache-pool-active' : 'pipeline-sticky-primary';
         const result = selectionResult(boundLease, mode, bound.account, reason, identity);
@@ -1815,7 +1881,7 @@ async function acquireStatefulBindingAccountLease(identity, { excludeIds = new S
     }
   }
   while (true) {
-    context = bindingSelectionContext(excludeIds);
+    context = bindingSelectionContext(excludeIds, identity.clientKeyId ?? null);
     if (!context.list.length) return { error: 'no available upstream account', strategy: mode, bindingSource: sessionBindingSource(identity), bindingResult: lookup.result };
     const concurrentEntry = sessionBindings.get(identity.fingerprint);
     if (concurrentEntry && concurrentEntry.expiresAt > Date.now() && context.activeIds.has(concurrentEntry.accountId)) return acquireStatefulBindingAccountLease(identity, { excludeIds, allowOverflow, ownerRequestId, bindingDeadline: deadline });
@@ -1850,7 +1916,7 @@ async function acquireStatefulBindingAccountLease(identity, { excludeIds = new S
 async function acquireCachePoolAccountLease(identity, { excludeIds = new Set(), allowOverflow = true } = {}) {
   const mode = config.accountMode, waitMs = Math.min(30000, Math.max(0, Number(config.concurrencyWaitMs) || 0)), deadline = Date.now() + waitMs;
   while (true) {
-    const list = enabledAccounts({ excludeIds });
+    const list = enabledAccounts({ excludeIds, clientKeyId: identity?.clientKeyId ?? null });
     if (!list.length) return { error: 'no available upstream account', strategy: mode };
     const candidates = pipelineCandidates(list), membership = cachePoolMembership(list, candidates);
     const activeCandidates = membership.activeCandidates, active = activeCandidates.map((candidate) => candidate.account);
@@ -1885,12 +1951,12 @@ async function acquirePipelineAccountLease(identity, options = {}) {
   const { excludeIds = new Set(), allowOverflow = true } = options;
   const mode = config.accountMode, waitMs = Math.min(30000, Math.max(0, Number(config.concurrencyWaitMs) || 0)), deadline = Date.now() + waitMs;
   while (true) {
-    const list = enabledAccounts({ excludeIds });
+    const list = enabledAccounts({ excludeIds, clientKeyId: identity?.clientKeyId ?? null });
     if (!list.length) return { error: 'no available upstream account', strategy: mode };
     const plan = buildPipelineGroups(list, identity);
     const primary = plan.stickyApplied ? plan.groups[0].accounts[0] : null;
     if (primary) {
-      const result = tryLeaseResult(primary);
+      const result = tryLeaseResult(primary, Date.now(), identity.clientKeyId ?? null);
       if (result.lease) { const selected = selectionResult(result.lease, mode, primary, 'pipeline-sticky-primary', identity); selected.pipeline = { ...plan, groups: undefined, selectedQuota: plan.groups[0].quota, selectedHealth: plan.groups[0].health }; return selected; }
       if (mode === 'single' || mode === 'sticky') {
         const primaryFacts = selectionBlockFacts([primary]);
@@ -1902,7 +1968,7 @@ async function acquirePipelineAccountLease(identity, options = {}) {
     }
     if (mode === 'single' && !primary) {
       const chosen = singlePreferred(plan.groups[0].accounts) || plan.groups[0].accounts[0];
-      const chosenLease = tryLease(chosen);
+      const chosenLease = tryLease(chosen, Date.now(), identity.clientKeyId ?? null);
       if (chosenLease) return { ...selectionResult(chosenLease, mode, chosen, 'single-selected', identity), pipeline: { diagnostics: plan.diagnostics, selectedQuota: plan.groups[0].quota, selectedHealth: plan.groups[0].health } };
       const chosenFacts = selectionBlockFacts(chosen ? [chosen] : []);
       const wait = waitDurationForBlock(deadline, chosenFacts);
@@ -1916,7 +1982,7 @@ async function acquirePipelineAccountLease(identity, options = {}) {
       if (mode === 'single') { const preferred = singlePreferred(group.accounts); ranked = available.includes(preferred) ? [preferred] : [available[0]]; }
       else if (mode === 'sticky' && identity?.fingerprint && !plan.stickyApplied) ranked = hrwRank(available, identity.fingerprint);
       else ranked = strategyRank(mode, available);
-      const lease = tryLease(ranked[0]); if (!lease) continue;
+      const lease = tryLease(ranked[0], Date.now(), identity.clientKeyId ?? null); if (!lease) continue;
       const fallback = groupIndex > 0 || !!primary;
       const result = selectionResult(lease, mode, primary || ranked[0], fallback ? 'pipeline-capacity-fallback' : ({roundrobin:'roundrobin-next',sticky:'sticky-no-identity-roundrobin','least-connections':'least-active','weighted-roundrobin':'weighted-slot','priority-failover':'priority-tier',single:'single-selected'}[mode]), identity, fallback);
       result.pipeline = { diagnostics: plan.diagnostics, selectedQuota: group.quota, selectedHealth: group.health, capacityFallback: fallback };
@@ -1928,11 +1994,21 @@ async function acquirePipelineAccountLease(identity, options = {}) {
     await waitForCapacity(wait);
   }
 }
-async function acquireAccountLease(identity, options = {}) { return pipelineEnabled() ? acquirePipelineAccountLease(identity, options) : acquireLegacyAccountLease(identity, options); }
+async function acquireAccountLease(identity, options = {}) {
+  if (identity?.credentialValid && !identity.credentialValid()) return { error: 'client credential revoked', credentialRevoked: true, strategy: config.accountMode };
+  const selected = await (pipelineEnabled() ? acquirePipelineAccountLease(identity, options) : acquireLegacyAccountLease(identity, options));
+  // A rotation may race a capacity wait. Only an already leased request may proceed.
+  if (identity?.credentialValid && !identity.credentialValid()) {
+    cleanupSessionBindingSelection(selected);
+    selected.lease?.release();
+    return { error: 'client credential revoked', credentialRevoked: true, strategy: config.accountMode };
+  }
+  return selected;
+}
 function retryAfterSeconds(waitMs) { return Math.min(30, Math.max(1, Math.ceil((Number(waitMs) || 1000) / 1000))); }
-function pickAccount() {
-  const list = enabledAccounts();
-  if (!list.length) return { name: '默认', key: config.apiKey || '', id: 'legacy', maxConcurrent: 0, perModel: {} };
+function pickAccount(clientKeyId = null) {
+  const list = enabledAccounts({ clientKeyId });
+  if (!list.length) return clientKeyId === null ? { name: '默认', key: config.apiKey || '', id: 'legacy', maxConcurrent: 0, perModel: {} } : null;
   if (config.accountMode === 'roundrobin' && list.length > 1) return rrRank(list)[0];
   return singlePreferred(list);
 }
@@ -1955,11 +2031,19 @@ const chatHeaders = (key) => ({
 
 // Downstream client credentials never grant management access. Admin state is independent of config.json.
 let PROXY_KEY = config.proxyKey || '';
-function authOK(req) {
-  if (!PROXY_KEY) return true;
-  const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
-  const key = String(req.headers['x-admin-key'] || '').trim(); // legacy client header, model routes only
-  return bearer === PROXY_KEY || key === PROXY_KEY;
+function clientKeyIdFor(req) {
+  const authorization = req.headers.authorization;
+  const legacyHeader = req.headers['x-admin-key']; // legacy client header, model routes only
+  const bearer = String(authorization || '').replace(/^Bearer\s+/i, '').trim();
+  const header = String(legacyHeader || '').trim();
+  // In the original single-key open mode every model request was anonymous,
+  // even if a client happened to send two inconsistent credential headers.
+  if (!PROXY_KEY && !config.clientKeys.length) return 'legacy';
+  if (authorization !== undefined && legacyHeader !== undefined && bearer !== header) return null;
+  const match = clientKeyInventory(config, PROXY_KEY).find((item) => item.key && (bearer === item.key || header === item.key));
+  if (match) return match.id;
+  // With extra keys, only absent credentials can enter the anonymous Legacy pool.
+  return !PROXY_KEY && authorization === undefined && legacyHeader === undefined ? 'legacy' : null;
 }
 function unauthorized(res) {
   return sendJSON(res, 401, { error: { message: 'unauthorized', type: 'auth_error' } });
@@ -1988,7 +2072,7 @@ function adminPasswordOK(password) {
   const hash = crypto.scryptSync(password, Buffer.from(adminState.salt, 'hex'), 64);
   return crypto.timingSafeEqual(hash, Buffer.from(adminState.hash, 'hex'));
 }
-if (adminState?.initialized && PROXY_KEY && adminPasswordOK(PROXY_KEY))
+if (adminState?.initialized && clientKeyInventory(config, PROXY_KEY).some((item) => item.key && adminPasswordOK(item.key)))
   throw new Error('client key must differ from the administrator password');
 function adminCodeOK(code) {
   const expected = process.env.CLINE_PASS_ADMIN_INIT_CODE;
@@ -2087,7 +2171,7 @@ async function adminAuthRoute(req, res, p) {
   }
   if (session.pending !== !adminState?.initialized || !isPlainObject(body) || Object.keys(body).sort().join(',') !== (session.pending ? 'newPassword' : 'currentPassword,newPassword') ||
       typeof body.newPassword !== 'string' || body.newPassword.length < 12 || body.newPassword.length > 1024 ||
-      body.newPassword === PROXY_KEY || adminPasswordOK(body.newPassword) ||
+      clientKeyInventory(config, PROXY_KEY).some((item) => item.key === body.newPassword) || adminPasswordOK(body.newPassword) ||
       (!session.pending && !adminPasswordOK(body.currentPassword))) return sendJSON(res, 400, { error: { message: 'invalid password change' } });
   const candidate = { version: 1, initialized: true, ...adminVerifier(body.newPassword) };
   atomicWriteJson(ADMIN_PATH, candidate); adminState = candidate; adminSessions.clear();
@@ -3801,7 +3885,7 @@ function settleProviderCircuit(modelId, cfg, account, attempt, outcome) {
 
 function redactSecrets(value) {
   let s = String(value ?? '');
-  const keys = [config.apiKey, config.proxyKey, PROXY_KEY, ...(config.accounts || []).flatMap((a) => {
+  const keys = [config.apiKey, ...clientKeyInventory(config, PROXY_KEY).map((item) => item.key), ...activeClientSecrets.keys(), process.env.PROXY_KEY, ...(config.accounts || []).flatMap((a) => {
     const values = [a.key, a.proxyUrl, ...Object.values(a.headers || {})];
     try { const u = new URL(a.proxyUrl); values.push(decodeURIComponent(u.username), decodeURIComponent(u.password)); } catch {}
     return values;
@@ -3813,7 +3897,7 @@ function redactSecrets(value) {
 // 把结构化上游错误归一成单行脱敏字符串；非 JSON 响应只使用通用原因，原始正文不进入诊断。
 const errText = (e) => redactSecrets(e == null ? '' : typeof e === 'string' ? e : JSON.stringify(e));
 function ordinaryFailureReason(result, sensitiveValues = []) {
-  const seeds = [config.apiKey, config.proxyKey, PROXY_KEY, ...config.accounts.flatMap((account) => [account.key, account.proxyUrl, ...Object.values(account.headers || {})])].filter(Boolean);
+  const seeds = [config.apiKey, ...clientKeyInventory(config, PROXY_KEY).map((item) => item.key), ...activeClientSecrets.keys(), process.env.PROXY_KEY, ...config.accounts.flatMap((account) => [account.key, account.proxyUrl, ...Object.values(account.headers || {})])].filter(Boolean);
   const redactor = new DetailRedactor(seeds);
   redactor.learnHeaders(result?.responseHeaders || {});
   redactor.learn(result?.structuredError);
@@ -4289,7 +4373,7 @@ function statisticsSegments(trace, finalAccountId, usage, clientDisconnect = fal
 function cacheHitOf(usage) {
   return usage?.cacheFieldPresent === true && usage.cachedTokens !== null ? usage.cachedTokens > 0 : null;
 }
-async function handleChat(req, res) {
+async function handleChat(req, res, clientKeyId) {
   const detail = detailContext.getStore();
   const requestId = detail?.requestId || crypto.randomUUID();
   res.setHeader('X-Cline-Request-Id', requestId);
@@ -4307,6 +4391,11 @@ async function handleChat(req, res) {
   const recordChat = (info) => record(modelId, info, detail);
   body = { ...body, model: modelId };
   const identity = extractSessionIdentity(req, body);
+  // Keep legacy HRW/derived-affinity stable across upgrade; namespace new owners
+  // so identical downstream sessions cannot share their process-local bindings.
+  if (identity.fingerprint && clientKeyId !== 'legacy') identity.fingerprint = hmacHex(`client-owner\0${clientKeyId}\0${identity.fingerprint}`);
+  identity.clientKeyId = clientKeyId;
+  identity.credentialValid = () => clientKeyIdFor(req) === clientKeyId;
   const forwardedHeaders = forwardHeadersFor(req, body);
   const affinity = prepareChatAffinity(body, identity);
   body = affinity.body;
@@ -4331,9 +4420,10 @@ async function handleChat(req, res) {
   selected = await acquireAccountLease(identity, { excludeIds: excluded, ownerRequestId: requestId });
   attemptOwner.bindingSelection = selected;
   if (!selected.lease) {
-    const protectedAccounts = config.accounts.filter((a) => a.enabled !== false && a.key && (getAccountState(a.id)?.protectionMonthlyAt || getAccountState(a.id)?.protectionShortAt || (quotaProvisional.get(a.id)?.until || 0) > Date.now()));
-    const status = enabledAccounts().length ? 429 : 503;
-    const protectionBlocked = protectedAccounts.length > 0 && !enabledAccounts().length;
+    if (selected.credentialRevoked) return unauthorized(res);
+    const protectedAccounts = config.accounts.filter((a) => a.clientKeyId === clientKeyId && a.enabled !== false && a.key && (getAccountState(a.id)?.protectionMonthlyAt || getAccountState(a.id)?.protectionShortAt || (quotaProvisional.get(a.id)?.until || 0) > Date.now()));
+    const status = enabledAccounts({ clientKeyId }).length ? 429 : 503;
+    const protectionBlocked = protectedAccounts.length > 0 && !enabledAccounts({ clientKeyId }).length;
     if (protectionBlocked) {
       const next = protectedAccounts.map((a) => getAccountState(a.id)?.protectionRetryAt || quotaProvisional.get(a.id)?.until || 0).filter((at) => at > Date.now());
       selected.retryAfter = next.length ? Math.min(3600, Math.max(1, Math.ceil((Math.min(...next) - Date.now()) / 1000))) : 60;
@@ -4379,6 +4469,7 @@ async function handleChat(req, res) {
       selected = await acquireAccountLease(identity, { excludeIds: excluded, ownerRequestId: requestId });
       attemptOwner.bindingSelection = selected;
       attemptOwner.lease = selected.lease || null;
+      if (selected.credentialRevoked) break;
       if (selected.lease) {
         selected.reason = 'replacement-after-account-action';
         completedTrace.push(...chain.trace);
@@ -4552,11 +4643,21 @@ function sendBusy(res, message, retryAfter = 1, status = 429) {
   res.end(JSON.stringify({ error: { message: safeReason(message || 'upstream accounts unavailable'), type: status === 429 ? 'rate_limit_error' : 'upstream_error' } }));
 }
 
-async function catalog() {
-  if (META.catalog && Date.now() - (META.catalogFetchedAt || 0) < 3600e3) return META.catalog;
-  const account = pickAccount();
+// This remains the catalog owner: scoped entries are bounded, process-local and never enter metadata.
+const clientCatalogs = new Map();
+async function catalog(clientKeyId = null) {
+  if (clientKeyId === null && META.catalog && Date.now() - (META.catalogFetchedAt || 0) < 3600e3) return META.catalog;
+  const account = pickAccount(clientKeyId);
+  if (!account) return [];
+  const scoped = clientKeyId === null ? null : clientCatalogs.get(clientKeyId);
+  if (scoped?.account === account && Date.now() - scoped.fetchedAt < 3600e3) return scoped.ids;
+  // Admin's persisted global catalog cannot authenticate a client or stand in for its owned account.
   const { json } = await fetchJSON(`${config.upstreamBase}/models`, { headers: chatHeaders(account.key) }, 60000, account);
   const ids = (json?.data || []).map((m) => m.id);
+  if (clientKeyId !== null) {
+    if (ids.length) clientCatalogs.set(clientKeyId, { account, ids, fetchedAt: Date.now() });
+    return ids;
+  }
   if (ids.length) { META.catalog = ids; META.catalogFetchedAt = Date.now(); saveMeta(); }
   return META.catalog || [];
 }
@@ -4586,7 +4687,7 @@ const server = http.createServer((req, res) => {
     : captureAllowed && adminState?.initialized === true && config.errorDetailLogging === true && req.method === 'POST' && CHAT_PATHS.has(pathname) ? (config.rawBodyLogging === true ? 'raw-error' : 'error') : null;
   if (profile) {
     if (DetailRoot.active >= 128) { detailedLogs.recordDrop('activeLimit'); return dispatch(req, res); }
-    const secrets = profile.startsWith('raw-') ? [] : [config.proxyKey, PROXY_KEY, ...config.accounts.flatMap((account) => [account.key, account.proxyUrl, ...Object.values(account.headers || {})])];
+    const secrets = profile.startsWith('raw-') ? [] : [...clientKeyInventory(config, PROXY_KEY).map((item) => item.key), ...activeClientSecrets.keys(), process.env.PROXY_KEY, ...config.accounts.flatMap((account) => [account.key, account.proxyUrl, ...Object.values(account.headers || {})])];
     const root = new DetailRoot(req, res, detailedLogs, secrets, { profile });
     return detailContext.run(root, () => dispatch(req, res));
   }
@@ -4616,7 +4717,21 @@ async function dispatch(req, res) {
       if (!session || session.pending || !adminState?.initialized) return unauthorized(res);
       if (!['GET', 'HEAD'].includes(req.method) && session.csrf !== req.headers['x-csrf-token']) return unauthorized(res);
     } else if (modelRoute || p.startsWith('/v1/')) {
-      if (!authOK(req)) return unauthorized(res);
+      req.clientKeyId = clientKeyIdFor(req);
+      if (!req.clientKeyId) return unauthorized(res);
+      const secret = clientKeyInventory(config, PROXY_KEY).find((item) => item.id === req.clientKeyId)?.key;
+      if (secret) {
+        activeClientSecrets.set(secret, (activeClientSecrets.get(secret) || 0) + 1);
+        let released = false;
+        const release = () => {
+          if (released) return;
+          released = true;
+          const remaining = (activeClientSecrets.get(secret) || 1) - 1;
+          if (remaining) activeClientSecrets.set(secret, remaining);
+          else activeClientSecrets.delete(secret);
+        };
+        res.once('finish', release); res.once('close', release);
+      }
     }
     if (req.method === 'POST' && p === '/v1/responses') {
       return sendJSON(res, 501, { error: { message: 'OpenAI Responses API is not supported; use /v1/chat/completions instead', type: 'unsupported_api', param: null, code: 'unsupported_api' } });
@@ -4810,7 +4925,7 @@ async function dispatch(req, res) {
         accounts: config.accounts.map((a) => { const recent = projectAggregate(aggregateRange(a.id).aggregate),lifetime=META.statistics.lifetime.accounts[a.id]; return { ...a, state: getAccountState(a.id), activeCount: activeCounts.get(a.id) || 0, rpm: rpmProjection(a), health: healthProjection(a), quota: quotaProjection(a.id), cachePoolRole: cacheRoles.get(a.id) ?? null, cachePoolQuotaRole: configuredCachePoolLowQuotaSize() > 0 && cacheRoles.get(a.id) === 'active' ? ({ hot: 'high', warm: 'low', unknown: 'unknown' }[quotaProjection(a.id).pool] || null) : null, statistics: { recent24h: recent, lifetimeRequests: lifetime ? lifetime.requests : 0, lifetimeErrors: lifetime ? lifetime.errors : 0 } }; }),
         mode: config.accountMode, active: config.activeAccount, concurrencyWaitMs: config.concurrencyWaitMs,
         quotaProtection: config.quotaProtection, errorRules: config.errorRules, retryRules: config.retryRules, accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline,
-        cachePool: { minSize: configuredCachePoolSize(), maxSize: configuredCachePoolMaxSize(), lowSize: configuredCachePoolLowQuotaSize(), targetSize: configuredCachePoolTargetSize(), actual: cachePoolMembership(enabledAccounts())?.actual || { high: 0, low: 0, unknown: 0 }, binding: sessionBindingSummary() },
+        cachePool: { minSize: configuredCachePoolSize(), maxSize: configuredCachePoolMaxSize(), lowSize: configuredCachePoolLowQuotaSize(), targetSize: configuredCachePoolTargetSize(), scope: 'per-client-key', actual: cachePoolActualByOwner(), binding: sessionBindingSummary() },
         stats: Object.fromEntries(config.accounts.map((a) => [a.name, { requests: META.statistics.lifetime.accounts[a.id]?.requests ?? 0 }])),
       });
     }
@@ -4859,26 +4974,39 @@ async function dispatch(req, res) {
         for (const field of ['weight', 'priority']) if (a[field] !== undefined && (!Number.isInteger(Number(a[field])) || Number(a[field]) < 1 || Number(a[field]) > 100)) return sendJSON(res, 400, { error: { message: `invalid ${field} at index ${i}` } });
         try { normalizeProxyUrl(a.proxyUrl, { strict: true }); validateAndNormalizeHeaders(a.headers, { strict: true }); }
         catch (e) { return sendJSON(res, 400, { error: { message: `account ${i}: ${e.message}` } }); }
+        const owner = a.clientKeyId === undefined ? config.accounts.find((old) => old.id === String(a.id))?.clientKeyId || defaultClientKeyId() : a.clientKeyId;
+        if (typeof owner !== 'string' || !clientKeyInventory().some((item) => item.id === owner)) return sendJSON(res, 400, { error: { message: `invalid clientKeyId at index ${i}` } });
         const routeError = validatePerModelInput(a.perModel || {});
         if (routeError) return sendJSON(res, 400, { error: { message: `account ${i}: ${routeError}` } });
       }
       const previousById = new Map(config.accounts.map((a) => [a.id, a]));
       const previousByName = new Map(config.accounts.map((a) => [a.name, a]));
       const seen = new Set();
-      const normalizedAccounts = body.accounts.map((a, i) => normalizeAccount(a, i, previousById, previousByName));
+      // Name-based ID reuse is a legacy compatibility fallback, not evidence of
+      // stable-ID ownership. An omitted owner inherits only from an explicit ID.
+      const normalizedAccounts = body.accounts.map((a, i) => normalizeAccount(a.clientKeyId === undefined && !previousById.has(String(a.id)) ? { ...a, clientKeyId: defaultClientKeyId() } : a, i, previousById, previousByName));
       const requestedActiveId = normalizedAccounts[Number(body.active)]?.id;
       const accs = normalizedAccounts.filter((a) => a.key);
+      try { validateClientKeys({ ...config, accounts: accs }, { persisted: true }); }
+      catch (error) { return sendJSON(res, 400, { error: { message: error.message } }); }
       if (!accs.length) return sendJSON(res, 400, { error: { message: '至少需要一个有效账号（key 非空）' } });
       for (const a of accs) { if (seen.has(a.id)) return sendJSON(res, 400, { error: { message: 'duplicate account id' } }); seen.add(a.id); }
       const requestedActive = requestedActiveId ? accs.findIndex((a) => a.id === requestedActiveId) : -1;
+      const nextActive = requestedActive >= 0 ? requestedActive : Math.min(Math.max(0, Number(body.active) || 0), accs.length - 1);
+      const next = { ...config, accounts: accs, accountMode: body.mode, activeAccount: nextActive,
+        concurrencyWaitMs: wait, errorRules: requestedErrorRules, retryRules: requestedRetryRules,
+        quotaProtection: requestedProtection, ...legacyRuleProjection(requestedErrorRules), accountPipeline: requestedPipeline };
+      // A failed config rename must not change live owner routing, invalidate bindings,
+      // or clear existing RPM/quota state before the client sees a failed save.
+      atomicWriteJson(CONFIG_PATH, next);
       const quotaRoutingWasEnabled = quotaRoutingEnabled();
-      config.accounts = accs; config.accountMode = body.mode; config.activeAccount = requestedActive >= 0 ? requestedActive : Math.min(Math.max(0, Number(body.active) || 0), accs.length - 1);
-      config.concurrencyWaitMs = wait; config.errorRules = requestedErrorRules; config.retryRules = requestedRetryRules; config.quotaProtection = requestedProtection; Object.assign(config, legacyRuleProjection(requestedErrorRules)); config.accountPipeline = requestedPipeline;
+      Object.assign(config, next); clientCatalogs.clear();
       normalizeCachePoolTarget(requestedPipeline);
       for (const [id, previous] of previousById) {
         const current = accs.find((a) => a.id === id);
         if (!current) { invalidateQuotaAccount(id, { clearSnapshot: true, deleted: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); clearRpmState(id); }
         else if (current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) { invalidateQuotaAccount(id, { clearSnapshot: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); const month = getAccountState(id)?.protectionMonthlyAt || 0; if (month) META.accountStates[id] = { protectionMonthlyAt: month }; else delete META.accountStates[id]; clearRpmState(id); }
+        else if (current.clientKeyId !== previous.clientKeyId) invalidateSessionBindingsForAccount(id);
         else if (previous.enabled !== false && current.enabled === false) { invalidateQuotaAccount(id); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); }
         else for (const model of new Set([...Object.keys(previous.perModel || {}), ...Object.keys(current.perModel || {})])) if (JSON.stringify(previous.perModel?.[model]) !== JSON.stringify(current.perModel?.[model])) clearProviderCircuitForRoute(id, model);
       }
@@ -4899,7 +5027,7 @@ async function dispatch(req, res) {
       for (const id of [...rpmWindows.keys()]) if (!seen.has(id) || !rpmLimit(accs.find((a) => a.id === id))) clearRpmState(id);
       pruneOrphanProviderStates();
       reconcileSessionBindings();
-      saveConfig(); saveMeta(); RR_COUNTER = 0; strategyCounters.clear(); pruneProxyAgents(); scheduleQuotaRefresh();
+      saveMeta(); RR_COUNTER = 0; strategyCounters.clear(); pruneProxyAgents(); scheduleQuotaRefresh();
       return sendJSON(res, 200, { ok: true, accounts: accs.length, mode: config.accountMode, active: config.activeAccount });
     }
     if (req.method === 'POST' && p === '/api/accounts/quota-recover') {
@@ -4972,16 +5100,66 @@ async function dispatch(req, res) {
     }
     if (req.method === 'POST' && p === '/api/security') {
       const body = await readJsonBody(req);
+      const next = { ...config };
       if (body.proxyKey !== undefined) {
         const candidate = String(body.proxyKey).trim();
         if (candidate && adminState?.initialized && adminPasswordOK(candidate)) return sendJSON(res, 400, { error: { message: 'client key must differ from admin password' } });
-        config.proxyKey = candidate;
+        next.proxyKey = candidate;
       }
-      if (body.publicBaseUrl !== undefined) config.publicBaseUrl = String(body.publicBaseUrl).trim().replace(/\/+$/, '');
-      if (body.exposeCatalog !== undefined) config.exposeCatalog = !!body.exposeCatalog;
-      saveConfig();
-      PROXY_KEY = config.proxyKey || '';
+      if (body.publicBaseUrl !== undefined) next.publicBaseUrl = String(body.publicBaseUrl).trim().replace(/\/+$/, '');
+      if (body.exposeCatalog !== undefined) next.exposeCatalog = !!body.exposeCatalog;
+      try { validateClientKeys(next, { persisted: true }); }
+      catch (error) { return sendJSON(res, 400, { error: { message: error.message } }); }
+      atomicWriteJson(CONFIG_PATH, next);
+      Object.assign(config, next);
+      PROXY_KEY = config.proxyKey || ''; // startup environment override is not a running-process pin
+      notifyCapacityWaiters();
       return sendJSON(res, 200, { ok: true, proxyKey: config.proxyKey, publicBaseUrl: config.publicBaseUrl, authRequired: !!PROXY_KEY, proxyBase: publicProxyBase(), exposeCatalog: !!config.exposeCatalog });
+    }
+    if (p === '/api/security/client-keys' || p.startsWith('/api/security/client-keys/')) {
+      const parts = p.slice('/api/security/client-keys/'.length).split('/');
+      if (req.method === 'GET' && p === '/api/security/client-keys') return sendJSON(res, 200, { keys: clientKeyInventory().map(({ id, name }) => ({ id, name })) });
+      if (req.method === 'POST' && p === '/api/security/client-keys') {
+        const body = await readJsonBody(req);
+        if (!isPlainObject(body) || Object.keys(body).join(',') !== 'name' || typeof body.name !== 'string') return sendJSON(res, 400, { error: { message: 'expected key name' } });
+        const row = { id: randomId('ck'), name: body.name, key: `cps_${crypto.randomBytes(32).toString('hex')}` };
+        const next = { ...config, clientKeys: [...config.clientKeys, row] };
+        try { validateClientKeys(next, { persisted: true }); if (adminPasswordOK(row.key)) throw new Error('client key must differ from admin password'); }
+        catch (error) { return sendJSON(res, 400, { error: { message: error.message } }); }
+        atomicWriteJson(CONFIG_PATH, next); config.clientKeys = next.clientKeys;
+        return sendJSON(res, 200, { id: row.id, name: row.name, key: row.key });
+      }
+      const id = parts[0], existing = config.clientKeys.find((row) => row.id === id);
+      if (!existing || (parts.length !== 1 && !(parts.length === 2 && parts[1] === 'rotate'))) return sendJSON(res, 404, { error: { message: 'unknown client key' } });
+      if (req.method === 'PATCH' && parts.length === 1) {
+        const body = await readJsonBody(req);
+        if (!isPlainObject(body) || Object.keys(body).join(',') !== 'name' || typeof body.name !== 'string') return sendJSON(res, 400, { error: { message: 'expected key name' } });
+        const next = { ...config, clientKeys: config.clientKeys.map((row) => row.id === id ? { ...row, name: body.name } : row) };
+        try { validateClientKeys(next, { persisted: true }); }
+        catch (error) { return sendJSON(res, 400, { error: { message: error.message } }); }
+        atomicWriteJson(CONFIG_PATH, next); config.clientKeys = next.clientKeys;
+        return sendJSON(res, 200, { id, name: body.name });
+      }
+      if (req.method === 'POST' && parts.length === 2) {
+        const body = await readJsonBody(req);
+        if (!isPlainObject(body) || Object.keys(body).length) return sendJSON(res, 400, { error: { message: 'expected empty body' } });
+        const key = `cps_${crypto.randomBytes(32).toString('hex')}`;
+        const next = { ...config, clientKeys: config.clientKeys.map((row) => row.id === id ? { ...row, key } : row) };
+        try { validateClientKeys(next, { persisted: true }); if (adminPasswordOK(key)) throw new Error('client key must differ from admin password'); }
+        catch (error) { return sendJSON(res, 400, { error: { message: error.message } }); }
+        atomicWriteJson(CONFIG_PATH, next); config.clientKeys = next.clientKeys;
+        invalidateSessionBindingsForOwner(id); notifyCapacityWaiters();
+        return sendJSON(res, 200, { id, key });
+      }
+      if (req.method === 'DELETE' && parts.length === 1) {
+        if (config.accounts.some((account) => account.clientKeyId === id)) return sendJSON(res, 409, { error: { message: 'reassign owned accounts before revoking this key' } });
+        const next = { ...config, clientKeys: config.clientKeys.filter((row) => row.id !== id) };
+        validateClientKeys(next, { persisted: true });
+        atomicWriteJson(CONFIG_PATH, next); config.clientKeys = next.clientKeys;
+        clientCatalogs.delete(id); notifyCapacityWaiters();
+        return sendJSON(res, 200, { ok: true });
+      }
+      return sendJSON(res, 404, { error: { message: 'no route' } });
     }
     if (req.method === 'POST' && p === '/api/validate-upstreams') {
       const input = await readJsonBody(req);
@@ -5036,11 +5214,11 @@ async function dispatch(req, res) {
     if (req.method === 'GET' && (p === '/v1/models' || p === '/api/v1/models' || p === '/models')) {
       // 默认只暴露订阅模型，避免目录模型淹没客户端的模型选择器；exposeCatalog=true 时合并完整目录
       const ids = config.exposeCatalog
-        ? [...new Set([...config.knownModels, ...(await catalog()), ...Object.keys(config.modelAliases || {})])]
+        ? [...new Set([...config.knownModels, ...(await catalog(req.clientKeyId)), ...Object.keys(config.modelAliases || {})])]
         : [...new Set([...config.knownModels, ...Object.keys(config.perModel), ...Object.keys(config.modelAliases || {})])];
       return sendJSON(res, 200, { object: 'list', data: ids.map((id) => ({ id, object: 'model' })) });
     }
-    if (CHAT_PATHS.has(p) && req.method === 'POST') return await handleChat(req, res);
+    if (CHAT_PATHS.has(p) && req.method === 'POST') return await handleChat(req, res, req.clientKeyId);
     return sendJSON(res, 404, { error: { message: `no route: ${req.method} ${p}` } });
   } catch (e) {
     return sendJSON(res, Number.isInteger(e?.statusCode) ? e.statusCode : 500, { error: { message: safeReason(e.message || 'internal error') } });

@@ -11,7 +11,7 @@ test('console login uses an in-memory CSRF session, clears legacy storage and pr
   let reloads = 0;
   const el = selector => {
     if (!elements.has(selector)) elements.set(selector, { value: '', hidden: false, disabled: false, style: {}, textContent: '',
-      addEventListener() {}, focus() {}, querySelectorAll() { return []; } });
+      addEventListener() {}, focus() {}, showModal() { this.open=true; }, close() { this.open=false; }, querySelectorAll() { return []; } });
     return elements.get(selector);
   };
   const responses = [];
@@ -53,8 +53,11 @@ test('console login uses an in-memory CSRF session, clears legacy storage and pr
   await run('tryLogin()');
   assert.equal(calls.at(-1)[0], '/api/auth/login');
   assert.equal(run('DATA.draft'), true);
+  run("showClientKeySecret('one-time-synthetic-secret', $('#newClientKeyName'))");
+  assert.equal(el('#clientKeySecret').value,'one-time-synthetic-secret');
   responses.push({ status: 401 });
   await assert.rejects(run("api('/api/accounts')"), /unauthorized/);
+  assert.equal(el('#clientKeySecret').value,'', '401 must clear revealed material');
   assert.equal(el('#loginOverlay').style.display, 'flex');
   assert.equal(run('DATA.draft'), true);
   assert.equal(run('ADMIN_CSRF'), null);
@@ -68,7 +71,9 @@ test('console login uses an in-memory CSRF session, clears legacy storage and pr
   assert.equal(reloads, 0);
   assert.equal(run('DATA.draft'), true);
   assert.match(el('#adminStatus').textContent, /退出未确认/);
+  run("showClientKeySecret('one-time-synthetic-secret', $('#newClientKeyName'))");
   responses.push({ status: 200, json: async () => ({ ok: true }) });
   await run('logoutAdmin()');
+  assert.equal(el('#clientKeySecret').value,'');
   assert.equal(reloads, 1);
 });

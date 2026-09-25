@@ -4,3 +4,5 @@
 {"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Trace auth, scoped lease, config, log and UI contracts"}
 {"file":".trellis/tasks/09-25-pricing-console-keys-300rpm/research/current-contract-and-hotpaths.md","reason":"Current global pool, env override and binding risks"}
 {"file": ".trellis/tasks/archive/2026-09/09-25-whole-service-performance/research/worst-cases.md", "reason": "Cold catalog 12-way fetch stampede; ensure future key-scoped catalog work is isolated"}
+{"file": ".trellis/tasks/09-25-multi-client-key-routing/research/current-routing-contract.md", "reason": "Verified current auth, scheduler, catalog, migration, diagnostics and browser caller matrix"}
+{"file": ".trellis/spec/backend/client-key-guidelines.md", "reason": "Reusable finalized client-key contract for future edits"}
