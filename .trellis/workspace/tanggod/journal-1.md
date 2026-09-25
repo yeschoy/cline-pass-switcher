@@ -948,3 +948,25 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 40: 完成模型与渠道统计页面拆分
+<!-- trellis-session: v=2 fp=cafb3d5f3d20e0b0 -->
+
+**Date**: 2026-09-25
+**Task**: 完成模型与渠道统计页面拆分
+**Branch**: `feat/simplify-model-provider-console`
+
+### Summary
+
+默认模型、独立渠道子视图共用统计快照；价格/口径详情按需展开，旧 v1/v2 与账号月参考额度分离。聚焦 58/58、全量 300/300 和本地 Chromium 390px 键盘/横滚/密集 200×10 合成场景通过；未验证生产容量或屏幕阅读器。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `19c952d` | feat: split model and channel statistics views |
+
+### Status
+
+[OK] **Completed**

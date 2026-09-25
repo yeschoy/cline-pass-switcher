@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 39
+- **Total Sessions**: 40
 - **Last Active**: 2026-09-25
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~950 | Active |
+| `journal-1.md` | ~972 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 40 | 2026-09-25 | 完成模型与渠道统计页面拆分 | `19c952d` | `feat/simplify-model-provider-console` |
 | 39 | 2026-09-25 | 修复归档价格研究脚本复现路径 | `3196657` | `main` |
 | 38 | 2026-09-25 | 完成模型参考价格扩展 | `741db20` | `feat/expand-reference-prices` |
 | 37 | 2026-09-25 | 五项集成记录与诊断版生产切换 | `2a1b5fa`, `32a150e`, `165755b` | `main` |
