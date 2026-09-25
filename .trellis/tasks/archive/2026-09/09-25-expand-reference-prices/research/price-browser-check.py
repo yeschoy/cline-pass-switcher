@@ -1,5 +1,5 @@
 """Local price UI acceptance using installed Playwright Chromium.
-Run: python3 .trellis/tasks/09-25-expand-reference-prices/research/price-browser-check.py http://127.0.0.1:<printed-port>/
+Run: python3 .trellis/tasks/archive/2026-09/09-25-expand-reference-prices/research/price-browser-check.py http://127.0.0.1:<printed-port>/
 Only accepts the exact loopback URL emitted by price-browser-fixture.mjs.
 """
 import json

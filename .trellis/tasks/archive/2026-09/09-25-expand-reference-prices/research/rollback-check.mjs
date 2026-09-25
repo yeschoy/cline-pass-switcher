@@ -1,4 +1,4 @@
-// Synthetic, local-only rollback rehearsal. Run from any cwd: node .trellis/tasks/09-25-expand-reference-prices/research/rollback-check.mjs
+// Synthetic, local-only rollback rehearsal. Run from repository root: node .trellis/tasks/archive/2026-09/09-25-expand-reference-prices/research/rollback-check.mjs
 // Never prints child output, fixture credentials, request bodies or raw operator files.
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
@@ -10,7 +10,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
+let repo = path.dirname(fileURLToPath(import.meta.url));
+while (!fs.existsSync(path.join(repo, 'server.js')) || !fs.existsSync(path.join(repo, 'package.json'))) {
+  const parent = path.dirname(repo);
+  if (parent === repo) throw Error('repository root not found');
+  repo = parent;
+}
 const oldVersion = 'clinepass-2026-09-24-v1';
 const newVersion = 'clinepass-2026-09-25-v2';
 const oldModel = 'cline-pass/kimi-k3';
@@ -117,7 +122,8 @@ try {
   fs.chmodSync(root, 0o700);
   fs.mkdirSync(dataDir, { mode: 0o700 });
   fs.mkdirSync(oldTree, { mode: 0o700 });
-  const oldSource = execFileSync('git', ['show', 'HEAD:server.js'], { cwd: repo, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+  // Pin the pre-v2 baseline; HEAD advances when this task is committed or archived.
+  const oldSource = execFileSync('git', ['show', '08f27f8:server.js'], { cwd: repo, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
   check(oldSource.includes(oldVersion) && !oldSource.includes(newVersion));
   check(fs.readFileSync(path.join(repo, 'server.js'), 'utf8').includes(newVersion));
   fs.writeFileSync(path.join(oldTree, 'server.js'), oldSource, { mode: 0o600 });
@@ -156,7 +162,7 @@ try {
   snapshot(dataDir, backupV1); // Entire private state, not a hand-edited v2 metadata file.
   const v1Bytes = fs.readFileSync(path.join(backupV1, 'metadata.json'));
   const v1Hash = sha(v1Bytes);
-  console.log('PASS old HEAD created frozen v1 cell and private full-state backup');
+  console.log('PASS old baseline created frozen v1 cell and private full-state backup');
 
   stage = 'new v2 generation';
   child = await launch(path.join(repo, 'server.js'), true);
@@ -181,7 +187,7 @@ try {
   check(fs.readFileSync(path.join(dataDir, 'metadata.json')).equals(v2Bytes));
   check(fs.readFileSync(path.join(dataDir, 'config.json')).equals(v2ConfigBytes));
   check(sha(fs.readFileSync(path.join(backupV2, 'metadata.json'))) === v2Hash);
-  console.log('PASS old HEAD rejected v2 before listening; config/metadata bytes unchanged');
+  console.log('PASS old baseline rejected v2 before listening; config/metadata bytes unchanged');
 
   stage = 'restore private v1 backup and restart old';
   fs.rmSync(dataDir, { recursive: true });
@@ -199,7 +205,7 @@ try {
   check(priceCell(restored, oldModel, oldVersion).lowPicoUsd === 103800000);
   check(!Object.hasOwn(restored.statistics.priceVersions, newVersion));
   check(sha(fs.readFileSync(path.join(backupV2, 'metadata.json'))) === v2Hash);
-  console.log('PASS private v1 restore restarted old HEAD and preserved historical v1; v2 kept separately, not visible to old');
+  console.log('PASS private v1 restore restarted old baseline and preserved historical v1; v2 kept separately, not visible to old');
   console.log('PASS all synthetic rollback checks');
 } catch {
   // Never dump child stderr, fixture credentials, raw metadata or untrusted response text.

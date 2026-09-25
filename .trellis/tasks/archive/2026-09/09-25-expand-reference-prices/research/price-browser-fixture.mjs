@@ -1,12 +1,17 @@
 // Local-only real-browser price fixture. All keys and usage are synthetic.
-// Run from repository root: node .trellis/tasks/09-25-expand-reference-prices/research/price-browser-fixture.mjs
+// Run from repository root: node .trellis/tasks/archive/2026-09/09-25-expand-reference-prices/research/price-browser-fixture.mjs
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../');
+let root = path.dirname(fileURLToPath(import.meta.url));
+while (!fs.existsSync(path.join(root, 'server.js')) || !fs.existsSync(path.join(root, 'test/admin-fixture.js'))) {
+  const parent = path.dirname(root);
+  if (parent === root) throw Error('repository root not found');
+  root = parent;
+}
 const { prepareAdminFixture } = await import(pathToFileURL(path.join(root, 'test/admin-fixture.js')).href);
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-price-browser-'));
 const listen = server => new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', () => { server.off('error', reject); resolve(server.address().port); }); });
