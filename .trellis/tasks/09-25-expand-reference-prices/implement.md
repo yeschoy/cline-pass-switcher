@@ -1,6 +1,6 @@
 # Execution plan (after review/start)
 
-- [ ] Refresh and record official price evidence; map exact model IDs/units/tier/write conditions and internal version.
+- [ ] Confirm with user whether screenshot/prior 13-model historical tariff or today's changed 12-model official table owns this new snapshot; evidence and difference are in `research/price-source-drift-2026-09-25.md`. Then map exact IDs/units/tier/write conditions and version/provenance. **Do not start implementation while this product decision remains open.**
 - [ ] Add focused price/usage/precision/version/unknown tests first; check current `validatePriceSnapshot()` and migration under old v5 data.
 - [ ] Add safe new tariff projection and extend only provably complete request-time valuations in `server.js`; preserve all old cells and fail-open model traffic if valuation fails.
 - [ ] Adjust UI price source/unsupported notes with the UI child or keep backward-compatible projection; update English backend/frontend specs and operator docs as appropriate.

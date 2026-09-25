@@ -1,0 +1,11 @@
+# ClinePass reference tariff source drift (read-only, 2026-09-25)
+
+Source fetched: https://docs.cline.bot/getting-started/clinepass . No account, production data or paid upstream used.
+
+The page still explicitly says ClinePass is a $9.99/month flat subscription and users **are not charged the individual API prices**; the table is USD per 1M tokens for reference/quota understanding. The page does not state row-by-row official effective dates. This live table now differs from the user's 2026-09-25 02:49 screenshot / prior 2026-09-24 collection in `.trellis/tasks/archive/2026-09/09-24-model-provider-statistics/research/official-pricing-and-usage.md`.
+
+- Screenshot/prior table has 13 named model IDs: GLM-5.3, GLM-5.2, Kimi K3, Kimi K2.7 Code, Kimi K2.6, DeepSeek V4 Pro, DeepSeek V4 Flash, MiMo-V2.5, MiMo-V2.5-Pro, MiniMax M3, Qwen3.8 Max, Qwen3.7 Max and Qwen3.7 Plus.
+- Current page has 12 named models. It **no longer lists** GLM-5.2, Kimi K2.7 Code, Kimi K2.6 or DeepSeek V4 Flash. It **adds** GLM-5.3 Flash ($0.15/$0.50/$0.03/—), DeepSeek V4.1 Flash ($0.30/$1.20/$0.006/—) and Muse Spark 1.3 Contributor ($0.10/$0.20/$0.002/—), in Input/Output/Cached Read/Cached Write USD/1M order. Other overlapping rows appeared unchanged on this read; the old/new inventories are nevertheless different.
+- A model ID must never borrow another version's tariff merely because its display name resembles it. The request-time frozen valuation cells must retain old exact rates and version. The screenshot date/collection timestamp is not an official effective date or a real charged invoice.
+
+Decision before implementation: user said “按照这个价格来计费，里面的模型价格” pointing at the screenshot. The current plan's phrase “new snapshot values/model IDs equal verified official table” conflicts with today's live table. Safe recommendation: make the screenshot/prior collected tariff an explicitly labelled frozen **historical reference** version, calculate only for IDs supported by explicit usage under that version, do not silently add new live rows or claim it is current, and treat adopting the new live table as a separately versioned later update. Confirm whether the user instead intends live latest tariff now, because model coverage differs.
