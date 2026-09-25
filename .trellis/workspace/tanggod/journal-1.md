@@ -970,3 +970,25 @@ Fast-forwarded all completed feature work into main, codified main-only normal p
 ### Status
 
 [OK] **Completed**
+
+
+## Session 41: Multi-client key ownership and isolated routing
+<!-- trellis-session: v=2 fp=75bc75791eb5c33d -->
+
+**Date**: 2026-09-25
+**Task**: Multi-client key ownership and isolated routing
+**Branch**: `feat/multi-client-key-routing`
+
+### Summary
+
+Implemented exclusive account ownership for multiple client keys, scoped chat/catalog/cache/bindings, one-time admin key UI, synthetic browser and unsafe old-image rollback evidence; local 333/333 full tests twice, one earlier intermittent cross-feature failure remains unexplained; no production rollout.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4250d88` | feat: isolate client keys by exclusive account pools |
+
+### Status
+
+[OK] **Completed**
