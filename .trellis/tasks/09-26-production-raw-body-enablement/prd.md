@@ -9,7 +9,7 @@ Plan a safe, reversible release that gives administrators failed-attempt detail 
 - Production release `20260924-173240-32a150e3-diagnostics` is running/healthy, restart 0 and no OOM, under a **536,870,912-byte (512 MiB)** cgroup limit; its `CLINE_PASS_RAW_BODY_READY=1` flag is absent. Private config projection: `detailedLogging=true`, `errorDetailLogging=true`, `rawBodyLogging=false`. The server requires the explicit readiness flag **and detected >=2 GiB** merely to make raw mode available. Raising the limit alone is not proof that multiple 35 MiB bodies and slow administration reads are safe.
 - The published code supports **35 MiB per raw body**, a **512 MiB shared retained reservation** with a 64 MiB sanitized-subset fence, 48h raw retention and existing 1 GiB combined store cap. Raw body bytes can contain secrets or private messages; Headers, list metadata, ordinary JSONL and configuration are not authorized to expose them. Existing admin Cookie/CSRF/transport controls deny client keys management.
 - A prior target-like 512 MiB synthetic raw-body load produced OOM, so direct setting activation on the current container is blocked by both the resource gate and absent readiness flag. Old-image rollback must isolate former client-key management ingress and the private raw directory; ordinary backups must omit raw groups or enforce an independent private 48h deletion policy. The 2026-09-24 code-release record remains `awaiting-admin-acceptance`, with an opaque current config hash different from its recorded immediate migration hash. Do not silently mark it accepted or overwrite later operator saves.
-- Local `main`/`origin/main` have been pushed to `9aaa691`, but production still runs `32a150e`. Pushing is **not** deployment; rolling out `main` would also migrate client-key ownership and has an independently documented unsafe old-image-on-v2 rollback path. Do not conflate that change with raw enablement.
+- At this baseline, local `main`/`origin/main` were `9aaa691` while production ran `32a150e`. On 2026-09-26 the operator separately approved a source-only fast-forward/push to `4d4ee87` for isolation; production **still** runs `32a150e`. Pushing is not deployment; a future `main` release would also migrate client-key ownership and has an unsafe old-image-on-v2 rollback boundary.
 
 ## Requirements
 
@@ -35,7 +35,7 @@ Plan a safe, reversible release that gives administrators failed-attempt detail 
 
 ## Remaining review gate
 
-The candidate image and measured memory limit cannot be chosen before isolated tests. After code and resource/backup/rollback/browser gates, present the exact live cutover for separate operator approval. Raw-group exclusion from ordinary backups is the default; if it cannot be proved, stop rather than inventing an external-expiry owner.
+A committed-main image passed bounded isolated 2 GiB stress, but two capture-budget drops, a large maximum event-loop delay and incomplete sustained/resource gates prevent accepting 2 GiB as the final live limit. After code, resource, backup, rollback and browser gates, present the exact live cutover for separate operator approval. Raw-group exclusion from ordinary backups is the default; if it cannot be proved, stop rather than inventing an external-expiry owner.
 
 ## Out of scope
 
