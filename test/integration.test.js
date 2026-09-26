@@ -4346,10 +4346,10 @@ test('raw body setting is refused without runtime memory readiness and preserves
   assert.equal((await (await fetch(`http://127.0.0.1:${port}/api/logs/settings`)).json()).rawBodyLogging, false);
 });
 
-test('raw body mode is explicit, admin-only and never projects Header or body into ordinary diagnostics', async (t) => {
+test('raw body mode is explicit, admin-only and projects only safe Headers in selected detail', async (t) => {
   const upstream = http.createServer((req, res) => {
     let body = ''; req.on('data', (chunk) => { body += chunk; }); req.on('end', () => {
-      res.setHeader('Content-Type', 'application/json'); res.setHeader('X-Fixture-Header', 'fixture-header-secret');
+      res.setHeader('Content-Type', 'application/json; charset=utf-8'); res.setHeader('X-Fixture-Header', 'fixture-header-secret'); res.setHeader('Set-Cookie', 'id=fixture-cookie-secret');
       res.end(JSON.stringify({ data: { choices: [{ message: { content: 'fixture-response-secret' } }] }, echo: body.includes('fixture-body-secret') ? 'accepted' : 'missing' }));
     });
   });
@@ -4358,7 +4358,7 @@ test('raw body mode is explicit, admin-only and never projects Header or body in
   t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
   const api = (route, options = {}) => fetch(`http://127.0.0.1:${port}${route}`, options);
   const clientOnly = { Authorization: 'Bearer fixture-client-key', 'X-Admin-Key': 'fixture-client-key' };
-  const chat = () => rawJson(port, '/v1/chat/completions', { model: 'raw-fixture', messages: [{ role: 'user', content: 'fixture-body-secret' }] }, clientOnly);
+  const chat = () => rawJson(port, '/v1/chat/completions', { model: 'raw-fixture', messages: [{ role: 'user', content: 'fixture-body-secret' }] }, { ...clientOnly, Cookie: 'id=fixture-cookie-secret', 'X-Fixture-Header': 'fixture-header-secret' });
   const first = await chat(); assert.equal(first.status, 200);
   const firstId = first.headers['x-cline-request-id'];
   await waitUntil(async () => (await (await api('/api/logs/details')).json()).items.some((row) => row.requestId === firstId && row.state !== 'open'));
@@ -4371,24 +4371,66 @@ test('raw body mode is explicit, admin-only and never projects Header or body in
   const settingsBefore = fs.readFileSync(path.join(running.dir, 'config.json'));
   assert.equal((await rawJson(port, '/api/logs/settings', { rawBodyLogging: 'true' })).status, 400);
   assert.deepEqual(fs.readFileSync(path.join(running.dir, 'config.json')), settingsBefore);
-  const settings = await rawJson(port, '/api/logs/settings', { rawBodyLogging: true }); assert.equal(settings.status, 200);
+  const settings = await rawJson(port, '/api/logs/settings', { rawBodyLogging: true, errorDetailLogging: true }); assert.equal(settings.status, 200);
   assert.equal(settings.json.rawBodyLogging, true); assert.equal(settings.json.maxPayloadBytes, undefined);
   const projection = await (await api('/api/logs/settings')).json(); assert.equal(projection.rawBodyAvailable, true); assert.equal(projection.rawMaxBodyBytes, 35 * 1024 * 1024); assert.equal(projection.maxPayloadBytes, 512 * 1024 * 1024); assert.equal(projection.maxSanitizedPayloadBytes, 64 * 1024 * 1024);
   const second = await chat(); assert.equal(second.status, first.status); assert.equal(second.text, first.text);
   const secondId = second.headers['x-cline-request-id'];
   await waitUntil(async () => (await (await api('/api/logs/details')).json()).items.some((row) => row.requestId === secondId && row.state !== 'open'));
   const listing = await (await api('/api/logs/details')).json();
-  const row = listing.items.find((item) => item.requestId === secondId); assert.equal(row.profile, 'raw-full');
+  const row = listing.items.find((item) => item.requestId === secondId); assert.equal(row.profile, 'raw-full'); assert.equal(listing.items.filter((item) => item.requestId === secondId).length, 1);
   const group = await (await api(`/api/logs/details/${secondId}`)).json();
   assert.equal(group.request.profile, 'raw-full'); assert.equal(group.bodies.every((body) => body.redacted === false), true);
+  assert.equal(group.request.headers['content-type'], 'application/json');
+  assert.equal(group.request.headers.authorization, '[REDACTED]');
+  assert.equal(group.request.headers.cookie, '[REDACTED]');
+  assert.equal(group.request.responseHeaders['content-type'], 'application/json');
+  assert.equal(group.attempts.length, 1);
+  assert.equal(group.attempts[0].headers['content-type'], 'application/json');
+  assert.equal(group.attempts[0].responseHeaders['content-type'], 'application/json');
+  assert.equal(group.attempts[0].headers.authorization, '[REDACTED]');
+  assert.equal(group.attempts[0].responseHeaders['set-cookie'], '[REDACTED]');
   const content = await api(`/api/logs/details/${secondId}/bodies/${group.request.requestBody}`);
   assert.equal(content.headers.get('cache-control'), 'no-store'); assert.equal(content.headers.get('x-content-type-options'), 'nosniff');
   assert.match(await content.text(), /fixture-body-secret/);
   const metadata = JSON.stringify({ listing, request: group.request, attempts: group.attempts });
-  assert.doesNotMatch(metadata, /fixture-body-secret|fixture-response-secret|fixture-header-secret|fixture-upstream-key/);
+  assert.doesNotMatch(metadata, /fixture-body-secret|fixture-response-secret|fixture-header-secret|fixture-cookie-secret|fixture-upstream-key|x-fixture-header/i);
   const ordinary = fs.readFileSync(path.join(running.dir, 'metadata.json'), 'utf8') + fs.readdirSync(path.join(running.dir, 'logs')).map((file) => fs.readFileSync(path.join(running.dir, 'logs', file), 'utf8')).join('');
-  assert.doesNotMatch(ordinary, /fixture-body-secret|fixture-response-secret|fixture-header-secret/);
+  assert.doesNotMatch(ordinary, /fixture-body-secret|fixture-response-secret|fixture-header-secret|fixture-cookie-secret/);
   assert.doesNotMatch(running.output(), /fixture-body-secret|fixture-response-secret|fixture-header-secret/);
   assert.equal((await (await api(`/api/logs/details/${firstId}`)).json()).request.profile, 'full');
   assert.equal((await fs.promises.readdir(path.join(running.dir, 'detailed-logs', 'raw'))).length, 1);
+});
+
+test('raw error-only keeps failed retry Headers and bodies but omits successful attempt', async (t) => {
+  const upstream = http.createServer((req, res) => {
+    const chunks = []; req.on('data', (chunk) => chunks.push(chunk)); req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString());
+      const first = body.provider?.only?.[0] === 'first' || body.providerOptions?.gateway?.only?.[0] === 'first';
+      res.setHeader('Content-Type', 'application/json'); res.setHeader('Set-Cookie', 'id=fixture-cookie-secret');
+      res.writeHead(first ? 500 : 200);
+      res.end(first ? '{"error":{"message":"fixture failed","status":500}}' : '{"choices":[{"message":{"content":"fixture success"}}]}');
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, errorDetailLogging: true, accounts: [{ id: 'a', name: 'A', key: 'fixture-upstream-secret', enabled: true, perModel: {} }], knownModels: ['retry'], perModel: { retry: { upstreams: ['first', 'second'], pinMode: 'strict' } } }, null, { NODE_ENV: 'test', CLINE_PASS_RAW_BODY_READY: '1', CLINE_PASS_TEST_RAW_MEMORY_BYTES: String(2 * 1024 * 1024 * 1024) });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  assert.equal((await rawJson(port, '/api/logs/settings', { rawBodyLogging: true })).status, 200);
+  const response = await rawJson(port, '/v1/chat/completions', { model: 'retry', messages: [{ role: 'user', content: 'fixture request body' }] });
+  assert.equal(response.status, 200);
+  const id = response.headers['x-cline-request-id'];
+  const api = (route) => fetch(`http://127.0.0.1:${port}${route}`).then((res) => res.json());
+  const group = await waitUntil(async () => { const item = await api(`/api/logs/details/${id}`); return item.request?.state !== undefined && item; });
+  assert.equal(group.request.profile, 'raw-error'); assert.equal(group.request.headers, undefined);
+  assert.deepEqual(group.attempts.map((attempt) => attempt.attemptIndex), [0]);
+  assert.equal(group.attempts[0].headers['content-type'], 'application/json');
+  assert.equal(group.attempts[0].headers.authorization, '[REDACTED]');
+  assert.equal(group.attempts[0].responseHeaders['content-type'], 'application/json');
+  assert.equal(group.attempts[0].responseHeaders['set-cookie'], '[REDACTED]');
+  assert.equal(group.bodies.length, 2);
+  assert.match(await (await fetch(`http://127.0.0.1:${port}/api/logs/details/${id}/bodies/${group.attempts[0].requestBody}`)).text(), /fixture request body/);
+  assert.match(await (await fetch(`http://127.0.0.1:${port}/api/logs/details/${id}/bodies/${group.attempts[0].responseBody}`)).text(), /fixture failed/);
+  assert.doesNotMatch(JSON.stringify(group), /fixture success|fixture-cookie-secret|fixture-upstream-secret/i);
+  const list = await api('/api/logs/details'); assert.equal(list.items.filter((item) => item.requestId === id).length, 1);
+  assert.doesNotMatch(JSON.stringify(list), /headers|fixture request body/i);
 });

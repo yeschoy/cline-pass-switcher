@@ -17,6 +17,7 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { JsonlLogGroup } from './lib/jsonl-log-store.js';
 import { DetailRoot, DetailRedactor, detailContext, detailRoute, observeStream, MAX_BODY_BYTES, MAX_RAW_BODY_BYTES, MAX_PAYLOAD_BYTES, MAX_SANITIZED_PAYLOAD_BYTES, captureBudget } from './lib/detailed-log-capture.js';
+import { projectRawHeaders } from './lib/raw-detail-headers.js';
 import { DetailedLogStore, parseDetailQuery, MAX_AGE_MS, RAW_MAX_AGE_MS, MAX_TOTAL_BYTES } from './lib/detailed-log-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -2206,7 +2207,7 @@ async function fetchJSON(url, opts = {}, timeoutMs = 60000, account = null) {
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(url, { ...opts, signal: ctrl.signal });
-    if (attempt) { attempt.status = res.status; attempt.responseHeaders = Object.fromEntries(res.headers); attempt.url = root.redactor.text(root.redactor.url(res.url)); attempt.redirected = res.redirected; }
+    if (attempt) { attempt.status = res.status; attempt.responseHeaders = root.raw ? projectRawHeaders(Object.fromEntries(res.headers)) : Object.fromEntries(res.headers); if (!root.raw) attempt.url = root.redactor.text(root.redactor.url(res.url)); attempt.redirected = res.redirected; }
     const text = await res.text();
     if (attempt) { attempt.output.add(text); attempt.output.end(); }
     let json = null;
@@ -3164,7 +3165,7 @@ function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, acc
         response = res;
         res.once('end', () => { cleanup(); dispose(); });
         res.once('close', () => { cleanup(); dispose(); });
-        if (detailAttempt) { detailAttempt.status = res.statusCode || 502; detailAttempt.responseHeaders = res.headers; }
+        if (detailAttempt) { detailAttempt.status = res.statusCode || 502; detailAttempt.responseHeaders = root.raw ? projectRawHeaders(res.headers, res.rawHeaders) : res.headers; }
         const responseBody = detailAttempt?.output ? observeStream(res, detailAttempt.output) : res;
         if (!settled) { settled = true; resolve({ status: res.statusCode || 502, headers: res.headers, body: responseBody, attemptToken, detailAttempt,
           setIdleTimeout(ms) {

@@ -8,16 +8,16 @@ const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
 const page = (requestId) => ({ items: [{ requestId, ts: 1, model: '<model>', accounts: ['<account>'], status: 200, state: 'complete', attemptCount: 1 }], nextCursor: null, health: { failures: 0, dropped: 0, corrupt: 0 } });
 function harness() {
-  const elements = new Map(), calls = [], copies = [];
+  const elements = new Map(), calls = [], copies = [], confirmations = [];
   const el = (id) => { if (!elements.has(id)) elements.set(id, { value: '', checked: false, hidden: false, disabled: false, textContent: '', innerHTML: '', style: {}, attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, listeners: {}, addEventListener(type, fn) { this.listeners[type] = fn; }, focus() { this.focused = true; }, select() { this.selected = true; } }); return elements.get(id); };
-  const context = vm.createContext({ document: { querySelector: el, addEventListener() {} }, localStorage: { getItem: () => '' }, fetch: () => new Promise(() => {}), setTimeout() {}, clearTimeout() {}, confirm: () => true, URL, URLSearchParams, navigator: { clipboard: { async writeText(text) { copies.push(text); } } } });
+  const context = vm.createContext({ document: { querySelector: el, addEventListener() {} }, localStorage: { getItem: () => '' }, fetch: () => new Promise(() => {}), setTimeout() {}, clearTimeout() {}, confirm: (message) => { confirmations.push(message); return context.confirmResult !== false; }, URL, URLSearchParams, navigator: { clipboard: { async writeText(text) { copies.push(text); } } } });
   const run = (code) => vm.runInContext(code, context); run(script);
   context.handler = async () => page('row');
   context.call = (...args) => { calls.push(args); return context.handler(...args); };
   run('api=(...args)=>call(...args)');
   run("ACCS={accounts:[{id:'draft',name:'Draft',key:'not submitted',maxConcurrent:9}],active:0};BULK_SELECTION.add(ACCS.accounts[0]);RAW_SCHEDULING={text:'unapplied raw draft'};$('#accMode').value='sticky';ERROR_RULE_DRAFT={statusRules:{'418':{action:'ban'}},contentRules:[{contains:'pending',action:'ignore'}]};ERROR_RULE_GENERATION=1;ADVANCED_ERROR_RULES={generation:1,text:'{}',dirty:true};$('#advancedErrorRulesJson').value='invalid pending JSON';");
   const drafts = () => run("JSON.stringify([ACCS,[...BULK_SELECTION],RAW_SCHEDULING,$('#accMode').value,ERROR_RULE_DRAFT,$('#advancedErrorRulesJson').value])");
-  return { context, run, el, calls, copies, drafts };
+  return { context, run, el, calls, copies, confirmations, drafts };
 }
 
 test('detailed health renders fixed nonzero reasons with safe old-server fallback and stale-read guards', async () => {
@@ -48,9 +48,43 @@ test('five sections, toggle and detail reads preserve all account/bulk/raw draft
   assert.equal(h.el('#navDetails').attrs['aria-pressed'], 'true'); assert.match(h.el('#detailsAuth').textContent, /独立管理员会话认证/);
   h.el('#detailedLogging').checked = true; await h.run('toggleDetailedLogging()');
   assert.equal(h.el('#detailedLogging').checked, true); h.el('#errorDetailLogging').checked = true; await h.run('toggleErrorDetailLogging()'); assert.equal(h.el('#errorDetailLogging').checked, true);
-  h.el('#rawBodyLogging').checked = true; await h.run('toggleRawBodyLogging()'); assert.equal(h.el('#rawBodyLogging').checked, true); assert.equal(h.drafts(), before);
+  h.el('#rawBodyLogging').checked = true; await h.run('toggleRawBodyLogging()'); assert.equal(h.el('#rawBodyLogging').checked, true); assert.equal(h.confirmations.length, 1); assert.equal(h.drafts(), before);
   assert.ok(h.calls.every(([path]) => path.startsWith('/api/logs/')));
   await h.run("switchSection('console')"); assert.equal(h.el('#detailsPanel').hidden, true); assert.equal(h.el('#consolePanel').hidden, false);
+});
+
+test('raw enable confirmation precedes every off-to-on write; cancellation and failure never opt in', async () => {
+  const h = harness(), before = h.drafts(); h.el('#detailsPanel').hidden = false;
+  let settings = { detailedLogging: true, errorDetailLogging: true, rawBodyLogging: false, rawBodyAvailable: true };
+  h.context.handler = async (path, body) => { if (body) settings = { ...settings, ...body }; return settings; };
+  await h.run('loadDetailSettings()'); h.context.confirmResult = false;
+  const initial = h.calls.length; h.el('#rawBodyLogging').focus(); h.el('#rawBodyLogging').checked = true; await h.run('toggleRawBodyLogging()');
+  assert.equal(h.calls.length, initial); assert.equal(h.el('#rawBodyLogging').checked, false); assert.equal(h.el('#rawBodyLogging').focused, true);
+  assert.match(h.el('#detailsStatus').textContent, /已取消启用/);
+  h.context.confirmResult = true; h.el('#rawBodyLogging').checked = true; await h.run('toggleRawBodyLogging()');
+  assert.equal(h.calls.length, initial + 1); assert.equal(h.calls.at(-1)[1].rawBodyLogging, true);
+  assert.equal(h.confirmations.length, 2);
+  h.el('#rawBodyLogging').checked = false; await h.run('toggleRawBodyLogging()');
+  assert.equal(h.confirmations.length, 2);
+  h.context.handler = async (path, body) => body ? { error: { message: 'fixture persist failure' } } : settings;
+  h.el('#rawBodyLogging').checked = true; await h.run('toggleRawBodyLogging()');
+  assert.equal(h.confirmations.length, 3); assert.equal(h.el('#rawBodyLogging').checked, false);
+  assert.equal(h.drafts(), before);
+});
+
+test('a confirmed raw setting write that finishes after navigation updates state without a stale status', async () => {
+  const h = harness(), saved = deferred(); h.el('#detailsPanel').hidden = false;
+  h.context.handler = (path, body) => body ? saved.promise : Promise.resolve({ detailedLogging: true, errorDetailLogging: true, rawBodyLogging: false, rawBodyAvailable: true });
+  await h.run('loadDetailSettings()'); h.el('#rawBodyLogging').checked = true;
+  const pending = h.run('toggleRawBodyLogging()');
+  assert.equal(h.calls.at(-1)[1].rawBodyLogging, true);
+  assert.equal(h.el('#rawBodyLogging').disabled, true);
+  await h.run("switchSection('console')");
+  saved.resolve({ detailedLogging: true, errorDetailLogging: true, rawBodyLogging: true }); await pending;
+  assert.equal(h.run('RAW_BODY_CONFIRMED'), true);
+  assert.equal(h.el('#rawBodyLogging').checked, true);
+  assert.doesNotMatch(h.el('#detailsStatus').textContent, /设置已保存/);
+  assert.equal(h.confirmations.length, 1);
 });
 
 test('unavailable raw runtime disables opt-in without mutating drafts or sending a write', async () => {
@@ -90,7 +124,7 @@ test('stale settings/list/selection/body reads cannot overwrite newer state; cop
 test('raw body warning and session loss clear loaded text without touching account drafts', async () => {
   const h = harness(), before = h.drafts(); h.el('#detailsPanel').hidden = false;
   h.context.handler = async (route) => route.includes('/bodies/') ? 'fixture raw body key' : { request: { requestId: 'root', profile: 'raw-full', requestBody: 'body' }, attempts: [], bodies: [{ bodyId: 'body', state: 'complete', capturedBytes: 20, observedBytes: 20, redacted: false }] };
-  await h.run("selectDetail('root')"); assert.match(h.el('#detailsBodyWarning').textContent, /未脱敏.*密钥/);
+  await h.run("selectDetail('root')"); assert.match(h.el('#detailsBodyWarning').textContent, /Header.*未脱敏.*密钥/);
   await h.run("loadDetailBody('root','body','complete')"); assert.equal(h.el('#detailsText').value, 'fixture raw body key');
   assert.equal(h.run('DETAIL_BODY_RAW'), true);
   h.run('showLogin()'); assert.equal(h.el('#detailsText').value, ''); assert.equal(h.run('DETAIL_BODY_TEXT'), null); assert.equal(h.el('#detailsCopy').disabled, true);
@@ -124,6 +158,11 @@ test('error rows require exact attempt index and call id before exposing one res
   assert.match(h.el('#detailsStatus').textContent, /起流后传输失败/); assert.equal(h.el('#detailsMetadata').focused, true);
   await h.run(`selectDetail('root',{attemptIndex:0,callId:${JSON.stringify(callId)}})`);
   assert.match(h.el('#detailsMetadata').textContent, /关联校验失败/); assert.equal(h.el('#detailsBodies').innerHTML, '');
+  h.context.handler = async () => ({ request: { ...group.request, profile: 'raw-error' }, attempts: [group.attempts[0], { attemptIndex: 1, callId, captureState: 'response-error', requestBody: 'failed-input', responseBody: 'failed-output' }], bodies: [group.bodies[0], { bodyId: 'failed-input', state: 'complete', capturedBytes: 2, observedBytes: 2 }, { bodyId: 'failed-output', state: 'complete', capturedBytes: 3, observedBytes: 3 }] });
+  await h.run(`selectDetail('root',{attemptIndex:1,callId:${JSON.stringify(callId)}})`);
+  const raw = JSON.parse(h.el('#detailsMetadata').textContent);
+  assert.deepEqual(Array.from(raw.bodies, (body) => body.bodyId), ['failed-input', 'failed-output']);
+  assert.equal(h.el('#detailsBodies').innerHTML.includes('other'), false);
   h.context.handler = async () => ({ ...group, attempts: [{ attemptIndex: 1, callId }, { attemptIndex: 1, callId }] });
   await h.run(`selectDetail('root',{attemptIndex:1,callId:${JSON.stringify(callId)}})`); assert.match(h.el('#detailsMetadata').textContent, /不唯一/);
   h.context.handler = async () => ({ error: { message: 'detailed record unavailable' } });

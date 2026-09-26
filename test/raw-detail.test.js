@@ -8,6 +8,7 @@ import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 import { BodyCapture, CaptureBudget, DetailRoot, observeStream, MAX_BODY_BYTES, MAX_RAW_BODY_BYTES, MAX_PAYLOAD_BYTES, MAX_SANITIZED_PAYLOAD_BYTES } from '../lib/detailed-log-capture.js';
 import { DetailedLogStore, RAW_MAX_AGE_MS, MAX_TOTAL_BYTES } from '../lib/detailed-log-store.js';
+import { projectRawHeaders } from '../lib/raw-detail-headers.js';
 
 const rawGroup = (ts, requestId, text = 'fixture-raw-secret') => {
   const bodyId = randomUUID();
@@ -192,16 +193,81 @@ test('raw error capture retains only failed request/response bodies and projects
   let group;
   const store = { generation: 0, recordDrop() {}, failure() { assert.fail('publish must not fail'); }, publish({ produce, release }) { group = produce(); release(); return Promise.resolve(true); } };
   const root = new DetailRoot(req, res, store, [], { profile: 'raw-error' });
-  const ok = root.attempt({ body: 'success-request', url: 'http://fixture/?key=private', headers: { 'x-echo': 'fixture-header-secret' }, account: { key: 'account-secret' } });
-  root.settleAttempt(ok, { failed: false, responseBody: 'success-response' });
-  const failed = root.attempt({ body: 'failed-request-秘密', url: 'http://fixture/?key=private', account: { name: 'fixture-header-secret' } });
-  root.settleAttempt(failed, { failed: true, responseBody: 'failed-response', httpStatus: 500, responseHeaders: { 'x-echo': 'fixture-header-secret' } });
+  const ok = root.attempt({ body: 'success-request', url: 'http://fixture/?key=private', headers: { 'content-type': 'text/plain', 'x-echo': 'fixture-header-secret' }, account: { key: 'account-secret' } });
+  root.settleAttempt(ok, { failed: false, responseBody: 'success-response', responseHeaders: { 'content-type': 'text/plain' } });
+  const failed = root.attempt({ body: 'failed-request-秘密', url: 'http://fixture/?key=private', headers: { 'content-type': 'application/json', authorization: 'Bearer account-secret' }, account: { name: 'fixture-header-secret' } });
+  root.settleAttempt(failed, { failed: true, responseBody: 'failed-response', httpStatus: 500, responseHeaders: { 'content-type': 'application/json', 'x-echo': 'fixture-header-secret' } });
   root.finalize();
   assert.equal(group.request.profile, 'raw-error'); assert.equal(group.attempts.length, 1);
   assert.deepEqual(group.bodies.map((body) => body.text), ['failed-request-秘密', 'failed-response']);
   const metadata = JSON.stringify({ request: group.request, attempts: group.attempts });
   for (const forbidden of ['success-request', 'success-response', 'fixture-header-secret', 'account-secret', 'private']) assert.equal(metadata.includes(forbidden), false);
   assert.equal(group.bodies.every((body) => body.descriptor.redacted === false), true);
+  assert.equal(group.request.headers, undefined);
+  assert.deepEqual({ ...group.attempts[0].headers }, { 'content-type': 'application/json', authorization: '[REDACTED]' });
+  assert.deepEqual({ ...group.attempts[0].responseHeaders }, { 'content-type': 'application/json' });
+  assert.doesNotMatch(metadata, /text\/plain/);
+});
+
+test('raw full projects ingress, each native attempt and downstream headers without touching bodies', () => {
+  const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: { 'content-type': 'application/json', authorization: 'Bearer ingress-secret' }, rawHeaders: ['Content-Type', 'application/json', 'Authorization', 'Bearer ingress-secret'] });
+  const response = { 'content-type': 'text/event-stream; charset=utf-8', 'set-cookie': 'id=downstream-secret' };
+  const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() { return this; }, getHeaders() { return response; } });
+  let group;
+  const store = { generation: 0, recordDrop() {}, failure() { assert.fail('publication failed'); }, open() { return Promise.resolve(); }, publish({ produce, release }) { group = produce(); release(); return Promise.resolve(true); } };
+  const root = new DetailRoot(req, res, store, [], { profile: 'raw-full' });
+  const first = root.attempt({ headers: { 'content-type': 'application/json', authorization: 'Bearer upstream-secret' }, body: 'request-secret-1', url: 'https://user:pass@fixture/?api_key=secret' });
+  first.output.add('failed-response-secret'); first.output.end();
+  root.settleAttempt(first, { failed: true, httpStatus: 500, responseHeaders: { 'content-type': 'application/json', 'set-cookie': 'id=upstream-secret' } });
+  const second = root.attempt({ headers: { accept: 'text/event-stream' }, body: 'request-secret-2' });
+  second.output.add('success-response-secret'); second.output.end();
+  root.settleAttempt(second, { responseHeaders: { 'content-type': 'text/event-stream', authorization: 'Bearer upstream-secret' } });
+  res.writeHead(200); root.output.add('downstream-body-secret'); root.output.end(); root.finalize();
+  const metadata = JSON.stringify({ request: group.request, attempts: group.attempts });
+  assert.deepEqual({ ...group.request.headers }, { 'content-type': 'application/json', authorization: '[REDACTED]' });
+  assert.deepEqual({ ...group.request.responseHeaders }, { 'content-type': 'text/event-stream', 'set-cookie': '[REDACTED]' });
+  assert.deepEqual({ ...group.attempts[0].headers }, { 'content-type': 'application/json', authorization: '[REDACTED]' });
+  assert.deepEqual({ ...group.attempts[0].responseHeaders }, { 'content-type': 'application/json', 'set-cookie': '[REDACTED]' });
+  assert.deepEqual({ ...group.attempts[1].headers }, { accept: 'text/event-stream' });
+  assert.deepEqual({ ...group.attempts[1].responseHeaders }, { 'content-type': 'text/event-stream', authorization: '[REDACTED]' });
+  assert.deepEqual(group.bodies.map((body) => body.text), ['', 'downstream-body-secret', 'request-secret-1', 'failed-response-secret', 'request-secret-2', 'success-response-secret']);
+  for (const secret of ['ingress-secret', 'upstream-secret', 'downstream-secret', 'user:pass', 'api_key']) assert.equal(metadata.includes(secret), false);
+  const validator = Object.create(DetailedLogStore.prototype);
+  assert.doesNotThrow(() => validator.validate({ request: group.request, attempts: group.attempts, bodies: group.bodies.map((body) => body.descriptor) }, root.requestId, true, root.ts));
+});
+
+test('a preprojected empty response map cannot be repopulated from normalized native headers', () => {
+  const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/v1/chat/completions', headers: {} });
+  const res = Object.assign(new EventEmitter(), { write() {}, end() {}, writeHead() { return this; }, getHeaders() { return {}; } });
+  let group;
+  const store = { generation: 0, recordDrop() {}, failure() { assert.fail('publication failed'); }, publish({ produce, release }) { group = produce(); release(); return Promise.resolve(true); } };
+  const root = new DetailRoot(req, res, store, [], { profile: 'raw-error' });
+  const attempt = root.attempt({ headers: {}, body: 'fixture request' });
+  attempt.responseHeaders = projectRawHeaders({ 'content-type': 'application/json' }, Array.from({ length: 258 }, (_, i) => i % 2 ? 'private' : 'x-custom'));
+  root.settleAttempt(attempt, { failed: true, httpStatus: 500, responseHeaders: { 'content-type': 'application/json' }, responseBody: 'fixture failure' });
+  root.finalize();
+  assert.deepEqual({ ...group.attempts[0].responseHeaders }, {});
+  assert.equal(group.bodies.length, 2);
+});
+
+test('raw manifest validates safe headers on publication and read, old maps remain optional', async (t) => {
+  const store = await setup(t), now = store.now(), item = rawGroup(now, randomUUID(), 'fixture raw');
+  const invalid = rawGroup(now, randomUUID(), 'fixture rejected');
+  assert.equal(await store.publish({ generation: store.generation, ts: now, requestId: invalid.requestId, profile: 'raw-full', release() {}, produce: () => { const group = invalid.produce(); group.request.headers = { authorization: 'fixture credential' }; return group; } }), false);
+  assert.equal((await store.query()).items.some((row) => row.requestId === invalid.requestId), false);
+  assert.equal(await store.publish({ generation: store.generation, ts: now, requestId: item.requestId, profile: 'raw-full', release() {}, produce: () => { const group = item.produce(); group.request.headers = projectRawHeaders({ 'content-type': 'application/json' }); return group; } }), true);
+  const list = await store.query(); assert.equal(JSON.stringify(list).includes('headers'), false);
+  assert.deepEqual((await store.detail(item.requestId)).request.headers, { 'content-type': 'application/json' });
+  const dir = path.join(store.rawDir, `${now}-${item.requestId}`), manifest = JSON.parse(await fs.readFile(path.join(dir, 'manifest.json')));
+  for (const unsafe of [{ authorization: 'Bearer fixture-secret' }, { authorization: 'gzip' }, { cookie: '0' }, { 'set-cookie': 'text/plain' }, { 'content-type': 'Bearer fixture-secret' }, { 'content-type': ['application/json'] }, Object.fromEntries(Array.from({ length: 6 }, (_, i) => [`x-${i}`, 'fixture-secret']))]) {
+    assert.throws(() => store.validate({ ...manifest, request: { ...manifest.request, headers: unsafe } }, item.requestId, true, now), SyntaxError);
+  }
+  manifest.request.headers = { 'content-type': 'Bearer fixture-secret' };
+  await fs.writeFile(path.join(dir, 'manifest.json'), JSON.stringify(manifest));
+  await assert.rejects(store.detail(item.requestId), { statusCode: 404 });
+  await assert.rejects(store.body(item.requestId, manifest.bodies[0].bodyId), { statusCode: 404 });
+  const old = publish(store, store.now(), 'old group'); assert.equal(await old.done, true);
+  assert.equal((await store.detail(old.requestId)).request.headers, undefined);
 });
 
 test('raw error-only SSE keeps only the exact triggering event and failed request bytes', async () => {
