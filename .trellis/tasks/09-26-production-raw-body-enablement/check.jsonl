@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/client-key-guidelines.md", "reason": "Do not deploy pushed multi-key schema or permit unsafe old-image rollback by accident"}
+{"file": ".trellis/spec/backend/admin-auth-guidelines.md", "reason": "Independent administrator and client-key denial for raw diagnostics"}
+{"file": ".trellis/tasks/archive/2026-09/09-24-detailed-log-35mb/research/raw-local-validation.md", "reason": "Local synthetic raw capture evidence and limits versus target cgroup"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Read logging-guidelines.md opt-in detail scenario in full on demand; injected file exceeds size limit"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Read state-management.md detailed settings and selected-content scenario in full on demand; injected file exceeds size limit"}
+{"file": ".trellis/spec/backend/deployment-guidelines.md", "reason": "Review committed source, migration, private backup, image and rollback gates"}
+{"file": ".trellis/tasks/09-26-production-raw-body-enablement/research/current-profile-and-header-boundary.md", "reason": "Verify that implemented Header projection closes the current omission without expanding ordinary logs"}
