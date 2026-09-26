@@ -9,3 +9,5 @@
 {"file": ".trellis/tasks/09-26-production-raw-body-enablement/research/target-stress-20260926.md", "reason": "Bounded 2 GiB synthetic raw-load evidence, diagnostic drops and limitations"}
 {"file": ".trellis/tasks/09-26-production-raw-body-enablement/research/private-migration-20260926.md", "reason": "Copied-data owner migration, quota-side-effect drift and compatible rollback smoke"}
 {"file": ".trellis/tasks/09-26-production-raw-body-enablement/research/backup-ttl-gates-20260926.md", "reason": "Read-only backup inventory limitations and exact-image synthetic 48h startup recovery"}
+{"file": ".trellis/tasks/09-26-production-raw-body-enablement/research/full-rollback-rehearsal-20260926.md", "reason": "Synthetic complete non-raw backup, v1/v2 preservation and exact-old-image restore; live-scale gates still open"}
+{"file": ".trellis/tasks/09-26-production-raw-body-enablement/research/code-only-512-preflight-20260926.md", "reason": "Raw-off committed image 512 MiB startup on private copied JSON trio, not full-corpus load"}
