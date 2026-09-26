@@ -258,9 +258,37 @@ def inventory(base, *, source=False, deadline=None):
     return h.digest(), count, total
 
 
-def atomic_status(stage, phase):
-    """Never promote a copy to trusted; isolated restore remains separate."""
-    encoded = (json.dumps({'phase': phase, 'trusted': False}, sort_keys=True) + '\n').encode()
+def atomic_status(stage, phase, *, source_tree, copy_tree, image, container_id,
+                  config_sha256, compose_sha256):
+    """Seal only verified non-raw inventory; isolated restore remains separate."""
+    require(type(phase) is str and phase == 'quiescent-copy-verified-restore-pending',
+            'status phase')
+
+    def tree(value):
+        require(type(value) is tuple and len(value) == 3, 'status tree shape')
+        digest, entries, size = value
+        require(type(digest) is bytes and len(digest) == 32 and
+                type(entries) is int and 0 <= entries <= MAX_ENTRIES and
+                type(size) is int and 0 <= size <= MAX_BYTES, 'status tree bounds')
+        return {'sha256': digest.hex(), 'entries': entries, 'bytes': size}
+
+    source, copy = tree(source_tree), tree(copy_tree)
+    require(source == copy and type(image) is str and
+            re.fullmatch(r'sha256:[0-9a-f]{64}', image) is not None and
+            type(container_id) is str and HEX.fullmatch(container_id) and
+            type(config_sha256) is str and HEX.fullmatch(config_sha256) and
+            type(compose_sha256) is str and HEX.fullmatch(compose_sha256),
+            'status evidence mismatch')
+    record = {'phase': phase, 'trusted': False, 'sourceTree': source, 'copyTree': copy,
+              'image': image, 'containerId': container_id,
+              'configSha256': config_sha256, 'composeSha256': compose_sha256}
+    encoded = (json.dumps(record, sort_keys=True) + '\n').encode()
+    status = stage / 'status.json'
+    info = status.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and
+            info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o600 and
+            read_json(status) == {'phase': 'precopy-unverified', 'trusted': False},
+            'untrusted status changed before seal')
     temp = stage / 'status.json.new'
     fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:

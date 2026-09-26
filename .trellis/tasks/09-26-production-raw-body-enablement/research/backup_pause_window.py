@@ -277,8 +277,8 @@ def execute(ops, cfg, *, anchor=Path('/'), uid=0, data_uid=1000,
         # Recheck after sidecar/gateway work: those checks may overlap an external
         # writer. This detects observed drift, not writes after this final scan;
         # acceptance still requires an external writer fence and recheck.
-        require(scan(cfg.data, source=True, deadline=deadline) == copied,
-                'final non-raw source drift')
+        final_source = scan(cfg.data, source=True, deadline=deadline)
+        require(final_source == copied, 'final non-raw source drift')
         fenced()
         verified = True
     finally:
@@ -314,7 +314,10 @@ def execute(ops, cfg, *, anchor=Path('/'), uid=0, data_uid=1000,
             ops.cancel(service)
     require(verified and recovered and clock() < started + WINDOW,
             'backup window did not finish safely')
-    atomic_status(cfg.stage, 'quiescent-copy-verified-restore-pending')
+    atomic_status(cfg.stage, 'quiescent-copy-verified-restore-pending',
+                  source_tree=final_source, copy_tree=copied, image=cfg.image,
+                  container_id=cfg.container_id, config_sha256=cfg.config_hash,
+                  compose_sha256=cfg.compose_hash)
     return True
 
 

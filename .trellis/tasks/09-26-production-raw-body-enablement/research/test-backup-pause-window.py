@@ -156,13 +156,120 @@ class PauseTests(unittest.TestCase):
     def test_success_stays_untrusted_and_uses_only_pause(self):
         self.assertTrue(pause.probe(self.ops, self.cfg, **self.kw))
         self.assertTrue(pause.execute(self.ops, self.cfg, **self.kw))
+        digest, entries, size = common.inventory(self.data, source=True)
+        expected_tree = {'sha256': digest.hex(), 'entries': entries, 'bytes': size}
         self.assertEqual(common.read_json(self.stage / 'status.json'), {
-            'phase': 'quiescent-copy-verified-restore-pending', 'trusted': False})
+            'phase': 'quiescent-copy-verified-restore-pending', 'trusted': False,
+            'sourceTree': expected_tree, 'copyTree': expected_tree,
+            'image': self.cfg.image, 'containerId': self.cfg.container_id,
+            'configSha256': self.cfg.config_hash, 'composeSha256': self.cfg.compose_hash})
+        self.assertEqual(common.inventory(self.stage / 'data'),
+                         common.inventory(self.data, source=True))
+        self.assertFalse((self.stage / 'status.json.new').exists())
         self.assertLess(self.ops.actions.index('arm'), self.ops.actions.index('pause'))
         self.assertEqual(self.ops.actions[self.ops.actions.index('pause') - 1], 'watchdog_active')
         self.assertLess(self.ops.actions.index('unpause'), self.ops.actions.index('cancel'))
         self.assertFalse(self.ops.timer)
         self.assertFalse((self.stage / 'data/detailed-logs/raw').exists())
+
+    def test_status_seal_rejects_malformed_evidence_before_creating_file(self):
+        tree = common.inventory(self.data, source=True)
+        evidence = {'source_tree': tree, 'copy_tree': tree, 'image': self.cfg.image,
+                    'container_id': self.cfg.container_id,
+                    'config_sha256': self.cfg.config_hash,
+                    'compose_sha256': self.cfg.compose_hash}
+        status = self.stage / 'status.json'
+        original = status.read_bytes()
+        cases = (
+            ('phase', 'precopy-unverified'),
+            ('source_tree', (tree[0][:-1], tree[1], tree[2])),
+            ('source_tree', (tree[0], True, tree[2])),
+            ('source_tree', (tree[0], common.MAX_ENTRIES + 1, tree[2])),
+            ('source_tree', (tree[0], tree[1], common.MAX_BYTES + 1)),
+            ('copy_tree', (tree[0], tree[1], tree[2] + 1)),
+            ('image', 'sha256:' + 'A' * 64),
+            ('container_id', 'short'),
+            ('config_sha256', 'A' * 64),
+            ('compose_sha256', 'bad'),
+        )
+        for name, value in cases:
+            with self.subTest(name=name, value=str(value)[:32]):
+                args = dict(evidence)
+                phase = 'quiescent-copy-verified-restore-pending'
+                if name == 'phase':
+                    phase = value
+                else:
+                    args[name] = value
+                with self.assertRaises(common.GateError):
+                    common.atomic_status(self.stage, phase, **args)
+                self.assertEqual(status.read_bytes(), original)
+                self.assertFalse((self.stage / 'status.json.new').exists())
+        self.assertTrue(common.stage_gate(self.stage, anchor=self.root,
+                                           owner=os.geteuid(), data_uid=os.geteuid()))
+
+    def test_status_seal_refuses_changed_initial_record_before_temp_creation(self):
+        tree = common.inventory(self.data, source=True)
+        original = (self.stage / 'status.json').read_bytes()
+        for changed in (b'{"phase":"already-sealed","trusted":false}',
+                        b'{"phase":"precopy-unverified","trusted":true}'):
+            with self.subTest(changed=changed):
+                put(self.stage / 'status.json', changed)
+                with self.assertRaises(common.GateError):
+                    common.atomic_status(self.stage, 'quiescent-copy-verified-restore-pending',
+                                         source_tree=tree, copy_tree=tree, image=self.cfg.image,
+                                         container_id=self.cfg.container_id,
+                                         config_sha256=self.cfg.config_hash,
+                                         compose_sha256=self.cfg.compose_hash)
+                self.assertEqual((self.stage / 'status.json').read_bytes(), changed)
+                self.assertFalse((self.stage / 'status.json.new').exists())
+        put(self.stage / 'status.json', original)
+        (self.stage / 'status.json').chmod(0o644)
+        with self.assertRaises(common.GateError):
+            common.atomic_status(self.stage, 'quiescent-copy-verified-restore-pending',
+                                 source_tree=tree, copy_tree=tree, image=self.cfg.image,
+                                 container_id=self.cfg.container_id,
+                                 config_sha256=self.cfg.config_hash,
+                                 compose_sha256=self.cfg.compose_hash)
+        self.assertEqual((self.stage / 'status.json').read_bytes(), original)
+        self.assertFalse((self.stage / 'status.json.new').exists())
+        (self.stage / 'status.json').chmod(0o600)
+
+    def test_status_seal_fsyncs_file_before_replace_then_directory(self):
+        tree = common.inventory(self.data, source=True)
+        fsync, replace = os.fsync, os.replace
+        events = []
+
+        def sync(fd):
+            events.append('file' if stat.S_ISREG(os.fstat(fd).st_mode) else 'directory')
+            return fsync(fd)
+
+        def swap(src, dst):
+            events.append('replace')
+            return replace(src, dst)
+
+        with patch.object(common.os, 'fsync', side_effect=sync), \
+             patch.object(common.os, 'replace', side_effect=swap):
+            common.atomic_status(self.stage, 'quiescent-copy-verified-restore-pending',
+                                 source_tree=tree, copy_tree=tree, image=self.cfg.image,
+                                 container_id=self.cfg.container_id,
+                                 config_sha256=self.cfg.config_hash,
+                                 compose_sha256=self.cfg.compose_hash)
+        self.assertEqual(events, ['file', 'replace', 'directory'])
+        self.assertFalse(common.read_json(self.stage / 'status.json')['trusted'])
+        self.assertFalse((self.stage / 'status.json.new').exists())
+
+    def test_status_seal_failure_occurs_only_after_service_recovery(self):
+        original = (self.stage / 'status.json').read_bytes()
+        def fail_seal(*args, **kwargs):
+            self.assertEqual(self.ops.state, 'running')
+            self.assertFalse(self.ops.timer)
+            self.assertLess(self.ops.actions.index('healthy'), self.ops.actions.index('cancel'))
+            raise common.GateError('synthetic seal failure')
+        with patch.object(pause, 'atomic_status', side_effect=fail_seal):
+            with self.assertRaises(common.GateError):
+                pause.execute(self.ops, self.cfg, **self.kw)
+        self.assertEqual((self.stage / 'status.json').read_bytes(), original)
+        self.assertFalse((self.stage / 'status.json.new').exists())
 
     def move_stage(self, destination):
         destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -221,7 +328,9 @@ class PauseTests(unittest.TestCase):
                 elif failure != 'health':
                     self.assertLess(self.ops.actions.index('healthy', self.ops.actions.index('unpause')),
                                     self.ops.actions.index('cancel'))
-                self.assertFalse(common.read_json(self.stage / 'status.json')['trusted'])
+                self.assertEqual(common.read_json(self.stage / 'status.json'),
+                                 {'phase': 'precopy-unverified', 'trusted': False})
+                self.assertFalse((self.stage / 'status.json.new').exists())
                 self.ops.failure = None
                 self.ops.state = 'running'
                 self.ops.timer = False
