@@ -4,3 +4,5 @@
 {"file":".trellis/tasks/09-27-error-log-detail-visibility/research/current-contract.md","reason":"Error-log/detailed-log existing boundary"}
 {"file":".trellis/tasks/09-27-load-health-account-routing/research/current-selection.md","reason":"Existing selection and wait behavior"}
 {"file":".trellis/tasks/09-27-high-concurrency-path-investigation/research/prior-evidence-and-gaps.md","reason":"Current performance evidence and missing measurements"}
+{"file":".trellis/spec/backend/client-key-guidelines.md","reason":"Generated extra-key security and compatibility boundary"}
+{"file":".trellis/tasks/09-27-longer-generated-client-keys/research/current-contract.md","reason":"Existing key generation and one-time display contract"}

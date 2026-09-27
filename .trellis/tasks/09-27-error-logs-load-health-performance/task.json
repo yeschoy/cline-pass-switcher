@@ -21,7 +21,8 @@
   "children": [
     "09-27-error-log-detail-visibility",
     "09-27-load-health-account-routing",
-    "09-27-high-concurrency-path-investigation"
+    "09-27-high-concurrency-path-investigation",
+    "09-27-longer-generated-client-keys"
   ],
   "parent": null,
   "relatedFiles": [],

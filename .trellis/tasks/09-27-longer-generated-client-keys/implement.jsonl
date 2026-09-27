@@ -1,0 +1,7 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend entry point before changing key generation"}
+{"file":".trellis/spec/backend/client-key-guidelines.md","reason":"Generated key format, old-key compatibility, owner authentication and atomic writes"}
+{"file":".trellis/spec/backend/admin-auth-guidelines.md","reason":"Independent admin authorization for create/rotate"}
+{"file":".trellis/spec/frontend/index.md","reason":"Native console entry point and browser verification"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"One-time modal lifecycle, clipboard fallback and stale responses"}
+{"file":".trellis/spec/guides/index.md","reason":"Security and cross-layer context routing"}
+{"file":".trellis/tasks/09-27-longer-generated-client-keys/research/current-contract.md","reason":"Existing generator, validation and UI/test evidence"}

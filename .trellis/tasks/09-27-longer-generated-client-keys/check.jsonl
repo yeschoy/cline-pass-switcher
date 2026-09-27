@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/client-key-guidelines.md","reason":"Check generated-key length and old-key compatibility"}
+{"file":".trellis/spec/backend/admin-auth-guidelines.md","reason":"Check auth boundary and one-time disclosure"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Check isolated tests and complete gate"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Check copied secret lifecycle and stale-action rejection"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Check textarea focus, keyboard, narrow display and browser gate"}
+{"file":".trellis/tasks/09-27-longer-generated-client-keys/research/current-contract.md","reason":"Compare new create/rotate with baseline"}
