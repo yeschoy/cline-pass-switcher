@@ -1036,3 +1036,33 @@ On 2026-09-25, audited bounded ordinary logs in place on the canonical productio
 ### Status
 
 [OK] **Completed**
+
+
+## Session 44: Raw-off production cutover and rollback contract
+<!-- trellis-session: v=2 fp=0b2b4c13f09ceff0 -->
+
+**Date**: 2026-09-27
+**Task**: Raw-off production cutover and rollback contract
+**Branch**: `feat/raw-detail-safe-headers`
+
+### Summary
+
+Committed-main raw-detail code is deployed raw-off at 512 MiB with 32 Legacy-owned accounts, healthy and zero restarts/OOM. Recorded scoped synthetic-artifact cleanup and reusable stop-first incompatible-schema rollback guidance. Positive administrator acceptance, real chat, raw backup/privacy, resource and browser gates remain open; production raw capture stays disabled.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `71510e5` | docs(task): bound raw-off stop-first deployment gates |
+| `29af388` | test(task): bound stopped-v1 backup preflight |
+| `d252117` | docs(task): record raw-off production code release |
+| `3ccad96` | docs(task): record scoped post-release cleanup |
+| `5cf38a3` | docs(spec): define stop-first incompatible-schema deployment |
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- Retain active raw-body enablement task and private v1/v2 rollback materials. Obtain positive administrator protected-page checks; separately prove raw backup exclusion, target cgroup headroom and real-browser/auth gates before requesting a raw-on cutover.

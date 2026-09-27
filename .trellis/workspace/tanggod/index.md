@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 43
-- **Last Active**: 2026-09-26
+- **Total Sessions**: 44
+- **Last Active**: 2026-09-27
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1038 | Active |
+| `journal-1.md` | ~1068 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 44 | 2026-09-27 | Raw-off production cutover and rollback contract | `71510e5`, `29af388`, `d252117`, `3ccad96`, `5cf38a3` | `feat/raw-detail-safe-headers` |
 | 43 | 2026-09-26 | Read-only production error-log follow-up | `6a7eba2` | `docs/remote-errors-followup-20260925` |
 | 42 | 2026-09-25 | Integrated pricing, console, client-key and performance acceptance | `8dc1584` | `feat/pricing-console-keys-integration` |
 | 41 | 2026-09-25 | Multi-client key ownership and isolated routing | `4250d88` | `feat/multi-client-key-routing` |
