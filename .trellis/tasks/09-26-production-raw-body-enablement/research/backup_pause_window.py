@@ -12,7 +12,6 @@ No tool can promise 600s availability if Docker/systemd/host itself is broken.
 """
 import argparse
 import json
-import http.client
 import os
 from pathlib import Path
 import re
@@ -29,12 +28,20 @@ from backup_window_watchdog import boot_id, read_state, state_path, SCRIPT as WA
 SERVICE = 'cline-pass-console'
 WINDOW = 600
 RESERVE = 60
+RECOVERY_WAIT = 55  # Leave at least five seconds of the watchdog reserve.
 MEMORY = 536_870_912
 ROOT = Path('/opt/cline-pass-switcher')
 INSPECT = ('{{json .Id}} {{json .Name}} {{json .Image}} {{json .State.Status}} '
            '{{json .State.Health.Status}} {{json .RestartCount}} '
            '{{json .State.OOMKilled}} {{json .HostConfig.Memory}} '
            '{{json .Mounts}} {{json .Config.Labels}}')
+META_GET = ['/usr/bin/curl', '--disable', '--silent', '--max-time', '3',
+            '--connect-timeout', '2', '--noproxy', '*', '-o', '/dev/null',
+            '-w', '%{http_code}', '--url', 'http://127.0.0.1:3123/api/meta']
+
+
+class IdentityDrift(GateError):
+    """An observed container/Compose identity mismatch, not a failed command."""
 
 
 def command(argv, timeout=15, max_output=8192):
@@ -59,30 +66,49 @@ def fields(text, count):
 
 
 class PauseOps:
-    def __init__(self, cfg, run=command, boot=time.monotonic, *, owner=0, anchor=Path('/')):
-        self.cfg, self.run, self.boot = cfg, run, boot
+    def __init__(self, cfg, run=command, boot=time.monotonic, *, owner=0, anchor=Path('/'),
+                 sleep=time.sleep):
+        self.cfg, self.run, self.boot, self.sleep = cfg, run, boot, sleep
         self.owner, self.anchor = owner, anchor
 
-    def inspect(self):
-        values = fields(self.run(['docker', 'inspect', '--format', INSPECT,
-                                  self.cfg.container_id]), 10)
+    def inspect(self, *, recovering=False, deadline=None):
+        def checked_run(argv):
+            if deadline is None:
+                return self.run(argv)
+            remaining = deadline - self.boot()
+            require(remaining > 0, 'recovery inspection deadline')
+            return self.run(argv, timeout=min(3, remaining))
+
+        response = checked_run(['docker', 'inspect', '--format', INSPECT,
+                                self.cfg.container_id])
+        try:
+            values = fields(response, 10)
+        except (ValueError, GateError) as exc:
+            raise IdentityDrift('inspect shape') from exc
         ident, name, image, status, health, restarts, oom, memory, mounts, labels = values
-        require(ident == self.cfg.container_id and name == '/' + SERVICE and
+        def identity(ok, reason):
+            if not ok:
+                raise IdentityDrift(reason)
+        identity(ident == self.cfg.container_id and name == '/' + SERVICE and
                 image == self.cfg.image and status in ('running', 'paused') and
-                health == 'healthy' and type(restarts) is int and restarts == 0 and
+                health in ('healthy', 'unhealthy', 'starting') and
+                type(restarts) is int and restarts == 0 and
                 oom is False and type(memory) is int and memory == MEMORY and
                 isinstance(mounts, list) and len(mounts) == 1 and
                 isinstance(labels, dict) and labels.get('com.docker.compose.service') == SERVICE and
                 len(labels) < 64, 'old container identity/health/memory fence')
         mount = mounts[0]
-        require(isinstance(mount, dict) and mount.get('Type') == 'bind' and
+        identity(isinstance(mount, dict) and mount.get('Type') == 'bind' and
                 mount.get('Source') == str(self.cfg.data) and
                 mount.get('Destination') == '/data' and mount.get('RW') is True,
                 'data mount fence')
-        require(self.run(['docker', 'compose', '-f', str(self.cfg.compose),
-                          'ps', '-q', SERVICE]).strip() == ident,
-                'Compose service identity drift')
-        return ident, status
+        compose_id = checked_run(['docker', 'compose', '-f', str(self.cfg.compose),
+                                  'ps', '-q', SERVICE]).strip()
+        require(deadline is None or self.boot() < deadline, 'recovery inspection deadline')
+        identity(compose_id == ident, 'Compose service identity drift')
+        require(status != 'running' or recovering or health == 'healthy',
+                'Docker health not ready')
+        return (ident, status, health) if recovering else (ident, status)
 
     def gateway_loaded(self):
         # nginx -T emits configuration to stdout; capture it only in memory, never log it.
@@ -165,8 +191,8 @@ class PauseOps:
     def pause(self):
         self.run(['docker', 'pause', self.cfg.container_id], 20)
 
-    def unpause(self):
-        self.run(['docker', 'unpause', self.cfg.container_id], 20)
+    def unpause(self, timeout=20):
+        self.run(['docker', 'unpause', self.cfg.container_id], timeout)
 
     def rsync(self, timeout):
         self.run(['rsync', '-a', '--numeric-ids', '--no-links', '--no-devices',
@@ -174,17 +200,35 @@ class PauseOps:
                   '--exclude=' + EXCLUDE, '--', str(self.cfg.data) + '/',
                   str(self.cfg.stage / 'data') + '/'], timeout)
 
-    def healthy(self):
-        require(self.inspect() == (self.cfg.container_id, 'running'), 'service not running')
-        # Fixed public metadata path, no credentials or body, 200 alone is checked.
-        connection = http.client.HTTPConnection('127.0.0.1', 3123, timeout=3)
-        try:
-            connection.request('GET', '/api/meta')
-            require(connection.getresponse().status == 200, 'local HTTP recovery failed')
-        except (OSError, ValueError) as exc:
-            raise GateError('local HTTP recovery unavailable') from exc
-        finally:
-            connection.close()
+    def healthy(self, *, timeout=0):
+        require(0 <= timeout <= RECOVERY_WAIT, 'recovery wait bound')
+        deadline = self.boot() + timeout
+        while True:
+            # Only this bounded post-unpause proof tolerates a running container
+            # whose Docker health has not yet recovered. Identity drift is fatal.
+            if timeout:
+                ident, status, health = self.inspect(recovering=True, deadline=deadline)
+            else:
+                ident, status = self.inspect()
+                health = 'healthy'
+            require((ident, status) == (self.cfg.container_id, 'running'),
+                    'service not running')
+            # Fixed public metadata path, no credentials or body.
+            remaining = deadline - self.boot()
+            require(not timeout or remaining > 0, 'local HTTP/Docker health recovery failed')
+            try:
+                http_ok = (self.run(META_GET, timeout=min(3, remaining) if timeout else 3,
+                                    max_output=3) == '200')
+            except (GateError, OSError):
+                http_ok = False
+            if health == 'healthy' and http_ok:
+                require(self.inspect(deadline=deadline if timeout else None) ==
+                        (self.cfg.container_id, 'running'),
+                        'service changed during HTTP recovery')
+                return
+            remaining = deadline - self.boot()
+            require(timeout and remaining > 0, 'local HTTP/Docker health recovery failed')
+            self.sleep(min(1, remaining))
 
 
 def raw_empty(data, uid):
@@ -223,7 +267,7 @@ def probe(ops, cfg, *, anchor=Path('/'), uid=0, data_uid=1000, scan=inventory):
 
 
 def execute(ops, cfg, *, anchor=Path('/'), uid=0, data_uid=1000,
-            clock=time.monotonic, sleep=time.sleep, scan=inventory):
+            clock=time.monotonic, scan=inventory):
     probe(ops, cfg, anchor=anchor, uid=uid, data_uid=data_uid, scan=scan)
     started = clock()
     service = None
@@ -283,29 +327,40 @@ def execute(ops, cfg, *, anchor=Path('/'), uid=0, data_uid=1000,
         verified = True
     finally:
         if attempted:
-            # Even if inspect fails, unpause the exact captured ID. A failed or
-            # timed-out pause can complete later; never cancel in that case.
+            # A running but not-yet-healthy container may already have been
+            # unpaused by the watchdog. Do not issue a redundant unpause. A
+            # failed inspect command is ambiguous; the independent watchdog
+            # stays armed. Observed identity drift must never be acted on.
+            recovery_deadline = min(ops.boot() + RECOVERY_WAIT, started + WINDOW - 5)
             try:
-                try:
-                    if ops.inspect() == (cfg.container_id, 'paused'):
-                        ops.unpause()
-                except (GateError, OSError):
-                    ops.unpause()
-                for attempt in range(10):
-                    try:
-                        ops.healthy()
-                        recovered = True
-                        break
-                    except (GateError, OSError):
-                        if attempt == 9 or clock() >= started + WINDOW - 5:
-                            raise
-                        sleep(1)
+                ident, status, _health = ops.inspect(recovering=True,
+                                                     deadline=recovery_deadline)
+            except IdentityDrift:
+                raise
             except (GateError, OSError):
                 try:
-                    ops.unpause()
+                    remaining = recovery_deadline - ops.boot()
+                    if remaining > 0:
+                        ops.unpause(timeout=min(20, remaining))  # best effort
                 except (GateError, OSError):
                     pass
                 raise
+            require(ident == cfg.container_id, 'recovery identity drift')
+            if status == 'paused':
+                try:
+                    remaining = recovery_deadline - ops.boot()
+                    require(remaining > 0, 'recovery deadline')
+                    ops.unpause(timeout=min(20, remaining))
+                except (GateError, OSError):
+                    # A timed-out unpause may have succeeded. Prove the state
+                    # below; never cancel solely on a Docker command result.
+                    pass
+            # Fenced work stops with a 60s reserve. Limit health recovery
+            # to the remaining reserve even if unpause itself was slow.
+            remaining = recovery_deadline - ops.boot()
+            require(remaining > 0, 'recovery deadline')
+            ops.healthy(timeout=remaining)
+            recovered = True
         elif armed_verified:
             # Only a verified exact-payload watchdog can be disarmed after health.
             ops.healthy()

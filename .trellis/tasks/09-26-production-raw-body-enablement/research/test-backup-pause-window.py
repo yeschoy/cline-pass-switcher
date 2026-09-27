@@ -35,12 +35,13 @@ class FakeOps:
         self.actions = []
         self.failure = None
         self.advance = None
+        self.boot = time.monotonic
 
-    def inspect(self):
+    def inspect(self, *, recovering=False, deadline=None):
         self.actions.append('inspect')
-        return self.cfg.container_id, self.state
+        return (self.cfg.container_id, self.state, 'healthy') if recovering else (self.cfg.container_id, self.state)
 
-    def healthy(self):
+    def healthy(self, *, timeout=0):
         self.actions.append('healthy')
         if self.failure == 'health' or self.state != 'running':
             raise common.GateError('synthetic unhealthy')
@@ -72,7 +73,7 @@ class FakeOps:
         if self.failure == 'ambiguous':
             raise common.GateError('synthetic ambiguous pause')
 
-    def unpause(self):
+    def unpause(self, timeout=20):
         self.actions.append('unpause')
         if self.failure == 'unpause':
             raise common.GateError('synthetic unpause failure')
@@ -171,6 +172,137 @@ class PauseTests(unittest.TestCase):
         self.assertLess(self.ops.actions.index('unpause'), self.ops.actions.index('cancel'))
         self.assertFalse(self.ops.timer)
         self.assertFalse((self.stage / 'data/detailed-logs/raw').exists())
+
+    def test_execute_waits_for_delayed_health_before_disarming_watchdog(self):
+        now = [time.monotonic()]
+        recovered_at = []
+        def delayed_health(*, timeout=0):
+            self.ops.actions.append('healthy')
+            if timeout:
+                self.assertEqual(self.ops.state, 'running')
+                self.assertTrue(self.ops.timer)
+                self.assertGreaterEqual(timeout, 30)
+                now[0] += 31  # synthetic 30-second Docker health cadence
+                recovered_at.append(len(self.ops.actions))
+        self.ops.healthy = delayed_health
+        self.assertTrue(pause.execute(self.ops, self.cfg, **self.kw, clock=lambda: now[0]))
+        self.assertEqual(len(recovered_at), 1)
+        self.assertLessEqual(recovered_at[0], self.ops.actions.index('cancel'))
+        self.assertFalse(self.ops.timer)
+
+    def test_watchdog_unpaused_running_unhealthy_then_recovers_without_redundant_unpause(self):
+        now = [0.0]
+        state, calls, run = self.docker_fixture()
+        original_inspect = self.ops.inspect
+        def watchdog_wins(*, recovering=False, deadline=None):
+            if recovering:
+                self.ops.state = 'running'  # watchdog unpaused after fenced copy
+                state.update(health='unhealthy', http=503)
+            return original_inspect(recovering=recovering, deadline=deadline)
+        def advance(seconds):
+            self.assertTrue(self.ops.timer)
+            now[0] += seconds
+            if now[0] >= 31:
+                state['health'] = 'healthy'
+            if now[0] >= 34:
+                state['http'] = 200
+        real = pause.PauseOps(self.cfg, run, boot=lambda: now[0], sleep=advance)
+        def health(*, timeout=0):
+            self.ops.actions.append('healthy')
+            real.healthy(timeout=timeout)
+        self.ops.inspect = watchdog_wins
+        self.ops.healthy = health
+        self.ops.boot = lambda: now[0]
+        self.assertTrue(pause.execute(self.ops, self.cfg, **self.kw, clock=lambda: now[0]))
+        self.assertEqual(now[0], 34)
+        self.assertNotIn('unpause', self.ops.actions)
+        self.assertIn(pause.META_GET, calls)
+        self.assertLess(self.ops.actions.index('healthy', self.ops.actions.index('pause')),
+                        self.ops.actions.index('cancel'))
+        self.assertFalse(self.ops.timer)
+
+    def test_copy_error_after_watchdog_unpause_waits_for_recovery_before_cancel(self):
+        now = [0.0]
+        state, calls, run = self.docker_fixture()
+        original_inspect = self.ops.inspect
+        def watchdog_wins(*, recovering=False, deadline=None):
+            if recovering:
+                self.ops.state = 'running'
+                state.update(health='unhealthy', http=503)
+            return original_inspect(recovering=recovering, deadline=deadline)
+        def advance(seconds):
+            self.assertTrue(self.ops.timer)
+            now[0] += seconds
+            if now[0] >= 31:
+                state['health'] = 'healthy'
+            if now[0] >= 34:
+                state['http'] = 200
+        real = pause.PauseOps(self.cfg, run, boot=lambda: now[0], sleep=advance)
+        def health(*, timeout=0):
+            self.ops.actions.append('healthy')
+            real.healthy(timeout=timeout)
+        self.ops.inspect = watchdog_wins
+        self.ops.healthy = health
+        self.ops.boot = lambda: now[0]
+        self.ops.failure = 'copy'
+        with self.assertRaises(common.GateError):
+            pause.execute(self.ops, self.cfg, **self.kw, clock=lambda: now[0])
+        self.assertEqual(now[0], 34)
+        self.assertNotIn('unpause', self.ops.actions)
+        self.assertIn(pause.META_GET, calls)
+        self.assertLess(self.ops.actions.index('healthy', self.ops.actions.index('rsync')),
+                        self.ops.actions.index('cancel'))
+        self.assertFalse(self.ops.timer)
+        self.assertEqual(common.read_json(self.stage / 'status.json'),
+                         {'phase': 'precopy-unverified', 'trusted': False})
+
+    def test_watchdog_unpaused_but_health_times_out_leaves_guard_armed(self):
+        original = self.ops.inspect
+        def watchdog_wins(*, recovering=False, deadline=None):
+            if recovering:
+                self.ops.state = 'running'
+            return original(recovering=recovering, deadline=deadline)
+        self.ops.inspect = watchdog_wins
+        self.ops.failure = 'unpause'  # redundant Docker unpause would fail
+        def never_healthy(*, timeout=0):
+            self.ops.actions.append('healthy')
+            if timeout:
+                self.assertTrue(self.ops.timer)
+                self.assertLessEqual(timeout, pause.RECOVERY_WAIT)
+                raise common.GateError('synthetic health timeout')
+        self.ops.healthy = never_healthy
+        with self.assertRaises(common.GateError):
+            pause.execute(self.ops, self.cfg, **self.kw)
+        self.assertNotIn('unpause', self.ops.actions)
+        self.assertNotIn('cancel', self.ops.actions)
+        self.assertTrue(self.ops.timer)
+
+    def test_identity_drift_after_pause_does_not_unpause_or_cancel(self):
+        original = self.ops.inspect
+        def drift(*, recovering=False, deadline=None):
+            if recovering:
+                raise pause.IdentityDrift('synthetic Compose identity drift')
+            return original()
+        self.ops.inspect = drift
+        with self.assertRaises(pause.IdentityDrift):
+            pause.execute(self.ops, self.cfg, **self.kw)
+        self.assertIn('pause', self.ops.actions)
+        self.assertNotIn('unpause', self.ops.actions)
+        self.assertNotIn('cancel', self.ops.actions)
+        self.assertTrue(self.ops.timer)
+
+    def test_inspect_command_failure_is_not_an_identity_change_or_cancellation(self):
+        original = self.ops.inspect
+        def unavailable(*, recovering=False, deadline=None):
+            if recovering:
+                raise common.GateError('synthetic Docker command unavailable')
+            return original()
+        self.ops.inspect = unavailable
+        with self.assertRaises(common.GateError):
+            pause.execute(self.ops, self.cfg, **self.kw)
+        self.assertIn('unpause', self.ops.actions)  # exact-ID best effort
+        self.assertNotIn('cancel', self.ops.actions)
+        self.assertTrue(self.ops.timer)
 
     def test_status_seal_rejects_malformed_evidence_before_creating_file(self):
         tree = common.inventory(self.data, source=True)
@@ -431,6 +563,175 @@ class PauseTests(unittest.TestCase):
         self.assertNotIn('pause', self.ops.actions)
         self.assertNotIn('cancel', self.ops.actions)
         self.assertTrue(self.ops.timer)
+
+    def docker_fixture(self):
+        state = {'status': 'running', 'health': 'healthy', 'image': self.cfg.image,
+                 'restarts': 0, 'mount': str(self.cfg.data), 'http': 200}
+        calls = []
+        def run(argv, timeout=15, max_output=8192):
+            calls.append(argv)
+            if argv == pause.META_GET:
+                self.assertLessEqual(timeout, 3)
+                self.assertEqual(max_output, 3)
+                return str(state['http'])
+            if argv[:2] == ['docker', 'inspect']:
+                values = (self.cfg.container_id, '/' + pause.SERVICE, state['image'],
+                          state['status'], state['health'], state['restarts'], False,
+                          pause.MEMORY,
+                          [{'Type': 'bind', 'Source': state['mount'],
+                            'Destination': '/data', 'RW': True}],
+                          {'com.docker.compose.service': pause.SERVICE})
+                return ' '.join(json.dumps(v) for v in values)
+            self.assertEqual(argv, ['docker', 'compose', '-f', str(self.cfg.compose),
+                                    'ps', '-q', pause.SERVICE])
+            return self.cfg.container_id
+        return state, calls, run
+
+    def test_paused_docker_unhealthy_or_starting_is_not_a_running_health_pass(self):
+        state, _calls, run = self.docker_fixture()
+        ops = pause.PauseOps(self.cfg, run)
+        for health in ('unhealthy', 'starting', 'healthy'):
+            state.update(status='paused', health=health)
+            with self.subTest(health=health):
+                self.assertEqual(ops.inspect(), (self.cfg.container_id, 'paused'))
+        state['status'] = 'running'
+        state['health'] = 'unhealthy'
+        with self.assertRaises(common.GateError):
+            ops.healthy()  # HTTP 200 cannot substitute for running Docker health.
+        for health in ('unhealthy', 'starting', 'missing', None):
+            state['health'] = health
+            with self.subTest(running_health=health), self.assertRaises(common.GateError):
+                ops.inspect()
+        state.update(status='paused', health='unhealthy')
+        for key, bad in (('image', 'sha256:' + 'c' * 64), ('restarts', 1),
+                         ('mount', '/wrong')):
+            original = state[key]
+            state[key] = bad
+            with self.subTest(fence=key), self.assertRaises(pause.IdentityDrift):
+                ops.inspect()
+            state[key] = original
+        state.update(status='running', health='healthy')
+        def failed_docker(argv, **kwargs):
+            if argv[:2] == ['docker', 'inspect']:
+                raise common.GateError('synthetic command unavailable')
+            return run(argv, **kwargs)
+        ops.run = failed_docker
+        with self.assertRaises(common.GateError) as error:
+            ops.inspect(recovering=True, deadline=ops.boot() + 3)
+        self.assertNotIsInstance(error.exception, pause.IdentityDrift)
+
+    def test_delayed_health_recovery_requires_both_http_and_docker_proof(self):
+        state, calls, run = self.docker_fixture()
+        now = [0.0]
+        state['health'] = 'unhealthy'
+        def advance(seconds):
+            self.assertLessEqual(seconds, 1)
+            now[0] += seconds
+            if now[0] >= 31:
+                state['health'] = 'healthy'
+            if now[0] >= 34:
+                state['http'] = 200
+        state['http'] = 503
+        ops = pause.PauseOps(self.cfg, run, boot=lambda: now[0], sleep=advance)
+        ops.healthy(timeout=55)
+        self.assertEqual(now[0], 34)
+        self.assertGreaterEqual(len([c for c in calls if c[:2] == ['docker', 'inspect']]), 35)
+        self.assertEqual(calls[-1][:2], ['docker', 'compose'])  # final strict reinspection
+
+    def test_recovery_timeout_and_identity_ambiguity_keep_watchdog_armed(self):
+        state, _calls, run = self.docker_fixture()
+        now = [0.0]
+        state['health'] = 'unhealthy'
+        ops = pause.PauseOps(self.cfg, run, boot=lambda: now[0],
+                             sleep=lambda seconds: now.__setitem__(0, now[0] + seconds))
+        with self.assertRaises(common.GateError):
+            ops.healthy(timeout=55)
+        self.assertEqual(now[0], 55)
+        now[0] = 0
+        def drift(seconds):
+            now[0] += seconds
+            state['status'] = 'paused'
+        ops.sleep = drift
+        with self.assertRaises(common.GateError):
+            ops.healthy(timeout=55)
+        self.assertEqual(now[0], 1)  # no retry through ambiguous state
+        state['status'] = 'running'
+        now[0] = 0
+        def slow_inspect(argv, timeout=15, max_output=8192):
+            self.assertLessEqual(timeout, 3)
+            result = run(argv, timeout=timeout, max_output=max_output)
+            now[0] += timeout  # Docker commands consume the whole permitted slice.
+            return result
+        ops.run = slow_inspect
+        with self.assertRaises(common.GateError):
+            ops.healthy(timeout=5)
+        self.assertLessEqual(now[0], 5)  # no HTTP or cancel beyond recovery deadline
+
+        def never_recovers(*, timeout=0):
+            if not timeout:
+                return FakeOps.healthy(self.ops)
+            self.assertTrue(self.ops.timer)
+            self.assertLessEqual(timeout, 55)
+            raise common.GateError('synthetic recovery timeout')
+        self.ops.healthy = never_recovers
+        with self.assertRaises(common.GateError):
+            pause.execute(self.ops, self.cfg, **self.kw)
+        self.assertIn('unpause', self.ops.actions)
+        self.assertNotIn('cancel', self.ops.actions)
+        self.assertTrue(self.ops.timer)
+        self.assertFalse(common.read_json(self.stage / 'status.json')['trusted'])
+
+    def test_curl_meta_is_fixed_bounded_and_requires_exact_status(self):
+        self.assertEqual(pause.META_GET, [
+            '/usr/bin/curl', '--disable', '--silent', '--max-time', '3',
+            '--connect-timeout', '2', '--noproxy', '*', '-o', '/dev/null',
+            '-w', '%{http_code}', '--url', 'http://127.0.0.1:3123/api/meta'])
+        state, _calls, run = self.docker_fixture()
+        def actual_run(argv, timeout=15, max_output=8192):
+            if argv == pause.META_GET:
+                return pause.command(argv, timeout=timeout, max_output=max_output)
+            return run(argv, timeout=timeout, max_output=max_output)
+        ops = pause.PauseOps(self.cfg, actual_run)
+        for code, output, ok in ((0, b'200', True), (0, b'200\n', False),
+                                 (0, b'302', False), (0, b'401', False),
+                                 (1, b'200', False), (0, b'200200', False),
+                                 (0, b'\xff', False)):
+            with self.subTest(code=code, output=output):
+                with patch.object(pause.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                        pause.META_GET, code, output, b'SYNTHETIC SECRET')) as call:
+                    if ok:
+                        ops.healthy()
+                    else:
+                        with self.assertRaises(common.GateError):
+                            ops.healthy()
+                call.assert_called_once_with(pause.META_GET, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, timeout=3, check=False)
+        self.assertEqual(state['status'], 'running')
+
+    def test_trickling_http_response_cannot_extend_recovery_wall_deadline(self):
+        state, _calls, run = self.docker_fixture()
+        now = [0.0]
+        def actual_run(argv, timeout=15, max_output=8192):
+            if argv == pause.META_GET:
+                return pause.command(argv, timeout=timeout, max_output=max_output)
+            return run(argv, timeout=timeout, max_output=max_output)
+        ops = pause.PauseOps(self.cfg, actual_run, boot=lambda: now[0],
+                             sleep=lambda seconds: now.__setitem__(0, now[0] + seconds))
+        tries = []
+        def trickle(argv, **kwargs):
+            self.assertEqual(argv, pause.META_GET)
+            timeout = kwargs['timeout']
+            self.assertLessEqual(timeout, 3)
+            tries.append(timeout)
+            now[0] += timeout  # bytes arrive periodically, but the process is killed at wall timeout
+            raise subprocess.TimeoutExpired(argv, timeout, output=b'20SYNTHETIC SECRET')
+        with patch.object(pause.subprocess, 'run', side_effect=trickle) as call:
+            with self.assertRaises(common.GateError):
+                ops.healthy(timeout=55)
+        self.assertEqual(now[0], 55)
+        self.assertGreater(len(tries), 1)
+        self.assertEqual(len(tries), call.call_count)
+        self.assertEqual(state['status'], 'running')
 
     def test_gateway_loaded_accepts_utf8_nginx_comment_without_logging(self):
         output = (f'# 配置校验\n# configuration file {self.gateway}:\n'
