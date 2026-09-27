@@ -3,4 +3,4 @@
 {"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Check escaping, semantics, focus and real-browser acceptance"}
 {"file":".trellis/spec/frontend/state-management.md","reason":"Check stale async/body discard and section lifecycle"}
 {"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Check group identity through API to UI"}
-{"file":".trellis/tasks/09-27-error-log-detail-visibility/research/current-contract.md","reason":"Check accepted partial versus raw-full behavior"}
+{"file":".trellis/tasks/archive/2026-09/09-27-error-log-detail-visibility/research/current-contract.md","reason":"Check accepted partial versus raw-full behavior"}

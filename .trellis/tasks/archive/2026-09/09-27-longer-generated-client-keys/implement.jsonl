@@ -4,4 +4,4 @@
 {"file":".trellis/spec/frontend/index.md","reason":"Native console entry point and browser verification"}
 {"file":".trellis/spec/frontend/state-management.md","reason":"One-time modal lifecycle, clipboard fallback and stale responses"}
 {"file":".trellis/spec/guides/index.md","reason":"Security and cross-layer context routing"}
-{"file":".trellis/tasks/09-27-longer-generated-client-keys/research/current-contract.md","reason":"Existing generator, validation and UI/test evidence"}
+{"file":".trellis/tasks/archive/2026-09/09-27-longer-generated-client-keys/research/current-contract.md","reason":"Existing generator, validation and UI/test evidence"}

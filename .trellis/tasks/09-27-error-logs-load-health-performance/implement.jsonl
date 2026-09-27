@@ -1,8 +1,8 @@
 {"file":".trellis/spec/backend/index.md","reason":"Parent cross-child backend security and routing contracts"}
 {"file":".trellis/spec/frontend/index.md","reason":"Parent cross-child UI state and accessibility contracts"}
 {"file":".trellis/spec/guides/index.md","reason":"Full lifecycle cross-layer integration review"}
-{"file":".trellis/tasks/09-27-error-log-detail-visibility/research/current-contract.md","reason":"Error-log/detailed-log existing boundary"}
-{"file":".trellis/tasks/09-27-load-health-account-routing/research/current-selection.md","reason":"Existing selection and wait behavior"}
-{"file":".trellis/tasks/09-27-high-concurrency-path-investigation/research/prior-evidence-and-gaps.md","reason":"Current performance evidence and missing measurements"}
+{"file":".trellis/tasks/archive/2026-09/09-27-error-log-detail-visibility/research/current-contract.md","reason":"Error-log/detailed-log existing boundary"}
+{"file":".trellis/tasks/archive/2026-09/09-27-load-health-account-routing/research/current-selection.md","reason":"Existing selection and wait behavior"}
+{"file":".trellis/tasks/archive/2026-09/09-27-high-concurrency-path-investigation/research/prior-evidence-and-gaps.md","reason":"Current performance evidence and missing measurements"}
 {"file":".trellis/spec/backend/client-key-guidelines.md","reason":"Generated extra-key security and compatibility boundary"}
-{"file":".trellis/tasks/09-27-longer-generated-client-keys/research/current-contract.md","reason":"Existing key generation and one-time display contract"}
+{"file":".trellis/tasks/archive/2026-09/09-27-longer-generated-client-keys/research/current-contract.md","reason":"Existing key generation and one-time display contract"}

@@ -4,4 +4,4 @@
 {"file":".trellis/spec/frontend/index.md","reason":"Native browser console entry point"}
 {"file":".trellis/spec/frontend/state-management.md","reason":"Per-feature generation, navigation and stale-response rules"}
 {"file":".trellis/spec/guides/index.md","reason":"Cross-layer lifecycle and security guides"}
-{"file":".trellis/tasks/09-27-error-log-detail-visibility/research/current-contract.md","reason":"Existing error/detail association and four-leg raw-full contract"}
+{"file":".trellis/tasks/archive/2026-09/09-27-error-log-detail-visibility/research/current-contract.md","reason":"Existing error/detail association and four-leg raw-full contract"}

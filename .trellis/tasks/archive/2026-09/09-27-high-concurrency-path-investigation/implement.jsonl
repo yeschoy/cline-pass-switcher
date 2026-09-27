@@ -2,4 +2,4 @@
 {"file":".trellis/spec/backend/quality-guidelines.md","reason":"Reproducible local test and verification requirements"}
 {"file":".trellis/spec/backend/logging-guidelines.md","reason":"Safe synthetic raw capture and diagnostic capacity limits"}
 {"file":".trellis/spec/guides/index.md","reason":"Cross-layer request/diagnostic lifecycle"}
-{"file":".trellis/tasks/09-27-high-concurrency-path-investigation/research/prior-evidence-and-gaps.md","reason":"Archived baseline, existing optimization and unreproduced gaps"}
+{"file":".trellis/tasks/archive/2026-09/09-27-high-concurrency-path-investigation/research/prior-evidence-and-gaps.md","reason":"Archived baseline, existing optimization and unreproduced gaps"}

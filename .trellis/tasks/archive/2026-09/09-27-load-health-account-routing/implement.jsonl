@@ -6,4 +6,4 @@
 {"file":".trellis/spec/frontend/state-management.md","reason":"Account snapshot/draft/raw scheduling round-trip and async state"}
 {"file":".trellis/spec/guides/index.md","reason":"Cross-layer scenario guides"}
 {"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Follow new account mode/wait field from API through UI and tests"}
-{"file":".trellis/tasks/09-27-load-health-account-routing/research/current-selection.md","reason":"Evidence of strict health grouping and existing wait/lease behavior"}
+{"file":".trellis/tasks/archive/2026-09/09-27-load-health-account-routing/research/current-selection.md","reason":"Evidence of strict health grouping and existing wait/lease behavior"}

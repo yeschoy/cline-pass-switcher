@@ -4,4 +4,4 @@
 {"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Console accessible controls, escaping and real-browser review"}
 {"file":".trellis/spec/frontend/state-management.md","reason":"Draft and snapshot persistence review"}
 {"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Complete config schema and field flow audit"}
-{"file":".trellis/tasks/09-27-load-health-account-routing/research/current-selection.md","reason":"Compare resulting behavior with recorded baseline"}
+{"file":".trellis/tasks/archive/2026-09/09-27-load-health-account-routing/research/current-selection.md","reason":"Compare resulting behavior with recorded baseline"}
