@@ -96,7 +96,7 @@ test('legacy migration, exclusive same-session routing, v2 final usage and sanit
   assert.equal(created.status, 200, 'client-key creation must succeed');
   const { id: teamId, key: teamKey } = created.json;
   assert.ok(/^ck_/.test(teamId), 'generated owner ID has the expected prefix');
-  assert.ok(/^cps_[a-f0-9]{64}$/.test(teamKey), 'generated secret has the expected shape');
+  assert.ok(/^cps_[a-f0-9]{96}$/.test(teamKey), 'generated secret has the expected shape');
   const list = await manage('/api/security/client-keys');
   assert.equal(list.status, 200); assert.equal(list.text.includes(teamKey), false);
   const before = await manage('/api/accounts');

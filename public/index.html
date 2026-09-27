@@ -34,12 +34,16 @@
   .card h2 { font-size: 15px; margin-bottom: 12px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .table-wrap { width:100%; overflow-x:auto; }
+  .log-chain-panel { width:min(100%, calc(100vw - 80px)); max-width:100%; overflow-x:auto; border:1px solid var(--border); border-radius:8px; padding:14px; }
+  .log-chain-leg { border-top:1px solid var(--border); padding:12px 0; }
+  .log-chain-leg pre { max-height:10rem; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .log-chain-panel textarea { width:100%; max-height:28rem; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; background:var(--card2); color:var(--text); }
   .account-name { min-width:240px; white-space:nowrap; }
   .drawer-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:70; display:none; }
   .drawer { position:absolute; right:0; top:0; height:100%; width:min(520px,100%); overflow:auto; background:var(--card); padding:24px; border-left:1px solid var(--border); }
   .drawer label { display:block; color:var(--dim); font-size:12px; margin:14px 0 5px; }
   .drawer input:not([type=checkbox]),.drawer textarea,.drawer select { width:100%; max-width:100%; background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px; }
-  #clientKeySecret { width:100%; background:var(--card2); color:var(--text); border:1px solid var(--border); padding:8px; overflow-wrap:anywhere; }
+  #clientKeySecret { width:100%; background:var(--card2); color:var(--text); border:1px solid var(--border); padding:8px; overflow-wrap:anywhere; white-space:pre-wrap; word-break:break-all; overflow-y:auto; font:13px/1.5 Consolas, monospace; max-height:min(45vh,240px); resize:vertical; }
   .modal { position:fixed; inset:0; z-index:80; background:rgba(0,0,0,.65); display:none; align-items:center; justify-content:center; }
   .modal-box { width:min(680px,calc(100% - 24px)); max-height:80vh; overflow:auto; background:var(--card); border:1px solid var(--border); border-radius:10px; padding:20px; }
   @media(max-width:600px){ body{padding:12px}.card{padding:12px}.drawer{padding:16px} }
@@ -185,7 +189,7 @@
     <div class="card">
       <div class="toolbar"><h2 id="logTitle" style="margin:0">最终请求结果（每个请求一条）</h2><span id="logSectionStatus" class="badge green" aria-live="polite">当前板块：请求日志</span><input id="logType" type="hidden" value="requests"><input id="logFrom" type="datetime-local" title="开始时间"><input id="logTo" type="datetime-local" title="结束时间"><input id="logRequestId" placeholder="请求 ID"><input id="logModel" placeholder="模型"><input id="logAccount" placeholder="账号"><input id="logStatus" placeholder="状态码"><select id="logResult"><option value="">结果：全部</option><option value="success">成功</option><option value="client_cancelled">客户端取消</option><option value="failed">失败</option></select><input id="logProvider" placeholder="供应商"><input id="logStrategy" placeholder="策略/错误类别"><select id="logStream"><option value="">流式：全部</option><option value="true">流式</option><option value="false">非流式</option></select><select id="logOverflow"><option value="">容量：全部</option><option value="true">容量溢出</option><option value="false">未溢出</option></select><select id="logSwitched"><option value="">换号：全部</option><option value="true">已换号</option><option value="false">未换号</option></select><button class="ghost" onclick="loadLogs()">筛选</button><button class="ghost" onclick="clearLogs()">清空当前日志</button></div>
       <p id="logDescription" class="dim">展示最终请求结果，每个请求一条；旧记录可能缺少 result，界面仅按历史状态显示 legacy_failed，不迁移或改写历史 JSONL。</p>
-      <div class="table-wrap"><table style="min-width:1220px"><thead><tr><th>时间</th><th>请求 ID</th><th>请求/实际模型</th><th>账号</th><th>策略/原因</th><th>状态 / 结果</th><th>供应商路径</th><th>亲和键/上游键/缓存</th><th>详情</th></tr></thead><tbody id="logBody"><tr><td colspan="9" class="empty">暂无记录</td></tr></tbody></table></div>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="日志表，可横向滚动"><table style="min-width:1220px"><thead><tr><th>时间</th><th>请求 ID</th><th>请求/实际模型</th><th>账号</th><th>策略/原因</th><th>状态 / 结果</th><th>供应商路径</th><th>亲和键/上游键/缓存</th><th>详情</th></tr></thead><tbody id="logBody"><tr><td colspan="9" class="empty">暂无记录</td></tr></tbody></table></div>
       <button id="logNext" class="ghost" onclick="loadLogs(true)" style="margin-top:10px">下一页</button>
     </div>
   </section>
@@ -241,9 +245,10 @@
       <label class="dim" style="font-size:13px">模式：</label>
       <select id="accMode" onchange="renderAccounts()">
         <option value="single">单账号（手动指定）</option><option value="roundrobin">账号池轮询</option><option value="sticky">会话粘性（HRW）</option>
-        <option value="least-connections">最少连接</option><option value="weighted-roundrobin">加权轮询</option><option value="priority-failover">主备优先级</option>
+        <option value="least-connections">最少连接</option><option value="weighted-roundrobin">加权轮询</option><option value="priority-failover">主备优先级</option><option value="load-health">无粘性·负载与健康</option>
       </select>
-      <label class="dim" style="font-size:12px">容量等待(ms) <input id="concurrencyWaitMs" type="number" min="0" max="30000" value="2000" style="width:90px"></label>
+      <label class="dim" style="font-size:12px" for="concurrencyWaitMs">首选账号/RPM 等待(ms) <input id="concurrencyWaitMs" type="number" min="0" max="30000" step="1" value="2000" style="width:90px"></label>
+      <label class="dim" style="font-size:12px" for="poolFullWaitMs">全池纯并发满等待(ms；留空继承) <input id="poolFullWaitMs" type="number" min="0" max="30000" step="1" placeholder="继承" style="width:90px"></label>
       <label class="dim" style="font-size:12px" for="monthlyQuotaThreshold">月参考余额封禁阈值 ($) <input id="monthlyQuotaThreshold" type="number" min="0.01" max="50" step="0.01" value="0.20" style="width:90px"></label>
       <label class="dim" style="font-size:12px" for="cachePoolSize">缓存池初始/最小账号数 <input id="cachePoolSize" type="number" min="0" max="100000" step="1" value="0" aria-describedby="cachePoolHelp" style="width:90px"></label>
       <label class="dim" style="font-size:12px" for="cachePoolMaxSize">动态扩容上限 <input id="cachePoolMaxSize" type="number" min="0" max="100000" step="1" value="0" aria-describedby="cachePoolHelp" style="width:90px"></label>
@@ -423,7 +428,7 @@
 <dialog id="clientKeySecretDialog" aria-labelledby="clientKeySecretTitle" aria-describedby="clientKeySecretHelp" style="width:min(540px,calc(100% - 24px));max-height:90vh;overflow:auto;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:18px">
   <h2 id="clientKeySecretTitle">新客户端密钥（仅显示一次）</h2>
   <p id="clientKeySecretHelp">复制并安全保存。关闭后无法再次查看；丢失只能轮换。此值不得当作管理员密码。</p>
-  <label for="clientKeySecret">仅此一次的密钥值</label><input id="clientKeySecret" type="text" readonly autocomplete="off" spellcheck="false">
+  <label for="clientKeySecret">仅此一次的密钥值</label><textarea id="clientKeySecret" readonly rows="5" wrap="soft" autocomplete="off" spellcheck="false"></textarea>
   <div class="toolbar"><button type="button" onclick="copyClientKeySecret()">复制密钥</button><button type="button" class="ghost" onclick="closeClientKeySecret(false)">关闭并清除</button></div>
   <p id="clientKeyCopyStatus" role="status" aria-live="polite"></p>
 </dialog>
@@ -448,12 +453,13 @@ async function api(path, body, method, asText=false, options={}) {
   const verb = method || (body ? 'POST' : 'GET');
   if (!['GET', 'HEAD'].includes(verb) && ADMIN_CSRF) headers['X-CSRF-Token'] = ADMIN_CSRF;
   const res = await fetch(path, { method: verb, headers, credentials: 'same-origin', ...(body ? { body: JSON.stringify(body) } : {}), ...(options.signal ? { signal: options.signal } : {}) });
-  if (res.status === 401) { ADMIN_CSRF = null; closeClientKeySecret(true,false); resetDetailSelection(); showLogin(); throw new Error('unauthorized'); }
+  if (res.status === 401) { ADMIN_CSRF = null; closeClientKeySecret(true,false); resetDetailSelection(); resetLogChain(); showLogin(); throw new Error('unauthorized'); }
   if(asText){if(!res.ok)throw Error('正文已过期、清空或暂不可用');return res.text();}
   return res.json();
 }
 
 function showLogin() {
+  resetLogChain();
   closeClientKeySecret(true,false);
   resetDetailSelection();
   $('#loginOverlay').style.display = 'flex';
@@ -675,7 +681,7 @@ async function loadAll() {
   DATA = {...models,subscription:(models.subscription||[]).map(item=>({...item,statistics:modelStatistics.get(item.id)||null}))};
   ACCS = accs; ALIASES = aliases;
   CLIENT_KEYS = Array.isArray(keyList?.keys) && keyList.keys.some(k => k.id === 'legacy') ? keyList.keys.map(({id,name}) => ({id,name})) : [{id:'legacy',name:'Legacy'}];
-  $('#accMode').value = ACCS.mode; $('#concurrencyWaitMs').value = ACCS.concurrencyWaitMs ?? 2000;
+  $('#accMode').value = ACCS.mode; $('#concurrencyWaitMs').value = ACCS.concurrencyWaitMs ?? 2000; $('#poolFullWaitMs').value = ACCS.poolFullWaitMs ?? '';
   $('#monthlyQuotaThreshold').value = (ACCS.quotaProtection?.monthlyThresholdUsd ?? 0.20).toFixed(2);
   const pipeline=ACCS.accountPipeline||{},cacheMin=pipeline.cachePoolSize??0;
   $('#cachePoolSize').value=cacheMin;$('#cachePoolMaxSize').value=pipeline.cachePoolMaxSize??cacheMin;$('#cachePoolLowQuotaSize').value=pipeline.cachePoolLowQuotaSize??0;
@@ -1336,13 +1342,14 @@ function rawSchedulingControls() {
   const accountPipeline=Object.fromEntries(Object.entries(RAW_PIPELINE_CONTROLS).map(([key,id]) => [key,$('#'+id).checked]));
   accountPipeline.order=pipelineOrder();
   for(const [key,id] of Object.entries(PIPELINE_NUMBER_CONTROLS))accountPipeline[key]=$('#'+id).value;
-  return {accountMode:$('#accMode').value, concurrencyWaitMs:$('#concurrencyWaitMs').value,errorRules:JSON.stringify(ERROR_RULE_DRAFT),retryRules:JSON.stringify(RETRY_RULE_DRAFT),accountPipeline};
+  return {accountMode:$('#accMode').value, concurrencyWaitMs:$('#concurrencyWaitMs').value,poolFullWaitMs:$('#poolFullWaitMs').value,errorRules:JSON.stringify(ERROR_RULE_DRAFT),retryRules:JSON.stringify(RETRY_RULE_DRAFT),accountPipeline};
 }
 function pipelineIntegerDraft(id,label,min,max) {
   const raw=String($('#'+id).value),value=Number(raw);
   if (!raw.trim() || !Number.isInteger(value) || value < min || value > max) throw Error(`${label}必须为 ${min}–${max} 的整数`);
   return value;
 }
+function poolFullWaitDraft() { return $('#poolFullWaitMs').value.trim() === '' ? null : pipelineIntegerDraft('poolFullWaitMs','全池纯并发满等待',0,30000); }
 function cachePoolSizeDraft() { return pipelineIntegerDraft('cachePoolSize','缓存池最小账号数',0,100000); }
 function pipelineNumberDraft() {
   const values={
@@ -1359,9 +1366,11 @@ function pipelineNumberDraft() {
   return values;
 }
 function validateRawScheduling(value, names) {
-  if (!exactRuleObject(value,['accountMode','concurrencyWaitMs','errorRules','retryRules','accountPipeline','accountNames'])) throw Error('根对象必须且只能包含六个指定字段');
+  if (!exactRuleObject(value,['accountMode','concurrencyWaitMs','poolFullWaitMs','errorRules','retryRules','accountPipeline','accountNames'])) throw Error('根对象必须且只能包含七个指定字段');
   if (!Array.from($('#accMode').options).some(option => option.value === value.accountMode)) throw Error('accountMode 无效');
   if (!Number.isInteger(value.concurrencyWaitMs) || value.concurrencyWaitMs < 0 || value.concurrencyWaitMs > 30000) throw Error('concurrencyWaitMs 必须为 0–30000 的整数');
+  if (value.poolFullWaitMs !== null && (!Number.isInteger(value.poolFullWaitMs) || value.poolFullWaitMs < 0 || value.poolFullWaitMs > 30000)) throw Error('poolFullWaitMs 必须为 null 或 0–30000 的整数');
+  if (value.accountMode === 'load-health' && value.accountPipeline?.sticky === true) throw Error('load-health 不能开启会话粘性');
   if (!exactRuleObject(value.accountPipeline,[...Object.keys(RAW_PIPELINE_CONTROLS),'order',...Object.keys(PIPELINE_NUMBER_CONTROLS)])) throw Error('accountPipeline 必须包含三个开关、order、缓存池 min/max 与会话绑定边界');
   for (const key of Object.keys(RAW_PIPELINE_CONTROLS)) if (typeof value.accountPipeline[key] !== 'boolean') throw Error(`accountPipeline.${key} 必须为 boolean`);
   if (!validPipelineOrder(value.accountPipeline.order)) throw Error('accountPipeline.order 必须是三个步骤的精确排列');
@@ -1381,7 +1390,7 @@ function openRawScheduling(button) {
   let value;
   try {
     if (!controls.concurrencyWaitMs.trim()) throw Error('concurrencyWaitMs 不可为空');
-    value = {accountMode:controls.accountMode,concurrencyWaitMs:Number(controls.concurrencyWaitMs),errorRules:cloneRuleDraft(),retryRules:cloneRetryRuleDraft(),accountPipeline:{...controls.accountPipeline,...pipelineNumberDraft()},accountNames:names};
+    value = {accountMode:controls.accountMode,concurrencyWaitMs:Number(controls.concurrencyWaitMs),poolFullWaitMs:poolFullWaitDraft(),errorRules:cloneRuleDraft(),retryRules:cloneRetryRuleDraft(),accountPipeline:{...controls.accountPipeline,...pipelineNumberDraft()},accountNames:names};
     validateRawScheduling(value,names);
   } catch (e) { $('#rawSchedulingFeedback').textContent = e.message; return; }
   const text = JSON.stringify(value,null,2);
@@ -1408,7 +1417,7 @@ function applyRawScheduling() {
   catch { $('#rawSchedulingError').textContent = '调度草稿不是有效 JSON'; return; }
   try { validateRawScheduling(value,snapshot.names); }
   catch (e) { $('#rawSchedulingError').textContent = e.message; return; }
-  $('#accMode').value = value.accountMode; $('#concurrencyWaitMs').value = String(value.concurrencyWaitMs);
+  $('#accMode').value = value.accountMode; $('#concurrencyWaitMs').value = String(value.concurrencyWaitMs); $('#poolFullWaitMs').value = value.poolFullWaitMs === null ? '' : String(value.poolFullWaitMs);
   commitErrorRuleDraft(value.errorRules,'原始调度 JSON 已应用到错误规则草稿');
   commitRetryRuleDraft(value.retryRules,'原始调度 JSON 已应用到停止重试草稿');
   for(const [key,id] of Object.entries(PIPELINE_NUMBER_CONTROLS))$('#'+id).value=String(value.accountPipeline[key]);
@@ -1418,8 +1427,8 @@ function applyRawScheduling() {
   $('#rawSchedulingFeedback').textContent = '草稿已更新，尚未生效；请保存账号配置';
 }
 function monthlyQuotaDraft(){const text=$('#monthlyQuotaThreshold').value.trim(),amount=Number(text);if(!/^\d+(?:\.\d{1,2})?$/.test(text)||amount<0.01||amount>50)throw Error('月参考余额阈值必须是 $0.01–$50.00，最多两位小数');return {monthlyThresholdUsd:amount};}
-function collectAccounts(){validateErrorRuleDraft(ERROR_RULE_DRAFT);validateRetryRuleDraft(RETRY_RULE_DRAFT);const rules=cloneRuleDraft(),retryRules=cloneRetryRuleDraft();return {quotaProtection:monthlyQuotaDraft(),accounts:ACCS.accounts.map(a=>({id:a.id,name:a.name,note:a.note||'',key:a.key||'',enabled:a.enabled!==false,maxConcurrent:Number(a.maxConcurrent)||0,maxRpm:Number(a.maxRpm)||0,weight:Number(a.weight)||1,priority:Number(a.priority)||100,proxyUrl:a.proxyUrl||'',headers:a.headers||{},perModel:a.perModel||{},clientKeyId:a.clientKeyId??'legacy'})),mode:$('#accMode').value,active:ACCS.active||0,errorRules:rules,retryRules,accountPipeline:{quotaPool:$('#pipelineQuotaPool').checked,healthSort:$('#pipelineHealthSort').checked,sticky:$('#pipelineSticky').checked,order:pipelineOrder(),...pipelineNumberDraft()}};}
-async function saveAccounts(payload=null){if(!payload){try{payload=collectAccounts();}catch(e){return accMsg(e.message,true);}}payload.concurrencyWaitMs=Number($('#concurrencyWaitMs').value);if(payload.errorRules===undefined)payload.errorRules=cloneRuleDraft();if(!payload.accounts.some(a=>a.key))return accMsg('至少需要一个 key 非空的账号',true);const r=await api('/api/accounts',payload);if(!r.ok)return accMsg(r.error?.message||'保存失败',true);accMsg(`已保存：${r.accounts} 个账号 · ${r.mode}`);await loadAll();}
+function collectAccounts(){validateErrorRuleDraft(ERROR_RULE_DRAFT);validateRetryRuleDraft(RETRY_RULE_DRAFT);const rules=cloneRuleDraft(),retryRules=cloneRetryRuleDraft(),poolFullWaitMs=poolFullWaitDraft();if($('#accMode').value==='load-health'&&$('#pipelineSticky').checked)throw Error('负载与健康模式不能开启会话粘性');return {quotaProtection:monthlyQuotaDraft(),accounts:ACCS.accounts.map(a=>({id:a.id,name:a.name,note:a.note||'',key:a.key||'',enabled:a.enabled!==false,maxConcurrent:Number(a.maxConcurrent)||0,maxRpm:Number(a.maxRpm)||0,weight:Number(a.weight)||1,priority:Number(a.priority)||100,proxyUrl:a.proxyUrl||'',headers:a.headers||{},perModel:a.perModel||{},clientKeyId:a.clientKeyId??'legacy'})),mode:$('#accMode').value,active:ACCS.active||0,poolFullWaitMs,errorRules:rules,retryRules,accountPipeline:{quotaPool:$('#pipelineQuotaPool').checked,healthSort:$('#pipelineHealthSort').checked,sticky:$('#pipelineSticky').checked,order:pipelineOrder(),...pipelineNumberDraft()}};}
+async function saveAccounts(payload=null){if(!payload){try{payload=collectAccounts();}catch(e){return accMsg(e.message,true);}}try{payload.concurrencyWaitMs=pipelineIntegerDraft('concurrencyWaitMs','首选账号/RPM 等待',0,30000);payload.poolFullWaitMs=poolFullWaitDraft();}catch(e){return accMsg(e.message,true);}if(payload.errorRules===undefined)payload.errorRules=cloneRuleDraft();if(!payload.accounts.some(a=>a.key))return accMsg('至少需要一个 key 非空的账号',true);const r=await api('/api/accounts',payload);if(!r.ok)return accMsg(r.error?.message||'保存失败',true);accMsg(`已保存：${r.accounts} 个账号 · ${r.mode}`);await loadAll();}
 async function recoverAccount(id){const r=await api('/api/accounts/recover',{id});if(r.ok){accMsg('账号已恢复');await loadAll();}}
 async function recoverMonthlyQuota(id){if(!confirm('确定解除月额度封禁？该账号可能再次额度不足并产生失败请求。请先核对额度。'))return;const r=await api('/api/accounts/quota-recover',{id});if(!r.ok)return accMsg(r.error?.message||'解除失败',true);accMsg('月额度封禁已解除，请注意后续失败');await loadAll();}
 async function recoverProvider(model,provider){const r=await api('/api/providers/recover',{model,provider});if(!r.ok){$('#accLive').textContent=r.error?.message||'Provider 恢复失败';return;}$('#accLive').textContent=`已恢复 ${model} / ${provider}`;await loadAll();}
@@ -1585,11 +1594,11 @@ function armStatisticsTimer(visitId){clearTimeout(STATISTICS_TIMER);STATISTICS_T
 function stopStatisticsVisit(){STATISTICS_VISIT_ID++;STATISTICS_QUERY_ID++;clearTimeout(STATISTICS_TIMER);STATISTICS_TIMER=null;STATISTICS_REFRESH_CONTROLLER?.abort();STATISTICS_REFRESH_CONTROLLER=null;STATISTICS_REFRESH_PROMISE=null;const button=$('#statisticsRefresh');if(button){button.disabled=false;button.textContent='↻ 手动刷新额度与统计';}}
 async function startStatisticsVisit(){const visitId=++STATISTICS_VISIT_ID;armStatisticsTimer(visitId);await loadStatistics(visitId);if(visitId===STATISTICS_VISIT_ID&&!$('#statisticsPanel').hidden)return refreshStatisticsQuota(false,visitId);return null;}
 function restoreStatisticsVisit(){if(!$('#statisticsPanel').hidden&&STATISTICS_TIMER===null)return startStatisticsVisit();return null;}
-if(typeof window!=='undefined'){window.addEventListener('pagehide',()=>{closeClientKeySecret(true,false);stopStatisticsVisit();stopModelProviders();resetDetailSelection();});window.addEventListener('pageshow',()=>!$('#statisticsPanel').hidden?restoreStatisticsVisit():!$('#modelProvidersPanel').hidden?loadModelProviders():null);}
+if(typeof window!=='undefined'){window.addEventListener('pagehide',()=>{closeClientKeySecret(true,false);stopStatisticsVisit();stopModelProviders();LOG_QUERY_ID++;resetLogChain();resetDetailSelection();});window.addEventListener('pageshow',()=>!$('#statisticsPanel').hidden?restoreStatisticsVisit():!$('#modelProvidersPanel').hidden?loadModelProviders():null);}
 async function switchSection(section){
   const isConsole=section==='console',isStatistics=section==='statistics',type=section==='errors'?'errors':'requests';
   closeClientKeySecret(true,false);
-  stopStatisticsVisit();stopModelProviders();LOG_QUERY_ID++;STATISTICS_QUERY_ID++;DETAIL_LIST_ID++;DETAIL_NAV_ID++;resetDetailSelection();
+  stopStatisticsVisit();stopModelProviders();LOG_QUERY_ID++;resetLogChain();STATISTICS_QUERY_ID++;DETAIL_LIST_ID++;DETAIL_NAV_ID++;resetDetailSelection();
   $('#consolePanel').hidden=!isConsole;$('#statisticsPanel').hidden=!isStatistics;$('#modelProvidersPanel').hidden=section!=='modelProviders';$('#logPanel').hidden=isConsole||isStatistics||section==='details'||section==='modelProviders';$('#detailsPanel').hidden=section!=='details';
   for(const [name,id] of [['console','navConsole'],['statistics','navStatistics'],['requests','navRequests'],['errors','navErrors'],['details','navDetails'],['modelProviders','navModelProviders']])$('#'+id).setAttribute('aria-pressed',String(section===name));
   if(isConsole)return;if(isStatistics)return startStatisticsVisit();if(section==='modelProviders'){$('#modelProvidersTitle').focus?.();return loadModelProviders();}if(section==='details'){const nav=DETAIL_NAV_ID;await loadDetailSettings();if(nav===DETAIL_NAV_ID&&detailVisible())return loadDetails();return;}
@@ -1660,7 +1669,7 @@ async function selectDetail(requestId,expected=null){
   }catch(error){if(id===DETAIL_SELECTION_ID&&detailVisible()){$('#detailsMetadata').textContent=expected?'详情不可用（已过期、已清空、被容量边界丢弃或发布失败）':error.message;$('#detailsMetadata').focus();}}
 }
 async function openErrorDetail(requestId,attemptIndex,detailCallId){const intent={requestId,attemptIndex,detailProfile:'error',detailCallId};if(!validErrorDetailIntent(intent))return;$('#detailsRequestId').value=requestId;DETAIL_CURSOR=null;await switchSection('details');if(!detailVisible())return;await selectDetail(requestId,{attemptIndex,callId:detailCallId});}
-function errorDetailAction(row){if(!row?.detailProfile&&!row?.detailCallId)return '<span class="dim">当时未开启错误详情</span>';if(!validErrorDetailIntent(row))return '<span class="dim">错误详情关联不可用</span>';return `<button type="button" class="ghost" onclick="openErrorDetail(${jsArg(row.requestId)},${jsArg(row.attemptIndex)},${jsArg(row.detailCallId)})">查看错误详情</button>`;}
+function errorDetailAction(row){if(!row?.detailProfile&&!row?.detailCallId)return '<span class="dim">当时未关联详情（未开启采集、历史行或容量省略）；原文无法补采</span>';if(!validErrorDetailIntent(row))return '<span class="dim">错误详情关联不可用</span>';return `<button type="button" class="ghost" onclick="openErrorDetail(${jsArg(row.requestId)},${jsArg(row.attemptIndex)},${jsArg(row.detailCallId)})">查看错误详情</button>`;}
 async function loadDetailBody(requestId,bodyId,state){
   const id=++DETAIL_SELECTION_ID;DETAIL_BODY_TEXT=null;$('#detailsCopy').disabled=true;$('#detailsText').value='加载中…';
   try{const text=await api('/api/logs/details/'+encodeURIComponent(requestId)+'/bodies/'+encodeURIComponent(bodyId),null,'GET',true);if(id!==DETAIL_SELECTION_ID||requestId!==DETAIL_REQUEST||!detailVisible())return;DETAIL_BODY_TEXT=text;$('#detailsText').value=text;$('#detailsCopy').disabled=false;$('#detailsStatus').textContent=(DETAIL_BODY_RAW?'未脱敏正文':'脱敏正文')+'状态：'+state;}
@@ -1673,6 +1682,98 @@ async function clearDetails(){
   try{await detailJSON('/api/logs/details',null,'DELETE');if(nav===DETAIL_NAV_ID&&detailVisible())await loadDetails();}
   catch(error){if(nav===DETAIL_NAV_ID&&detailVisible())$('#detailsStatus').textContent=error.message;}
 }
+// The ordinary error table owns exactly one transient inline detail selection. No body text is cached outside its textarea.
+let LOG_CHAIN_ID=0, LOG_CHAIN_BODY_ID=0, LOG_CHAIN_CONTROLLER=null, LOG_CHAIN=null;
+const logChainVisible=()=>!$('#logPanel').hidden&&$('#logType').value==='errors';
+function resetLogChain(returnFocus=false){
+  LOG_CHAIN_ID++;LOG_CHAIN_BODY_ID++;LOG_CHAIN_CONTROLLER?.abort();LOG_CHAIN_CONTROLLER=null;
+  const trigger=LOG_CHAIN?.trigger;
+  const text=$('#logChainText');if(text)text.value='';
+  $('#logChainRow')?.remove?.();LOG_CHAIN=null;
+  if(trigger){trigger.setAttribute('aria-expanded','false');if(returnFocus&&logChainVisible()&&trigger.isConnected)trigger.focus();}
+}
+function closeLogChain(){resetLogChain(true);}
+function inlineErrorAction(row){
+  if(!validErrorDetailIntent(row))return '';
+  return ` <button type="button" class="ghost" aria-expanded="false" aria-controls="logChainPanel" onclick="openLogChain(${jsArg(row.requestId)},${row.attemptIndex},${jsArg(row.detailCallId)},${jsArg(row.detailProfile)},this)">在此查看链路</button>`;
+}
+const LOG_CHAIN_MISSING='详情不可用：可能当时未采集、容量省略、发布失败，或已过期/清空；历史正文不能恢复。普通错误摘要的限长不代表原文已采集。';
+function rawChainHeaders(headers){
+  if(!headers||typeof headers!=='object'||Array.isArray(headers))return '未采集或旧记录缺少 Header 安全投影';
+  const names=['content-type','content-length','accept','content-encoding','transfer-encoding','authorization','cookie','set-cookie'];
+  const lines=names.filter(name=>Object.hasOwn(headers,name)).map(name=>`${name}: ${['authorization','cookie','set-cookie'].includes(name)?'[REDACTED]':String(headers[name])}`);
+  return lines.length?lines.join('\n'):'无可显示的安全 Header 字段（自定义字段和值不保留）';
+}
+function renderLogChain(group,attempt){
+  const raw=group.request.profile.startsWith('raw-'),full=group.request.profile.endsWith('full');
+  const index=attempt.attemptIndex+1;
+  const finalStatus=full?`最终客户端响应 · HTTP ${group.request.status??'未提交'}`:`最终客户端响应 Header/Body 未采集 · 终结状态 ${group.request.status??'未知'}`;
+  $('#logChainTitle').textContent=`失败上游调用 ${index} · HTTP ${attempt.httpStatus??attempt.status??'未收到'} · ${attempt.captureState||'状态未知'}；${finalStatus} / ${group.request.result||'结果未知'}（独立于该上游调用）`;
+  $('#logChainAttempts').textContent=`本组 ${group.attempts.length} 次原生上游调用：${group.attempts.map(item=>`尝试 ${Number.isSafeInteger(item.attemptIndex)?item.attemptIndex+1:'?'} HTTP ${item.httpStatus??item.status??'未收到'} / 结果 ${item.outcomeStatus??'未知'} · ${item.captureState||'状态未知'}（${item===attempt?'当前选中的失败调用':'仅显示状态，不读取正文'}）`).join(' · ')}`;
+  $('#logChainWarning').textContent=raw?'警告：正文为单独授权的未脱敏原文，可能含密钥、密码和私人对话；Header 仅显示安全投影。每段最多采集 35 MiB、最长保留 48 小时且可能提前容量淘汰；点击某一段正文后才会读取，复制后请保护剪贴板。':'此记录是脱敏详情，不是未脱敏原文；未开启独立原文 opt-in 的历史正文无法恢复。Header 不提供原文安全投影。';
+  const legs=[
+    ['客户端入站请求',full?group.request:null,'headers','requestBody'],
+    [`上游调用 ${index} 请求（选中的失败 attempt）`,attempt,'headers','requestBody'],
+    [`上游调用 ${index} 响应（不是最终客户端响应）`,attempt,'responseHeaders','responseBody'],
+    ['最终客户端响应（请求级，可能是重试成功或流式中断）',full?group.request:null,'responseHeaders','responseBody']
+  ];
+  const descriptors=Array.isArray(group.bodies)?group.bodies:[];
+  LOG_CHAIN.bodies=[];
+  $('#logChainLegs').innerHTML=legs.map(([label,source,headerKey,bodyKey],i)=>{
+    const body=source&&descriptors.filter(item=>item.bodyId===source[bodyKey]&&DETAIL_UUID.test(item.bodyId||''));
+    const descriptor=body?.length===1?body[0]:null;
+    if(descriptor&&!(i===2&&attempt.captureState==='no-response')&&(!raw||descriptor.redacted===false))LOG_CHAIN.bodies.push(descriptor);
+    const state=descriptor?.state||'未采集';
+    const bytes=descriptor&&Number.isSafeInteger(descriptor.capturedBytes)&&Number.isSafeInteger(descriptor.observedBytes)?` · ${descriptor.capturedBytes}/${descriptor.observedBytes} bytes`:'';
+    const noResponse=i===2&&attempt.captureState==='no-response';
+    const canLoad=!noResponse&&LOG_CHAIN.bodies.includes(descriptor)&&['complete','truncated','interrupted'].includes(state)&&(descriptor.capturedBytes>0||state==='complete');
+    const note=!source?'该 profile 未采集此段':noResponse?'未收到上游响应；无响应 Header / 正文':!descriptor?'未采集或正文已缺失':state==='truncated'?'超过单体大小上限，只有前缀可读':state==='resource-limited'?'捕获容量省略，正文不可读':state==='omitted-for-safety'?'安全原因省略，正文不可读':state==='unread'?'请求正文未读取':state==='interrupted'?'传输中断，仅已采集前缀可读':state==='complete'?'已采集（按需读取）':`状态 ${state}，正文不可读`;
+    return `<div class="log-chain-leg"><h4>${escapeHtml(label)}</h4><p>Header（${raw?'安全投影':'脱敏模式不在此展示 Header'}）</p><pre id="logChainHeaders${i}"></pre><p>${escapeHtml(note)}${escapeHtml(bytes)}</p>${canLoad?`<button type="button" class="ghost" onclick="loadLogChainBody(${jsArg(descriptor.bodyId)})">加载${escapeHtml(label)}正文 · ${escapeHtml(state)}${escapeHtml(bytes)}</button>`:''}</div>`;
+  }).join('');
+  legs.forEach(([,source,headerKey],i)=>{$('#logChainHeaders'+i).textContent=!source?'未采集':i===2&&attempt.captureState==='no-response'?'未收到上游响应':raw?rawChainHeaders(source[headerKey]):'脱敏详情不提供原文 Header 安全投影；可使用独立详细日志页查看脱敏资料';});
+  $('#logChainStatus').textContent=raw?`已关联调用 ${index}；${attempt.captureState==='stream-transport-failed'?'起流后传输失败，响应仅含已捕获前缀':attempt.captureState==='no-response'?'未收到上游响应':'请区分上游失败和最终客户端状态'}。请选择一段正文按需读取。`:`已关联调用 ${index}；此详情已脱敏，非原文。请选择一段已采集正文按需读取。`;
+}
+async function openLogChain(requestId,attemptIndex,detailCallId,detailProfile,button){
+  const intent={requestId,attemptIndex,detailCallId,detailProfile};
+  if(!validErrorDetailIntent(intent)||!logChainVisible()||!button?.closest('tr'))return;
+  if(LOG_CHAIN?.trigger===button){closeLogChain();return;}
+  resetLogChain();
+  const id=LOG_CHAIN_ID,query=LOG_QUERY_ID,controller=new AbortController();
+  LOG_CHAIN={requestId,attemptIndex,detailCallId,detailProfile,trigger:button,bodies:[],loaded:false};LOG_CHAIN_CONTROLLER=controller;
+  button.setAttribute('aria-expanded','true');
+  button.closest('tr').insertAdjacentHTML('afterend',`<tr id="logChainRow"><td colspan="9"><div id="logChainPanel" class="log-chain-panel" role="region" aria-label="所选失败调用的请求链路"><div class="toolbar"><strong id="logChainTitle">关联详情加载中…</strong><button id="logChainClose" type="button" class="ghost" onclick="closeLogChain()">关闭链路</button></div><p id="logChainStatus" role="status" aria-live="polite">只加载元数据，不读取正文</p><p id="logChainAttempts" class="dim"></p><p id="logChainWarning"></p><div id="logChainLegs"></div><label for="logChainText">所选正文（可能为未脱敏原文）</label><textarea id="logChainText" readonly rows="12"></textarea><button id="logChainCopy" type="button" class="ghost" disabled onclick="copyLogChainBody()">复制已加载正文</button></div></td></tr>`);
+  $('#logChainClose').focus();
+  try{
+    const group=await api('/api/logs/details/'+encodeURIComponent(requestId),null,'GET',false,{signal:controller.signal});
+    if(id!==LOG_CHAIN_ID||query!==LOG_QUERY_ID||controller!==LOG_CHAIN_CONTROLLER||!logChainVisible())return;
+    const matches=Array.isArray(group.attempts)?group.attempts.filter(item=>item.attemptIndex===attemptIndex&&item.callId===detailCallId):[];
+    if(group?.error){$('#logChainTitle').textContent='详情不可用';$('#logChainStatus').textContent=LOG_CHAIN_MISSING;return;}
+    if(group.request?.requestId!==requestId||group.request.profile!==detailProfile||matches.length!==1||matches[0].captureState==='success'){
+      $('#logChainTitle').textContent='详情关联校验失败';$('#logChainStatus').textContent='requestId、profile 或失败调用的 attemptIndex/callId 不一致或不唯一；不提供正文。';return;
+    }
+    renderLogChain(group,matches[0]);
+  }catch(e){if(id===LOG_CHAIN_ID&&query===LOG_QUERY_ID&&logChainVisible()&&e?.name!=='AbortError'){$('#logChainTitle').textContent='详情不可用';$('#logChainStatus').textContent=LOG_CHAIN_MISSING;}}
+}
+async function loadLogChainBody(bodyId){
+  const selection=LOG_CHAIN,descriptor=selection?.bodies.find(body=>body.bodyId===bodyId);
+  if(!selection||!descriptor||!logChainVisible()||!DETAIL_UUID.test(bodyId)||!['complete','truncated','interrupted'].includes(descriptor.state)||(descriptor.capturedBytes===0&&descriptor.state!=='complete'))return;
+  LOG_CHAIN_CONTROLLER?.abort();const controller=new AbortController(),id=LOG_CHAIN_ID,bodyVersion=++LOG_CHAIN_BODY_ID,query=LOG_QUERY_ID;
+  LOG_CHAIN_CONTROLLER=controller;selection.loaded=false;$('#logChainText').value='';$('#logChainCopy').disabled=true;$('#logChainStatus').textContent='正在按需读取所选正文…';
+  try{const text=await api('/api/logs/details/'+encodeURIComponent(selection.requestId)+'/bodies/'+encodeURIComponent(bodyId),null,'GET',true,{signal:controller.signal});
+    if(id!==LOG_CHAIN_ID||bodyVersion!==LOG_CHAIN_BODY_ID||query!==LOG_QUERY_ID||selection!==LOG_CHAIN||!logChainVisible())return;
+    $('#logChainText').value=text;selection.loaded=true;$('#logChainCopy').disabled=false;
+    $('#logChainStatus').textContent=`${selection.detailProfile.startsWith('raw-')?'未脱敏原文':'脱敏正文'} · ${descriptor.state} · ${descriptor.capturedBytes}/${descriptor.observedBytes} bytes（仅诊断副本，非全部转发字节）`;
+  }catch(e){if(id===LOG_CHAIN_ID&&bodyVersion===LOG_CHAIN_BODY_ID&&selection===LOG_CHAIN&&logChainVisible()&&e?.name!=='AbortError'){$('#logChainText').value='';$('#logChainStatus').textContent='正文已过期、清空或暂不可用；请重新核对详情';}}
+}
+async function copyLogChainBody(){
+  const selection=LOG_CHAIN;if(!selection?.loaded||!logChainVisible())return;
+  const id=LOG_CHAIN_ID,bodyVersion=LOG_CHAIN_BODY_ID,text=$('#logChainText').value;
+  try{await navigator.clipboard.writeText(text);if(id===LOG_CHAIN_ID&&bodyVersion===LOG_CHAIN_BODY_ID&&logChainVisible())$('#logChainStatus').textContent='已复制正文，请保护剪贴板';}
+  catch{if(id===LOG_CHAIN_ID&&bodyVersion===LOG_CHAIN_BODY_ID&&logChainVisible()){$('#logChainStatus').textContent='复制失败，请在文本框中选择并手动复制';$('#logChainText').focus();$('#logChainText').select();}}
+}
+for(const id of ['logFrom','logTo','logRequestId','logModel','logAccount','logStatus','logResult','logProvider','logStrategy','logStream','logOverflow','logSwitched'])$('#'+id).addEventListener('input',()=>{
+  LOG_QUERY_ID++;LOG_CURSOR=null;resetLogChain();$('#logBody').innerHTML='<tr><td colspan="9" class="empty">筛选已改变，请点击筛选</td></tr>';$('#logNext').disabled=true;
+});
 function affinityLogLabel(x){
   const keyLabels={parent_session:'父会话',parent_thread:'父线程',parent_conversation:'父对话',parent_agent:'父 Agent',prompt_cache_key:'Codex prompt_cache_key',session_id:'会话 ID',thread_id:'线程 ID',conversation_id:'对话 ID',agent_id:'Agent ID',message_hmac:'消息 HMAC 回退',none:'无'};
   const confidenceLabels={explicit:'显式',fallback:'回退',none:'无'};
@@ -1683,7 +1784,7 @@ function affinityLogLabel(x){
 }
 function cacheHitLogLabel(value){return value===true?'缓存命中':value===false?'缓存明确未命中':'缓存未知';}
 async function loadLogs(next=false){
-  if(!$('#logBody'))return; const type=$('#logType').value; if(!next)LOG_CURSOR=null; const queryId=++LOG_QUERY_ID;
+  if(!$('#logBody'))return; resetLogChain(); const type=$('#logType').value; if(!next)LOG_CURSOR=null; const queryId=++LOG_QUERY_ID;
   const params=new URLSearchParams({limit:'50'}); if(LOG_CURSOR)params.set('cursor',LOG_CURSOR);
   const values={requestId:$('#logRequestId').value,model:$('#logModel').value,account:$('#logAccount').value,status:$('#logStatus').value,provider:$('#logProvider').value};
   for(const [k,v] of Object.entries(values))if(v.trim())params.set(k,v.trim());
@@ -1695,10 +1796,10 @@ async function loadLogs(next=false){
   if(type==='requests'&&$('#logSwitched').value)params.set('switched',$('#logSwitched').value);
   const r=await api(`/api/logs/${type}?${params}`),items=r.items||[];
   if(queryId!==LOG_QUERY_ID||type!==$('#logType').value)return;
-  $('#logBody').innerHTML=items.map(x=>{const legacyResult=Number(x.status)>=200&&Number(x.status)<400?'success':'legacy_failed';const status=type==='requests'?`${x.status??'—'} / ${x.result||legacyResult}`:`${x.status??'—'} / ${x.upstreamStatus??'—'}`;const affinity=type==='requests'?`${affinityLogLabel(x)} · ${cacheHitLogLabel(x.cacheHit)}`:'—',detailAction=type==='errors'?errorDetailAction(x):'';const blockNote=type==='requests'&&['concurrency','rpm','mixed'].includes(x.blockedBy)?` · 阻塞 ${x.blockedBy}${Number.isSafeInteger(x.retryAfter)?` · Retry-After ${x.retryAfter}s`:''}`:'';return `<tr><td>${escapeHtml(new Date(x.ts).toLocaleString())}</td><td class="mono">${escapeHtml(x.requestId)}</td><td class="mono">${escapeHtml(x.requestedModel||'—')}<br><span class="dim">${escapeHtml(x.resolvedModel||'—')}</span></td><td>${escapeHtml(x.accountName||'—')}</td><td>${escapeHtml(x.strategy||x.category||'—')}<br><span class="dim">${escapeHtml((x.selectionReason||x.accountAction||'')+blockNote)}</span></td><td>${escapeHtml(status)}</td><td>${escapeHtml((x.targetProviders||x.providerPath||[]).join(' → ')||x.actualProvider||x.targetProvider||'—')}</td><td>${escapeHtml(affinity)}</td><td>${detailAction}<details><summary>展开</summary><pre>${escapeHtml(JSON.stringify(x,null,2))}</pre></details></td></tr>`;}).join('')||'<tr><td colspan="9" class="empty">暂无记录</td></tr>';
+  $('#logBody').innerHTML=items.map(x=>{const legacyResult=Number(x.status)>=200&&Number(x.status)<400?'success':'legacy_failed';const status=type==='requests'?`${x.status??'—'} / ${x.result||legacyResult}`:`${x.status??'—'} / ${x.upstreamStatus??'—'}`;const affinity=type==='requests'?`${affinityLogLabel(x)} · ${cacheHitLogLabel(x.cacheHit)}`:'—',detailAction=type==='errors'?errorDetailAction(x)+inlineErrorAction(x):'';const blockNote=type==='requests'&&['concurrency','rpm','mixed'].includes(x.blockedBy)?` · 阻塞 ${x.blockedBy}${Number.isSafeInteger(x.retryAfter)?` · Retry-After ${x.retryAfter}s`:''}`:'';return `<tr><td>${escapeHtml(new Date(x.ts).toLocaleString())}</td><td class="mono">${escapeHtml(x.requestId)}</td><td class="mono">${escapeHtml(x.requestedModel||'—')}<br><span class="dim">${escapeHtml(x.resolvedModel||'—')}</span></td><td>${escapeHtml(x.accountName||'—')}</td><td>${escapeHtml(x.strategy||x.category||'—')}<br><span class="dim">${escapeHtml((x.selectionReason||x.accountAction||'')+blockNote)}</span></td><td>${escapeHtml(status)}</td><td>${escapeHtml((x.targetProviders||x.providerPath||[]).join(' → ')||x.actualProvider||x.targetProvider||'—')}</td><td>${escapeHtml(affinity)}</td><td>${detailAction}<details><summary>展开</summary><pre>${escapeHtml(JSON.stringify(x,null,2))}</pre></details></td></tr>`;}).join('')||'<tr><td colspan="9" class="empty">暂无记录</td></tr>';
   LOG_CURSOR=r.nextCursor;$('#logNext').disabled=!LOG_CURSOR;
 }
-async function clearLogs(){const type=$('#logType').value,title=type==='errors'?'错误日志':'请求日志';if(!confirm(`确认清空${title}？此操作不可撤销。`))return;await api('/api/logs/'+type,null,'DELETE');if($('#logPanel').hidden||type!==$('#logType').value)return;await loadLogs();}
+async function clearLogs(){const type=$('#logType').value,title=type==='errors'?'错误日志':'请求日志';if(!confirm(`确认清空${title}？此操作不可撤销。`))return;LOG_QUERY_ID++;resetLogChain();await api('/api/logs/'+type,null,'DELETE');if($('#logPanel').hidden||type!==$('#logType').value)return;await loadLogs();}
 function accMsg(msg, isErr) {
   const el = $('#accMsg');
   el.textContent = msg;

@@ -20,7 +20,7 @@ public/index.html draft
   -> loadAll() reloads server snapshots
 ```
 
-The browser owns drafts; the server owns validation and persistence. Because the API replaces the account list, hidden `id`, proxy/Header, note, scheduling, and `perModel` fields must survive every projection and round trip.
+The browser owns drafts; the server owns validation and persistence. Because the API replaces the account list, hidden `id`, proxy/Header, note, scheduling, and `perModel` fields must survive every projection and round trip. Scheduling includes the opt-in non-sticky `load-health` mode and `poolFullWaitMs`: absent on older saves preserves an explicit value, null inherits `concurrencyWaitMs`, and invalid explicit values must be rejected before writing. The raw scheduling editor and presets retain the same distinction.
 
 ### Chat request
 

@@ -116,6 +116,19 @@ async function scenario(t, config, run, env = {}, quota = {}) {
 const chat = (port, key, route = '/v1/chat/completions', header = 'Authorization', extra = {}) => api(port, route, { method: 'POST', key, header, body: { model, messages: [{ role: 'user', content: 'hello' }], ...extra } });
 const chatWithHeaders = (port, headers) => api(port, '/v1/chat/completions', { method: 'POST', body: { model, messages: [] }, headers });
 
+test('load-health pool capacity and wait are scoped to each client-key owner', async (t) => {
+  const teamKey='team-client-key-123456';
+  await scenario(t,{clientKeys:[{id:'team',name:'Team',key:teamKey}],accountMode:'load-health',concurrencyWaitMs:0,poolFullWaitMs:0,
+    accounts:[{id:'one',name:'Legacy',key:'upstream-one',clientKeyId:'legacy',enabled:true,maxConcurrent:1,perModel:{}},{id:'two',name:'Team',key:'upstream-two',clientKeyId:'team',enabled:true,maxConcurrent:1,perModel:{}}]},async({port,upstream})=>{
+    const held=api(port,'/v1/chat/completions',{method:'POST',key:legacy,body:{model,messages:[{role:'user',content:'hold'}]}});
+    await waitFor(()=>chatAttempts(upstream).length===1,'legacy account held');
+    assert.equal((await chat(port,legacy)).status,429,'Legacy cannot borrow Team capacity');
+    const team=await chat(port,teamKey);assert.equal(team.status,200);assert.equal(team.json.choices[0].message.content,'Bearer upstream-two');
+    assert.deepEqual(chatAttempts(upstream),['Bearer upstream-one','Bearer upstream-two']);
+    upstream.release();assert.equal((await held).status,200);
+  });
+});
+
 test('single empty Legacy retains anonymous and old invalid-header compatibility', async (t) => {
   await scenario(t, { proxyKey: '' }, async ({ port, upstream }) => {
     assert.equal((await chat(port)).status, 200);
@@ -189,6 +202,33 @@ test('nonempty PROXY_KEY startup override keeps ordinary 401 authentication', as
   }, { PROXY_KEY: legacy });
 });
 
+test('persisted 68-character extra key survives startup and restart without rotation or owner migration', async (t) => {
+  const oldKey = `cps_${'a1'.repeat(32)}`;
+  await scenario(t, { clientKeys: [{ id: 'team', name: 'Team B', key: oldKey }], accounts: [
+    { id: 'one', name: 'one', key: 'upstream-one', clientKeyId: 'legacy' },
+    { id: 'two', name: 'two', key: 'upstream-two', clientKeyId: 'team' },
+  ] }, async ({ dir, port, upstream, manage, restart }) => {
+    const file = path.join(dir, 'config.json');
+    for (const header of ['Authorization', 'X-Admin-Key']) {
+      const response = await chat(port, oldKey, '/v1/chat/completions', header);
+      assert.equal(response.status, 200);
+      assert.equal(response.json.choices[0].message.content, 'Bearer upstream-two');
+    }
+    const snapshot = (await manage('/api/accounts')).json;
+    assert.equal((await manage('/api/accounts', 'POST', { accounts: snapshot.accounts, mode: 'single', active: 0, concurrencyWaitMs: 0 })).status, 200);
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).clientKeys.find((row) => row.id === 'team')?.key === oldKey, true, 'full account save retains old credential');
+    assert.equal((await chat(port, oldKey)).status, 200);
+    const beforeHash = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+    await restart();
+    assert.equal(crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'), beforeHash, 'restart does not rewrite or rotate the old credential');
+    assert.equal((await manage('/api/security/client-keys')).text.includes(oldKey), false);
+    assert.equal((await api(port, '/api/meta')).text.includes(oldKey), false);
+    assert.equal((await chat(port, oldKey)).status, 200);
+    assert.equal((await manage('/api/accounts')).json.accounts.find((a) => a.id === 'two').clientKeyId, 'team');
+    assert.deepEqual(chatAttempts(upstream), Array(4).fill('Bearer upstream-two'));
+  });
+});
+
 test('key inventory, migration, old full save, rotation, reassignment and byte-preserving rejection', async (t) => {
   await scenario(t, {}, async ({ dir, port, upstream, manage, restart }) => {
     const before = await manage('/api/accounts');
@@ -196,7 +236,7 @@ test('key inventory, migration, old full save, rotation, reassignment and byte-p
     const created = await manage('/api/security/client-keys', 'POST', { name: 'Team B' });
     assert.equal(created.status, 200, created.text);
     const { id, key } = created.json;
-    assert.match(key, /^cps_[a-f0-9]{64}$/);
+    assert.equal(/^cps_[a-f0-9]{96}$/.test(key), true, 'create produces a 100-character secret');
     assert.equal((await manage('/api/security/client-keys')).text.includes(key), false);
     assert.equal((await manage(`/api/security/client-keys/${id}`, 'PATCH', { name: 'Team B renamed' })).status, 200);
     assert.equal((await manage('/api/security/client-keys')).json.keys[1].name, 'Team B renamed');
@@ -239,11 +279,19 @@ test('key inventory, migration, old full save, rotation, reassignment and byte-p
     assert.deepEqual(upstream.seen.filter((entry) => entry.url.endsWith('/chat/completions')).map((entry) => entry.auth), ['Bearer upstream-one', 'Bearer upstream-two']);
     const rotated = await manage(`/api/security/client-keys/${id}/rotate`, 'POST', {});
     assert.equal(rotated.status, 200); assert.notEqual(rotated.json.key, key);
+    assert.equal(/^cps_[a-f0-9]{96}$/.test(rotated.json.key), true, 'rotate produces a 100-character secret');
     assert.equal((await chat(port, key)).status, 401);
     assert.equal((await chat(port, rotated.json.key, '/chat/completions', 'X-Admin-Key')).status, 200);
     assert.equal((await manage('/api/security/client-keys')).text.includes(rotated.json.key), false);
     await restart({ CLINE_PASS_KEY: 'synthetic-env-upstream-key' });
     assert.equal((await chat(port, rotated.json.key)).status, 200);
+    assert.equal((await chat(port, key)).status, 401, 'old credential stays invalid after restart');
+    for (const secret of [key, rotated.json.key]) {
+      assert.equal((await api(port, '/api/meta')).text.includes(secret), false);
+      assert.equal((await manage('/api/logs/requests?limit=100')).text.includes(secret), false);
+      assert.equal((await manage('/api/logs/errors?limit=100')).text.includes(secret), false);
+      assert.equal(fs.readFileSync(path.join(dir, 'metadata.json'), 'utf8').includes(secret), false);
+    }
     const saved = await manage('/api/accounts');
     assert.equal(saved.json.accounts.find((a) => a.id === two.id).clientKeyId, id);
     assert.equal(saved.json.accounts.find((a) => a.key === 'synthetic-env-upstream-key').clientKeyId, 'legacy');
@@ -494,33 +542,38 @@ test('owner-scoped SSE first-event retry, secret redaction and empty legacy star
 });
 
 test('failed full account save retains persisted bytes, runtime owner routing and live credentials', async (t) => {
+  const oldKey = `cps_${'b2'.repeat(32)}`;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-owner-rollback-'));
   const loader = path.join(dir, 'fault-loader.mjs'), fault = path.join(dir, 'config-fault');
   fs.writeFileSync(loader, `import fs from 'node:fs'; const rename = fs.renameSync;
 fs.renameSync = (from, to) => { if (String(to).endsWith('/config.json') && fs.existsSync(${JSON.stringify(fault)})) throw Error('synthetic config rename failure'); return rename(from, to); };`);
-  try { await scenario(t, { clientKeys: [{ id: 'team', name: 'Team B', key: 'team-client-key-123456' }], accounts: [
+  try { await scenario(t, { clientKeys: [{ id: 'team', name: 'Team B', key: oldKey }], accounts: [
     { id: 'one', name: 'one', key: 'upstream-one', clientKeyId: 'legacy' },
     { id: 'two', name: 'two', key: 'upstream-two', clientKeyId: 'team' },
   ] }, async ({ dir: dataDir, port, upstream, manage }) => {
     const configPath = path.join(dataDir, 'config.json');
-    const before = fs.readFileSync(configPath);
+    const beforeHash = crypto.createHash('sha256').update(fs.readFileSync(configPath)).digest('hex');
+    const unchanged = () => assert.equal(crypto.createHash('sha256').update(fs.readFileSync(configPath)).digest('hex'), beforeHash, 'failed write preserves config bytes');
     const accounts = (await manage('/api/accounts')).json.accounts;
     fs.writeFileSync(fault, '');
     const failed = await manage('/api/accounts', 'POST', { accounts: accounts.map((account) => account.id === 'two' ? { ...account, clientKeyId: 'legacy' } : account), mode: 'single', active: 1, concurrencyWaitMs: 0 });
     assert.equal(failed.status, 500);
-    assert.deepEqual(fs.readFileSync(configPath), before);
+    unchanged();
     assert.equal((await manage('/api/accounts')).json.accounts.find((a) => a.id === 'two').clientKeyId, 'team');
     assert.equal((await manage('/api/security/client-keys/team', 'DELETE')).status, 409);
     assert.equal((await chat(port, legacy)).json.choices[0].message.content, 'Bearer upstream-one');
-    assert.equal((await chat(port, 'team-client-key-123456')).json.choices[0].message.content, 'Bearer upstream-two');
+    assert.equal((await chat(port, oldKey)).json.choices[0].message.content, 'Bearer upstream-two');
     assert.deepEqual(upstream.seen.filter((entry) => entry.url.endsWith('/chat/completions')).map((entry) => entry.auth), ['Bearer upstream-one', 'Bearer upstream-two']);
-    assert.deepEqual(fs.readFileSync(configPath), before);
+    unchanged();
     assert.equal((await manage('/api/security', 'POST', { proxyKey: 'new-legacy-client-456' })).status, 500);
     assert.equal((await manage('/api/security')).json.proxyKey, legacy);
     assert.equal((await manage('/api/security/client-keys/team/rotate', 'POST', {})).status, 500);
-    assert.equal((await chat(port, 'team-client-key-123456')).status, 200);
+    assert.equal((await manage('/api/security/client-keys', 'POST', { name: 'Another team' })).status, 500);
+    assert.equal((await manage('/api/security/client-keys')).json.keys.length, 2);
+    assert.equal((await manage('/api/accounts')).json.accounts.find((a) => a.id === 'two').clientKeyId, 'team');
+    assert.equal((await chat(port, oldKey)).status, 200);
     assert.equal((await chat(port, 'new-legacy-client-456')).status, 401);
-    assert.deepEqual(fs.readFileSync(configPath), before);
+    unchanged();
     fs.unlinkSync(fault);
     assert.equal((await manage('/api/accounts', 'POST', { accounts: accounts.map((a) => a.id === 'two' ? { ...a, clientKeyId: 'legacy' } : a), mode: 'single', active: 1, concurrencyWaitMs: 0 })).status, 200);
   }, { NODE_OPTIONS: `--import=${loader}` }); }

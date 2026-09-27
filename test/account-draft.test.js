@@ -6,7 +6,7 @@ import vm from 'node:vm';
 const script = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8').match(/<script>([\s\S]*?)<\/script>/)[1];
 const DEFAULT_PIPELINE_ORDER = ['quotaPool','healthSort','sticky'];
 const DEFAULT_PIPELINE = {quotaPool:false,healthSort:false,sticky:false,order:[...DEFAULT_PIPELINE_ORDER],cachePoolSize:0,cachePoolMaxSize:0,cachePoolLowQuotaSize:0,sessionBindingExplicitTtlMs:7200000,sessionBindingFallbackTtlMs:900000,sessionBindingMaxEntries:50000};
-const fixture = () => ({mode:'single', active:1, concurrencyWaitMs:2000, errorRules:[], accountPipeline:{...DEFAULT_PIPELINE,order:[...DEFAULT_PIPELINE_ORDER]}, cachePool:{minSize:0,maxSize:0,targetSize:0,binding:{enabled:false,size:0,maxEntries:50000}}, accounts:[0,1,2].map(i => ({id:`id${i}`, clientKeyId:'legacy', name:i < 2 ? 'duplicate <name>' : 'other', note:`note${i}`, key:`fake${i}`, enabled:i !== 1, maxConcurrent:i+1, maxRpm:i*5, weight:i+1, priority:10+i, proxyUrl:'http://localhost:1234', headers:{'X-Test':'fixture'}, perModel:{model:{upstreams:['mock']}}, activeCount:0, cachePoolRole:i===0?'active':i===1?'standby':null}))});
+const fixture = () => ({mode:'single', active:1, concurrencyWaitMs:2000, poolFullWaitMs:null, errorRules:[], accountPipeline:{...DEFAULT_PIPELINE,order:[...DEFAULT_PIPELINE_ORDER]}, cachePool:{minSize:0,maxSize:0,targetSize:0,binding:{enabled:false,size:0,maxEntries:50000}}, accounts:[0,1,2].map(i => ({id:`id${i}`, clientKeyId:'legacy', name:i < 2 ? 'duplicate <name>' : 'other', note:`note${i}`, key:`fake${i}`, enabled:i !== 1, maxConcurrent:i+1, maxRpm:i*5, weight:i+1, priority:10+i, proxyUrl:'http://localhost:1234', headers:{'X-Test':'fixture'}, perModel:{model:{upstreams:['mock']}}, activeCount:0, cachePoolRole:i===0?'active':i===1?'standby':null}))});
 function harness() {
   const elements = new Map(), calls = [], timers = new Map(), windowListeners = {};
   let timerId = 0;
@@ -19,7 +19,7 @@ function harness() {
   pipelineList.children=DEFAULT_PIPELINE_ORDER.map((step,index)=>{const position={textContent:String(index+1),attrs:{},setAttribute(name,value){this.attrs[name]=value;}},button=()=>({disabled:false,focusCalls:0,focus(){if(!this.disabled){this.focused=true;this.focusCalls++;}}}),up=button(),down=button();return{dataset:{pipelineStep:step},attrs:{},classList:classList(),position,up,down,setAttribute(name,value){this.attrs[name]=value;},querySelector(selector){return selector==='.pipeline-position'?position:selector==='.pipeline-move-up'?up:selector==='.pipeline-move-down'?down:null;},getBoundingClientRect(){return{top:0,height:20};}};});
   pipelineList.appendChild=node=>{const index=pipelineList.children.indexOf(node);if(index>=0)pipelineList.children.splice(index,1);pipelineList.children.push(node);return node;};
   el('#newAccountOwner').value='legacy';
-  el('#accMode').options = ['single','roundrobin','sticky','least-connections','weighted-roundrobin','priority-failover'].map(value=>({value}));
+  el('#accMode').options = ['single','roundrobin','sticky','least-connections','weighted-roundrobin','priority-failover','load-health'].map(value=>({value}));
   context.snapshot = fixture();
   run("ACCS = snapshot; $('#monthlyQuotaThreshold').value='0.20'; $('#accMode').value='single'; $('#concurrencyWaitMs').value='2000'; $('#cachePoolSize').value='0'; $('#cachePoolMaxSize').value='0'; $('#cachePoolLowQuotaSize').value='0'; $('#sessionBindingExplicitTtlMs').value='7200000'; $('#sessionBindingFallbackTtlMs').value='900000'; $('#sessionBindingMaxEntries').value='50000'; hydrateErrorRuleDraft(snapshot.errorRules); renderAccounts();");
   const snapshot = () => JSON.parse(run('JSON.stringify(ACCS)'));
@@ -50,14 +50,17 @@ test('client-key list and account owner draft round-trip stay escaped and comple
 
 test('key writes require confirmation, reload accepted state, and disclose generated secret only until dismissed', async () => {
   const h=harness(), calls=[], confirmations=[];
+  const createKey=`cps_${'01'.repeat(48)}`, rotateKey=`cps_${'ab'.repeat(48)}`;
   h.context.sent=calls;h.context.confirm=message=>{confirmations.push(message);return false;};
-  h.run("CLIENT_KEYS=[{id:'legacy',name:'Legacy'},{id:'team',name:'Team'}]; renderClientKeys(); api=async(path,body,method)=>{sent.push({path,body,method});return path.endsWith('/rotate')?{id:'team',key:'generated-rotate-secret'}:path==='/api/security/client-keys'?{id:'other',name:body.name,key:'generated-create-secret'}:{ok:false,error:{message:'reassign owned accounts before revoking this key'}}}; loadAll=async()=>{CLIENT_KEYS=[{id:'legacy',name:'Legacy'},{id:'team',name:'Team'}];renderClientKeys();};");
+  h.context.createKey=createKey;h.context.rotateKey=rotateKey;
+  h.run("CLIENT_KEYS=[{id:'legacy',name:'Legacy'},{id:'team',name:'Team'}]; renderClientKeys(); api=async(path,body,method)=>{sent.push({path,body,method});return path.endsWith('/rotate')?{id:'team',key:rotateKey}:path==='/api/security/client-keys'?{id:'other',name:body.name,key:createKey}:{ok:false,error:{message:'reassign owned accounts before revoking this key'}}}; loadAll=async()=>{CLIENT_KEYS=[{id:'legacy',name:'Legacy'},{id:'team',name:'Team'}];renderClientKeys();};");
   h.el('#newClientKeyName').value='New team';h.el('#secProxyKey').value='legacy-key';
   await h.run('createClientKey()');
   assert.deepEqual(JSON.parse(JSON.stringify(calls[0])),{path:'/api/security/client-keys',body:{name:'New team'}});
-  assert.equal(h.el('#clientKeySecret').value,'generated-create-secret');
-  assert.doesNotMatch(h.el('#clientKeyBody').innerHTML,/generated-create-secret/);
-  h.run('closeClientKeySecret()');assert.equal(h.el('#clientKeySecret').value,'');
+  assert.equal(h.el('#clientKeySecret').value===createKey,true,'create reveals the full 100-character key');
+  assert.equal(h.el('#clientKeySecret').focused,true);
+  assert.equal(h.el('#clientKeyBody').innerHTML.includes(createKey),false);
+  h.run('closeClientKeySecret()');assert.equal(h.el('#clientKeySecret').value.length,0);
   await h.run("rotateClientKey('team')");await h.run("revokeClientKey('team')");
   assert.equal(calls.length,1,'cancelled operations never write');assert.match(confirmations.join(' '),/Team/);
   h.context.confirm=()=>true;
@@ -65,50 +68,54 @@ test('key writes require confirmation, reload accepted state, and disclose gener
   await h.run("rotateClientKey('team')");
   assert.equal(calls[1].path,'/api/security/client-keys/team/rotate');assert.equal(calls[1].method,undefined);
   assert.deepEqual(JSON.parse(JSON.stringify(calls[1].body)),{});
-  assert.equal(h.el('#clientKeySecret').value,'generated-rotate-secret');
+  assert.equal(h.el('#clientKeySecret').value===rotateKey,true,'rotate reveals the full 100-character key');
+  const copied=[];h.context.navigator={clipboard:{writeText:async text=>copied.push(text)}};
+  await h.run('copyClientKeySecret()');assert.equal(copied.length,1);assert.equal(copied[0]===rotateKey,true,'clipboard receives the complete key');
   h.run('closeClientKeySecret()');
   assert.equal(h.el('#clientKeyRotate-team').focused,true,'dismissal focuses the accepted re-rendered rotate button');
   await h.run("revokeClientKey('team')");
-  assert.equal(calls[2].method,'DELETE');assert.equal(h.el('#clientKeySecret').value,'','revocation clears prior one-time material');
+  assert.equal(calls[2].method,'DELETE');assert.equal(h.el('#clientKeySecret').value.length,0,'revocation clears prior one-time material');
   assert.match(h.el('#clientKeysStatus').textContent,/reassign owned accounts/);
   assert.equal(h.run('CLIENT_KEYS.length'),2,'409 cannot optimistically delete');
   h.context.prompt=()=> 'Renamed team';await h.run("renameClientKey('team')");
   assert.equal(calls[3].method,'PATCH');assert.deepEqual(JSON.parse(JSON.stringify(calls[3].body)),{name:'Renamed team'});
-  h.run("showClientKeySecret('copy-once', $('#newClientKeyName'))");
+  h.context.copyKey=createKey;h.run("showClientKeySecret(copyKey, $('#newClientKeyName'))");
   h.context.navigator={clipboard:{writeText:async()=>{throw Error('denied');}}};
   await h.run('copyClientKeySecret()');assert.equal(h.el('#clientKeySecret').selected,true);
+  assert.equal(h.el('#clientKeySecret').value===createKey,true,'selection fallback retains the complete 100-character key');
   assert.match(h.el('#clientKeyCopyStatus').textContent,/手动复制/);
   let prevented=false;h.el('#clientKeySecretDialog').listeners.cancel({preventDefault(){prevented=true;}});
-  assert.equal(prevented,true);assert.equal(h.el('#clientKeySecret').value,'');
+  assert.equal(prevented,true);assert.equal(h.el('#clientKeySecret').value.length,0);
 });
 
 test('create and rotate reveal their one-time secret before a failed list refresh, without replaying the write', async () => {
   for (const action of ['create','rotate']) {
-    const h=harness(), writes=[];
-    h.context.writes=writes;
+    const h=harness(), writes=[], secret=`cps_${'cd'.repeat(48)}`;
+    h.context.writes=writes;h.context.secret=secret;
     h.context.refresh=()=>new Promise((resolve,reject)=>{h.context.rejectRefresh=reject;});
-    h.run("CLIENT_KEYS=[{id:'legacy',name:'Legacy'},{id:'team',name:'Team'}]; api=async(path,body,method)=>{writes.push({path,body,method});return {id:'team',key:'only-once-secret'};}; loadAll=refresh;");
+    h.run("CLIENT_KEYS=[{id:'legacy',name:'Legacy'},{id:'team',name:'Team'}]; api=async(path,body,method)=>{writes.push({path,body,method});return {id:'team',key:secret};}; loadAll=refresh;");
     h.el('#secProxyKey').value='configured-legacy';h.el('#newClientKeyName').value='New team';
     if(action==='rotate'){h.context.document.getElementById=id=>h.el('#'+id);h.context.confirm=()=>true;}
     const pending=h.run(action==='create'?'createClientKey()':"rotateClientKey('team')");
     await Promise.resolve();
     assert.equal(writes.length,1,`${action} must write only once`);
     assert.equal(h.el('#clientKeySecretDialog').open,true,`${action} must reveal before refresh settles`);
-    assert.equal(h.el('#clientKeySecret').value,'only-once-secret');
+    assert.equal(h.el('#clientKeySecret').value===secret,true,'full one-time secret appears before refresh');
     h.context.navigator={clipboard:{writeText:async()=>{throw Error('denied');}}};
     await h.run('copyClientKeySecret()');
     assert.equal(h.el('#clientKeySecret').selected,true);
     h.context.rejectRefresh(Error('network unavailable'));
     await pending;
-    assert.equal(h.el('#clientKeySecret').value,'only-once-secret','failed refresh must preserve manual-copy value');
+    assert.equal(h.el('#clientKeySecret').value===secret,true,'failed refresh must preserve manual-copy value');
     assert.equal(h.el('#clientKeySecret').selected,true);
     assert.match(h.el('#clientKeyCopyStatus').textContent,/手动复制/);
     assert.match(h.el('#clientKeysStatus').textContent,/操作已生效但列表刷新失败.*请先复制.*之后刷新.*不要重复提交/);
-    assert.doesNotMatch(h.el('#clientKeysStatus').textContent,/only-once-secret|操作失败/);
-    assert.doesNotMatch(h.el('#clientKeyBody').innerHTML,/only-once-secret/);
-    assert.doesNotMatch(h.run('JSON.stringify(CLIENT_KEYS)+JSON.stringify(ACCS)'),/only-once-secret/);
+    assert.equal(h.el('#clientKeysStatus').textContent.includes(secret),false);
+    assert.doesNotMatch(h.el('#clientKeysStatus').textContent,/操作失败/);
+    assert.equal(h.el('#clientKeyBody').innerHTML.includes(secret),false);
+    assert.equal(h.run('JSON.stringify(CLIENT_KEYS)+JSON.stringify(ACCS)').includes(secret),false);
     assert.equal(writes.length,1,'a failed read must not repeat a successful write');
-    h.run('closeClientKeySecret()');assert.equal(h.el('#clientKeySecret').value,'');
+    h.run('closeClientKeySecret()');assert.equal(h.el('#clientKeySecret').value.length,0);
   }
 });
 
@@ -128,25 +135,26 @@ test('successful key rename and revoke do not report write failure when list ref
 });
 
 test('refresh 401 clears the revealed key, and navigation during refresh cannot revive it', async () => {
-  const h=harness(), writes=[];
-  h.context.writes=writes;h.context.seenBefore401=null;
-  h.run("const originalApi=api; api=async(path,body,method)=>path==='/api/security/client-keys'?(writes.push(path),{id:'team',key:'only-once-secret'}):originalApi(path,body,method); loadAll=async()=>{seenBefore401=$('#clientKeySecret').value;return api('/api/accounts');};");
+  const h=harness(), writes=[], oneTimeKey=`cps_${'e3'.repeat(48)}`;
+  h.context.writes=writes;h.context.seenBefore401=null;h.context.oneTimeKey=oneTimeKey;
+  h.run("const originalApi=api; api=async(path,body,method)=>path==='/api/security/client-keys'?(writes.push(path),{id:'team',key:oneTimeKey}):originalApi(path,body,method); loadAll=async()=>{seenBefore401=$('#clientKeySecret').value;return api('/api/accounts');};");
   h.context.fetch=async()=>({status:401});
   h.el('#newClientKeyName').value='New team';h.el('#secProxyKey').value='configured-legacy';
   await h.run('createClientKey()');
   assert.equal(writes.length,1);
-  assert.equal(h.context.seenBefore401,'only-once-secret');
+  assert.equal(h.context.seenBefore401 === oneTimeKey,true,'the full 100-character key was visible before 401');
   assert.equal(h.el('#clientKeySecret').value,'');
   assert.equal(h.el('#clientKeySecretDialog').open,false);
   assert.equal(h.el('#loginOverlay').style.display,'flex');
   assert.doesNotMatch(h.el('#clientKeysStatus').textContent,/列表刷新失败/);
 
-  const nav=harness();nav.context.refresh=()=>new Promise((resolve,reject)=>{nav.context.rejectRefresh=reject;});
-  nav.run("api=async()=>({id:'team',key:'stale-secret'});loadAll=refresh;");
+  const nav=harness();nav.context.oneTimeKey=oneTimeKey;
+  nav.context.refresh=()=>new Promise((resolve,reject)=>{nav.context.rejectRefresh=reject;});
+  nav.run("api=async()=>({id:'team',key:oneTimeKey});loadAll=refresh;");
   nav.el('#newClientKeyName').value='New team';nav.el('#secProxyKey').value='configured-legacy';
   const pending=nav.run('createClientKey()');
   await Promise.resolve();
-  assert.equal(nav.el('#clientKeySecret').value,'stale-secret','write is displayed before pending read');
+  assert.equal(nav.el('#clientKeySecret').value === oneTimeKey,true,'the full key is displayed before the pending read');
   await nav.run("switchSection('console')");
   nav.context.rejectRefresh(Error('network unavailable'));
   await pending;
@@ -560,9 +568,9 @@ test('raw editor projects only live scheduling and all reference names; combined
   h.el('#pipelineQuotaPool').checked=true;
   h.el('#accSearch').value='other'; h.run('clearBulkSelection(); openRawScheduling()');
   const draft=rawDraft(h), before=h.snapshot();
-  assert.deepEqual(Object.keys(draft),['accountMode','concurrencyWaitMs','errorRules','retryRules','accountPipeline','accountNames']);
+  assert.deepEqual(Object.keys(draft),['accountMode','concurrencyWaitMs','poolFullWaitMs','errorRules','retryRules','accountPipeline','accountNames']);
   assert.deepEqual(draft.accountNames,before.accounts.map(a=>a.name));
-  assert.equal(draft.accountMode,'sticky'); assert.equal(draft.concurrencyWaitMs,987);
+  assert.equal(draft.accountMode,'sticky'); assert.equal(draft.concurrencyWaitMs,987); assert.equal(draft.poolFullWaitMs,null);
   assert.deepEqual(draft.errorRules,[{id:'quota-418',scope:'account',action:'hard-quarantine',when:{statuses:[418],body_contains:'quota exceeded'}}]);
   assert.equal(draft.accountPipeline.quotaPool,true); assert.equal(draft.accountPipeline.cachePoolSize,0);
   draft.accountMode='priority-failover'; draft.concurrencyWaitMs=30000;
@@ -577,8 +585,25 @@ test('raw editor projects only live scheduling and all reference names; combined
   const payload=JSON.parse(h.run('JSON.stringify(sent[0].body)'));
   assert.deepEqual(payload.accounts,before.accounts.map(({activeCount,cachePoolRole,...a})=>a));
   assert.equal(payload.active,1); assert.equal(payload.accounts[1].maxConcurrent,42);
-  assert.equal(payload.mode,draft.accountMode); assert.equal(payload.concurrencyWaitMs,30000);
+  assert.equal(payload.mode,draft.accountMode); assert.equal(payload.concurrencyWaitMs,30000); assert.equal(payload.poolFullWaitMs,null);
   assert.deepEqual(payload.errorRules,draft.errorRules);assert.deepEqual(payload.accountPipeline,draft.accountPipeline);
+});
+
+test('load-health mode and optional pool wait survive raw draft, preset and full save', async () => {
+  const h=harness();
+  h.el('#accMode').value='load-health'; h.el('#poolFullWaitMs').value='0';
+  h.run('openRawScheduling()');const draft=rawDraft(h);
+  assert.equal(draft.poolFullWaitMs,0);assert.equal(draft.accountMode,'load-health');
+  draft.poolFullWaitMs=30000;h.el('#rawSchedulingJson').value=JSON.stringify(draft);h.run('applyRawScheduling()');
+  assert.equal(h.el('#poolFullWaitMs').value,'30000');
+  h.context.sent=[];h.run("api=async(path,body)=>{sent.push({path,body});return {ok:false};}");
+  await h.run('saveAccounts()');assert.equal(h.context.sent[0].body.poolFullWaitMs,30000);
+  h.el('#preset').value='throughput';h.run('previewPreset()');
+  assert.equal(JSON.parse(h.run('JSON.stringify(PENDING_PRESET)')).poolFullWaitMs,30000);
+  await h.run('applyPreset()');assert.equal(h.context.sent[1].body.poolFullWaitMs,30000);
+  h.el('#poolFullWaitMs').value='';await h.run('saveAccounts()');assert.equal(h.context.sent[2].body.poolFullWaitMs,null);
+  for(const value of ['-1','1.5','30001','NaN']){h.el('#poolFullWaitMs').value=value;h.run('openRawScheduling()');assert.notEqual(h.el('#rawSchedulingDialog').open,true);const before=h.context.sent.length;await h.run('saveAccounts()');assert.equal(h.context.sent.length,before);}
+  h.el('#poolFullWaitMs').value='0';h.el('#accMode').value='load-health';h.el('#pipelineSticky').checked=true;await h.run('saveAccounts()');assert.equal(h.context.sent.length,3);
 });
 
 test('successful raw save hydrates persisted values and clears obsolete draft feedback without discarding an open editor', async () => {
@@ -627,6 +652,7 @@ test('raw validation rejects every unsupported domain atomically without echoing
   const validRule={id:'valid',scope:'account',action:'degrade',when:{statuses:[429]}};
   const invalid=['{ secret-value',null,[],{}, {...base,secret:'secret-value'}, ...['unknown',null,1].map(accountMode=>({...base,accountMode})),
     ...['1',true,null,-1,30001,1.5].map(concurrencyWaitMs=>({...base,concurrencyWaitMs})),
+    ...['1',true,-1,30001,1.5].map(poolFullWaitMs=>({...base,poolFullWaitMs})),
     ...[null,[],{}, {...base.accountPipeline,extra:true}, {...base.accountPipeline,sticky:1}, {...base.accountPipeline,cachePoolSize:-1}, {...base.accountPipeline,cachePoolSize:100001}, {...base.accountPipeline,order:['sticky']}, {...base.accountPipeline,order:['sticky','sticky','quotaPool']}].map(accountPipeline=>({...base,accountPipeline})),
     ...[null,{},[{...validRule,id:''}],[{...validRule,id:'-invalid'}],[validRule,{...validRule}],[{...validRule,scope:'credential'}],[{...validRule,providers:['bad provider']}],[{...validRule,when:{statuses:[500],body_contains:null}}],[{...validRule,when:{statuses:[500],header:null}}],[{...validRule,action:'cooldown'}],[{...validRule,when:{}}],[{...validRule,when:{statuses:[99]}}],[{...validRule,action:'cooldown',reset:{fallback:'300',max:'1h'}}]].map(errorRules=>({...base,errorRules})),
     {...base,accountNames:['renamed']}, {...base,accountNames:null}];
@@ -656,7 +682,7 @@ test('unapplied invalid advanced rules do not corrupt raw scheduling; invalid nu
 });
 
 test('raw stale reload, scheduling edits, rename, deletion and duplicate reorder never overwrite newer drafts', () => {
-  for(const change of ["ACCS=JSON.parse(JSON.stringify(ACCS))", "$('#accMode').value='sticky'", "$('#cachePoolSize').value='2'", "commitErrorRuleDraft([{id:'hard-418',scope:'account',action:'hard-quarantine',when:{statuses:[418]}}])", "$('#pipelineSticky').checked=true", "movePipelineStep('sticky',-1)", "ACCS.accounts[0].name='new'", 'ACCS.accounts.pop()', '[ACCS.accounts[0],ACCS.accounts[1]]=[ACCS.accounts[1],ACCS.accounts[0]]']){
+  for(const change of ["ACCS=JSON.parse(JSON.stringify(ACCS))", "$('#accMode').value='sticky'", "$('#cachePoolSize').value='2'", "$('#poolFullWaitMs').value='900'", "commitErrorRuleDraft([{id:'hard-418',scope:'account',action:'hard-quarantine',when:{statuses:[418]}}])", "$('#pipelineSticky').checked=true", "movePipelineStep('sticky',-1)", "ACCS.accounts[0].name='new'", 'ACCS.accounts.pop()', '[ACCS.accounts[0],ACCS.accounts[1]]=[ACCS.accounts[1],ACCS.accounts[0]]']){
     const h=harness();h.run('openRawScheduling()');const text=h.el('#rawSchedulingJson').value;
     h.run(change);const before=h.snapshot(),controls=liveScheduling(h);h.run('applyRawScheduling()');
     assert.deepEqual(h.snapshot(),before); assert.equal(liveScheduling(h),controls);
@@ -690,7 +716,7 @@ test('raw applied custom rules remain compatible with existing confirm-and-save 
   assert.equal(observed.filter(rule=>rule.id.startsWith('preset-provider-')).length,5,'observe replaces the shared stable preset IDs instead of appending shadowed rules');
 });
 
-test('raw validator accepts six modes and numeric limits but rejects missing fields and non-JSON numeric types', () => {
+test('raw validator accepts seven modes and numeric limits but rejects missing fields and non-JSON numeric types', () => {
   const h=harness(); h.run('openRawScheduling()');const base=rawDraft(h);
   for(const option of h.el('#accMode').options){
     h.context.candidate={...base,accountMode:option.value,concurrencyWaitMs:0,errorRules:[{id:'cool-429',scope:'account',action:'cooldown',when:{statuses:[429]},reset:{fallback:'1s',max:'1s'}}]};

@@ -53,8 +53,10 @@ test('console login uses an in-memory CSRF session, clears legacy storage and pr
   await run('tryLogin()');
   assert.equal(calls.at(-1)[0], '/api/auth/login');
   assert.equal(run('DATA.draft'), true);
-  run("showClientKeySecret('one-time-synthetic-secret', $('#newClientKeyName'))");
-  assert.equal(el('#clientKeySecret').value,'one-time-synthetic-secret');
+  const oneTimeKey = `cps_${'e3'.repeat(48)}`;
+  ctx.oneTimeKey = oneTimeKey;
+  run("showClientKeySecret(oneTimeKey, $('#newClientKeyName'))");
+  assert.equal(el('#clientKeySecret').value === oneTimeKey, true);
   responses.push({ status: 401 });
   await assert.rejects(run("api('/api/accounts')"), /unauthorized/);
   assert.equal(el('#clientKeySecret').value,'', '401 must clear revealed material');
@@ -71,7 +73,7 @@ test('console login uses an in-memory CSRF session, clears legacy storage and pr
   assert.equal(reloads, 0);
   assert.equal(run('DATA.draft'), true);
   assert.match(el('#adminStatus').textContent, /退出未确认/);
-  run("showClientKeySecret('one-time-synthetic-secret', $('#newClientKeyName'))");
+  run("showClientKeySecret(oneTimeKey, $('#newClientKeyName'))");
   responses.push({ status: 200, json: async () => ({ ok: true }) });
   await run('logoutAdmin()');
   assert.equal(el('#clientKeySecret').value,'');

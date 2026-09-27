@@ -4,6 +4,14 @@ import fs from 'node:fs';
 
 const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 
+test('load-health and pool-full wait use labelled native controls with an inheritance hint', () => {
+  assert.match(html, /<option value="load-health">无粘性/);
+  assert.match(html, /for="concurrencyWaitMs"/);
+  assert.match(html, /for="poolFullWaitMs"/);
+  assert.match(html, /id="poolFullWaitMs" type="number" min="0" max="30000" step="1" placeholder="继承"/);
+  assert.match(html, /全池纯并发满等待/);
+});
+
 test('monthly quota protection uses a labelled reference threshold and explicit separate recovery', () => {
   assert.match(html, /id="monthlyQuotaThreshold"[^>]*type="number"[^>]*min="0\.01"[^>]*max="50"[^>]*step="0\.01"/);
   assert.match(html, /for="monthlyQuotaThreshold"/);
@@ -44,7 +52,8 @@ test('client-key console uses authenticated labels, native owner/secret controls
   assert.match(html, /<label for="drawerClientKeyId">归属客户端密钥/);
   assert.match(html, /<select id="drawerClientKeyId">/);
   assert.match(html, /id="clientKeySecretDialog" aria-labelledby="clientKeySecretTitle" aria-describedby="clientKeySecretHelp"/);
-  assert.match(html, /id="clientKeySecret" type="text" readonly autocomplete="off"/);
+  assert.match(html, /<textarea id="clientKeySecret" readonly rows="5" wrap="soft" autocomplete="off" spellcheck="false"><\/textarea>/);
+  assert.match(html, /#clientKeySecret\s*\{[^}]*width:100%;[^}]*overflow-wrap:anywhere;[^}]*white-space:pre-wrap;[^}]*overflow-y:auto;/);
   assert.match(html, /addEventListener\('cancel',e=>\{e.preventDefault\(\);closeClientKeySecret\(false\)/);
   assert.match(html, /onclick="closeClientKeySecret\(false\)">关闭并清除/);
   assert.match(html, /navigator.clipboard.writeText\(field.value\)/);
@@ -109,7 +118,7 @@ test('request and error sections share one log view and reset the selected type 
   assert.match(html, /数量不等于失败请求数/);
   assert.match(html, /id="logResult"/);
   const switchSection = html.slice(html.indexOf('async function switchSection'), html.indexOf('async function loadLogs'));
-  assert.match(switchSection, /LOG_QUERY_ID\+\+;STATISTICS_QUERY_ID\+\+;/);
+  assert.match(switchSection, /LOG_QUERY_ID\+\+;resetLogChain\(\);STATISTICS_QUERY_ID\+\+;/);
   assert.match(switchSection, /\$\('#consolePanel'\)\.hidden=!isConsole;\$\('#statisticsPanel'\)\.hidden=!isStatistics;\$\('#modelProvidersPanel'\)\.hidden=section!=='modelProviders';\$\('#logPanel'\)\.hidden=isConsole\|\|isStatistics/);
   assert.match(switchSection, /setAttribute\('aria-pressed',String\(section===name\)\)/);
   assert.match(switchSection, /\$\('#logType'\)\.value=type/);
@@ -189,6 +198,29 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   assert.doesNotMatch(statistics, /\.key\b|proxyUrl|\.headers\b|\.note\b|rawResponse|rawTrace|session|message/);
 });
 
+test('error log inline chain is explicit, single-row, focusable and keeps raw bytes outside ordinary rows', () => {
+  assert.match(html, /function inlineErrorAction\(row\)/);
+  assert.match(html, /aria-expanded="false" aria-controls="logChainPanel"/);
+  assert.match(html, /id="logChainPanel"[^>]+role="region"/);
+  assert.match(html, /id="logChainStatus" role="status" aria-live="polite"/);
+  assert.match(html, /id="logChainText" readonly/);
+  assert.match(html, /id="logChainCopy"[^>]+disabled/);
+  assert.match(html, /\.log-chain-panel \{[^}]*overflow-x:auto/);
+  const viewer = html.slice(html.indexOf('let LOG_CHAIN_ID'), html.indexOf('function affinityLogLabel'));
+  assert.match(viewer, /validErrorDetailIntent\(intent\)/);
+  assert.match(viewer, /matches\.length!==1/);
+  assert.match(viewer, /group\.request\?\.requestId!==requestId\|\|group\.request\.profile!==detailProfile/);
+  assert.match(viewer, /button\.closest\('tr'\)\.insertAdjacentHTML\('afterend'/);
+  assert.match(viewer, /\$\('#logChainClose'\)\.focus\(\)/);
+  assert.match(viewer, /trigger\.isConnected\)trigger\.focus\(\)/);
+  assert.match(viewer, /jsArg\(descriptor\.bodyId\)/);
+  assert.match(viewer, /\$\('#logChainText'\)\.value=text/);
+  assert.match(viewer, /\$\('#logChainText'\)\.select\(\)/);
+  const list = html.slice(html.indexOf('async function loadLogs'), html.indexOf('async function clearLogs'));
+  assert.doesNotMatch(list, /\/bodies\//);
+  assert.match(list, /errorDetailAction\(x\)\+inlineErrorAction\(x\)/);
+});
+
 test('statistics quota controls expose labelled lifecycle, truthful units and cancellation guards', () => {
   assert.match(html, /id="statisticsRefresh"[^>]+type="button"[^>]+aria-describedby="statisticsQuotaHelp"[^>]+onclick="refreshStatisticsQuota\(true\)"/);
   assert.match(html, /进入本页及停留期间每 5 分钟刷新启用且已配置的账号额度/);assert.match(html,/查看额度不会启用额度池路由/);
@@ -200,7 +232,7 @@ test('statistics quota controls expose labelled lifecycle, truthful units and ca
   assert.match(statistics,/typeof value==='number'&&Number\.isFinite\(value\)&&value>=0&&value<=100/);
   assert.match(statistics,/\(100-used\)\.toFixed\(1\)/);assert.match(statistics,/api\('\/api\/statistics\/quota-refresh',\{force\}/);
   assert.match(statistics,/new AbortController\(\)/);assert.match(statistics,/signal:controller\.signal/);assert.match(html,/async function api\(path, body, method, asText=false, options=\{\}\)/);
-  assert.match(html,/STATISTICS_REFRESH_MS = 5 \* 60 \* 1000/);assert.match(statistics,/window\.addEventListener\('pagehide',\(\)=>\{closeClientKeySecret\(true,false\);stopStatisticsVisit\(\);stopModelProviders\(\);resetDetailSelection\(\);\}\)/);assert.match(statistics,/window\.addEventListener\('pageshow',\(\)=>!\$\('#statisticsPanel'\)\.hidden\?restoreStatisticsVisit\(\):!\$\('#modelProvidersPanel'\)\.hidden\?loadModelProviders\(\):null\)/);
+  assert.match(html,/STATISTICS_REFRESH_MS = 5 \* 60 \* 1000/);assert.match(statistics,/window\.addEventListener\('pagehide',\(\)=>\{closeClientKeySecret\(true,false\);stopStatisticsVisit\(\);stopModelProviders\(\);LOG_QUERY_ID\+\+;resetLogChain\(\);resetDetailSelection\(\);\}\)/);assert.match(statistics,/window\.addEventListener\('pageshow',\(\)=>!\$\('#statisticsPanel'\)\.hidden\?restoreStatisticsVisit\(\):!\$\('#modelProvidersPanel'\)\.hidden\?loadModelProviders\(\):null\)/);
   assert.match(statistics,/STATISTICS_TIMER===null\)return startStatisticsVisit\(\)/);assert.match(statistics,/STATISTICS_REFRESH_CONTROLLER\?\.abort\(\)/);assert.match(statistics,/visitId!==STATISTICS_VISIT_ID/);
   assert.match(statistics,/controller!==STATISTICS_REFRESH_CONTROLLER/);assert.match(statistics,/STATISTICS_REFRESH_PROMISE&&STATISTICS_REFRESH_VISIT===visitId/);
 });

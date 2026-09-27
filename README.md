@@ -10,7 +10,7 @@ Node.js 本地/服务器代理 + 网页控制台，用于 [Cline Pass](https://c
 - 🎯 **精确钉住与一键配置上游** —— 首选固定+健康回退 / Switcher 健康自动选择都由 switcher 外层执行；每个具名 HTTP attempt 只注入当前 provider 的单元素 `only`。可按账号执行探测→校验→预览→测试→确认，并支持 provider 内成本、首字、吞吐排序
 - 🧬 **双维度错误策略** —— 一套有序 `errorRules` 可分别作用于账号或模型×Provider，支持状态码、正文 ANY、响应 Header、Provider/model 范围及 ignore/degrade/cooldown/hard-quarantine；只有显式规则会冷却或硬隔离
 - 🚫 **上游排除** —— 勾「排除」的已知渠道不会进入 attempt 计划；已知渠道全部被排除时安全失败，不会用 auto 绕过排除
-- 👥 **账号池** —— 支持单账号、轮询、HRW 粘性、最少连接、加权轮询和优先级容灾；六种安全预设可先预览再应用
+- 👥 **账号池** —— 支持单账号、轮询、HRW 粘性、最少连接、加权轮询、优先级容灾和可选的无粘性负载＋健康度调度；安全预设可先预览再应用
 - 🛡️ **账号高级设置** —— 备注、并发、权重、优先级、安全自定义 Header，以及 HTTP/HTTPS/SOCKS5/SOCKS5H 出站代理（故障绝不回退直连）
 - 🔗 **账号级模型路由** —— 每个账号可为模型整项覆盖全局上游顺序、模式、排除、排序、重试上限与 Provider 冷却；删除专属配置即可恢复继承
 - 📊 **可信统计与成功率** —— 独立统计板块展示累计/最近 24 小时请求、真实 usage Token、缓存 Token 双指标，以及账号与模型×Provider 的直接成功率、样本和覆盖；无样本保持“无数据”
@@ -100,7 +100,7 @@ location / {
 
 `config.json` 中 `proxyKey` 是 ID 固定为 `legacy` 的**唯一持久化** Legacy 密钥；`clientKeys` 只存额外密钥的 `{ id, name, key }`，均为私有明文配置，不是管理员密码，也不是账号的上游 `accounts[].key`。普通日志、公开元数据与默认脱敏详情不得显示客户端密钥；**显式开启的原文正文模式不保证去除用户自行嵌入的任意密钥文本**。每个上游账号的 `clientKeyId` 恰好指向一个有效下游密钥 ID。旧配置中的账号、旧 `apiKey` 迁移账号及 `CLINE_PASS_KEY` 注入账号均归 `legacy`，稳定账号 ID 不变；当 Legacy 为空且已有额外密钥时，新注入的 Legacy 账号会使启动拒绝（先设置非空 Legacy 密钥/`PROXY_KEY` 或移除注入）。旧客户端完整 `POST /api/accounts` 省略 `clientKeyId` 时，已存在账号按稳定 ID 保留原归属，新增账号由服务端分配当前有效默认归属（Legacy 有密钥或仅有 Legacy 时选 Legacy，否则选首个额外密钥）。新客户端应显式提交有效归属，不要靠省略字段猜测。未知归属/重复 ID、名字或密钥在保存前拒绝，损坏的既有配置不能被默认值覆盖；完整账号保存要带回隐藏的 `id`、`clientKeyId`、`perModel`、代理及 Header 等字段。
 
-管理接口仅对**已初始化管理员 Cookie 会话**开放，写请求须带会话 `X-CSRF-Token`；Bearer 或旧 `X-Admin-Key` 客户端密钥只能认证模型接口，不能管理。所有新密钥接口响应均为 `Cache-Control: no-store`；正常列表只含名称/ID，只有创建和轮换的当次响应给新值，无法再次读取。旧 `GET/POST /api/security` 仍向**管理员**返回 Legacy 的 `proxyKey` 明文，是特意保留的兼容例外，不应误当成额外密钥的安全列表。请求/响应要点（`<id>` 为额外密钥 ID，非账号 ID）：
+管理接口仅对**已初始化管理员 Cookie 会话**开放，写请求须带会话 `X-CSRF-Token`；Bearer 或旧 `X-Admin-Key` 客户端密钥只能认证模型接口，不能管理。所有新密钥接口响应均为 `Cache-Control: no-store`；正常列表只含名称/ID，只有创建和轮换的当次响应给新值，无法再次读取。新生成的独立密钥固定为 `cps_` 加 96 个十六进制字符（48 字节随机数，共 100 字符）；旧版 `cps_` 加 64 个十六进制字符等既有密钥继续有效，不会因升级自动轮换或迁移。旧 `GET/POST /api/security` 仍向**管理员**返回 Legacy 的 `proxyKey` 明文，是特意保留的兼容例外，不应误当成额外密钥的安全列表。请求/响应要点（`<id>` 为额外密钥 ID，非账号 ID）：
 
 | 操作 | 请求 | 成功响应 |
 |---|---|---|
@@ -110,7 +110,7 @@ location / {
 | 轮换 | `POST /api/security/client-keys/<id>/rotate`，JSON `{}` | `{ "id": "<id>", "key": "<新一次性值>" }` |
 | 撤销 | `DELETE /api/security/client-keys/<id>` | `{ "ok": true }`；仍有归属账号时 `409`，不修改配置 |
 
-操作顺序：① 备份私有 DATA_DIR，完成独立管理员登录/CSRF；若 Legacy 为空且有 Legacy 归属账号，**先保存一个非空 Legacy 密钥**，否则创建额外密钥会被拒绝（不会把匿名旧用户悄悄改成新密钥用户）；② 在「访问与安全」创建并安全复制新密钥，关闭一次性弹窗后无法再次查看，丢失只能轮换；③ 在「账号管理」新建账号时选择归属，或在抽屉中修改旧账号归属，点击**保存账号配置**并核对已接受状态，再给客户端分发对应 Bearer 密钥（兼容 `X-Admin-Key` 模型请求）；④ 轮换前通知客户端，确认后旧值立即拒绝**新准入**，生成值当次复制并更新客户端；⑤ 撤销前先保存所有归属账号的重分配，核对后确认撤销。已获 lease 的工作可继续使用原账号完成；等待中的旧密钥请求不允许在轮换/撤销后新获 lease。密钥操作成功会重新拉取服务器快照，未保存的账号草稿可能被覆盖，请先保存或自行留存；确认对话框不能代替服务器验证。
+操作顺序：① 备份私有 DATA_DIR，完成独立管理员登录/CSRF；若 Legacy 为空且有 Legacy 归属账号，**先保存一个非空 Legacy 密钥**，否则创建额外密钥会被拒绝（不会把匿名旧用户悄悄改成新密钥用户）；② 在「访问与安全」创建并安全复制新密钥，一次性弹窗可换行显示长值，复制失败可手动全选复制；关闭一次性弹窗后无法再次查看，丢失只能轮换；③ 在「账号管理」新建账号时选择归属，或在抽屉中修改旧账号归属，点击**保存账号配置**并核对已接受状态，再给客户端分发对应 Bearer 密钥（兼容 `X-Admin-Key` 模型请求）；④ 轮换前通知客户端，确认后旧值立即拒绝**新准入**，生成值当次复制并更新客户端；⑤ 撤销前先保存所有归属账号的重分配，核对后确认撤销。已获 lease 的工作可继续使用原账号完成；等待中的旧密钥请求不允许在轮换/撤销后新获 lease。密钥操作成功会重新拉取服务器快照，未保存的账号草稿可能被覆盖，请先保存或自行留存；确认对话框不能代替服务器验证。
 
 `/chat/completions`、`/v1/chat/completions`、`/api/v1/chat/completions` 在认证后仅能调度该密钥归属的账号：单账号、轮询、HRW、成功率流水线、会话绑定、缓存活跃/备用、同账号 Provider 重试及首包前允许的一次换号都不得跨归属；空/不可用归属池安全失败，不借其他池。`/models`、`/v1/models`、`/api/v1/models` 的静态已知 ID/别名可共享，但 `exposeCatalog` 抓取只能使用当前客户端归属的账号，空池不能用管理员目录缓存或外池回退。`/v1/responses` 认证后仍返回 501，不发上游。管理员 `/api/models` 和明确 `accountId` 的探测/测试独立于客户端池，管理员不指定 ID 时保留现有全局选择能力。缓存池在各归属内**分别派生**活跃/备用集合，但共享 `metadata.json.cachePoolTargetSize` 这**一个数字**；某池扩容可能使其他池的派生活跃集扩大，实际角色计数是所有归属池的合计，不是每密钥独立配置/限流。`maxRpm` 仍按上游账号分别统计；月参考额度与模型参考消费等值也按原机制分别估算，绝不是每客户端密钥独立配额、账单或相互抵扣。
 
@@ -149,9 +149,10 @@ location / {
 |---|---|
 | `accounts` | 账号池：`[{ id, clientKeyId, name, note, key, enabled, maxConcurrent, maxRpm, weight, priority, proxyUrl, headers, perModel }]`；`clientKeyId` 是下游密钥的稳定归属 ID，`key` 是**上游**凭据；每个账号只归属一个客户端密钥。备注不进入上游/普通日志，`maxConcurrent: 0` 表示不限 |
 | `maxRpm` | 账号级每分钟真实上游请求上限（整数 0～100000，`0` 表示不限）。按每个实际发往 Cline `/chat/completions` 的 native attempt 计数（含 Provider retry；`/api/test`、`/api/probe`、`/api/validate-upstreams`、绑定已保存 accountId 的 `/api/accounts/test` 与 `/api/accounts/proxy-test` 均计数；models/catalog/quota 与无持久 accountId 的临时 credential 测试不计）。使用单进程精确滚动 60 秒窗口：重启清空、多副本各自独立，不是跨进程硬上限 |
-| `accountMode` | `single` / `roundrobin` / `sticky` / `least-connections` / `weighted-roundrobin` / `priority-failover` |
+| `accountMode` | `single` / `roundrobin` / `sticky` / `least-connections` / `weighted-roundrobin` / `priority-failover` / `load-health`（仅用于关闭 `accountPipeline.sticky` 的请求） |
 | `activeAccount` | 单账号模式下使用的下标 |
-| `concurrencyWaitMs` | 容量等待时间，0～30000 ms，默认 2000 |
+| `concurrencyWaitMs` | 首选账号等待及 RPM/混合阻塞等待，0～30000 ms，默认 2000 |
+| `poolFullWaitMs` | 当前归属池全部合格候选有限并发满载、且 RPM 均可用时的等待，整数 0～30000 ms；省略或 `null` 继承 `concurrencyWaitMs`。旧客户端完整保存省略此字段时保留已有值，显式 `null` 恢复继承。无效持久值启动失败且不覆写原文件 |
 | `errorRules` | 唯一权威的有序错误规则数组；每条含稳定 `id`、`account`/`provider-model` 维度、动作、可选 Provider/model 范围，以及 status/body/Header AND 条件。`cooldown.reset` 使用显式格式与严格 `d/h/m/s` fallback/max；最多 100 条/64 KiB。动作与直接健康样本固定为 `ignore`/0、`degrade`/1、`cooldown`/1、`hard-quarantine`/1 个失败样本，后两者同时保持临时/持续处置 |
 | `retryRules` | 唯一权威的有序“停止重试”数组；每条含稳定 `id`、固定 `decision: "stop"`，以及同时存在的 `when.statuses` 与 `when.body_contains`。两类条件 AND、body 数组 ANY、大小写不敏感普通文本（不支持正则/Header）；首条命中即停止本请求剩余 Provider 与账号替换。缺失默认 `[]`；最多 100 条/64 KiB。普通日志只投影 `retryRuleId`/`retryDecision`/`retryMatchedBy` 枚举，不记录 needle 或匹配片段 |
 | `accountErrorRules` / `accountContentErrorRules` | 只读兼容镜像。旧配置启动时按“内容规则在前、状态规则在后”迁移；旧客户端不提交 `errorRules` 时只能原样回传镜像，试图修改会得到 409 |
@@ -240,11 +241,11 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 
 `retryRules` 是独立的请求级停止条件：`statuses` 与 `body_contains` 同时命中即立即停止本请求全部剩余 Provider 与账号替换，并保留原始最终状态/正文；无命中则保持现有继续重试行为。它不隐式修改健康状态，只有同时存在的 `errorRules` 才决定样本与处置。控制台的“无效 system 消息停止重试”是手动预设：预览确认后同时加入 `retryRules: stop` 与同条件的 provider-model `ignore`，从而对确定性请求错误只发送一个真实 attempt、不换号、不降低渠道成功率；预设默认不启用，也不会在启动迁移中自动写入。
 
-调度固定先执行禁用、账号冷却、硬隔离和 reserve 等资格过滤。只有 success-rate 时，每次请求按 `success / (success + degrade)` 降序，有数据优先、无数据置后；只有 sticky 时继续使用无状态 HRW。sticky 与 healthSort 同时生效时，sticky 变为“已有会话绑定命中门”：hit 直接使用绑定账号，miss 才按 `order` 中 quotaPool/healthSort 的相对顺序处理当前活跃候选，并用 HRW 做同层稳定 tie-break。成功率变化不会迁移已有绑定。
+调度固定先执行禁用、账号冷却、硬隔离和 reserve 等资格过滤。可选 `load-health` 仅在未开启粘性的归属池生效：在最先有可接单账号的额度分组内，按最近 24h 有样本成功率选出距最佳已知率不超过 15 个百分点的候选，未知样本也保留为可探索候选；先按当前在途数最少，已知样本取最高成功率，未知样本与该最高率共同轮询（不是将未知率记为 0 或 100）。`maxConcurrent: 0` 仍是不限制；RPM 只作准入判断。此模式跳过 `healthSort` 的严格成功率分层，但不改变额度分组或粘性选择；与 `accountPipeline.sticky` 同时配置会被拒绝。高并发只改善本地分流，不能保证上游绝不返回 429。只有 success-rate 时，每次请求按 `success / (success + degrade)` 降序，有数据优先、无数据置后；只有 sticky 时继续使用无状态 HRW。sticky 与 healthSort 同时生效时，sticky 变为“已有会话绑定命中门”：hit 直接使用绑定账号，miss 才按 `order` 中 quotaPool/healthSort 的相对顺序处理当前活跃候选，并用 HRW 做同层稳定 tie-break。成功率变化不会迁移已有绑定。
 
-`cachePoolSize > 0` 仅在 sticky 模式或显式启用会话粘性步骤时生效；它是初始/最小大小，`cachePoolMaxSize` 是扩容上限。`cachePoolLowQuotaSize` 默认 0（沿用原有非 reserve、priority/稳定 ID 成员和选择）；正数时固定低额度槽（fresh 完整快照已用 80%–<95%）先于高额度槽（<80%）承载请求，reserve（≥95%）排除，未知最后补位。低额度按剩余升序、高额度按剩余降序，再按 priority/稳定 ID 派生；实际 high/low/unknown 数量单独显示，不持久化成员 ID。动态扩容只增加高额度目标；低额度并发/RPM 不可用时立即尝试高额度。只有全部活跃账号都设置了有限 `maxConcurrent` 且满载、RPM 仍可用，等待 `concurrencyWaitMs` 后重算仍满载，target 才同步 grow-one 并持久化到 `metadata.json`；多个并发超时不会越过 max，压力下降不自动缩容，`max=min` 可关闭自动扩容。低额度账号最终 account/degrade 会进入独立 waiting-refresh，首包前最多换号一次；真实额度刷新成功才可恢复，任一已知窗口 100%（含部分快照）进入 quota-exhausted，到有效 reset 后重新刷新，失败/未知不会清除；人工恢复仅清错误规则状态。刷新沿用两槽队列与失败退避。备用账号必须先正式晋升为 active 才能承载请求或建立绑定；无合格成员/达到 max 时返回容量错误，unlimited 活跃账号不会触发增长。
+`cachePoolSize > 0` 仅在 sticky 模式或显式启用会话粘性步骤时生效；它是初始/最小大小，`cachePoolMaxSize` 是扩容上限。`cachePoolLowQuotaSize` 默认 0（沿用原有非 reserve、priority/稳定 ID 成员和选择）；正数时固定低额度槽（fresh 完整快照已用 80%–<95%）先于高额度槽（<80%）承载请求，reserve（≥95%）排除，未知最后补位。低额度按剩余升序、高额度按剩余降序，再按 priority/稳定 ID 派生；实际 high/low/unknown 数量单独显示，不持久化成员 ID。动态扩容只增加高额度目标；低额度并发/RPM 不可用时立即尝试高额度。只有全部活跃账号都设置了有限 `maxConcurrent` 且满载、RPM 仍可用，等待有效 `poolFullWaitMs`（`null` 继承 `concurrencyWaitMs`）后重算仍满载，target 才同步 grow-one 并持久化到 `metadata.json`；多个并发超时不会越过 max，压力下降不自动缩容，`max=min` 可关闭自动扩容。低额度账号最终 account/degrade 会进入独立 waiting-refresh，首包前最多换号一次；真实额度刷新成功才可恢复，任一已知窗口 100%（含部分快照）进入 quota-exhausted，到有效 reset 后重新刷新，失败/未知不会清除；人工恢复仅清错误规则状态。刷新沿用两槽队列与失败退避。备用账号必须先正式晋升为 active 才能承载请求或建立绑定；无合格成员/达到 max 时返回容量错误，unlimited 活跃账号不会触发增长。
 
-账号级 **RPM 限流**（`maxRpm`）与 `maxConcurrent` 共存，准入顺序固定为硬资格 → `maxConcurrent` → RPM：并发已满时不会预留或消耗 RPM（失败诊断可能读取窗口以区分混合阻塞）。账号 `lease` 在准入时原子预留第一个 RPM permit，只有真正把请求交给 Node transport（`req.end()`）才提交为窗口内事实；发送前的同步失败或未发出会立即退还预留并唤醒等待者，发送后的 DNS/连接/代理/TLS/成功/错误/超时/取消都不退款。同一账号内的 Provider retry 每次独立预留；无 permit 时不等待、不发请求、不换号，直接返回本地 429 + 精确 `Retry-After`，此前真实失败 attempt 的原始 upstream 状态与错误行仍保留，请求行以 `errorCategory: "rpm"` 记录本地限流而不是伪造 upstream 429。初始选择会跳过“有并发但 RPM 耗尽”的候选，全部不可用时 `Retry-After` 来自最早滚动窗口恢复时间；等待复用现有容量 waiter 与 `concurrencyWaitMs` 上限，不新增 refill 定时器或队列。RPM 阻塞（含混合阻塞）不会触发缓存池动态扩容，只有全部活跃候选都有限并发满载且 RPM 仍有容量时才允许既有的 grow-one。删除账号或替换 Key/代理会清理该账号窗口，普通 disable/re-enable 不会绕过窗口内已提交事实，`maxRpm: 0` 立即关闭限制并清理无用状态。`GET /api/accounts` 只投影 `rpm: { limit, used, reserved, retryAt }` 这样的安全数值，普通日志只投影 `blockedBy` 枚举与有界 `retryAfter`。
+账号级 **RPM 限流**（`maxRpm`）与 `maxConcurrent` 共存，准入顺序固定为硬资格 → `maxConcurrent` → RPM：并发已满时不会预留或消耗 RPM（失败诊断可能读取窗口以区分混合阻塞）。账号 `lease` 在准入时原子预留第一个 RPM permit，只有真正把请求交给 Node transport（`req.end()`）才提交为窗口内事实；发送前的同步失败或未发出会立即退还预留并唤醒等待者，发送后的 DNS/连接/代理/TLS/成功/错误/超时/取消都不退款。同一账号内的 Provider retry 每次独立预留；无 permit 时不等待、不发请求、不换号，直接返回本地 429 + 精确 `Retry-After`，此前真实失败 attempt 的原始 upstream 状态与错误行仍保留，请求行以 `errorCategory: "rpm"` 记录本地限流而不是伪造 upstream 429。初始选择会跳过“有并发但 RPM 耗尽”的候选，全部不可用时 `Retry-After` 来自最早滚动窗口恢复时间；等待复用现有容量 waiter 与 `concurrencyWaitMs` 上限，不新增 refill 定时器或队列。纯并发全池满则按 `poolFullWaitMs` 从同一次选号开始计时、容量释放可提前唤醒；首选号满但其他号空闲以及 RPM/混合阻塞仍按旧等待规则，不串联两段超时。RPM 阻塞（含混合阻塞）不会触发缓存池动态扩容，只有全部活跃候选都有限并发满载且 RPM 仍有容量时才允许既有的 grow-one。删除账号或替换 Key/代理会清理该账号窗口，普通 disable/re-enable 不会绕过窗口内已提交事实，`maxRpm: 0` 立即关闭限制并清理无用状态。`GET /api/accounts` 只投影 `rpm: { limit, used, reserved, retryAt }` 这样的安全数值，普通日志只投影 `blockedBy` 枚举与有界 `retryAfter`。
 
 组合模式的 session binding 只存在内存，复用已有 HMAC fingerprint：显式 Codex/Claude/session 身份使用 2 小时滑动 TTL，`message_hmac` 使用 15 分钟，默认最多 50,000 条并按 LRU 淘汰，重启即清空。首次 miss 在取得 lease 后建立 provisional binding，真实 native attempt 提交后确认；同会话并发可命中 provisional。绑定账号满载时先等待，再临时使用其他 active，但不会改绑。删除/禁用、Key/代理变化、账号 cooldown/hard-quarantine、退出 active 或进入 reserve 会失效并重新选择；Provider 失败、普通失败、成功率或 hot/warm/unknown 变化不改绑。管理 API/普通日志仅显示安全计数及 `bindingSource`/`bindingResult` 枚举，不输出 session、fingerprint、候选表或绑定明细。
 

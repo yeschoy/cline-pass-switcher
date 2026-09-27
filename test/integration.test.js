@@ -962,6 +962,171 @@ test('legacy migration and cooldown state survive restart', async (t) => {
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(running.dir, 'config.json'))).accounts.map((a) => a.id), migrated.accounts.map((a) => a.id));
 });
 
+test('load-health spreads live work, respects six concurrent leases and leaves sticky incompatible', async (t) => {
+  const seen=[], pending=[];
+  const upstream=http.createServer((req,res)=>{req.resume();req.on('end',()=>{if(req.method==='GET'){res.writeHead(500);return res.end('{}');}seen.push(req.headers.authorization);pending.push(res);});});
+  const upstreamPort=await listen(upstream),port=await unusedPort();
+  const accounts=[{id:'a',name:'A',key:'ka',enabled:true,maxConcurrent:6,perModel:{}},{id:'b',name:'B',key:'kb',enabled:true,maxConcurrent:6,perModel:{}}];
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts,accountMode:'load-health',concurrencyWaitMs:0,poolFullWaitMs:0,knownModels:['m'],perModel:{},errorRules:[],accountPipeline:{quotaPool:false,healthSort:true,sticky:false}});
+  t.after(async()=>{for(const res of pending)if(!res.writableEnded)res.end('{}');await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  const send=()=>rawJson(port,'/v1/chat/completions',{model:'m',messages:[]});
+  const finish=(index)=>{pending[index].writeHead(200,{'Content-Type':'application/json'});pending[index].end(JSON.stringify({choices:[{message:{content:'OK'}}]}));};
+  const first=send();await waitUntil(()=>seen.length===1);const second=send();await waitUntil(()=>seen.length===2);
+  assert.deepEqual(new Set(seen),new Set(['Bearer ka','Bearer kb']),'healthSort must not partition away a healthy idle candidate');
+  finish(0);finish(1);await Promise.all([first,second]);
+  let view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+  assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts.map(a=>({...a,enabled:a.id==='a'})),mode:'load-health',active:0,concurrencyWaitMs:0,poolFullWaitMs:0,accountPipeline:view.accountPipeline,errorRules:[]})).status,200);
+  const held=[];for(let i=0;i<6;i++){held.push(send());await waitUntil(()=>seen.length===i+3);}
+  view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.equal(view.accounts[0].activeCount,6);
+  const blocked=await send();assert.equal(blocked.status,429);assert.equal(blocked.json.error.message,'all upstream accounts are busy');assert.equal(seen.length,8,'seventh concurrent request must never reach the capped account');
+  const blockedLog=await waitUntil(async()=>{const page=await(await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${blocked.headers['x-cline-request-id']}`)).json();return page.items[0];});
+  assert.equal(blockedLog.strategy,'load-health');assert.equal(blockedLog.blockedBy,'concurrency');assert.equal(blockedLog.retryAfter,1);assert.equal(blockedLog.attempts.length,0);assert.equal('poolFullWaitMs' in blockedLog,false);
+  assert.equal((await rawJson(port,'/api/accounts',{accounts:view.accounts.map(a=>({...a,enabled:true})),mode:'load-health',active:0,concurrencyWaitMs:0,poolFullWaitMs:0,accountPipeline:view.accountPipeline,errorRules:[]})).status,200);
+  const seventh=send();await waitUntil(()=>seen.length===9);assert.equal(seen.at(-1),'Bearer kb','a newly eligible idle account accepts the seventh request');
+  for(let i=2;i<8;i++)finish(i);await Promise.all(held);
+  const eighth=send();await waitUntil(()=>seen.length===10);assert.equal(seen.at(-1),'Bearer ka','a released lease re-enters routing');
+  for(let i=8;i<pending.length;i++)finish(i);await Promise.all([seventh,eighth]);
+  view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.deepEqual(view.accounts.map(a=>a.activeCount),[0,0]);
+  const bytes=fs.readFileSync(path.join(running.dir,'config.json'));
+  const bad=await rawJson(port,'/api/accounts',{accounts:view.accounts,mode:'load-health',active:0,concurrencyWaitMs:0,poolFullWaitMs:0,accountPipeline:{...view.accountPipeline,sticky:true},errorRules:[]});assert.equal(bad.status,400);assert.deepEqual(fs.readFileSync(path.join(running.dir,'config.json')),bytes);
+});
+
+test('load-health weighs known rates without zeroing unknown samples or strict health partitions', async (t) => {
+  const pending=[],seen=[];
+  const upstream=http.createServer((req,res)=>{req.resume();req.on('end',()=>{if(req.method==='GET'){res.writeHead(500);return res.end('{}');}const auth=req.headers.authorization;seen.push(auth);if(seen.length===1){res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify({choices:[{message:{content:'seed'}}]}));}pending.push(res);});});
+  const upstreamPort=await listen(upstream),port=await unusedPort();
+  const accounts=['a','b','c','d'].map(id=>({id,name:id.toUpperCase(),key:`key-${id}`,enabled:true,maxConcurrent:1,perModel:{}}));
+  let running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts,accountMode:'single',activeAccount:0,concurrencyWaitMs:0,poolFullWaitMs:0,knownModels:['m'],perModel:{},errorRules:[]});
+  t.after(async()=>{for(const res of pending)if(!res.writableEnded)res.end('{}');if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  const send=()=>rawJson(port,'/v1/chat/completions',{model:'m',messages:[]});
+  assert.equal((await send()).status,200);await stop(running.child);running.child=null;
+  const metaPath=path.join(running.dir,'metadata.json'),metadata=JSON.parse(fs.readFileSync(metaPath));
+  const bucket=metadata.statistics.minuteBuckets.at(-1);assert.equal(bucket.accountHealth.a.successes,1);
+  bucket.accountHealth.b={...bucket.accountHealth.a,successes:9,degrades:1};
+  bucket.accountHealth.c={...bucket.accountHealth.a,successes:3,degrades:7};
+  fs.writeFileSync(metaPath,JSON.stringify(metadata));
+  const cfgPath=path.join(running.dir,'config.json'),cfg=JSON.parse(fs.readFileSync(cfgPath));cfg.accountMode='load-health';cfg.accountPipeline={...cfg.accountPipeline,healthSort:true};fs.writeFileSync(cfgPath,JSON.stringify(cfg));
+  running=await startSwitcher(null,running.dir);
+  const holders=[];for(let i=0;i<4;i++){holders.push(send());await waitUntil(()=>seen.length===i+2);}
+  assert.deepEqual(new Set(seen.slice(1,4)),new Set(['Bearer key-a','Bearer key-b','Bearer key-d']),'the good-rate band balances by live load and explores unknown samples');
+  assert.equal(seen[4],'Bearer key-c','a known bad rate is used only after better and unknown accounts are saturated');
+  const view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();assert.deepEqual(view.accounts.map(a=>a.activeCount),[1,1,1,1]);
+  for(const res of pending){res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));}assert.ok((await Promise.all(holders)).every(r=>r.status===200));
+});
+
+test('invalid persisted pool wait and sticky load-health fail startup without rewriting operator bytes', async (t) => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-pool-wait-invalid-')),file=path.join(dir,'config.json');t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  for(const patch of [{poolFullWaitMs:-1},{poolFullWaitMs:'4'},{poolFullWaitMs:30001},{accountMode:'load-health',accountPipeline:{sticky:true}}]){
+    const bytes=Buffer.from(JSON.stringify({accounts:[{id:'a',name:'A',key:'fixture-key',enabled:true,perModel:{}}],...patch}));fs.writeFileSync(file,bytes);
+    const child=spawn(process.execPath,['server.js'],{cwd:path.resolve('.'),env:{...process.env,DATA_DIR:dir,BIND_HOST:'127.0.0.1',CLINE_PASS_KEY:'',PROXY_KEY:''},stdio:['ignore','pipe','pipe']});let output='';child.stderr.on('data',chunk=>{output+=chunk;});
+    assert.notEqual(await new Promise(resolve=>child.once('exit',resolve)),0);assert.match(output,/invalid poolFullWaitMs|load-health cannot enable sticky/);assert.deepEqual(fs.readFileSync(file),bytes);
+  }
+});
+
+test('poolFullWaitMs inherits, wakes on lease release and never extends RPM/mixed or preferred-only waits', async (t) => {
+  const seen=[];let delay=210;
+  const upstream=http.createServer((req,res)=>{req.resume();req.on('end',()=>{if(req.method==='GET'){res.writeHead(500);return res.end('{}');}seen.push(req.headers.authorization);setTimeout(()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}));},delay);});});
+  const upstreamPort=await listen(upstream),port=await unusedPort();
+  const accounts=[{id:'a',name:'A',key:'ka',enabled:true,maxConcurrent:1,maxRpm:0,perModel:{}},{id:'b',name:'B',key:'kb',enabled:false,maxConcurrent:1,maxRpm:0,perModel:{}}];
+  let running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts,accountMode:'single',activeAccount:0,concurrencyWaitMs:0,knownModels:['m'],perModel:{},errorRules:[]});
+  t.after(async()=>{if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  const send=()=>rawJson(port,'/v1/chat/completions',{model:'m',messages:[]});
+  const view=async()=>(await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+  let snapshot=await view();assert.equal(snapshot.poolFullWaitMs,null);
+  const save=async(patch={})=>{const state=await view();return rawJson(port,'/api/accounts',{accounts:state.accounts,mode:state.mode,active:0,concurrencyWaitMs:state.concurrencyWaitMs,poolFullWaitMs:state.poolFullWaitMs,errorRules:state.errorRules,accountPipeline:state.accountPipeline,...patch});};
+  assert.equal((await save({poolFullWaitMs:500})).status,200);
+  const holder=send();await waitUntil(()=>seen.length===1);
+  const start=Date.now(),waiting=send();assert.equal((await waiting).status,200);assert.ok(Date.now()-start>=80,'pool wait does not use zero preferred wait');await holder;
+  snapshot=await view();assert.equal(snapshot.poolFullWaitMs,500);assert.equal(snapshot.accounts[0].activeCount,0);
+  assert.equal((await save({poolFullWaitMs:0})).status,200);const secondHolder=send();await waitUntil(()=>seen.length===3);
+  const immediate=await send();assert.equal(immediate.status,429);assert.equal(immediate.headers['retry-after'],'1');await secondHolder;
+  assert.equal((await save({accounts:(await view()).accounts.map(a=>({...a,enabled:true})),poolFullWaitMs:500})).status,200);
+  const preferred=send();await waitUntil(()=>seen.length===4);const preferredStart=Date.now();const preferredBlocked=await send();assert.equal(preferredBlocked.status,429);assert.ok(Date.now()-preferredStart<150,'a full selected account with another idle must not use the pool budget');await preferred;
+  snapshot=await view();const configPath=path.join(running.dir,'config.json'),bytes=fs.readFileSync(configPath);
+  for(const bad of [-1,30001,1.5,'5',true,{},[]]){const result=await save({poolFullWaitMs:bad});assert.equal(result.status,400);assert.deepEqual(fs.readFileSync(configPath),bytes);}
+  assert.equal((await save({poolFullWaitMs:null,concurrencyWaitMs:0})).status,200);assert.equal((await view()).poolFullWaitMs,null);
+  assert.equal((await save({poolFullWaitMs:350})).status,200);
+  // An older full-list client omitting the new field must retain its explicit value.
+  snapshot=await view();assert.equal((await rawJson(port,'/api/accounts',{accounts:snapshot.accounts,mode:'single',active:0,concurrencyWaitMs:0,errorRules:snapshot.errorRules,accountPipeline:snapshot.accountPipeline})).status,200);
+  assert.equal((await view()).poolFullWaitMs,350);
+  await stop(running.child);running.child=null;running=await startSwitcher(null,running.dir);assert.equal((await view()).poolFullWaitMs,350);
+  assert.equal((await save({accounts:(await view()).accounts.map(a=>({...a,enabled:a.id==='a',maxRpm:a.id==='a'?1:0})),poolFullWaitMs:350})).status,200);
+  delay=0;await send();const rpmStart=Date.now();const rpm=await send();assert.equal(rpm.status,429);assert.ok(Date.now()-rpmStart<200);assert.ok(Number(rpm.headers['retry-after'])>=1);
+  delay=210;
+  assert.equal((await save({accounts:(await view()).accounts.map(a=>({...a,enabled:true,maxRpm:a.id==='a'?1:0})),mode:'load-health',poolFullWaitMs:350})).status,200);
+  const mixedHolder=send();await waitUntil(()=>seen.length===6);assert.equal(seen.at(-1),'Bearer kb');
+  const mixedStart=Date.now(),mixed=await send();assert.equal(mixed.status,429);assert.ok(Date.now()-mixedStart<200);assert.equal(seen.length,6);await mixedHolder;
+  assert.equal((await save({accounts:(await view()).accounts.map(a=>({...a,enabled:a.id==='a',maxRpm:0})),mode:'sticky',poolFullWaitMs:180})).status,200);
+  delay=440;const stickyBody={model:'m',messages:[]},header={'Session-Id':'stable-pool-wait'};
+  const stickyHolder=rawJson(port,'/v1/chat/completions',stickyBody,header);await waitUntil(()=>seen.length===7);
+  const stickyStart=Date.now(),stickyBlocked=await rawJson(port,'/v1/chat/completions',stickyBody,header);
+  assert.equal(stickyBlocked.status,429);assert.ok(Date.now()-stickyStart>=100&&Date.now()-stickyStart<330,'sticky overflow probe must not start a second pool wait');await stickyHolder;
+});
+
+test('pool wait budgets stay fixed at admission across live configuration changes in legacy and pipeline selectors', async (t) => {
+  const pending = [], reply = (res) => res.end('{"choices":[{"message":{"content":"ok"}}]}');
+  const upstream = http.createServer((req, res) => { req.resume(); req.on('end', () => pending.push(res)); });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const accounts = ['a', 'b'].map((id) => ({ id, name: id, key: `key-${id}`, enabled: true, maxConcurrent: 1 }));
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, knownModels: ['m'], accounts,
+    accountMode: 'least-connections', concurrencyWaitMs: 0, poolFullWaitMs: 2200,
+    accountPipeline: { quotaPool: false, healthSort: false, sticky: false } });
+  t.after(async () => { for (const res of pending.splice(0)) if (!res.writableEnded) reply(res); await stop(running.child); upstream.closeAllConnections?.(); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const chat = () => rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] });
+  for (const healthSort of [false, true]) {
+    const snapshot = await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+    assert.equal((await rawJson(port, '/api/accounts', { accounts: snapshot.accounts, mode: 'least-connections', active: 0,
+      concurrencyWaitMs: 0, poolFullWaitMs: 2200, errorRules: snapshot.errorRules,
+      accountPipeline: { ...snapshot.accountPipeline, healthSort } })).status, 200);
+    const first = chat(); await waitUntil(() => pending.length === 1, 3000, 'first held account');
+    const second = chat(); await waitUntil(() => pending.length === 2, 3000, 'second held account');
+    const waiting = chat();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(pending.length, 2, 'third request is blocked by pool capacity');
+    const latest = await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+    assert.equal((await rawJson(port, '/api/accounts', { accounts: latest.accounts, mode: 'least-connections', active: 0,
+      concurrencyWaitMs: 0, poolFullWaitMs: 0, errorRules: latest.errorRules,
+      accountPipeline: { ...latest.accountPipeline, healthSort } })).status, 200);
+    reply(pending.shift());
+    await waitUntil(() => pending.length === 2, 3000, 'waiting request leased released capacity');
+    reply(pending[1]);
+    assert.equal((await waiting).status, 200, 'in-flight request keeps the pool budget captured before the save');
+    for (const res of pending.splice(0)) if (!res.writableEnded) reply(res);
+    assert.equal((await first).status, 200); assert.equal((await second).status, 200);
+  }
+});
+
+test('a rate-limited candidate among entirely full finite-capacity accounts is mixed, not a pure pool-full wait', async (t) => {
+  const pending = [], reply = (res) => res.end('{"choices":[{"message":{"content":"ok"}}]}');
+  const upstream = http.createServer((req, res) => { req.resume(); req.on('end', () => pending.push({ res, authorization: req.headers.authorization })); });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, knownModels: ['m'],
+    accountMode: 'least-connections', concurrencyWaitMs: 0, poolFullWaitMs: 5000,
+    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, maxConcurrent: 1, maxRpm: 1 },
+      { id: 'b', name: 'B', key: 'key-b', enabled: true, maxConcurrent: 1 }] });
+  t.after(async () => { for (const item of pending.splice(0)) if (!item.res.writableEnded) reply(item.res); await stop(running.child); upstream.closeAllConnections?.(); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const chat = () => rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] });
+  const first = chat(); await waitUntil(() => pending.length === 1, 3000, 'first account admitted');
+  const second = chat(); await waitUntil(() => pending.length === 2, 3000, 'second account admitted');
+  assert.deepEqual(pending.map((item) => item.authorization).sort(), ['Bearer key-a', 'Bearer key-b']);
+  let timer;
+  const blocked = await Promise.race([chat(), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('mixed block incorrectly used the five-second pool budget')), 3000); })]).finally(() => clearTimeout(timer));
+  assert.equal(blocked.status, 429);
+  assert.ok(Number(blocked.headers['retry-after']) >= 1, 'Retry-After uses the RPM reset, not a zero normal wait');
+  assert.ok(Number(blocked.headers['retry-after']) <= 60);
+  assert.equal(pending.length, 2, 'a local block sends no third upstream request');
+  const mixedRow = await waitUntil(async () => (await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?limit=20`)).json()).items.find((row) => row.blockedBy === 'mixed'), 3000, 'mixed block request row');
+  assert.equal(mixedRow.retryAfter, Number(blocked.headers['retry-after']));
+  reply(pending.find((item) => item.authorization === 'Bearer key-b').res);
+  const recovered = chat();
+  await waitUntil(() => pending.length === 3, 3000, 'free RPM-eligible account reused');
+  assert.equal(pending[2].authorization, 'Bearer key-b');
+  reply(pending[2].res);
+  assert.equal((await recovered).status, 200, 'the RPM-blocked account does not prevent use of newly free capacity');
+  for (const item of pending.splice(0)) if (!item.res.writableEnded) reply(item.res);
+  assert.equal((await first).status, 200); assert.equal((await second).status, 200);
+});
+
 test('new scheduling modes, account fields, model aliases and independent logs', async (t) => {
   const seen = [];
   let coolFailures = 1;
@@ -4402,6 +4567,51 @@ test('raw body mode is explicit, admin-only and projects only safe Headers in se
   assert.equal((await fs.promises.readdir(path.join(running.dir, 'detailed-logs', 'raw'))).length, 1);
 });
 
+test('raw-full failed retry groups link ordinary error rows to four distinct on-demand legs and final JSON/SSE output', async (t) => {
+  const upstream = http.createServer((req, res) => {
+    const chunks = []; req.on('data', chunk => chunks.push(chunk)); req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString());
+      const provider = body.provider?.only?.[0] || body.providerOptions?.gateway?.only?.[0];
+      res.setHeader('Content-Type', 'application/json'); res.setHeader('Set-Cookie', 'private=fixture-cookie');
+      if (provider !== 'last') { res.writeHead(500); return res.end(JSON.stringify({ error: { message: 'fixture-upstream-failure-' + provider, status: 500 } })); }
+      if (body.stream) { res.writeHead(200, { 'Content-Type': 'text/event-stream' }); return res.end('data: {"choices":[{"delta":{"content":"fixture-final-stream"}}]}\n\ndata: [DONE]\n\n'); }
+      res.end('{"choices":[{"message":{"content":"fixture-final-json"}}]}');
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, detailedLogging: true, accounts: [{ id: 'a', name: 'Fixture', key: 'fixture-upstream-key', enabled: true, perModel: {} }], knownModels: ['inline-one','inline-two'], perModel: { 'inline-one': { upstreams: ['first','last'], pinMode: 'strict' }, 'inline-two': { upstreams: ['first','second','last'], pinMode: 'strict' } } }, null, { NODE_ENV: 'test', CLINE_PASS_RAW_BODY_READY: '1', CLINE_PASS_TEST_RAW_MEMORY_BYTES: String(2 * 1024 * 1024 * 1024) });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  assert.equal((await rawJson(port, '/api/logs/settings', { rawBodyLogging: true })).status, 200);
+  const api = (route) => fetch(`http://127.0.0.1:${port}${route}`);
+  for (const [model, stream, failed] of [['inline-one', false, 1], ['inline-two', true, 2]]) {
+    const response = await rawJson(port, '/v1/chat/completions', { model, stream, messages: [{ role: 'user', content: 'fixture-inline-inbound' }] });
+    assert.equal(response.status, 200);
+    const id = response.headers['x-cline-request-id'];
+    const errors = await waitUntil(async () => { const list = await (await api(`/api/logs/errors?requestId=${id}`)).json(); return list.items?.length === failed && list.items; });
+    const group = await waitUntil(async () => { const data = await (await api(`/api/logs/details/${id}`)).json(); return data.request?.profile === 'raw-full' && data.attempts.length === failed + 1 && data; });
+    assert.deepEqual(errors.map(row => row.attemptIndex).sort(), Array.from({ length: failed }, (_, i) => i));
+    assert.equal(group.request.status, 200); assert.equal(group.request.result, 'success');
+    for (const row of errors) {
+      assert.equal(row.detailProfile, 'raw-full');
+      const matches = group.attempts.filter(attempt => attempt.attemptIndex === row.attemptIndex && attempt.callId === row.detailCallId);
+      assert.equal(matches.length, 1); assert.equal(matches[0].status, 500); assert.equal(matches[0].captureState, 'response-error');
+      assert.equal(matches[0].headers.authorization, '[REDACTED]'); assert.equal(matches[0].responseHeaders['set-cookie'], '[REDACTED]');
+      assert.equal((await (await api(`/api/logs/details/${id}/bodies/${matches[0].responseBody}`)).text()).includes('fixture-upstream-failure'), true);
+    }
+    const selected = group.attempts.find(attempt => attempt.callId === errors[0].detailCallId);
+    assert.notEqual(selected.responseBody, group.request.responseBody);
+    for (const bodyId of [group.request.requestBody, selected.requestBody, selected.responseBody, group.request.responseBody]) assert.ok(group.bodies.some(body => body.bodyId === bodyId && body.redacted === false));
+    assert.match(await (await api(`/api/logs/details/${id}/bodies/${group.request.requestBody}`)).text(), /fixture-inline-inbound/);
+    assert.match(await (await api(`/api/logs/details/${id}/bodies/${selected.requestBody}`)).text(), /fixture-inline-inbound/);
+    assert.match(await (await api(`/api/logs/details/${id}/bodies/${group.request.responseBody}`)).text(), stream ? /fixture-final-stream.*\[DONE\]/s : /fixture-final-json/);
+    assert.equal(group.request.headers['content-type'], 'application/json');
+    assert.equal(group.request.responseHeaders['content-type'], stream ? 'text/event-stream' : 'application/json');
+    assert.doesNotMatch(JSON.stringify({ errors, group }), /fixture-inline-inbound|fixture-final-json|fixture-final-stream|fixture-cookie|fixture-upstream-key/);
+    const ordinary = fs.readdirSync(path.join(running.dir, 'logs')).map(name => fs.readFileSync(path.join(running.dir, 'logs', name), 'utf8')).join('');
+    assert.doesNotMatch(ordinary, /fixture-inline-inbound|fixture-final-json|fixture-final-stream|fixture-cookie|fixture-upstream-key/);
+  }
+});
+
 test('raw error-only keeps failed retry Headers and bodies but omits successful attempt', async (t) => {
   const upstream = http.createServer((req, res) => {
     const chunks = []; req.on('data', (chunk) => chunks.push(chunk)); req.on('end', () => {
@@ -4422,6 +4632,8 @@ test('raw error-only keeps failed retry Headers and bodies but omits successful 
   const api = (route) => fetch(`http://127.0.0.1:${port}${route}`).then((res) => res.json());
   const group = await waitUntil(async () => { const item = await api(`/api/logs/details/${id}`); return item.request?.state !== undefined && item; });
   assert.equal(group.request.profile, 'raw-error'); assert.equal(group.request.headers, undefined);
+  assert.equal(group.request.status, 200); assert.equal(group.request.result, 'success'); // Projected by the request finalizer, not captured from downstream Header/Body.
+  assert.equal(group.request.responseBody, undefined); assert.equal(group.request.responseHeaders, undefined);
   assert.deepEqual(group.attempts.map((attempt) => attempt.attemptIndex), [0]);
   assert.equal(group.attempts[0].headers['content-type'], 'application/json');
   assert.equal(group.attempts[0].headers.authorization, '[REDACTED]');

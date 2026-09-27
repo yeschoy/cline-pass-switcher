@@ -99,9 +99,10 @@ Only the four duration keys support `CLINE_PASS_TEST_INBOUND_KEEP_ALIVE_MS`, `CL
     perModel: { [modelId]: RouteConfig }
   }],
   accountMode: "single" | "roundrobin" | "sticky" |
-               "least-connections" | "weighted-roundrobin" | "priority-failover",
+               "least-connections" | "weighted-roundrobin" | "priority-failover" | "load-health",
   activeAccount,
   concurrencyWaitMs,
+  poolFullWaitMs: null | integer, // null/absence inherits concurrencyWaitMs; explicit 0-30000
   errorRules: [{
     id,
     scope: "account" | "provider-model",
@@ -153,7 +154,7 @@ Startup normalization preserves legacy behavior while making the schema explicit
 - if the account list is empty and legacy `apiKey` is set, create a default single account;
 - add and persist stable account IDs, `maxConcurrent: 0`, `maxRpm: 0`, `weight: 1`, `priority: 100`, empty `note/proxyUrl/headers`, and `perModel: {}`;
 - normalize account-level `maxRpm` to a canonical integer `0..100000` where `0` means unlimited (`MAX_RPM_LIMIT`, `rpmLimit()`). A legacy or absent field becomes `0`; a complete account save that omits `maxRpm` for an existing stable `id` preserves the previous value (`normalizeAccount()` reads `previous.maxRpm`); a genuinely new account without it becomes `0`. Non-strict normalization (`normalizeMaxRpm()`) maps `undefined`/`null`/negative/non-numeric/non-integral values to `0` (a numeric string such as `"10"` becomes `10` through `Number()`) and truncates a value above the cap; the strict management save accepts only a real JavaScript number satisfying `Number.isInteger(a.maxRpm) && a.maxRpm >= 0 && a.maxRpm <= 100000`, so a numeric string such as `"10"` is rejected. **This strictness is deliberate**: it intentionally differs from `maxConcurrent`/`weight`/`priority`, which string-coerce through `Number()`. Do not "unify" it by adding `Number()` coercion. An invalid value returns `400` before any write and leaves the exact `config.json` bytes unchanged;
-- accept all six account modes; old `single/roundrobin/sticky` retain their previous behavior;
+- accept all seven account modes; old `single/roundrobin/sticky` retain their previous behavior;
 - normalize `proxyUrl` only to HTTP, HTTPS, SOCKS5, or SOCKS5H and normalize account Header names/values through the shared security validator;
 - normalize `modelAliases` only to known `cline-pass/*` targets without alias/original-name collisions;
 - normalize legacy `upstream` into `upstreams` while retaining `upstream` as the first-item compatibility mirror;
@@ -316,6 +317,9 @@ Opt-in detailed content belongs only to the independent `DATA_DIR/detailed-logs/
 | Unknown account state after account deletion | remove state on normalization/account save |
 | `concurrencyWaitMs` outside 0-30000 at startup | normalize to 2000 |
 | Management API wait outside 0-30000 | `400`; no write |
+| `poolFullWaitMs` absent or null | inherit effective `concurrencyWaitMs`; an old-client POST omitting it preserves the existing explicit value; an explicit null resets inheritance |
+| Persisted explicit `poolFullWaitMs` is not an integer 0-30000 | fail startup before migration writes; preserve original bytes |
+| API explicit `poolFullWaitMs` is not null or integer 0-30000, or `load-health` is combined with pipeline sticky | `400`; no write |
 | `maxConcurrent` outside 0-100000 through management API | `400`; no write |
 | `maxRpm` is not a real JavaScript integer 0-100000 (numeric string such as `"10"`, fraction, negative, `null`) through the management API | `400`; no write; an older-client omission instead preserves the stable-`id` value, and a new account missing it becomes `0` |
 | Account is deleted or its key/proxy identity rotates | clear that account's in-process RPM window; `maxRpm = 0` also drops it; ordinary disable/re-enable keeps committed in-window facts |

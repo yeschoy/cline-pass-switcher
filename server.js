@@ -64,6 +64,7 @@ const DEFAULT_CONFIG = {
   accountMode: 'single',   // single=手动指定 | roundrobin=轮询 | sticky=会话 HRW 粘性
   activeAccount: 0,        // single 模式下使用的账号下标
   concurrencyWaitMs: 2000,
+  poolFullWaitMs: null, // null inherits concurrencyWaitMs
   errorRules: [],          // canonical ordered account/provider-model failure rules
   retryRules: [],          // canonical ordered request-level retry-stop rules
   quotaProtection: { monthlyThresholdUsd: 0.20 }, // community-reference $50 monthly cap
@@ -208,6 +209,9 @@ let shuttingDown = false;
 
 function randomId(prefix = 'acc') {
   return `${prefix}_${crypto.randomBytes(12).toString('hex')}`;
+}
+function generateClientKey() {
+  return `cps_${crypto.randomBytes(48).toString('hex')}`;
 }
 function envAccountId(key) {
   return `env_${crypto.createHmac('sha256', META.routingSecret).update(String(key)).digest('hex').slice(0, 24)}`;
@@ -611,7 +615,7 @@ function migrateLegacyErrorRules(statusRules, contentRules) {
   for (const [status, rule] of Object.entries(normalizeAccountErrorRules(statusRules))) out.push({ id: `legacy-status-${status}`, scope: 'account', action: rule.action === 'ban' ? 'hard-quarantine' : rule.action, when: { statuses: [Number(status)] }, ...(rule.action === 'cooldown' ? { reset: { fallback: durationText(rule.cooldownMs), max: durationText(rule.cooldownMs) } } : {}) });
   return normalizeErrorRules(out, { strict: true });
 }
-const ACCOUNT_MODES = new Set(['single', 'roundrobin', 'sticky', 'least-connections', 'weighted-roundrobin', 'priority-failover']);
+const ACCOUNT_MODES = new Set(['single', 'roundrobin', 'sticky', 'least-connections', 'weighted-roundrobin', 'priority-failover', 'load-health']);
 const FORBIDDEN_CUSTOM_HEADER = /(?:authorization|proxy-authorization|cookie|set-cookie|host|content-length|connection|transfer-encoding|upgrade|keep-alive|te|trailer|session|thread|conversation|attestation|installation|api[-_]?key|access[-_]?token|secret|credential|device[-_]?id)/i;
 function validateNote(note) {
   return typeof note === 'string' && note.length <= 500 && !/[\x00-\x09\x0b-\x1f\x7f\r]/.test(note);
@@ -756,6 +760,18 @@ function waitDurationForBlock(deadline, facts) {
   if (remaining <= 0) return 0;
   if (!Number.isSafeInteger(facts?.retryAt)) return remaining;
   return Math.max(1, Math.min(remaining, facts.retryAt - Date.now()));
+}
+function admissionWaitBudgets() {
+  const normal = Math.min(30000, Math.max(0, Number(config.concurrencyWaitMs) || 0));
+  return { normal, pool: config.poolFullWaitMs ?? normal };
+}
+function poolWaitBudget(candidates, waits) {
+  const pureFull = candidates.length > 0 && candidates.every((a) => a.maxConcurrent > 0 && !accountHasCapacity(a) && rpmAvailable(a));
+  return pureFull ? waits.pool : waits.normal;
+}
+function poolWaitForBlock(start, candidates, facts, waits) {
+  const budget = poolWaitBudget(candidates, waits);
+  return { budget, duration: waitDurationForBlock(start + budget, facts) };
 }
 function normalizeAccount(a, i, prevById = new Map(), prevByName = new Map()) {
   const suppliedId = String(a?.id || '').trim();
@@ -1189,6 +1205,7 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   const wait = Math.floor(Number(config.concurrencyWaitMs));
   if (!Number.isFinite(wait) || wait < 0 || wait > 30000) { config.concurrencyWaitMs = 2000; dirty = true; }
   else if (config.concurrencyWaitMs !== wait) { config.concurrencyWaitMs = wait; dirty = true; }
+  if (config.poolFullWaitMs !== null && (!Number.isInteger(config.poolFullWaitMs) || config.poolFullWaitMs < 0 || config.poolFullWaitMs > 30000)) throw new Error('invalid poolFullWaitMs');
   const aliases = normalizeModelAliases(config.modelAliases || {});
   if (JSON.stringify(aliases) !== JSON.stringify(config.modelAliases || {})) { config.modelAliases = aliases; dirty = true; }
   const pm = normalizePerModelMap(config.perModel || {});
@@ -1204,6 +1221,7 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   if (!configHadCanonicalRetryRules || JSON.stringify(retryRules) !== JSON.stringify(config.retryRules)) { config.retryRules = retryRules; dirty = true; }
   const pipeline = normalizeAccountPipeline(config.accountPipeline);
   if (JSON.stringify(pipeline) !== JSON.stringify(config.accountPipeline)) { config.accountPipeline = pipeline; dirty = true; }
+  if (config.accountMode === 'load-health' && pipeline.sticky) throw new Error('load-health cannot enable sticky');
   if (normalizeCachePoolTarget(pipeline)) dirty = true;
   const old = Array.isArray(config.accounts) ? config.accounts : [];
   const byId = new Map(old.filter((a) => a?.id).map((a) => [String(a.id), a]));
@@ -1472,8 +1490,7 @@ async function waitForCapacity(ms) {
   finally { clearTimeout(timer); waiters.delete(wake); }
 }
 // 复用现有全局 waiter 和 deadline；等待目标取"最早 RPM 窗口恢复"与剩余预算的较小值，不新增 refill 定时器。
-async function waitForLease(accounts, waitMs, clientKeyId = null) {
-  const deadline = Date.now() + waitMs;
+async function waitForLease(accounts, waitMs, clientKeyId = null, poolCandidates = null, start = Date.now(), waits = null) {
   let facts = selectionBlockFacts(accounts);
   while (true) {
     for (const account of accounts) {
@@ -1482,9 +1499,11 @@ async function waitForLease(accounts, waitMs, clientKeyId = null) {
     }
     if (clientKeyId !== null && !accounts.some((account) => enabledAccounts({ clientKeyId }).includes(account))) return { lease: null, blockedBy: 'unavailable', retryAt: null };
     facts = selectionBlockFacts(accounts);
-    const wait = waitDurationForBlock(deadline, facts);
-    if (wait <= 0) return { lease: null, ...facts };
-    await waitForCapacity(wait);
+    // Overflow probes pass no pool callback: they must remain immediate even when the pool budget is positive.
+    const { budget, duration } = poolCandidates ? poolWaitForBlock(start, poolCandidates(), facts, waits)
+      : { budget: waitMs, duration: waitDurationForBlock(start + waitMs, facts) };
+    if (duration <= 0) return { lease: null, ...facts, waitMs: budget };
+    await waitForCapacity(duration);
   }
 }
 function hmacHex(value) { return crypto.createHmac('sha256', META.routingSecret).update(String(value)).digest('hex'); }
@@ -1502,6 +1521,19 @@ function rrRank(list) {
   return [...list.slice(start), ...list.slice(0, start)];
 }
 function strategyRank(mode, list) {
+  if (mode === 'load-health') {
+    const health = new Map(list.map((a) => [a.id, successHealthProjection('account', a.id).successRate]));
+    const known = list.map((a) => health.get(a.id)).filter((rate) => rate !== null);
+    const best = known.length ? Math.max(...known) : null;
+    const preferred = list.filter((a) => best === null || health.get(a.id) === null || health.get(a.id) >= best - 0.15);
+    const pool = preferred.length ? preferred : list;
+    const min = Math.min(...pool.map((a) => activeCounts.get(a.id) || 0));
+    const least = pool.filter((a) => (activeCounts.get(a.id) || 0) === min);
+    const knownLeast = least.map((a) => health.get(a.id)).filter((rate) => rate !== null);
+    const highest = knownLeast.length ? Math.max(...knownLeast) : null;
+    // Unknown is exploratory, not a fabricated 0 or 100: share the tie with the best known rate.
+    return rrRank(least.filter((a) => health.get(a.id) === null || health.get(a.id) === highest));
+  }
   if (mode === 'least-connections') {
     const min = Math.min(...list.map((a) => activeCounts.get(a.id) || 0));
     return rrRank(list.filter((a) => (activeCounts.get(a.id) || 0) === min));
@@ -1530,33 +1562,33 @@ function selectionResult(lease, mode, preferred, reason, identity, overflow = fa
     sessionSource: identity?.source || (mode === 'single' ? 'single' : 'roundrobin'), source: identity?.source || (mode === 'single' ? 'single' : 'roundrobin'),
   };
 }
-async function acquireLegacyAccountLease(identity, { excludeIds = new Set(), allowOverflow = true } = {}) {
+async function acquireLegacyAccountLease(identity, { excludeIds = new Set(), allowOverflow = true, waitBudgets } = {}) {
   const clientKeyId = identity?.clientKeyId ?? null;
-  const waitMs = Math.min(30000, Math.max(0, Number(config.concurrencyWaitMs) || 0));
+  const waitMs = waitBudgets.normal;
   const list = enabledAccounts({ excludeIds, clientKeyId });
   if (!list.length) return { error: 'no available upstream account', strategy: config.accountMode };
-  const mode = config.accountMode;
+  const mode = config.accountMode, start = Date.now();
+  const currentPool = () => enabledAccounts({ excludeIds, clientKeyId });
   if (mode === 'sticky' && identity?.fingerprint) {
     const ranked = hrwRank(list, identity.fingerprint);
     const primary = ranked[0];
     let waited = tryLeaseResult(primary, Date.now(), clientKeyId);
     if (waited.lease) return selectionResult(waited.lease, mode, primary, 'sticky-primary', identity);
-    waited = await waitForLease([primary], waitMs, clientKeyId);
+    waited = await waitForLease([primary], waitMs, clientKeyId, currentPool, start, waitBudgets);
     if (waited.lease) return selectionResult(waited.lease, mode, primary, 'sticky-primary', identity);
     if (allowOverflow) {
       const overflow = await waitForLease(ranked.slice(1), 0, clientKeyId);
       if (overflow.lease) return selectionResult(overflow.lease, mode, primary, 'sticky-overflow', identity, true);
     }
-    return busyFailure(waited.blockedBy, waited.retryAt, mode, waitMs, 'all upstream accounts are busy');
+    return busyFailure(waited.blockedBy, waited.retryAt, mode, waited.waitMs, 'all upstream accounts are busy');
   }
   if (mode === 'single') {
     const preferred = singlePreferred(list);
-    const waited = await waitForLease([preferred], waitMs, clientKeyId);
+    const waited = await waitForLease([preferred], waitMs, clientKeyId, currentPool, start, waitBudgets);
     if (waited.lease) return selectionResult(waited.lease, mode, preferred, 'single-selected', identity);
-    return busyFailure(waited.blockedBy, waited.retryAt, mode, waitMs, 'upstream account is busy');
+    return busyFailure(waited.blockedBy, waited.retryAt, mode, waited.waitMs, 'upstream account is busy');
   }
-  const reasons = { roundrobin: 'roundrobin-next', sticky: 'sticky-no-identity-roundrobin', 'least-connections': 'least-active', 'weighted-roundrobin': 'weighted-slot', 'priority-failover': 'priority-tier' };
-  const deadline = Date.now() + waitMs;
+  const reasons = { roundrobin: 'roundrobin-next', sticky: 'sticky-no-identity-roundrobin', 'least-connections': 'least-active', 'weighted-roundrobin': 'weighted-slot', 'priority-failover': 'priority-tier', 'load-health': 'load-health' };
   let facts = selectionBlockFacts(list);
   while (true) {
     const current = enabledAccounts({ excludeIds, clientKeyId });
@@ -1569,9 +1601,9 @@ async function acquireLegacyAccountLease(identity, { excludeIds = new Set(), all
       if (result.lease) return selectionResult(result.lease, mode, ranked[0], reasons[mode], identity);
     }
     facts = selectionBlockFacts(current);
-    const wait = waitDurationForBlock(deadline, facts);
-    if (wait <= 0) return busyFailure(facts.blockedBy, facts.retryAt, mode, waitMs, 'all upstream accounts are busy');
-    await waitForCapacity(wait);
+    const { budget, duration } = poolWaitForBlock(start, current, facts, waitBudgets);
+    if (duration <= 0) return busyFailure(facts.blockedBy, facts.retryAt, mode, budget, 'all upstream accounts are busy');
+    await waitForCapacity(duration);
   }
 }
 function configuredCachePoolSize() { return Number.isInteger(config.accountPipeline?.cachePoolSize) ? config.accountPipeline.cachePoolSize : 0; }
@@ -1636,7 +1668,7 @@ function buildPipelineGroups(list, identity, candidates = pipelineCandidates(lis
     if (step === 'quotaPool') {
       if (!groups.some((group) => group.candidates.some((candidate) => candidate.quota.pool !== 'unknown'))) diagnostics.push('quota-all-unknown');
       else groups = groups.flatMap((group) => ['hot','warm','unknown','reserve'].map((pool) => ({ ...group, candidates: group.candidates.filter((candidate) => candidate.quota.pool === pool), quota: pool })).filter((next) => next.candidates.length));
-    } else if (step === 'healthSort') {
+    } else if (step === 'healthSort' && config.accountMode !== 'load-health') {
       groups = groups.flatMap((group) => {
         const rates = [...new Set(group.candidates.map((candidate) => candidate.health.successRate).filter((rate) => rate !== null))].sort((a,b) => b-a);
         const rated = rates.map((rate) => ({ ...group, candidates: group.candidates.filter((candidate) => candidate.health.successRate === rate), health: 'rated' }));
@@ -1809,9 +1841,9 @@ function attachBindingMiss(result, identity, ownerRequestId, missResult) {
   result.bindingToken = createProvisionalSessionBinding(identity, result.lease.account.id, ownerRequestId);
   return result;
 }
-async function acquireStatefulBindingAccountLease(identity, { excludeIds = new Set(), allowOverflow = true, ownerRequestId, bindingDeadline = null } = {}) {
-  const mode = config.accountMode, waitMs = Math.min(30000, Math.max(0, Number(config.concurrencyWaitMs) || 0));
-  const deadline = bindingDeadline ?? Date.now() + waitMs;
+async function acquireStatefulBindingAccountLease(identity, { excludeIds = new Set(), allowOverflow = true, ownerRequestId, bindingStart = null, waitBudgets } = {}) {
+  const mode = config.accountMode, waitMs = waitBudgets.normal;
+  const start = bindingStart ?? Date.now();
   let context = bindingSelectionContext(excludeIds, identity.clientKeyId ?? null);
   if (!context.list.length) return { error: 'no available upstream account', strategy: mode, bindingSource: sessionBindingSource(identity), bindingResult: 'miss' };
   let lookup = findSessionBinding(identity, context.activeIds);
@@ -1857,8 +1889,9 @@ async function acquireStatefulBindingAccountLease(identity, { excludeIds = new S
         return attachBindingHit(result, identity, entry, lookup.result);
       }
       const boundFacts = selectionBlockFacts(bound ? [bound.account] : []);
-      const wait = waitDurationForBlock(deadline, boundFacts);
-      if (wait > 0) { await waitForCapacity(wait); continue; }
+      const pool = context.activeCandidates.map((candidate) => candidate.account);
+      const { budget, duration } = poolWaitForBlock(start, pool, boundFacts, waitBudgets);
+      if (duration > 0) { await waitForCapacity(duration); continue; }
       const plan = buildPipelineGroups(context.activeCandidates.map((candidate) => candidate.account), identity, context.activeCandidates, { skipSticky: true });
       const fallback = allowOverflow ? tryPipelinePlanLease(plan, identity, mode, { excludeId: entry.accountId }) : { lease: null, preferred: bound.account };
       if (fallback.lease) {
@@ -1876,16 +1909,16 @@ async function acquireStatefulBindingAccountLease(identity, { excludeIds = new S
           result.pipeline = bindingPipelineFacts(grown.plan, grown.context, grown.candidate, true);
           return attachBindingHit(result, identity, entry, 'temporary-overflow');
         }
-        if (grown) return busyFailure('concurrency', null, mode, waitMs, 'all upstream accounts are busy', { bindingSource: entry.source, bindingResult: lookup.result });
+        if (grown) return busyFailure('concurrency', null, mode, budget, 'all upstream accounts are busy', { bindingSource: entry.source, bindingResult: lookup.result });
       }
-      return busyFailure(boundFacts.blockedBy, boundFacts.retryAt, mode, waitMs, 'all upstream accounts are busy', { bindingSource: entry.source, bindingResult: lookup.result });
+      return busyFailure(boundFacts.blockedBy, boundFacts.retryAt, mode, budget, 'all upstream accounts are busy', { bindingSource: entry.source, bindingResult: lookup.result });
     }
   }
   while (true) {
     context = bindingSelectionContext(excludeIds, identity.clientKeyId ?? null);
     if (!context.list.length) return { error: 'no available upstream account', strategy: mode, bindingSource: sessionBindingSource(identity), bindingResult: lookup.result };
     const concurrentEntry = sessionBindings.get(identity.fingerprint);
-    if (concurrentEntry && concurrentEntry.expiresAt > Date.now() && context.activeIds.has(concurrentEntry.accountId)) return acquireStatefulBindingAccountLease(identity, { excludeIds, allowOverflow, ownerRequestId, bindingDeadline: deadline });
+    if (concurrentEntry && concurrentEntry.expiresAt > Date.now() && context.activeIds.has(concurrentEntry.accountId)) return acquireStatefulBindingAccountLease(identity, { excludeIds, allowOverflow, ownerRequestId, bindingStart: start, waitBudgets });
     if (concurrentEntry) { deleteSessionBinding(identity.fingerprint, concurrentEntry); lookup = { entry: null, result: 'invalidated' }; }
     const plan = buildPipelineGroups(context.activeCandidates.map((candidate) => candidate.account), identity, context.activeCandidates, { skipSticky: true });
     const chosen = tryPipelinePlanLease(plan, identity, mode);
@@ -1897,9 +1930,10 @@ async function acquireStatefulBindingAccountLease(identity, { excludeIds = new S
       return attachBindingMiss(result, identity, ownerRequestId, lookup.result);
     }
     if (!context.activeCandidates.length) return busyFailure('concurrency', null, mode, waitMs, 'all upstream accounts are busy', { bindingSource: sessionBindingSource(identity), bindingResult: lookup.result });
-    const missFacts = selectionBlockFacts(context.activeCandidates.map((candidate) => candidate.account));
-    const wait = waitDurationForBlock(deadline, missFacts);
-    if (wait > 0) { await waitForCapacity(wait); continue; }
+    const active = context.activeCandidates.map((candidate) => candidate.account);
+    const missFacts = selectionBlockFacts(active);
+    const { budget, duration } = poolWaitForBlock(start, active, missFacts, waitBudgets);
+    if (duration > 0) { await waitForCapacity(duration); continue; }
     if (allowOverflow && context.membership) {
       const grown = growAndLeaseCachePoolOne(context.membership, identity, mode, excludeIds, { skipSticky: true });
       if (grown?.lease) {
@@ -1909,13 +1943,13 @@ async function acquireStatefulBindingAccountLease(identity, { excludeIds = new S
         result.pipeline = bindingPipelineFacts(grown.plan, grown.context, grown.candidate, fallback);
         return attachBindingMiss(result, identity, ownerRequestId, lookup.result);
       }
-      if (grown) return busyFailure('concurrency', null, mode, waitMs, 'all upstream accounts are busy', { bindingSource: sessionBindingSource(identity), bindingResult: lookup.result });
+      if (grown) return busyFailure('concurrency', null, mode, budget, 'all upstream accounts are busy', { bindingSource: sessionBindingSource(identity), bindingResult: lookup.result });
     }
-    return busyFailure(missFacts.blockedBy, missFacts.retryAt, mode, waitMs, 'all upstream accounts are busy', { bindingSource: sessionBindingSource(identity), bindingResult: lookup.result });
+    return busyFailure(missFacts.blockedBy, missFacts.retryAt, mode, budget, 'all upstream accounts are busy', { bindingSource: sessionBindingSource(identity), bindingResult: lookup.result });
   }
 }
-async function acquireCachePoolAccountLease(identity, { excludeIds = new Set(), allowOverflow = true } = {}) {
-  const mode = config.accountMode, waitMs = Math.min(30000, Math.max(0, Number(config.concurrencyWaitMs) || 0)), deadline = Date.now() + waitMs;
+async function acquireCachePoolAccountLease(identity, { excludeIds = new Set(), allowOverflow = true, waitBudgets } = {}) {
+  const mode = config.accountMode, waitMs = waitBudgets.normal, start = Date.now();
   while (true) {
     const list = enabledAccounts({ excludeIds, clientKeyId: identity?.clientKeyId ?? null });
     if (!list.length) return { error: 'no available upstream account', strategy: mode };
@@ -1931,8 +1965,8 @@ async function acquireCachePoolAccountLease(identity, { excludeIds = new Set(), 
     }
     if (!active.length) return busyFailure('concurrency', null, mode, waitMs, 'all upstream accounts are busy');
     const activeFacts = selectionBlockFacts(active);
-    const wait = waitDurationForBlock(deadline, activeFacts);
-    if (wait > 0) { await waitForCapacity(wait); continue; }
+    const { budget, duration } = poolWaitForBlock(start, active, activeFacts, waitBudgets);
+    if (duration > 0) { await waitForCapacity(duration); continue; }
     if (allowOverflow) {
       const grown = growAndLeaseCachePoolOne(membership, identity, mode, excludeIds);
       if (grown?.lease) {
@@ -1941,16 +1975,16 @@ async function acquireCachePoolAccountLease(identity, { excludeIds = new Set(), 
         result.pipeline = cachePipelineFacts(grown.plan, grown.context.membership, grown.candidate, 'active', overflow);
         return result;
       }
-      if (grown) return busyFailure('concurrency', null, mode, waitMs, 'all upstream accounts are busy');
+      if (grown) return busyFailure('concurrency', null, mode, budget, 'all upstream accounts are busy');
     }
-    return busyFailure(activeFacts.blockedBy, activeFacts.retryAt, mode, waitMs, 'all upstream accounts are busy');
+    return busyFailure(activeFacts.blockedBy, activeFacts.retryAt, mode, budget, 'all upstream accounts are busy');
   }
 }
 async function acquirePipelineAccountLease(identity, options = {}) {
   if (sessionBindingEnabled(identity, options.ownerRequestId)) return acquireStatefulBindingAccountLease(identity, options);
   if (cachePoolEnabled()) return acquireCachePoolAccountLease(identity, options);
   const { excludeIds = new Set(), allowOverflow = true } = options;
-  const mode = config.accountMode, waitMs = Math.min(30000, Math.max(0, Number(config.concurrencyWaitMs) || 0)), deadline = Date.now() + waitMs;
+  const mode = config.accountMode, waitBudgets = options.waitBudgets, waitMs = waitBudgets.normal, start = Date.now();
   while (true) {
     const list = enabledAccounts({ excludeIds, clientKeyId: identity?.clientKeyId ?? null });
     if (!list.length) return { error: 'no available upstream account', strategy: mode };
@@ -1961,10 +1995,10 @@ async function acquirePipelineAccountLease(identity, options = {}) {
       if (result.lease) { const selected = selectionResult(result.lease, mode, primary, 'pipeline-sticky-primary', identity); selected.pipeline = { ...plan, groups: undefined, selectedQuota: plan.groups[0].quota, selectedHealth: plan.groups[0].health }; return selected; }
       if (mode === 'single' || mode === 'sticky') {
         const primaryFacts = selectionBlockFacts([primary]);
-        const wait = waitDurationForBlock(deadline, primaryFacts);
-        if (wait > 0) { await waitForCapacity(wait); continue; }
-        if (mode === 'single') return busyFailure(primaryFacts.blockedBy, primaryFacts.retryAt, mode, waitMs, 'upstream account is busy');
-        if (!allowOverflow) return busyFailure(primaryFacts.blockedBy, primaryFacts.retryAt, mode, waitMs, 'all upstream accounts are busy');
+        const { budget, duration } = poolWaitForBlock(start, plan.groups.flatMap((group) => group.accounts), primaryFacts, waitBudgets);
+        if (duration > 0) { await waitForCapacity(duration); continue; }
+        if (mode === 'single') return busyFailure(primaryFacts.blockedBy, primaryFacts.retryAt, mode, budget, 'upstream account is busy');
+        if (!allowOverflow) return busyFailure(primaryFacts.blockedBy, primaryFacts.retryAt, mode, budget, 'all upstream accounts are busy');
       }
     }
     if (mode === 'single' && !primary) {
@@ -1972,9 +2006,9 @@ async function acquirePipelineAccountLease(identity, options = {}) {
       const chosenLease = tryLease(chosen, Date.now(), identity.clientKeyId ?? null);
       if (chosenLease) return { ...selectionResult(chosenLease, mode, chosen, 'single-selected', identity), pipeline: { diagnostics: plan.diagnostics, selectedQuota: plan.groups[0].quota, selectedHealth: plan.groups[0].health } };
       const chosenFacts = selectionBlockFacts(chosen ? [chosen] : []);
-      const wait = waitDurationForBlock(deadline, chosenFacts);
-      if (wait > 0) { await waitForCapacity(wait); continue; }
-      return busyFailure(chosenFacts.blockedBy, chosenFacts.retryAt, mode, waitMs, 'upstream account is busy');
+      const { budget, duration } = poolWaitForBlock(start, plan.groups.flatMap((group) => group.accounts), chosenFacts, waitBudgets);
+      if (duration > 0) { await waitForCapacity(duration); continue; }
+      return busyFailure(chosenFacts.blockedBy, chosenFacts.retryAt, mode, budget, 'upstream account is busy');
     }
     for (let groupIndex = 0; groupIndex < plan.groups.length; groupIndex++) {
       const group = plan.groups[groupIndex], available = group.accounts.filter((account) => account.id !== primary?.id && accountHasCapacity(account) && rpmAvailable(account));
@@ -1985,19 +2019,21 @@ async function acquirePipelineAccountLease(identity, options = {}) {
       else ranked = strategyRank(mode, available);
       const lease = tryLease(ranked[0], Date.now(), identity.clientKeyId ?? null); if (!lease) continue;
       const fallback = groupIndex > 0 || !!primary;
-      const result = selectionResult(lease, mode, primary || ranked[0], fallback ? 'pipeline-capacity-fallback' : ({roundrobin:'roundrobin-next',sticky:'sticky-no-identity-roundrobin','least-connections':'least-active','weighted-roundrobin':'weighted-slot','priority-failover':'priority-tier',single:'single-selected'}[mode]), identity, fallback);
+      const result = selectionResult(lease, mode, primary || ranked[0], fallback ? 'pipeline-capacity-fallback' : ({roundrobin:'roundrobin-next',sticky:'sticky-no-identity-roundrobin','least-connections':'least-active','weighted-roundrobin':'weighted-slot','priority-failover':'priority-tier',single:'single-selected','load-health':'load-health'}[mode]), identity, fallback);
       result.pipeline = { diagnostics: plan.diagnostics, selectedQuota: group.quota, selectedHealth: group.health, capacityFallback: fallback };
       return result;
     }
-    const planFacts = selectionBlockFacts(plan.groups.flatMap((group) => group.accounts));
-    const wait = waitDurationForBlock(deadline, planFacts);
-    if (wait <= 0) return busyFailure(planFacts.blockedBy, planFacts.retryAt, mode, waitMs, 'all upstream accounts are busy');
-    await waitForCapacity(wait);
+    const candidates = plan.groups.flatMap((group) => group.accounts);
+    const planFacts = selectionBlockFacts(candidates);
+    const { budget, duration } = poolWaitForBlock(start, candidates, planFacts, waitBudgets);
+    if (duration <= 0) return busyFailure(planFacts.blockedBy, planFacts.retryAt, mode, budget, 'all upstream accounts are busy');
+    await waitForCapacity(duration);
   }
 }
 async function acquireAccountLease(identity, options = {}) {
   if (identity?.credentialValid && !identity.credentialValid()) return { error: 'client credential revoked', credentialRevoked: true, strategy: config.accountMode };
-  const selected = await (pipelineEnabled() ? acquirePipelineAccountLease(identity, options) : acquireLegacyAccountLease(identity, options));
+  const admission = { ...options, waitBudgets: admissionWaitBudgets() };
+  const selected = await (pipelineEnabled() ? acquirePipelineAccountLease(identity, admission) : acquireLegacyAccountLease(identity, admission));
   // A rotation may race a capacity wait. Only an already leased request may proceed.
   if (identity?.credentialValid && !identity.credentialValid()) {
     cleanupSessionBindingSelection(selected);
@@ -4924,7 +4960,7 @@ async function dispatch(req, res) {
       const cacheRoles = cachePoolRoles();
       return sendJSON(res, 200, {
         accounts: config.accounts.map((a) => { const recent = projectAggregate(aggregateRange(a.id).aggregate),lifetime=META.statistics.lifetime.accounts[a.id]; return { ...a, state: getAccountState(a.id), activeCount: activeCounts.get(a.id) || 0, rpm: rpmProjection(a), health: healthProjection(a), quota: quotaProjection(a.id), cachePoolRole: cacheRoles.get(a.id) ?? null, cachePoolQuotaRole: configuredCachePoolLowQuotaSize() > 0 && cacheRoles.get(a.id) === 'active' ? ({ hot: 'high', warm: 'low', unknown: 'unknown' }[quotaProjection(a.id).pool] || null) : null, statistics: { recent24h: recent, lifetimeRequests: lifetime ? lifetime.requests : 0, lifetimeErrors: lifetime ? lifetime.errors : 0 } }; }),
-        mode: config.accountMode, active: config.activeAccount, concurrencyWaitMs: config.concurrencyWaitMs,
+        mode: config.accountMode, active: config.activeAccount, concurrencyWaitMs: config.concurrencyWaitMs, poolFullWaitMs: config.poolFullWaitMs,
         quotaProtection: config.quotaProtection, errorRules: config.errorRules, retryRules: config.retryRules, accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline,
         cachePool: { minSize: configuredCachePoolSize(), maxSize: configuredCachePoolMaxSize(), lowSize: configuredCachePoolLowQuotaSize(), targetSize: configuredCachePoolTargetSize(), scope: 'per-client-key', actual: cachePoolActualByOwner(), binding: sessionBindingSummary() },
         stats: Object.fromEntries(config.accounts.map((a) => [a.name, { requests: META.statistics.lifetime.accounts[a.id]?.requests ?? 0 }])),
@@ -4936,6 +4972,8 @@ async function dispatch(req, res) {
       if (!ACCOUNT_MODES.has(body.mode)) return sendJSON(res, 400, { error: { message: 'invalid account mode' } });
       const wait = Number(body.concurrencyWaitMs ?? 2000);
       if (!Number.isInteger(wait) || wait < 0 || wait > 30000) return sendJSON(res, 400, { error: { message: 'concurrencyWaitMs must be an integer from 0 to 30000' } });
+      const poolWait = body.poolFullWaitMs === undefined ? config.poolFullWaitMs : body.poolFullWaitMs;
+      if (poolWait !== null && (!Number.isInteger(poolWait) || poolWait < 0 || poolWait > 30000)) return sendJSON(res, 400, { error: { message: 'poolFullWaitMs must be null or an integer from 0 to 30000' } });
       let requestedErrorRules = config.errorRules, requestedPipeline = config.accountPipeline, requestedRetryRules = config.retryRules, requestedProtection = config.quotaProtection;
       try {
         if (body.errorRules !== undefined) requestedErrorRules = normalizeErrorRules(body.errorRules, { strict: true });
@@ -4960,6 +4998,7 @@ async function dispatch(req, res) {
           fallbackSessionBindingMaxEntries: config.accountPipeline.sessionBindingMaxEntries,
         });
       } catch (e) { return sendJSON(res, 400, { error: { message: e.message } }); }
+      if (body.mode === 'load-health' && requestedPipeline.sticky) return sendJSON(res, 400, { error: { message: 'load-health cannot enable sticky' } });
       if (!Number.isInteger(Number(body.active ?? 0)) || Number(body.active ?? 0) < 0 || Number(body.active ?? 0) >= body.accounts.length) return sendJSON(res, 400, { error: { message: 'active account index is out of range' } });
       const existingIds = new Set(config.accounts.map((a) => a.id));
       for (const [i, a] of body.accounts.entries()) {
@@ -4995,7 +5034,7 @@ async function dispatch(req, res) {
       const requestedActive = requestedActiveId ? accs.findIndex((a) => a.id === requestedActiveId) : -1;
       const nextActive = requestedActive >= 0 ? requestedActive : Math.min(Math.max(0, Number(body.active) || 0), accs.length - 1);
       const next = { ...config, accounts: accs, accountMode: body.mode, activeAccount: nextActive,
-        concurrencyWaitMs: wait, errorRules: requestedErrorRules, retryRules: requestedRetryRules,
+        concurrencyWaitMs: wait, poolFullWaitMs: poolWait, errorRules: requestedErrorRules, retryRules: requestedRetryRules,
         quotaProtection: requestedProtection, ...legacyRuleProjection(requestedErrorRules), accountPipeline: requestedPipeline };
       // A failed config rename must not change live owner routing, invalidate bindings,
       // or clear existing RPM/quota state before the client sees a failed save.
@@ -5123,7 +5162,7 @@ async function dispatch(req, res) {
       if (req.method === 'POST' && p === '/api/security/client-keys') {
         const body = await readJsonBody(req);
         if (!isPlainObject(body) || Object.keys(body).join(',') !== 'name' || typeof body.name !== 'string') return sendJSON(res, 400, { error: { message: 'expected key name' } });
-        const row = { id: randomId('ck'), name: body.name, key: `cps_${crypto.randomBytes(32).toString('hex')}` };
+        const row = { id: randomId('ck'), name: body.name, key: generateClientKey() };
         const next = { ...config, clientKeys: [...config.clientKeys, row] };
         try { validateClientKeys(next, { persisted: true }); if (adminPasswordOK(row.key)) throw new Error('client key must differ from admin password'); }
         catch (error) { return sendJSON(res, 400, { error: { message: error.message } }); }
@@ -5144,7 +5183,7 @@ async function dispatch(req, res) {
       if (req.method === 'POST' && parts.length === 2) {
         const body = await readJsonBody(req);
         if (!isPlainObject(body) || Object.keys(body).length) return sendJSON(res, 400, { error: { message: 'expected empty body' } });
-        const key = `cps_${crypto.randomBytes(32).toString('hex')}`;
+        const key = generateClientKey();
         const next = { ...config, clientKeys: config.clientKeys.map((row) => row.id === id ? { ...row, key } : row) };
         try { validateClientKeys(next, { persisted: true }); if (adminPasswordOK(key)) throw new Error('client key must differ from admin password'); }
         catch (error) { return sendJSON(res, 400, { error: { message: error.message } }); }
