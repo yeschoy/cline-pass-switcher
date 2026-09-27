@@ -1129,3 +1129,31 @@ Committed-main raw-detail code is deployed raw-off at 512 MiB with 32 Legacy-own
 ### Status
 
 [OK] **Completed**
+
+
+## Session 47: 按用户要求行政归档剩余任务
+<!-- trellis-session: v=2 fp=8e6951e46b9fc311 -->
+
+**Date**: 2026-09-28
+**Task**: 按用户要求行政归档剩余任务
+**Branch**: `feat/raw-detail-safe-headers`
+
+### Summary
+
+用户要求将全部剩余 Trellis 任务标为完成。归档缓存活跃池验收、生产原文日志启用及诊断/额度/管理台父任务；每项记录 administrative-unverified，保留未勾选验收条件。未改变生产配置、原文开关或发布验收状态。
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] task.py validate 三项通过；归档后 task.py list --mine 为 0，任务 closureDisposition/notes 和归档记录核对通过，git diff --check 通过。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 若将来需要验证缓存策略、开启原文采集或完成管理员页面验收，须重新确定授权和独立证据；不得以 Trellis completed 状态代替生产验收。
