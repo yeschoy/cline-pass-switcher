@@ -30,6 +30,10 @@ New private deployment.json record (older record shapes remain readable):
     sourceArchiveSha256, configSha256,
     status: 'awaiting-admin-acceptance' | 'completed',
     machineVerification, adminAcceptance }
+Authenticated GET /api/statistics:
+  { generatedAt, window: { kind: 'last-1440-minutes', from, to },
+    recent24h: { global: { cacheKnownRequests, cacheHitRequests,
+      cacheHitRequestRate, cacheInputTokens, cacheInputCachedTokens, cacheTokenRatio, ... } } }
 ```
 
 ```bash
@@ -70,6 +74,11 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 - Rollback automation must detect whether execution actually crossed the live-mutation boundary before stopping a container. A failure while preparing backups, reading modes, or staging the candidate—before Compose/data/image state changes—requires a proved no-op recovery and must not stop or restart the still-healthy old container. Construct a complete JSON record **before** opening its new file: a Python `open(path, 'x')` followed by a failing expression may leave a zero-byte placeholder, which must be verified/repaired only in private staging. Before the live switch, exercise atomic replacement/restore helpers against private scratch files and require the old Compose/config hashes plus exact running image to remain unchanged.
 - Do not prune releases, images, build cache, logs, or operator data during deployment.
 
+#### Post-release metric attribution
+
+- `/api/statistics.recent24h` aggregates persisted buckets within the rolling 1,440-minute window, including a partial current minute; it is **not** a since-deployment or arbitrary-window query. Buckets survive a process restart, so a large known-cache sample count or favorable `cacheHitRequestRate` immediately after switching can still belong to earlier code/configuration. `cacheHitRequestRate` is `cacheHitRequests / cacheKnownRequests` when the denominator is known and positive: a request counts as known only with an explicit cached-token field, and as a hit only when that value is positive. `cacheTokenRatio` is a separate cached-input-token share. Unknown samples are not misses or numeric zero.
+- For a task-defined post-release target, record the running release/image, container start, accepted configuration/pool target, statistics schema/coverage and exact UTC policy activation time. Apply that task's explicit warmup, observation interval, minimum known-sample count and failure/latency/overflow/health guardrails to **one uninterrupted policy window**, using bounded timestamped request rows or minute-bucket projections with truthful boundary/retention limitations. A restart, configuration/pool-target change or statistics migration that breaks attribution starts a new window; do not splice cohorts or reuse the previous baseline. If the exact window or coverage is unavailable, report **insufficient evidence**, not pass/fail. Keep only safe aggregate projections in reports; never export operator JSON, request bodies or raw diagnostic groups.
+
 #### Endpoint policy
 
 - Required release gates are the local `/api/meta`, authenticated `/api/models`, `/api/statistics`, request-log and detailed-log settings projections, quota-refresh input rejection, and the `ai-internal` network alias. If the agent has no administrator password/session, use an operator's post-switch browser check as explicitly attributed testimony for the protected views and leave the release pending until all required views are confirmed; local mocks and 401-only negative checks do not satisfy authenticated production reads.
@@ -108,6 +117,7 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 | Switcher comments arrive at New API but the final client still idles out | Enable New API's existing downstream ping where needed; Switcher comments alone cover only New API ← Switcher |
 | Public endpoint fails despite working DNS | Treat as deployment validation failure and roll back |
 | Machine switch succeeds but administrator review remains pending | Atomically record release, commit, exact image and `awaiting-admin-acceptance` with distinct machine-verified and operator-pending facts; report the deployed state immediately |
+| Rolling statistics include pre-switch/policy-change buckets, the exact window is incomplete, or known-cache coverage is below the task's floor | Mark the metric verdict `insufficient evidence`; freeze a new boundary and do not infer a post-release hit rate from `recent24h` or `lifetime` |
 | All required authenticated/operator gates and any later config-save intent are confirmed | Atomically mark `completed` against the actual accepted current config hash; label operator testimony separately from machine checks, never store secrets |
 
 ### 5. Good / Base / Bad Cases
@@ -118,6 +128,8 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 \
 - **Base:** the public hostname has a known pre-switch DNS outage; the new container passes every local/internal gate, deployment stays active, and the DNS limitation is reported separately.
 - **Base:** the new image is running/healthy with zero restarts and machine gates passed, but the operator has not yet read every protected view. Say “deployed, awaiting administrator acceptance”; do not say “not deployed” or “completed.”
 - **Good:** after the immediate predicted config hash passed, an operator saves a scheduling field. A safe structural projection names only the changed field, the current bytes are preserved, and completion waits for the operator to confirm intent; a private backup remains available.
+- **Good:** a restarted service exposes a high rolling cache hit rate, but the report labels it mixed-history and waits for a complete stable post-release window with the required known samples and guardrails.
+- **Bad:** declare a cache rollout successful from `recent24h.global.cacheHitRequestRate` minutes after restarting, despite persisted pre-release buckets or changed pool settings.
 - **Bad:** ask which server to use even though the user said “remote” and this contract defines the canonical host.
 - **Bad:** use `scp -r .`, which can upload gitignored credentials, local data, `.pi`, `.trellis`, or unrelated dirty files.
 - **Bad:** print the admin key in logs or pass it through a parent-visible command line.
@@ -153,7 +165,8 @@ After switching:
 - verify the internal `cline-pass-switcher` alias;
 - verify client-key-only management denial with the effective client key read **inside** the remote process and output only status codes, without exposing the key in arguments or logs; this is a negative check, not proof of administrator success;
 - if no independent admin session is available to the agent, record operator-confirmed protected views separately, leave `awaiting-admin-acceptance` for missing views, and if the config hash later changes obtain intent through a safe field-path-only comparison before finalizing;
-- save a safe verification report and preserve rollback artifacts.
+- save a safe verification report and preserve rollback artifacts;
+- for any post-release metric target, verify the report's exact UTC window against release/config/start boundaries, assert known-cache hit/count and token-share denominators are distinct, check the task-specific sample floor and guardrails, and label mixed or incomplete cohorts `insufficient evidence`. Existing `test/integration.test.js` usage assertions establish the known-versus-hit counter contract; a deployment report must additionally prove its own time attribution and coverage rather than treating that unit test as production evidence.
 
 ### 7. Wrong vs Correct
 
@@ -189,4 +202,9 @@ Wrong: image is healthy but admin checks are pending → report "not deployed";
 Correct: report "new commit/image deployed; administrator acceptance pending";
          compare only safe changed field paths, retain both current bytes and backup,
          request operator intent before accepting a new hash or fencing rollback.
+
+Wrong:   GET /api/statistics -> recent24h.global.cacheHitRequestRate >= target -> rollout passed.
+Correct: fix the release/policy start and exact post-warmup UTC interval, count only known
+         cache samples in that stable interval, check coverage and every guardrail; if the
+         interval is interrupted or unavailable, report insufficient evidence.
 ```
