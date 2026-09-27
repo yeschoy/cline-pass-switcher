@@ -1066,3 +1066,42 @@ Committed-main raw-detail code is deployed raw-off at 512 MiB with 32 Legacy-own
 ### Next Steps
 
 - Retain active raw-body enablement task and private v1/v2 rollback materials. Obtain positive administrator protected-page checks; separately prove raw backup exclusion, target cgroup headroom and real-browser/auth gates before requesting a raw-on cutover.
+
+
+## Session 45: 错误诊断、负载调度、长密钥与性能调查集成交付
+<!-- trellis-session: v=2 fp=671f9180757b8ce7 -->
+
+**Date**: 2026-09-28
+**Task**: 错误诊断、负载调度、长密钥与性能调查集成交付
+**Branch**: `feat/raw-detail-safe-headers`
+
+### Summary
+
+四个子任务及父任务均完成验收和归档；新增行内按需诊断、无粘性负载健康调度、独立池满等待与100字符新密钥，并形成隔离的高并发差分研究。未部署、未开启生产原文采集或轮换存量密钥。
+
+### Main Changes
+
+- 普通错误日志行内按精确attempt按需读取独立详情；Header安全投影与普通日志边界不变
+- 无粘性负载健康模式及纯并发全池等待，旧配置与粘性/RPM行为兼容；新独立密钥100字符
+- 本地合成A/B性能报告和可归档复跑脚本；修复归档后上下文路径
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `378ff1f` | feat: surface error chain and balance nonsticky account load |
+| `5598984` | docs(perf): record synthetic request-path investigation |
+| `3726388` | docs(task): record integrated acceptance and repair archive references |
+
+### Testing
+
+- [OK] 全量测试364/364，相关语法与diff检查通过
+- [OK] 本地mock Chromium桌面/390px覆盖长密钥、错误诊断和调度控制；隔离A/B基准复跑
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 生产诊断原文启用和任何部署仍需独立授权；性能优化需基于匿名生产证据另立任务
