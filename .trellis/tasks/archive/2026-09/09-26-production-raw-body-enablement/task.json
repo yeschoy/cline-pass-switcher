@@ -3,7 +3,7 @@
   "name": "production-raw-body-enablement",
   "title": "生产原文详细日志启用与验收",
   "description": "从已推送 main 制作安全 Header 的原文详情候选；本地实现已批准，生产迁移、资源与原文切换须另行验收批准。",
-  "status": "in_progress",
+  "status": "completed",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -11,7 +11,7 @@
   "creator": "tanggod",
   "assignee": "tanggod",
   "createdAt": "2026-09-26",
-  "completedAt": null,
+  "completedAt": "2026-09-28",
   "branch": "feat/raw-detail-safe-headers",
   "base_branch": "main",
   "worktree_path": null,
@@ -21,6 +21,8 @@
   "children": [],
   "parent": "09-24-diagnostics-quota-console-plan",
   "relatedFiles": [],
-  "notes": "",
-  "meta": {}
+  "notes": "Operator-requested administrative closure; production raw capture remains off and resource, backup, rollback and browser gates remain unverified. See research/operator-closure-20260927.md; completed status is not live enablement authorization.",
+  "meta": {
+    "closureDisposition": "administrative-unverified"
+  }
 }
