@@ -3,7 +3,7 @@
   "name": "diagnostics-quota-console-plan",
   "title": "诊断容量、额度可靠性与管理台统计安全改造",
   "description": "统筹详细日志容量、账号额度显示与耗尽控制、模型渠道统计、管理端独立登录五项可独立验收的需求与集成检查。",
-  "status": "planning",
+  "status": "completed",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -11,7 +11,7 @@
   "creator": "tanggod",
   "assignee": "tanggod",
   "createdAt": "2026-09-24",
-  "completedAt": null,
+  "completedAt": "2026-09-28",
   "branch": null,
   "base_branch": "main",
   "worktree_path": null,
@@ -28,6 +28,8 @@
   ],
   "parent": null,
   "relatedFiles": [],
-  "notes": "",
-  "meta": {}
+  "notes": "Operator-requested administrative closure; final protected-view acceptance and production raw enablement were not completed. See research/operator-closure-20260927.md; do not infer release acceptance from completed status.",
+  "meta": {
+    "closureDisposition": "administrative-unverified"
+  }
 }
