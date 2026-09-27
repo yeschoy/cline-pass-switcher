@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 45
+- **Total Sessions**: 46
 - **Last Active**: 2026-09-28
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1107 | Active |
+| `journal-1.md` | ~1131 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 46 | 2026-09-28 | 最新分支生产发布与指标验收规范 | `a17eef6`, `8214ab4`, `b22064d` | `feat/raw-detail-safe-headers` |
 | 45 | 2026-09-28 | 错误诊断、负载调度、长密钥与性能调查集成交付 | `378ff1f`, `5598984`, `3726388` | `feat/raw-detail-safe-headers` |
 | 44 | 2026-09-27 | Raw-off production cutover and rollback contract | `71510e5`, `29af388`, `d252117`, `3ccad96`, `5cf38a3` | `feat/raw-detail-safe-headers` |
 | 43 | 2026-09-26 | Read-only production error-log follow-up | `6a7eba2` | `docs/remote-errors-followup-20260925` |

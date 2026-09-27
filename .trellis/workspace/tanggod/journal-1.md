@@ -1105,3 +1105,27 @@ Committed-main raw-detail code is deployed raw-off at 512 MiB with 32 Legacy-own
 ### Next Steps
 
 - 生产诊断原文启用和任何部署仍需独立授权；性能优化需基于匿名生产证据另立任务
+
+
+## Session 46: 最新分支生产发布与指标验收规范
+<!-- trellis-session: v=2 fp=7b04b576123352bc -->
+
+**Date**: 2026-09-28
+**Task**: 最新分支生产发布与指标验收规范
+**Branch**: `feat/raw-detail-safe-headers`
+
+### Summary
+
+将最新分支代码发布到生产并保留管理员验收待办；只读复核缓存池，确认现有滚动统计不足以证明稳定窗口验收；在部署规格中明确发布后指标归属与证据不足处理。原文采集和新调度仍未启用，三个在途任务均未满足归档条件。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a17eef6` | docs(task): record read-only cache-pool recheck |
+| `8214ab4` | docs(deploy): record latest-branch production release |
+| `b22064d` | docs(spec): require stable post-release metric windows |
+
+### Status
+
+[OK] **Completed**
