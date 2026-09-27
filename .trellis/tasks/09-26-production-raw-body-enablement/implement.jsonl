@@ -1,4 +1,5 @@
-{"file": ".trellis/spec/backend/deployment-guidelines.md", "reason": "Immutable exact-image production gates, private data backup, admin acceptance and rollback"}
+{"file": ".trellis/spec/backend/deployment-guidelines.md", "reason": "Immutable exact-image production gates, private data backup, admin acceptance and compatible rollback"}
+{"file": ".trellis/spec/backend/schema-changing-deployment-guidelines.md", "reason": "Stop-first incompatible DATA_DIR schema and complete v1/v2 rollback override"}
 {"file": ".trellis/tasks/archive/2026-09/09-24-detailed-log-35mb/research/raw-security-gates.md", "reason": "Raw-only privacy, 48h backup and old-image isolation invariants"}
 {"file": ".trellis/tasks/09-24-diagnostics-quota-console-plan/integration-report.md", "reason": "Actual 32a150e deployment and outstanding acceptance/resource gates"}
 {"file": ".trellis/spec/backend/index.md", "reason": "Read logging-guidelines.md opt-in detail scenario in full on demand; injected file exceeds size limit"}

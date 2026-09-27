@@ -3,7 +3,8 @@
 {"file": ".trellis/tasks/archive/2026-09/09-24-detailed-log-35mb/research/raw-local-validation.md", "reason": "Local synthetic raw capture evidence and limits versus target cgroup"}
 {"file": ".trellis/spec/backend/index.md", "reason": "Read logging-guidelines.md opt-in detail scenario in full on demand; injected file exceeds size limit"}
 {"file": ".trellis/spec/frontend/index.md", "reason": "Read state-management.md detailed settings and selected-content scenario in full on demand; injected file exceeds size limit"}
-{"file": ".trellis/spec/backend/deployment-guidelines.md", "reason": "Review committed source, migration, private backup, image and rollback gates"}
+{"file": ".trellis/spec/backend/deployment-guidelines.md", "reason": "Review committed source, private backup, image and compatible rollback gates"}
+{"file": ".trellis/spec/backend/schema-changing-deployment-guidelines.md", "reason": "Review stop-first schema migration, complete v1/v2 backup and old-image rollback override"}
 {"file": ".trellis/tasks/09-26-production-raw-body-enablement/research/current-profile-and-header-boundary.md", "reason": "Verify that implemented Header projection closes the current omission without expanding ordinary logs"}
 {"file": ".trellis/tasks/09-26-production-raw-body-enablement/research/isolated-preflight-20260926.md", "reason": "Read-only production baseline and unresolved backup/older-release gates"}
 {"file": ".trellis/tasks/09-26-production-raw-body-enablement/research/target-stress-20260926.md", "reason": "Bounded 2 GiB synthetic raw-load evidence, diagnostic drops and limitations"}
