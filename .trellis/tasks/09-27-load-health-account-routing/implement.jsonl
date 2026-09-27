@@ -1,0 +1,9 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend entry point for account routing and persistence"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Atomic config persistence, schema migration, invalid operator JSON"}
+{"file":".trellis/spec/backend/client-key-guidelines.md","reason":"Per-owner eligible account isolation and routing semantics"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Local capacity/RPM 429 and Retry-After behavior"}
+{"file":".trellis/spec/frontend/index.md","reason":"Frontend entry point for the native console"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Account snapshot/draft/raw scheduling round-trip and async state"}
+{"file":".trellis/spec/guides/index.md","reason":"Cross-layer scenario guides"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Follow new account mode/wait field from API through UI and tests"}
+{"file":".trellis/tasks/09-27-load-health-account-routing/research/current-selection.md","reason":"Evidence of strict health grouping and existing wait/lease behavior"}

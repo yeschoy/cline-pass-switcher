@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Cross-child backend regression gate"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Check ordinary and detailed logging separation"}
+{"file":".trellis/spec/backend/client-key-guidelines.md","reason":"Check routing owner and sticky isolation"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Check admin console security, accessibility and browser gate"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Check config/UI/test/spec completeness"}

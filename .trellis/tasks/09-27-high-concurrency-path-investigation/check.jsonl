@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Review fixture isolation, repeatability and full gate"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Review secrets and raw capture boundaries in benchmarks"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Review bottleneck attribution across full request lifecycle"}
+{"file":".trellis/tasks/09-27-high-concurrency-path-investigation/research/prior-evidence-and-gaps.md","reason":"Avoid duplicate or non-comparable claims against archived baseline"}

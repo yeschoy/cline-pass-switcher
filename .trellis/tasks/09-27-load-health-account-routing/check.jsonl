@@ -1,0 +1,7 @@
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Server validation, routing and integration quality gates"}
+{"file":".trellis/spec/backend/client-key-guidelines.md","reason":"Owner and sticky compatibility review"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Local 429/RPM waiting and Retry-After review"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Console accessible controls, escaping and real-browser review"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Draft and snapshot persistence review"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Complete config schema and field flow audit"}
+{"file":".trellis/tasks/09-27-load-health-account-routing/research/current-selection.md","reason":"Compare resulting behavior with recorded baseline"}
