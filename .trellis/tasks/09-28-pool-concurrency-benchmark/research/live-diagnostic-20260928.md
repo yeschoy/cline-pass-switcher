@@ -1,0 +1,22 @@
+# Bounded alias/stream diagnosis — 2026-09-28T16:03Z
+
+## Boundary
+
+The operator requested a root-cause self-test after the two failed non-stream dry-runs. This was **not** an RPM or concurrency capacity run. A previous credential-bound diagnostic preflight stopped before traffic because full detailed logging had been enabled. At the new boundary, read-only state showed full/raw logging off, error-only logging on, the service healthy, and exact alias `pc/deepseek-v4.1-flash` → `cline-pass/deepseek-v4.1-flash`. A fresh hidden-input preflight privately matched the supplied client key to Legacy (48 total/46 statically eligible), checked the resolved routes, and passed. The running image was `sha256:57c0acbe791c963a68768222694993ba0a44e9485af814a6ee161894a2679d8e`, started 2026-09-27T20:32:00Z. Reviewed generator SHA-256 `7138382147e9c27673c6b5bdc903836736c5c7efce534c4b774744ad4874097c`, wrapper SHA-256 `330a4b882f239bded2e2ec468a382be2be5c3b711063a3cbb36cfc8ede8619cf`; 35 loopback tests passed. The operator again entered the client key through hidden local input for execution; it was confined to SSH stdin and the remote process.
+
+The diagnostic used public HTTPS `POST /v1/chat/completions`, one minimal fixed prompt, the requested alias, `max_tokens=256`, distinct generated sessions and no client retries. It allowed at most two sequential sends, eight worst-case reserved upstream attempts, one in-flight client, 120 seconds, and the existing 350-per-rolling-minute ceiling. It did **not** launch the old paced/burst run. Full/raw capture remained off; no production routing, account, diagnostic setting, image or code was changed.
+
+## Observations
+
+| UTC stage | Protocol | Sent/completed/useful | Upstream attempts | Client latency | Outcome |
+|---|---|---:|---:|---:|---|
+| 16:03:30–31 | non-stream | 1/1/1 | 1 | 1141.7 ms | HTTP 200, useful response |
+| 16:03:33–34 | SSE | 1/1/1 | 1 | 953.6 ms | HTTP 200, meaningful delta, `[DONE]`, clean EOF |
+
+Stop was `steps_complete`; peak observed **client** overlap 1, unresolved requests 0, visible 429/5xx/fanout/timeout 0. Four resource samples had CPU 0–2.22% and RSS 76.3–86.3 MiB; event-loop delay and process-local holds were unobserved. The background certain-minimum counter was 0, **not** proof of zero external traffic. The service was still healthy with zero restarts on the post-run read. No response body, account/provider identity, key, request ID or raw log was retained.
+
+A private ordinary-log comparison found exactly one earlier failed non-stream request in its UTC window and one new successful non-stream alias request in the diagnostic window. Their **target Provider matched, selected accounts differed**. The 16:03 diagnostic window also contained an external stream request with the same resolved model and alias, so ordinary logs cannot uniquely tie one stream row to this diagnostic's streamed request; the client-side bounded SSE parser is the evidence for that individual success. The earlier two ordinary error reasons did not match the exact archived `empty response content` text. The earlier request was `max_tokens=8`; archived **other** requests implicated `max_tokens=16` and recovered at 256, making a too-small output budget a plausible hypothesis, **not proof for this failure**. The alias resolves to the same route as the direct model, so merely using `pc/` cannot by itself explain the two earlier upstream HTTP 500s. A valid Legacy client credential and two successful real calls contradict a general downstream-key mismatch, but cannot exclude an isolated upstream account issue.
+
+## Decision / limitations
+
+This two-request comparison establishes that the reviewed minimal 256-token workload worked once in each protocol on the current pool. It neither identifies the precise cause of the earlier 500 nor proves any sustained RPM, peak concurrency or SSE behavior under load. Account, time and possibly gateway internals were not held constant. Do not silently turn `max_tokens=256` into a production policy or infer that all keys are valid. A causal test would need separately approved same-account/same-Provider controlled requests and safe error attribution; no such additional paid traffic was run. The original RPM task remains open. Temporary task scripts/reports remain under Trellis; no remote benchmark files were created by the wrapper. Ask the operator before deleting any non-business intermediate artifacts; retain Trellis logs.

@@ -1,0 +1,11 @@
+# Read-only production projection — 2026-09-28T07:42Z
+
+No client credential was used, and no chat/paid request, config save or service restart occurred. This is **not** the complete credential-bound preflight or a capacity result.
+
+- Canonical production container was running/healthy on image `sha256:57c0acbe791c963a68768222694993ba0a44e9485af814a6ee161894a2679d8e`, started `2026-09-27T20:32:00.427603643Z`; one Docker sample showed 0.07% CPU and 72.62 MiB / 512 MiB RSS. A single sample is not sustained headroom evidence.
+- Persisted Legacy pool: 45 accounts, 43 enabled with nonempty upstream keys, all finite `maxConcurrent=7`, giving a *conditional local cap sum* of 301, not measured concurrency. Other owners, runtime bans/holds, RPM reservations and traffic are not covered by this sum.
+- Sticky routing with cache pool target/minimum 5 and maximum 100. The current target corresponds to at most 35 simultaneous local leases across five finite-cap accounts if all are eligible; target may grow under the documented conditions. Neither 35 nor 301 is observed useful upstream concurrency.
+- Candidate direct model is configured and has no alias collision; all 43 enabled Legacy accounts resolve an explicit `maxRetries=1`. Existing diagnostic switches: error-only on, full/raw off. No persisted protection state observed for those 43 at the read instant; process-local protection and currently occupied leases/RPM are not observable here.
+- The supplied chat client credential was **not** matched against Legacy or another owner; no private no-echo handoff was performed. No authenticated live account/RPM projection or request-attributed background traffic monitor was available. The benchmark operational gate remains closed.
+
+Safety review found that the service may retry an internal upstream 429 before exposing a response; the client can stop only when a downstream 429 or `X-Cline-Attempts>1` becomes visible. The task requires explicit acceptance of that residual risk, or a separately authorized real-time upstream-attempt observer, before any paid traffic. The locally repaired Python generator additionally publishes rolling-error veto before releasing admission and includes unresolved workers' worst-case reservations in its summary. Local synthetic tests alone do not validate this host revision or a production run.

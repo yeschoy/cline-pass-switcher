@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "账号租约、RPM准入、上游重试和生产流量安全边界"}
+{"file": ".trellis/spec/backend/client-key-guidelines.md", "reason": "按客户端密钥隔离的账号池和管理投影"}
+{"file": ".trellis/spec/backend/deployment-guidelines.md", "reason": "生产目标、凭据和只读运维边界"}
+{"file": ".trellis/tasks/archive/2026-09/09-27-high-concurrency-path-investigation/research/method.md", "reason": "旧合成基准的方法和不能外推的限制"}
