@@ -34,15 +34,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         assert self.headers['User-Agent'] == 'curl/8.0'
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         diagnostic = body['model'] == 'local/diagnostic'
-        assert body['stream'] is (diagnostic and self.server.hits == 2)
-        assert body['max_tokens'] == (256 if diagnostic else 8)
+        assert body['stream'] is (not diagnostic or self.server.hits == 2)
+        assert body['max_tokens'] == 256
         assert body['model'] in ('local/mock', 'local/diagnostic')
         self.server.sessions.add(body['session_id'])
+        self.server.bodies.append(body)
         status, attempts, payload = self.server.reply(self.server.hits)
         self.send_response(status)
         if attempts is not None:
             self.send_header('X-Cline-Attempts', str(attempts))
-        if diagnostic and self.server.hits == 2 and status == 200:
+        if body['stream'] and status == 200:
             self.send_header('Content-Type', 'text/event-stream')
         self.end_headers()
         try:
@@ -50,7 +51,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 for part in payload:
                     self.wfile.write(part)
                     self.wfile.flush()
-                    if diagnostic and self.server.stream_hold:
+                    if self.server.peer_probe:
+                        entered, closed = self.server.peer_probe
+                        entered.set()
+                        self.connection.settimeout(2)
+                        if self.connection.recv(1) == b'':
+                            closed.set()
+                    if self.server.stream_hold:
                         self.server.stream_hold[0].set()
                         self.server.stream_hold[1].wait(3)
             else:
@@ -67,8 +74,11 @@ class BenchTests(unittest.TestCase):
         self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         self.server.hits = 0
         self.server.sessions = set()
+        self.server.bodies = []
         self.server.stream_hold = None
-        self.server.reply = lambda n: (200, 1, {'choices': [{'message': {'content': 'OK'}}]})
+        self.server.peer_probe = None
+        self.server.reply = lambda n: (200, 1, [
+            b'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n', b'data: [DONE]\n\n'])
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.origin = 'http://127.0.0.1:' + str(self.server.server_port)
@@ -90,6 +100,15 @@ class BenchTests(unittest.TestCase):
 
     def diagnostic_child(self):
         return self.run_child(['--local-diagnostic-test-only', self.origin, 'local/diagnostic'])
+
+    def short_capacity_run(self, runner=None):
+        # Exercise the real admission/send/response/stage path without a 120s
+        # paid-rate window. These short windows cannot establish sustained RPM.
+        runner = runner or benchmark.Runner(self.origin, 'local/mock', benchmark.LocalMonitor(KEY))
+        stage = runner.stage
+        with patch.object(runner, 'stage', side_effect=lambda name, rate=0, duration=0, size=0:
+                          stage(name, rate=rate, duration=min(duration, .25), size=size)):
+            return runner.run()
 
     def test_diagnostic_fragmented_sse_requires_delta_done_and_clean_end(self):
         self.server.reply = lambda n: (200, 1, {'choices': [{'message': {'content': 'OK'}}]} if n == 1 else
@@ -129,10 +148,35 @@ class BenchTests(unittest.TestCase):
                 timer.join(1)
             conn.close()
 
+    def test_abort_closes_detached_response_socket_and_drains_stalled_sse(self):
+        entered, peer_closed = threading.Event(), threading.Event()
+        self.server.peer_probe = (entered, peer_closed)
+        self.server.reply = lambda n: (200, 1, [
+            b'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n', b'data: [DONE]\n\n'])
+        r = benchmark.Runner(self.origin, 'local/mock', benchmark.LocalMonitor(KEY))
+        result = []
+        t = threading.Thread(target=lambda: result.append(r.stage('dry_run')), daemon=True)
+        t.start()
+        self.assertTrue(entered.wait(2))
+        until = time.monotonic() + 2
+        while not any(res is not None and conn.sock is None for conn, (res, _) in list(r.active.items())) and time.monotonic() < until:
+            time.sleep(.005)
+        self.assertTrue(any(res is not None and conn.sock is None for conn, (res, _) in list(r.active.items())))
+        r.abort('operator_stop')
+        self.assertTrue(peer_closed.wait(2), 'remote peer must observe the cancelled socket EOF')
+        t.join(2)
+        self.assertFalse(t.is_alive(), 'client SSE reader must drain without waiting for DONE')
+        self.assertEqual(r.inflight, 0)
+        self.assertEqual(result[0]['success'], 0)
+        self.assertEqual(result[0]['errors']['cancelled'], 1)
+        self.assertEqual(result[0]['unresolvedAtStageEnd'], 0)
+        self.assertEqual(self.server.hits, 1)
+
     def test_diagnostic_stream_errors_done_missing_empty_and_event_limit_stop(self):
         cases = [
             [b'data: {"error":"PRIVATE"}\n\n', b'data: [DONE]\n\n'],
             [b'event: error\ndata: {"choices":[{"delta":{"content":"OK"}}]}\n\n', b'data: [DONE]\n\n'],
+            [b'event:  ERROR\ndata: {"choices":[{"delta":{"content":"OK"}}]}\n\n', b'data: [DONE]\n\n'],
             [b'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n'],
             [b'data: [DONE]\n\n'],
             [b'data: ' + b'x' * (benchmark.SSE_EVENT_MAX + 1) + b'\n\n'],
@@ -222,6 +266,205 @@ class BenchTests(unittest.TestCase):
             benchmark.projection(config, meta, alias, target)
         self.assertEqual(self.server.hits, 0)
 
+    def test_capacity_sse_ramp_and_adaptive_bursts_count_only_complete_streams(self):
+        out = self.short_capacity_run()
+        self.assertEqual((out['schema'], out['stream'], out['stop']), (3, True, 'steps_complete'))
+        self.assertEqual([s['stage'] for s in out['stages']],
+                         ['dry_run', 'paced_60', 'paced_120', 'paced_240', 'paced_350'] +
+                         [f'burst_{n}' for n in (1, 2, 4, 8, 16, 32, 64)])
+        self.assertEqual(out['sent'], self.server.hits)
+        self.assertEqual(len(self.server.sessions), out['sent'])
+        self.assertTrue(all(b['stream'] is True and b['max_tokens'] == 256 for b in self.server.bodies))
+        self.assertLessEqual(out['sent'], 900)
+        self.assertLessEqual(out['paidAttemptsObservedOrReserved'], 900)
+        self.assertLessEqual(out['peakClientInFlight'], 64)
+        self.assertGreaterEqual(out['peakClientInFlight'], 1)
+        self.assertEqual(sum(s['offered'] for s in out['stages']), out['sent'])
+        for s in out['stages']:
+            self.assertEqual(s['completed'] + s['unresolvedAtStageEnd'], s['offered'])
+            self.assertEqual(s['success'], s['completed'])
+            self.assertEqual(s['latencySamples'], s['success'])
+            self.assertEqual(s['attemptsKnown'], s['completed'])
+            self.assertEqual(s['attempts'], s['completed'])
+            self.assertLessEqual(s['peakClientInFlight'], 64)
+            if s['completed']:
+                self.assertGreater(s['p95Ms'], 0)
+                self.assertGreater(s['goodputRps'], 0)
+        invoker.validate_output({**out, 'runtimeImageSha256': 'sha256:' + 'a' * 64,
+                                 'runtimeStartedUtc': '2026-09-28T00:00:00Z'}, '--execute-stdin-key')
+
+    def test_capacity_stream_failure_at_first_paced_step_stops_without_more_sends(self):
+        good = [b'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n', b'data: [DONE]\n\n']
+        for reply, reason, category in (
+            ([b'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n'], 'invalid', 'invalid'),
+            ([b'data: [DONE]\n\n'], 'invalid', 'invalid'),
+            ([b'event:  ERROR\ndata: {"choices":[{"delta":{"content":"OK"}}]}\n\n',
+              b'data: [DONE]\n\n'], 'invalid', 'invalid'),
+            ([b'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n',
+              b'data: {"object":"error","message":"PRIVATE"}\n\n', b'data: [DONE]\n\n'], 'invalid', 'invalid'),
+            ((429, 0, {'error': 'PRIVATE'}), 'first_429', 'local429'),
+            ((429, 1, {'error': 'PRIVATE'}), 'first_429', 'attempted429'),
+            ((200, 2, good), 'fanout', 'fanout'),
+        ):
+            with self.subTest(reason=reason, category=category):
+                self.server.hits = 0
+                self.server.reply = lambda n: (200, 1, good) if n == 1 else (
+                    reply if isinstance(reply, tuple) else (200, 1, reply))
+                out = self.short_capacity_run()
+                self.assertEqual(out['stop'], reason)
+                self.assertEqual(out['sent'], self.server.hits)
+                self.assertEqual(out['sent'], 2)
+                self.assertEqual(out['stages'][0]['success'], 1)
+                step = out['stages'][1]
+                self.assertEqual(step['stage'], 'paced_60')
+                self.assertEqual(step['success'], 0)
+                self.assertEqual(step['errors'][category], 1)
+                self.assertEqual(step['latencySamples'], 0)
+                self.assertEqual(out['paidAttemptsObservedOrReserved'],
+                                 1 if category == 'local429' else 3 if category == 'fanout' else 2)
+
+    def test_capacity_stream_timeout_and_operator_cancel_are_not_success(self):
+        good = [b'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n', b'data: [DONE]\n\n']
+        self.server.reply = lambda n: (200, 1, good)
+        real_reader = benchmark.read_sse
+        reads = 0
+        def timeout_after_dry(*args):
+            nonlocal reads
+            reads += 1
+            if reads > 1:
+                raise benchmark.socket.timeout()
+            return real_reader(*args)
+        with patch.object(benchmark, 'read_sse', side_effect=timeout_after_dry):
+            out = self.short_capacity_run()
+        self.assertEqual((out['stop'], out['sent']), ('timeout', 2))
+        self.assertEqual(out['stages'][1]['errors']['timeout'], 1)
+        self.assertEqual(out['stages'][1]['success'], 0)
+
+        entered, release = threading.Event(), threading.Event()
+        reads = 0
+        def suspended_reader(*args):
+            nonlocal reads
+            reads += 1
+            if reads == 2:
+                entered.set()
+                release.wait(2)
+            return real_reader(*args)
+        runner = benchmark.Runner(self.origin, 'local/mock', benchmark.LocalMonitor(KEY))
+        result = []
+        try:
+            with patch.object(benchmark, 'read_sse', side_effect=suspended_reader):
+                t = threading.Thread(target=lambda: result.append(self.short_capacity_run(runner)), daemon=True)
+                t.start()
+                self.assertTrue(entered.wait(3))
+                runner.abort('operator_stop')
+                release.set()
+                t.join(5)
+            self.assertFalse(t.is_alive())
+            self.assertEqual((result[0]['stop'], result[0]['sent']), ('operator_stop', 2))
+            self.assertEqual(result[0]['stages'][1]['success'], 0)
+            self.assertEqual(result[0]['stages'][1]['errors']['cancelled'], 1)
+        finally:
+            release.set()
+
+    def test_capacity_budgets_apply_across_paced_and_burst_stages(self):
+        runner = benchmark.Runner(self.origin, 'local/mock', benchmark.LocalMonitor(KEY))
+        runner.max_requests = 5
+        runner.max_paid = 5
+        out = self.short_capacity_run(runner)
+        self.assertEqual(out['stop'], 'request_budget')
+        self.assertGreaterEqual(out['sent'], 1)
+        self.assertLessEqual(out['sent'], 5)
+        self.assertLessEqual(out['paidAttemptsObservedOrReserved'], 5)
+        self.assertLessEqual(out['peakClientInFlight'], 64)
+        self.assertEqual(self.server.hits, out['sent'])
+
+    def test_rolling_send_seam_is_shared_across_capacity_stages(self):
+        runner = benchmark.Runner(self.origin, 'local/mock', benchmark.LocalMonitor(KEY))
+        with patch.object(benchmark, 'LIMIT_RPM', 3):
+            first = runner.stage('paced_350', rate=60000, duration=.06)
+            second = runner.stage('burst_4', rate=60000, duration=.04)
+            self.assertEqual((first['offered'], second['offered']), (3, 0))
+            self.assertEqual(len(runner.sent), 3)
+            self.assertEqual(self.server.hits, 3)
+            self.assertEqual(runner.paid_used, 3)
+            runner.abort('operator_stop')
+            self.assertFalse(runner.launch({'offered': 0, 'peakClientInFlight': 0}))
+        self.assertEqual(self.server.hits, 3)
+
+    def test_budget_truncated_burst_reports_actual_peak_not_named_target(self):
+        runner = benchmark.Runner(self.origin, 'local/mock', benchmark.LocalMonitor(KEY))
+        runner.paid_used = 896  # one four-attempt reservation remains
+        first = runner.stage('burst_64', size=64)
+        self.assertEqual(runner.reason, 'request_budget')
+        self.assertEqual(first['plannedOffered'], 64)
+        self.assertTrue(first['budgetCensored'])
+        self.assertEqual(first['offered'], 1)
+        self.assertEqual(first['peakClientInFlight'], 1)
+        self.assertEqual(self.server.hits, 1)
+
+    def test_slow_write_reservation_holds_rolling_slot_for_concurrent_sends_and_abort(self):
+        runner = benchmark.Runner(self.origin, 'local/mock', benchmark.LocalMonitor(KEY))
+        stage = {'name': 'burst_4', 'offered': 0, 'peakClientInFlight': 0,
+                 'completed': 0, 'kinds': collections.Counter(), 'attemptsKnown': 0,
+                 'attempts': 0, 'latencies': []}
+        original = benchmark.http.client.HTTPConnection.request
+        first_started, second_sent = threading.Event(), threading.Event()
+        actual = []
+        def slow_request(conn, *args, **kwargs):
+            if not first_started.is_set():
+                first_started.set()
+                time.sleep(.16)  # crosses the shortened rolling window before real send
+            actual.append(time.monotonic())
+            if len(actual) == 2:
+                second_sent.set()
+            return original(conn, *args, **kwargs)
+        with patch.object(benchmark, 'RPM_WINDOW_SECONDS', .12), \
+             patch.object(benchmark, 'LIMIT_RPM', 1), \
+             patch.object(benchmark.http.client.HTTPConnection, 'request', slow_request):
+            self.assertTrue(runner.launch(stage))
+            self.assertTrue(first_started.wait(2))
+            self.assertTrue(runner.launch(stage))
+            self.assertTrue(runner.launch(stage))
+            self.assertTrue(second_sent.wait(2))
+            runner.abort('operator_stop')
+            until = time.monotonic() + 2
+            while runner.inflight and time.monotonic() < until:
+                time.sleep(.005)
+        self.assertEqual(runner.inflight, 0)
+        self.assertEqual(len(actual), 2)
+        self.assertGreaterEqual(actual[1] - actual[0], .12)
+        self.assertEqual(stage['offered'], 2)
+        self.assertEqual(self.server.hits, 2)
+
+    def test_capacity_host_modes_require_exact_alias_before_work(self):
+        common = {'knownModels': [benchmark.MODEL],
+                  'modelAliases': {benchmark.DIAGNOSTIC_ALIAS: benchmark.MODEL},
+                  'perModel': {benchmark.MODEL: {'maxRetries': 1}},
+                  'accounts': [{'id': 'synthetic-id', 'key': KEY, 'enabled': True}]}
+        meta = {'accountStates': {}, 'cachePoolTargetSize': 0,
+                'statistics': {'lifetime': {'global': {'requests': 0}}}}
+        self.assertEqual(benchmark.projection(common, meta, benchmark.DIAGNOSTIC_ALIAS, benchmark.MODEL)[4], 1)
+        with self.assertRaises(benchmark.Guard):
+            benchmark.projection({**common, 'modelAliases': {}}, meta, benchmark.DIAGNOSTIC_ALIAS, benchmark.MODEL)
+        monitor = unittest.mock.Mock()
+        monitor.image = 'sha256:' + 'a' * 64
+        monitor.started = '2026-09-28T00:00:00Z'
+        monitor.base = (None, 0, 0, 1, 1, 0)
+        monitor.error_only = False
+        monitor.cpu0 = monitor.rss0 = 0
+        monitor.mem_limit = 512 * 1024**2
+        with patch.object(benchmark, 'supplied_key', return_value=KEY), \
+             patch.object(benchmark, 'HostMonitor', return_value=monitor) as factory, \
+             patch.object(benchmark, 'Runner') as runner, contextlib.redirect_stdout(io.StringIO()):
+            benchmark.main(['--preflight-stdin-key'])
+            factory.assert_called_once_with(benchmark.DIAGNOSTIC_ALIAS, KEY, approved_target=benchmark.MODEL)
+            factory.reset_mock()
+            runner.return_value.run.return_value = {}
+            benchmark.main(['--execute-stdin-key'])
+            factory.assert_called_once_with(benchmark.DIAGNOSTIC_ALIAS, KEY, approved_target=benchmark.MODEL)
+            runner.assert_called_once_with(benchmark.ORIGIN, benchmark.DIAGNOSTIC_ALIAS, monitor, diagnostic=False)
+        self.assertEqual(self.server.hits, 0)
+
     def test_429_without_attempt_stops_before_ramp(self):
         self.server.reply = lambda n: (429, 0, {'error': {'message': 'PRIVATE'}})
         p = self.run_child()
@@ -244,11 +487,28 @@ class BenchTests(unittest.TestCase):
         self.assertEqual(out['stop'], 'fanout')
         self.assertEqual(out['sent'], 1)
         self.assertEqual(out['stages'][0]['errors']['fanout'], 1)
+        self.assertEqual(out['stages'][0]['unresolvedAtStageEnd'], 0)
+
+    def test_stop_waits_briefly_for_worker_settlement_before_stage_snapshot(self):
+        runner = benchmark.Runner(self.origin, 'local/mock', benchmark.LocalMonitor(KEY))
+        runner.inflight = 1
+        runner.abort('operator_stop')
+        worker = threading.Thread(target=lambda: (time.sleep(.06), setattr(runner, 'inflight', 0)))
+        worker.start()
+        began = time.monotonic()
+        runner.wait_drain()
+        worker.join(timeout=1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(runner.inflight, 0)
+        self.assertGreaterEqual(time.monotonic() - began, .04)
+        self.assertEqual(self.server.hits, 0)
 
     def test_200_error_envelope_is_not_success(self):
         for error in ('PRIVATE', {}, None):
             with self.subTest(error=error):
-                self.server.reply = lambda n: (200, 1, {'error': error, 'choices': [{'message': {'content': 'OK'}}]})
+                self.server.reply = lambda n: (200, 1, [
+                    b'data: ' + json.dumps({'error': error, 'choices': [{'delta': {'content': 'OK'}}]}).encode() + b'\n\n',
+                    b'data: [DONE]\n\n'])
                 out = json.loads(self.run_child().stdout)
                 self.assertEqual(out['sent'], 1)
                 self.assertEqual(out['stages'][0]['success'], 0)
@@ -334,6 +594,9 @@ class BenchTests(unittest.TestCase):
         class FakeResponse:
             status = 200
 
+            def close(self):
+                pass
+
             def getheader(self, name):
                 return '1'
 
@@ -363,7 +626,8 @@ class BenchTests(unittest.TestCase):
         stage = {'offered': 0, 'peakClientInFlight': 0, 'completed': 0,
                  'kinds': collections.Counter(), 'attemptsKnown': 0,
                  'attempts': 0, 'latencies': []}
-        with patch.object(benchmark.http.client, 'HTTPConnection', DelayedConnection):
+        with patch.object(benchmark.http.client, 'HTTPConnection', DelayedConnection), \
+             patch.object(benchmark, 'read_sse', return_value=True):
             self.assertTrue(r.launch(stage))
             self.assertTrue(connected.wait(2))
             r.sent.extend([time.monotonic() - 61] * benchmark.LIMIT_RPM)
@@ -424,6 +688,8 @@ class BenchTests(unittest.TestCase):
         sent, release = threading.Event(), threading.Event()
         class Response:
             status = 200
+            def close(self):
+                pass
             def getheader(self, name):
                 return '1'
             def read(self, size):
@@ -444,7 +710,8 @@ class BenchTests(unittest.TestCase):
         r = benchmark.Runner(self.origin, 'local/mock', benchmark.LocalMonitor(KEY))
         out = []
         try:
-            with patch.object(benchmark.http.client, 'HTTPConnection', DelayedConnection):
+            with patch.object(benchmark.http.client, 'HTTPConnection', DelayedConnection), \
+                 patch.object(benchmark, 'read_sse', return_value=True):
                 t = threading.Thread(target=lambda: out.append(r.stage('dry_run')))
                 t.start()
                 self.assertTrue(sent.wait(2))
@@ -654,7 +921,7 @@ class BenchTests(unittest.TestCase):
                   'ownerAccounts': {'total': 1, 'eligible': 1, 'unlimited': 0}, 'diagnostics': 'off'}
         preflight = {**common, 'preflight': 'ok',
                      'resourceBaseline': {'cpuPct': 1.0, 'rssMiB': 128.0, 'memoryLimitMiB': 512.0}}
-        live = {**common, 'schema': 1, 'stop': 'monitor_guard', 'stream': False,
+        live = {**common, 'schema': 3, 'stop': 'monitor_guard', 'stream': True,
                 'limits': {'rpm': 350, 'requests': 900, 'seconds': 300, 'inflightEmergency': 64,
                            'maxAttemptsPerChat': 4}, 'sent': 0, 'paidAttemptsObservedOrReserved': 0,
                 'peakClientInFlight': 0, 'backgroundCertainMinimum': 0, 'unresolvedClientRequests': 0,
@@ -690,7 +957,8 @@ class BenchTests(unittest.TestCase):
             encoded = re.search(r'base64\.b64decode\("([A-Za-z0-9+/=]+)"\)', remote[4]).group(1)
             self.assertEqual(base64.b64decode(encoded), script)
         self.assertEqual(self.server.hits, 0)
-        sample = {'stage': 'dry_run', 'startedUtc': common['runtimeStartedUtc'],
+        sample = {'stage': 'dry_run', 'plannedOffered': 1, 'budgetCensored': False,
+                  'startedUtc': common['runtimeStartedUtc'],
                   'endedUtc': common['runtimeStartedUtc'], 'durationSeconds': 1,
                   'offered': 1, 'completed': 1, 'unresolvedAtStageEnd': 0, 'success': 1, 'successRate': 1.0,
                   'goodputRps': 1.0, 'completedRps': 1.0, 'peakClientInFlight': 1,
@@ -700,7 +968,7 @@ class BenchTests(unittest.TestCase):
                                            'auth', 'unavailable', 'invalid', 'fanout', 'network',
                                            'timeout', 'cancelled'), 0)}
         invoker.validate_output(diagnostic, '--diagnostic-stdin-key')
-        for path, value in ((('stream',), False), (('limits', 'requests'), 900),
+        for path, value in ((('stream',), False), (('schema',), 1), (('limits', 'requests'), 900),
                             (('stages',), [{'stage': KEY}])):
             changed = json.loads(json.dumps(diagnostic))
             target = changed
@@ -712,6 +980,11 @@ class BenchTests(unittest.TestCase):
         measured = {**live, 'sent': 1, 'paidAttemptsObservedOrReserved': 1,
                     'peakClientInFlight': 1, 'stages': [sample]}
         invoker.validate_output(measured, '--execute-stdin-key')
+        for bad in ({'plannedOffered': 64}, {'budgetCensored': True}):
+            changed = json.loads(json.dumps(measured))
+            changed['stages'][0].update(bad)
+            with self.assertRaises(ValueError):
+                invoker.validate_output(changed, '--execute-stdin-key')
         for field in ('errors', 'p95Ms', 'stage', 'unresolvedAtStageEnd'):
             changed = json.loads(json.dumps(measured))
             if field == 'errors':
@@ -742,6 +1015,15 @@ class BenchTests(unittest.TestCase):
                 target[path[-1]] = value
                 with self.assertRaises(ValueError):
                     invoker.validate_output(changed, '--execute-stdin-key')
+
+    def test_wrapper_rejects_nonzero_child_even_with_valid_looking_output(self):
+        def failed_child(argv, **kwargs):
+            code = ('import json,sys; sys.stdin.buffer.readline(); '
+                    'print(json.dumps({"preflight":"ok"})); sys.exit(1)')
+            return subprocess.Popen([sys.executable, '-B', '-c', code], **kwargs)
+        with self.assertRaises(ValueError):
+            invoker.invoke('--preflight-stdin-key', KEY, Path('/synthetic/identity'), b'pass', popen=failed_child)
+        self.assertEqual(self.server.hits, 0)
 
     def test_wrapper_interrupt_closes_local_ssh_pipe(self):
         class Interrupted:

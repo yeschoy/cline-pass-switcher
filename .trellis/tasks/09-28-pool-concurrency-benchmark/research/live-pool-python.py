@@ -25,8 +25,8 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 ORIGIN = 'https://clinepass.yeschoy.io'
-MODEL = 'cline-pass/deepseek-v4.1-flash'  # original non-stream benchmark remains unchanged
-DIAGNOSTIC_ALIAS = 'pc/deepseek-v4.1-flash'
+MODEL = 'cline-pass/deepseek-v4.1-flash'  # approved resolved target
+DIAGNOSTIC_ALIAS = 'pc/deepseek-v4.1-flash'  # fixed client-facing alias for both modes
 DIAGNOSTIC_TARGET = MODEL
 DIAGNOSTIC_REQUESTS, DIAGNOSTIC_SECONDS = 2, 120
 SSE_EVENT_MAX, SSE_TOTAL_MAX = 65536, 262144
@@ -34,6 +34,7 @@ CONTAINER = 'cline-pass-console'
 CONFIG = '/opt/cline-pass-switcher/data/config.json'
 META = '/opt/cline-pass-switcher/data/metadata.json'
 LIMIT_RPM, LIMIT_REQUESTS, LIMIT_SECONDS, LIMIT_INFLIGHT = 350, 900, 300, 64
+RPM_WINDOW_SECONDS = 60  # tests may shorten the window, never a production setting
 # maxRetries <= 1 per resolved route, at most two account chains per chat.
 ATTEMPT_RESERVATION = 4
 RESPONSE_MAX = 65536
@@ -320,6 +321,10 @@ class LocalMonitor:
         pass
 
 
+def response_socket(response):
+    return getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
+
+
 def read_sse(response, connection, deadline):
     """Incremental bounded SSE validity check; never return content or error reasons."""
     total = 0
@@ -369,7 +374,7 @@ def read_sse(response, connection, deadline):
         # http.client clears connection.sock when the response will close (e.g.
         # HTTP/1.0), but HTTPResponse.fp still owns the receiving socket. Keep
         # the absolute SSE deadline on that socket too; never accept a late DONE.
-        sock = connection.sock or getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
+        sock = response_socket(response) or connection.sock
         if sock is None:
             raise Guard('invalid_stream')
         sock.settimeout(min(5, remaining))
@@ -397,7 +402,7 @@ def read_sse(response, connection, deadline):
                 event.extend(current)
                 if len(event) > SSE_EVENT_MAX:
                     raise Guard('invalid_stream')
-                if current == b'event: error' or current == b'event:error':
+                if current.startswith(b'event:') and current[6:].strip().lower() == b'error':
                     error_event = True
                 if current.startswith(b'data:'):
                     data_lines.append(current[5:].lstrip(b' '))
@@ -422,7 +427,7 @@ class Runner:
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.reason = None
-        self.active = set()
+        self.active = {}  # connection -> (response, response-owned socket); guarded by lock
         self.results = []
         self.baseline = None
         self.recent = collections.deque(maxlen=20)
@@ -435,11 +440,23 @@ class Runner:
             if self.reason:
                 return
             self.reason = why
-            active = list(self.active)
-        for c in active:
+            active = list(self.active.items())
+        for c, (response, sock) in active:
+            # HTTP/1.0 and Connection: close detach conn.sock at getresponse().
+            # Interrupt the response-owned read, not just the connection object.
+            for owned in (sock, c.sock):
+                if owned is not None:
+                    try:
+                        owned.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    try:
+                        owned.close()
+                    except OSError:
+                        pass
             try:
                 c.close()
-            except Exception:
+            except OSError:
                 pass
 
     def healthy(self):
@@ -463,7 +480,7 @@ class Runner:
         return True
 
     def request(self, stage):
-        conn = None
+        conn = res = None
         sent = None
         kind, attempts = 'network', None
         try:
@@ -472,9 +489,9 @@ class Runner:
             with self.lock:
                 if self.stop.is_set():
                     return
-                self.active.add(conn)
-            streaming = self.diagnostic and stage['name'] == 'diagnostic_stream'
-            data = json.dumps({'model': self.model, 'stream': streaming, 'max_tokens': 256 if self.diagnostic else 8,
+                self.active[conn] = (None, None)
+            streaming = not self.diagnostic or stage['name'] == 'diagnostic_stream'
+            data = json.dumps({'model': self.model, 'stream': streaming, 'max_tokens': 256,
                                'session_id': secrets.token_hex(16), 'messages': [{'role': 'user', 'content': 'Reply OK.'}]})
             # Establish TLS/connect before the send seam; delayed workers must recheck
             # abort, deadline, rolling 60s, and the reserved paid-attempt budget.
@@ -485,7 +502,7 @@ class Runner:
             while True:
                 with self.lock:
                     now = time.monotonic()
-                    while self.sent and self.sent[0] <= now - 60:
+                    while self.sent and self.sent[0] <= now - RPM_WINDOW_SECONDS:
                         self.sent.popleft()
                     if (self.stop.is_set() or self.monitor.stop.is_set()
                             or now - self.monitor.last > 6 or now >= self.deadline):
@@ -493,8 +510,11 @@ class Runner:
                     if self.count >= self.max_requests or self.paid_used + self.inflight * ATTEMPT_RESERVATION > self.max_paid:
                         return
                     if len(self.sent) < LIMIT_RPM:
-                        # Linearization point: abort cannot race between this check
-                        # and handing request bytes to the HTTP connection.
+                        # Reserve a slot before transport handoff. Keep it for 60s
+                        # AFTER request() returns (even on a partial/failed write):
+                        # the actual write may occur anywhere inside that interval.
+                        # Serialized writes make this conservative for every 60s
+                        # window, including slow writes crossing a minute boundary.
                         sent = now
                         self.sent.append(now)
                         self.count += 1
@@ -503,16 +523,24 @@ class Runner:
                         stage['offered'] += 1
                         stage['peakClientInFlight'] = max(stage['peakClientInFlight'], self.client_inflight)
                         self.monitor.sent_one()
-                        # The lock covers the small HTTP write, not the 30s response.
-                        conn.request('POST', '/v1/chat/completions', body=data, headers={
-                            'Authorization': 'Bearer ' + self.monitor.key, 'Content-Type': 'application/json',
-                            'User-Agent': 'curl/8.0'})
+                        # The lock covers the bounded write, not the response.
+                        # Do not refund the slot on exceptions: bytes may have left.
+                        try:
+                            conn.request('POST', '/v1/chat/completions', body=data, headers={
+                                'Authorization': 'Bearer ' + self.monitor.key, 'Content-Type': 'application/json',
+                                'User-Agent': 'curl/8.0'})
+                        finally:
+                            self.sent[-1] = time.monotonic()
                         if conn.sock is not None:
                             conn.sock.settimeout(30)
                         break
-                    wait = min(.1, max(.001, self.sent[0] + 60 - now))
+                    wait = min(.1, max(.001, self.sent[0] + RPM_WINDOW_SECONDS - now))
                 self.stop.wait(wait)
             res = conn.getresponse()
+            with self.lock:
+                self.active[conn] = (res, response_socket(res))
+                if self.stop.is_set():
+                    return
             raw_attempts = res.getheader('X-Cline-Attempts')
             attempts = int(raw_attempts) if raw_attempts and re.fullmatch(r'(0|[1-9]\d{0,8})', raw_attempts) else None
             if attempts is not None and attempts > 1:
@@ -558,7 +586,9 @@ class Runner:
             kind = 'timeout'
             if sent is None:
                 self.abort('connect_timeout')
-            elif self.diagnostic:
+            else:
+                # A stalled streamed body is not a successful completion and
+                # must not allow another capacity step to begin.
                 self.abort('timeout')
         except Guard:
             kind = 'invalid'
@@ -567,22 +597,28 @@ class Runner:
             kind = 'network'
             self.abort('network')
         finally:
-            if conn:
-                try:
-                    conn.close()
-                except OSError:
-                    pass
+            # HTTP/1.0/Connection: close can detach the response-owned socket
+            # from conn.sock; closing conn alone leaves a failed SSE read open.
+            for source in (res, conn):
+                if source is not None:
+                    try:
+                        source.close()
+                    except OSError:
+                        pass
             ms = (time.monotonic() - sent) * 1000 if sent is not None else None
             why = None
             with self.lock:
-                self.active.discard(conn)
+                self.active.pop(conn, None)
                 self.inflight -= 1
                 if sent is not None:
                     self.client_inflight -= 1
                     # Missing/invalid attempt count consumes the entire reservation.
                     self.paid_used += attempts if attempts is not None and attempts <= ATTEMPT_RESERVATION else ATTEMPT_RESERVATION
                     # A cancelled request is never a completed useful success.
-                    if self.stop.is_set() and kind == 'network':
+                    if (self.stop.is_set() and kind in ('network', 'success', 'invalid', 'timeout')
+                            and self.reason not in ('invalid', 'timeout', 'network', 'oversized_reply', 'invalid_reply')):
+                        # A response interrupted by an external veto cannot
+                        # retroactively be credited as useful SSE completion.
                         kind = 'cancelled'
                     stage['kinds'][kind] += 1
                     stage['completed'] += 1
@@ -607,7 +643,18 @@ class Runner:
                 self.abort(why)
 
     def wait_drain(self):
-        while self.inflight and self.healthy():
+        # A veto may be published by a worker just before it settles its own
+        # counters. Give that worker a bounded chance to finish before freezing
+        # the stage snapshot; never wait indefinitely on a broken transport.
+        stopping_until = None
+        while self.inflight:
+            if self.healthy():
+                time.sleep(.02)
+                continue
+            if stopping_until is None:
+                stopping_until = time.monotonic() + 1
+            if time.monotonic() >= stopping_until:
+                break
             time.sleep(.02)
 
     def stage(self, name, rate=0, duration=0, size=0):
@@ -620,7 +667,7 @@ class Runner:
             tick = began
             while self.healthy() and time.monotonic() < began + duration:
                 if time.monotonic() >= tick:
-                    if not self.launch(s) and not self.inflight and (self.count >= LIMIT_REQUESTS or self.paid_used + ATTEMPT_RESERVATION > LIMIT_REQUESTS):
+                    if not self.launch(s) and not self.inflight and (self.count >= self.max_requests or self.paid_used + ATTEMPT_RESERVATION > self.max_paid):
                         self.abort('request_budget')
                     tick = time.monotonic() + interval
                 time.sleep(min(.01, max(.001, tick - time.monotonic())))
@@ -646,7 +693,10 @@ class Runner:
             counts = dict(s['kinds'])
             latencies = list(s['latencies'])
             success = counts.get('success', 0)
+            planned = size if size else (1 if not rate else None)
             result = {'stage': name, 'startedUtc': s['startedUtc'], 'endedUtc': ended,
+                      'plannedOffered': planned,
+                      'budgetCensored': self.reason == 'request_budget' and (planned is None or offered < planned),
                       'durationSeconds': round(elapsed, 2), 'offered': offered,
                       'completed': completed, 'unresolvedAtStageEnd': offered - completed,
                       'success': success,
@@ -711,14 +761,14 @@ class Runner:
             sent, reserved, peak, unresolved = (self.count,
                 self.paid_used + self.inflight * ATTEMPT_RESERVATION,
                 self.peak, self.inflight)
-        return {'schema': 2 if self.diagnostic else 1, 'stop': self.reason,
+        return {'schema': 2 if self.diagnostic else 3, 'stop': self.reason,
                 'runtimeImageSha256': self.monitor.image if self.monitor.image.startswith('sha256:') else None,
                 'runtimeStartedUtc': self.monitor.started if self.monitor.image.startswith('sha256:') else None,
                 'limits': {'rpm': LIMIT_RPM, 'requests': self.max_requests,
                 'seconds': DIAGNOSTIC_SECONDS if self.diagnostic else LIMIT_SECONDS, 'inflightEmergency': self.max_inflight,
                 'maxAttemptsPerChat': ATTEMPT_RESERVATION}, 'sent': sent,
                 'paidAttemptsObservedOrReserved': reserved,
-                'peakClientInFlight': peak, 'owner': 'legacy', 'stream': 'comparison' if self.diagnostic else False,
+                'peakClientInFlight': peak, 'owner': 'legacy', 'stream': 'comparison' if self.diagnostic else True,
                 'ownerAccounts': {'total': self.monitor.base[3], 'eligible': self.monitor.base[4],
                                   'unlimited': self.monitor.base[5]},
                 'resource': {'cpuPctMinMax': [min((x[0] for x in samples), default=None), max((x[0] for x in samples), default=None)],
@@ -731,7 +781,7 @@ class Runner:
 
 def main(argv):
     if argv == ['--preflight-stdin-key']:
-        monitor = HostMonitor(MODEL, supplied_key())
+        monitor = HostMonitor(DIAGNOSTIC_ALIAS, supplied_key(), approved_target=DIAGNOSTIC_TARGET)
         monitor.check()
         print(json.dumps({'preflight': 'ok', 'runtimeImageSha256': monitor.image,
                           'runtimeStartedUtc': monitor.started, 'owner': 'legacy',
@@ -756,7 +806,8 @@ def main(argv):
         return
     diagnostic = False
     if argv == ['--execute-stdin-key']:
-        origin, model, monitor = ORIGIN, MODEL, HostMonitor(MODEL, supplied_key())
+        origin, model = ORIGIN, DIAGNOSTIC_ALIAS
+        monitor = HostMonitor(model, supplied_key(), approved_target=DIAGNOSTIC_TARGET)
     elif argv == ['--diagnostic-stdin-key']:
         diagnostic = True
         origin, model = ORIGIN, DIAGNOSTIC_ALIAS

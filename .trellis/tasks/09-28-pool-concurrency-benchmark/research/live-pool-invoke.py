@@ -160,8 +160,8 @@ def validate_output(record, mode):
         for name in baseline:
             number(baseline[name], 1000000)
         return
-    if type(record['schema']) is not int or record['schema'] != (2 if diagnostic else 1) or (
-            record['stream'] != 'comparison' if diagnostic else record['stream'] is not False):
+    if type(record['schema']) is not int or record['schema'] != (2 if diagnostic else 3) or (
+            record['stream'] != 'comparison' if diagnostic else record['stream'] is not True):
         raise ValueError('unexpected remote output')
     if record['stop'] not in ('monitor_guard', 'deadline', 'fanout', 'first_429', 'auth_drift',
                               'account_protection', 'invalid_reply', 'invalid', 'oversized_reply',
@@ -198,17 +198,26 @@ def validate_output(record, mode):
     if type(stages) is not list or len(stages) > len(names):
         raise ValueError('unexpected remote output')
     for index, stage in enumerate(stages):
-        fields(stage, 'stage startedUtc endedUtc durationSeconds offered completed unresolvedAtStageEnd success successRate goodputRps completedRps peakClientInFlight attempts attemptsKnown latencySamples p50Ms p95Ms p99Ms errors')
+        fields(stage, 'stage startedUtc endedUtc plannedOffered budgetCensored durationSeconds offered completed unresolvedAtStageEnd success successRate goodputRps completedRps peakClientInFlight attempts attemptsKnown latencySamples p50Ms p95Ms p99Ms errors')
         if stage['stage'] != names[index]:
             raise ValueError('unexpected remote output')
         timestamp(stage['startedUtc'])
         timestamp(stage['endedUtc'])
+        planned = int(stage['stage'].split('_')[1]) if stage['stage'].startswith('burst_') else (None if stage['stage'].startswith('paced_') else 1)
+        if stage['plannedOffered'] != planned or type(stage['budgetCensored']) is not bool:
+            raise ValueError('unexpected remote output')
+        expected_censor = (index == len(stages) - 1 and record['stop'] == 'request_budget'
+                           and (planned is None or stage['offered'] < planned))
+        if stage['budgetCensored'] is not expected_censor or (planned is not None and stage['offered'] > planned):
+            raise ValueError('unexpected remote output')
         for name, maximum in [('offered', 1 if diagnostic else 900), ('completed', 1 if diagnostic else 900),
                               ('unresolvedAtStageEnd', 1 if diagnostic else 64), ('success', 1 if diagnostic else 900),
                               ('peakClientInFlight', 1 if diagnostic else 64), ('attempts', 4 if diagnostic else 3600),
                               ('attemptsKnown', 1 if diagnostic else 900), ('latencySamples', 1 if diagnostic else 900)]:
             integer(stage[name], maximum)
-        for name, maximum in [('durationSeconds', 330), ('goodputRps', 900), ('completedRps', 900)]:
+        # Bursts can complete in <1s; the generator floors elapsed to 1ms.
+        # This is a stage-span quotient, not a claim of sustained offered RPM.
+        for name, maximum in [('durationSeconds', 330), ('goodputRps', 900000), ('completedRps', 900000)]:
             number(stage[name], maximum)
         number(stage['successRate'], 1, nullable=True)
         for name in ('p50Ms', 'p95Ms', 'p99Ms'):

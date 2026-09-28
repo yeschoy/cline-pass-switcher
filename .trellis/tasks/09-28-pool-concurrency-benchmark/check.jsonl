@@ -1,3 +1,4 @@
 {"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "审查准入统计、请求来源和安全影响"}
+{"file": ".trellis/spec/backend/client-key-guidelines.md", "reason": "审查 Legacy owner 独占池、别名路由和不跨池准入"}
 {"file": ".trellis/spec/backend/deployment-guidelines.md", "reason": "审查生产操作未越界及敏感数据排除"}
 {"file": ".trellis/tasks/archive/2026-09/09-27-high-concurrency-path-investigation/research/method.md", "reason": "独立审查旧基准和本次外推边界"}
