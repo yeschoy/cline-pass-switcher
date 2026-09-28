@@ -1463,7 +1463,7 @@ test('model/provider reference statistics attribute only final usage and freeze 
     res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:'ok',provider_metadata:{gateway:{routing:{finalProvider:body.model==='unsupported'?'mismatch':provider||'unknown'}}}}}],usage}));
   });});
   const upstreamPort=await listen(upstream),port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-provider-values-'));
-  const current='clinepass-2026-09-25-v2';
+  const current='clinepass-2026-09-29-v3';
   const models=['cline-pass/kimi-k3','cline-pass/glm-5.3','cline-pass/deepseek-v4-flash','cline-pass/deepseek-v4-pro','unsupported','toString','provider-path','provider-prototype'];
   let running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts:[{id:'a',name:'A',key:'local',enabled:true,perModel:{}}],accountMode:'single',activeAccount:0,knownModels:models,perModel:Object.fromEntries(models.map(model=>[model,model==='cline-pass/glm-5.3'?{}:{upstreams:model==='provider-path'?['vendor/path']:model==='provider-prototype'?['toString']:['first','second']}]))},dir);
   t.after(async()=>{if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
@@ -1489,13 +1489,14 @@ test('model/provider reference statistics attribute only final usage and freeze 
   assert.equal(find('provider-prototype').providers.find(p=>p.id==='toString').usage.inputTokens,10,'prototype-named Provider has its own usage cell');
   assert.ok(Number.isSafeInteger(find('provider-prototype').providers.find(p=>p.id==='toString').health.coverageFrom));
   assert.doesNotMatch(running.output(),/\[统计\] 更新失败/,'unpriced/prototype-named models do not interrupt statistics finalization');
-  assert.equal(stats.referencePrices.current.effectiveAt,null);assert.equal(stats.referencePrices.versions[current].collectedAt,'2026-09-25');
+  assert.equal(stats.referencePrices.current.effectiveAt,null);assert.equal(stats.referencePrices.versions[current].collectedAt,'2026-09-29');
   const before=structuredClone(stats.models),metaPath=path.join(dir,'metadata.json');await stop(running.child);running.child=null;
   const metadata=JSON.parse(fs.readFileSync(metaPath));assert.equal(metadata.statistics.version,5);assert.equal(metadata.statistics.minuteBuckets.at(-1).valuation['cline-pass/kimi-k3'].second[current].lowPicoUsd,51900000);
   running=await startSwitcher(null,dir);stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();assert.deepEqual(stats.models,before);
   await stop(running.child);running.child=null;
   const older=JSON.parse(fs.readFileSync(metaPath)),version='clinepass-older-v2';
   older.statistics.priceVersions[version]={...older.statistics.priceVersions[current],version,collectedAt:'2026-01-01',models:structuredClone(older.statistics.priceVersions[current].models)};
+  delete older.statistics.priceVersions[version].selection;
   older.statistics.priceVersions[version].models['cline-pass/kimi-k3'].rates[0][0]=10000;
   delete older.statistics.priceVersions[current];
   for(const bucket of older.statistics.minuteBuckets)for(const providers of Object.values(bucket.valuation))for(const cells of Object.values(providers))if(cells[current]){cells[version]=cells[current];delete cells[current];}
@@ -1520,7 +1521,7 @@ test('statistics projection preserves provider cells, frozen price versions and 
     res.end(JSON.stringify({ choices: [{ message: { content: 'ok', provider_metadata: { gateway: { routing: { finalProvider: 'one' } } } } }], usage: { prompt_tokens: 10, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 3 } } }));
   }); });
   const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-stat-read-'));
-  const id = 'cline-pass/kimi-k3', current = 'clinepass-2026-09-25-v2', older = 'clinepass-old-synthetic';
+  const id = 'cline-pass/kimi-k3', current = 'clinepass-2026-09-29-v3', older = 'clinepass-old-synthetic';
   let running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'synthetic', enabled: true, perModel: {} }], knownModels: [id], perModel: { [id]: { upstreams: ['one'] } } }, dir);
   t.after(async () => { if (running?.child) await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
   assert.equal((await rawJson(port, '/v1/chat/completions', { model: id, messages: [] })).status, 200);
@@ -1546,6 +1547,7 @@ test('statistics projection preserves provider cells, frozen price versions and 
   for (const field of ['inputKnownRequests', 'inputTokens', 'cacheKnownRequests', 'cacheHitRequests', 'cachedTokens', 'cacheInputKnownRequests', 'cacheInputTokens', 'cacheInputCachedTokens']) missingUsage[field] = 0;
   delete unknown.valuation[id]; // Output is known, but input and cache are missing: cannot price this success.
   meta.statistics.priceVersions[older] = { ...structuredClone(meta.statistics.priceVersions[current]), version: older, collectedAt: '2026-01-01' };
+  delete meta.statistics.priceVersions[older].selection;
   meta.statistics.priceVersions[older].models[id].rates[0][0] = 10000;
   const c = meta.statistics.recentCoverage;
   for (const field of ['modelTrackingStartedMinute', 'routingTrackingStartedMinute', 'accountHealthTrackingStartedMinute', 'providerHealthTrackingStartedMinute', 'usageTrackingStartedMinute']) c[field] = Math.min(c[field], unknown.minute);
@@ -1588,7 +1590,7 @@ test('statistics projection preserves provider cells, frozen price versions and 
 });
 
 test('current 12-model reference snapshot prices only evidenced final usage and preserves v1 on restart', async (t) => {
-  const v1='clinepass-2026-09-24-v1',v2='clinepass-2026-09-25-v2';
+  const v1='clinepass-2026-09-24-v1',v2='clinepass-2026-09-25-v2',v3='clinepass-2026-09-29-v3';
   const upstream=http.createServer((req,res)=>{const chunks=[];req.on('data',c=>chunks.push(c));req.on('end',()=>{
     const body=JSON.parse(Buffer.concat(chunks).toString()),provider=body.providerOptions?.gateway?.only?.[0]||body.provider?.only?.[0];
     if(provider==='first'){res.writeHead(500,{'Content-Type':'application/json'});return res.end(JSON.stringify({error:{message:'failed',status:500}}));}
@@ -1605,7 +1607,7 @@ test('current 12-model reference snapshot prices only evidenced final usage and 
   t.after(async()=>{if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
   const get=async()=> (await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json());
   const prices=(await get()).referencePrices.current;
-  assert.equal(prices.version,v2);assert.equal(prices.rateScale,10000);assert.equal(prices.effectiveAt,null);assert.deepEqual(Object.keys(prices.models).sort(),ids.sort());
+  assert.equal(prices.version,v3);assert.equal(prices.selection,'terminal-utc-weekdays-no-holidays');assert.equal(prices.rateScale,10000);assert.equal(prices.effectiveAt,null);assert.deepEqual(Object.keys(prices.models).sort(),ids.sort());
   const cline='https://docs.cline.bot/getting-started/clinepass',deepseek='https://api-docs.deepseek.com/quick_start/pricing/';
   const expected={
     'glm-5.3':[[14000,44000,2600,null]],'glm-5.3-flash':[[1500,5000,300,null]],'kimi-k3':[[30000,150000,3000,null]],
@@ -1621,21 +1623,22 @@ test('current 12-model reference snapshot prices only evidenced final usage and 
   }
   for(const id of [...ids,'cline-pass/deepseek-v4-flash','cline-pass/glm-5.2'])assert.equal((await rawJson(port,'/v1/chat/completions',{model:id,messages:[]})).status,200);
   let stats=await get(),row=id=>stats.models.find(m=>m.id===`cline-pass/${id}`).providerStatistics;
-  assert.equal(row('mimo-v2.5').valuation.versions[v2].lowPicoUsd,1548400,'0.0028 cache read is exact');
-  assert.equal(row('mimo-v2.5-pro').valuation.versions[v2].lowPicoUsd,19183500,'0.0145 cache read is exact');
-  assert.equal(row('glm-5.3-flash').valuation.versions[v2].lowPicoUsd,0,'explicit zero is priced');
-  assert.equal(row('glm-5.3-flash').valuation.versions[v2].pricedRequests,1);
-  assert.equal(row('deepseek-v4-pro').valuation.versions[v2].lowPicoUsd,8646000);
-  assert.equal(row('deepseek-v4-pro').valuation.versions[v2].highPicoUsd,17292000);
-  assert.equal(row('deepseek-v4.1-flash').valuation.versions[v2].lowPicoUsd,2259000);
-  assert.equal(row('deepseek-v4.1-flash').valuation.versions[v2].highPicoUsd,4518000);
+  assert.equal(row('mimo-v2.5').valuation.versions[v3].lowPicoUsd,1548400,'0.0028 cache read is exact');
+  assert.equal(row('mimo-v2.5-pro').valuation.versions[v3].lowPicoUsd,19183500,'0.0145 cache read is exact');
+  assert.equal(row('glm-5.3-flash').valuation.versions[v3].lowPicoUsd,0,'explicit zero is priced');
+  assert.equal(row('glm-5.3-flash').valuation.versions[v3].pricedRequests,1);
+  for (const [id, low] of [['deepseek-v4-pro',8646000],['deepseek-v4.1-flash',2259000]]) {
+    const cell=row(id).valuation.versions[v3];
+    assert.equal(cell.lowPicoUsd,cell.highPicoUsd,'new DeepSeek valuation is a selected amount');
+    assert.ok([low,low*2].includes(cell.lowPicoUsd));
+  }
   for(const id of ['qwen3.8-max','qwen3.7-max','qwen3.7-plus','minimax-m3','muse-spark-1.3-contributor','deepseek-v4-flash','glm-5.2']){
     assert.deepEqual(row(id).valuation.versions,{},`${id} must not invent missing evidence or inherit a nearby rate`);
     assert.equal(row(id).usage.requests,1);
   }
   assert.equal(row('mimo-v2.5').providers.find(p=>p.id==='first').usage.requests,0,'failed retry has no usage');
-  assert.equal(row('mimo-v2.5').providers.find(p=>p.id==='second').valuation.versions[v2].pricedRequests,1);
-  assert.equal(row('mimo-v2.5-pro').providers.find(p=>p.id===null).valuation.versions[v2].pricedRequests,1,'mismatched final provider remains unknown');
+  assert.equal(row('mimo-v2.5').providers.find(p=>p.id==='second').valuation.versions[v3].pricedRequests,1);
+  assert.equal(row('mimo-v2.5-pro').providers.find(p=>p.id===null).valuation.versions[v3].pricedRequests,1,'mismatched final provider remains unknown');
   assert.equal(row('mimo-v2.5-pro').providers.find(p=>p.id==='second').usage.requests,0);
   assert.equal(row('minimax-m3').usage.inputKnownRequests,1);
   assert.equal(row('minimax-m3').usage.cacheKnownRequests,0,'missing cached read remains unknown');
@@ -1647,38 +1650,46 @@ test('current 12-model reference snapshot prices only evidenced final usage and 
     'cline-pass/deepseek-v4-pro':{tier:'peak/off-peak range',rates:[[660,1980,22],[1320,3960,44]]},
   }};
   meta.statistics.priceVersions[v1]=historical;
+  meta.statistics.priceVersions[v2]={...structuredClone(meta.statistics.priceVersions[v3]),version:v2,collectedAt:'2026-09-25'};
+  delete meta.statistics.priceVersions[v2].selection;
   const bucket=meta.statistics.minuteBuckets.at(-1);
   bucket.valuation['cline-pass/kimi-k3'].second[v1]={pricedRequests:1,lowPicoUsd:51900000,highPicoUsd:51900000,overflowFields:[]};
+  bucket.valuation['cline-pass/deepseek-v4-pro'].second[v2]={pricedRequests:1,lowPicoUsd:8646000,highPicoUsd:17292000,overflowFields:[]};
   bucket.valuation['cline-pass/deepseek-v4-flash']={'':{[v1]:{pricedRequests:1,lowPicoUsd:2881000,highPicoUsd:5762000,overflowFields:[]}}};
   const bytes=Buffer.from(JSON.stringify(meta));fs.writeFileSync(metaPath,bytes);
   running=await startSwitcher(null,dir);stats=await get();
   assert.equal(stats.models.find(m=>m.id==='cline-pass/kimi-k3').providerStatistics.valuation.versions[v1].lowPicoUsd,51900000,'v1 frozen amount survives v2 restart');
   assert.deepEqual(stats.models.find(m=>m.id==='cline-pass/deepseek-v4-flash').providerStatistics.valuation.versions[v1],bucket.valuation['cline-pass/deepseek-v4-flash'][''][v1],'retired Flash keeps only its historical interval');
-  assert.equal(stats.models.find(m=>m.id==='cline-pass/mimo-v2.5').providerStatistics.valuation.versions[v2].lowPicoUsd,1548400);
+  assert.equal(stats.models.find(m=>m.id==='cline-pass/mimo-v2.5').providerStatistics.valuation.versions[v3].lowPicoUsd,1548400);
+  const mixed=stats.models.find(m=>m.id==='cline-pass/deepseek-v4-pro').providerStatistics.valuation.versions;
+  assert.equal(mixed[v2].highPicoUsd-mixed[v2].lowPicoUsd,8646000,'historical interval remains frozen beside selected v3 amount');
+  assert.equal(mixed[v3].lowPicoUsd,mixed[v3].highPicoUsd);
   assert.equal(stats.models.length,before.length);
   assert.equal(stats.referencePrices.versions[v1].models['cline-pass/kimi-k3'].rates[0][0],3000);
   assert.equal(stats.referencePrices.versions[v2].models['cline-pass/mimo-v2.5'].rates[0][2],28);
   await stop(running.child);running.child=null;
   const countBoundary=JSON.parse(fs.readFileSync(metaPath));
-  countBoundary.statistics.minuteBuckets.at(-1).valuation['cline-pass/kimi-k3'].second[v2].pricedRequests=Number.MAX_SAFE_INTEGER;
+  countBoundary.statistics.minuteBuckets.at(-1).valuation['cline-pass/kimi-k3'].second[v3].pricedRequests=Number.MAX_SAFE_INTEGER;
   fs.writeFileSync(metaPath,JSON.stringify(countBoundary));running=await startSwitcher(null,dir);
   assert.equal((await rawJson(port,'/v1/chat/completions',{model:'cline-pass/kimi-k3',messages:[]})).status,200);
-  stats=await get();const countOverflow=stats.models.find(m=>m.id==='cline-pass/kimi-k3').providerStatistics.valuation.versions[v2];
+  stats=await get();const countOverflow=stats.models.find(m=>m.id==='cline-pass/kimi-k3').providerStatistics.valuation.versions[v3];
   assert.equal(countOverflow.pricedRequests,null);assert.deepEqual(countOverflow.overflowFields,['pricedRequests'],'priced request overflow must not wrap to a complete count');
   assert.equal(stats.models.find(m=>m.id==='cline-pass/kimi-k3').providerStatistics.valuation.versions[v1].lowPicoUsd,51900000,'v1 frozen amount is unaffected');
   await stop(running.child);running.child=null;
-  const corrupt=JSON.parse(fs.readFileSync(metaPath));corrupt.statistics.priceVersions[v2].models['cline-pass/mimo-v2.5'].rates[0][2]=29;
+  const corrupt=JSON.parse(fs.readFileSync(metaPath));corrupt.statistics.priceVersions[v3].models['cline-pass/mimo-v2.5'].rates[0][2]=29;
   const invalid=Buffer.from(JSON.stringify(corrupt));fs.writeFileSync(metaPath,invalid);
   const failed=spawn(process.execPath,['server.js'],{cwd:path.resolve('.'),env:{...process.env,DATA_DIR:dir,BIND_HOST:'127.0.0.1'},stdio:['ignore','pipe','pipe']});
   let stderr='';failed.stderr.on('data',c=>{stderr+=c;});assert.notEqual(await new Promise(resolve=>failed.once('exit',resolve)),0);
   assert.match(stderr,/invalid current reference price snapshot/);assert.deepEqual(fs.readFileSync(metaPath),invalid);
   for(const mutate of [
-    m=>{m.statistics.priceVersions[v2].rateScale=1000;},
-    m=>{m.statistics.priceVersions[v2].models['cline-pass/mimo-v2.5'].rates[0][0]=null;},
-    m=>{m.statistics.priceVersions[v2].models['cline-pass/mimo-v2.5'].source='https://example.invalid/';},
+    m=>{m.statistics.priceVersions[v3].rateScale=1000;},
+    m=>{m.statistics.priceVersions[v3].models['cline-pass/mimo-v2.5'].rates[0][0]=null;},
+    m=>{m.statistics.priceVersions[v3].models['cline-pass/mimo-v2.5'].source='https://example.invalid/';},
+    m=>{m.statistics.priceVersions[v3].selection='untrusted-rule';},
+    m=>{m.statistics.priceVersions[v2].models['cline-pass/mimo-v2.5'].rates[0][0]=1;},
     m=>{m.statistics.priceVersions[v1].rateScale=10000;},
     m=>{m.statistics.priceVersions[v1].models['cline-pass/kimi-k3'].rates[0][0]=30000;},
-    m=>{m.statistics.priceVersions[v2].models.__proto__=null;m.statistics.priceVersions[v2].models['__proto__']={tier:'single',rates:[[0,0,0,null]],source:cline};},
+    m=>{m.statistics.priceVersions[v3].models.__proto__=null;m.statistics.priceVersions[v3].models['__proto__']={tier:'single',rates:[[0,0,0,null]],source:cline};},
   ]){
     const bad=structuredClone(meta);mutate(bad);const original=Buffer.from(JSON.stringify(bad));fs.writeFileSync(metaPath,original);
     const child=spawn(process.execPath,['server.js'],{cwd:path.resolve('.'),env:{...process.env,DATA_DIR:dir,BIND_HOST:'127.0.0.1'},stdio:['ignore','pipe','pipe']});
@@ -1727,11 +1738,11 @@ test('v4 statistics migrate without backfill, provider usage loss and money over
   assert.equal(persisted.statistics.recentCoverage.droppedValuationMinuteCells,1);
   assert.equal(stats.models.find(row=>row.id===models[0]).providerStatistics.coverage.complete,false);
   assert.equal(stats.models.find(row=>row.id===models[0]).providerStatistics.valuation.complete,false);
-  const overflow=stats.models.find(row=>row.id===models[1]).providerStatistics.valuation.versions['clinepass-2026-09-25-v2'];
+  const overflow=stats.models.find(row=>row.id===models[1]).providerStatistics.valuation.versions['clinepass-2026-09-29-v3'];
   assert.equal(overflow.lowPicoUsd,null);assert.deepEqual(overflow.overflowFields,['lowPicoUsd','highPicoUsd']);assert.equal(overflow.pricedRequests,1);
   await stop(running.child);running.child=null;
-  const capped=JSON.parse(fs.readFileSync(metaPath)),current='clinepass-2026-09-25-v2',cell=capped.statistics.minuteBuckets.at(-1).valuation['cline-pass/glm-5.3'].second;
-  for(let i=1;i<=8;i++){const version=`clinepass-historical-${i}`;capped.statistics.priceVersions[version]={...structuredClone(capped.statistics.priceVersions[current]),version,collectedAt:'2026-01-01'};cell[version]=structuredClone(cell[current]);}
+  const capped=JSON.parse(fs.readFileSync(metaPath)),current='clinepass-2026-09-29-v3',cell=capped.statistics.minuteBuckets.at(-1).valuation['cline-pass/glm-5.3'].second;
+  for(let i=1;i<=8;i++){const version=`clinepass-historical-${i}`;capped.statistics.priceVersions[version]={...structuredClone(capped.statistics.priceVersions[current]),version,collectedAt:'2026-01-01'};delete capped.statistics.priceVersions[version].selection;cell[version]=structuredClone(cell[current]);}
   delete capped.statistics.priceVersions[current];delete cell[current];fs.writeFileSync(metaPath,JSON.stringify(capped));
   running=await startSwitcher(null,dir);assert.equal((await rawJson(port,'/v1/chat/completions',{model:models[1],messages:[]})).status,200);
   const cappedStats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json(),after=JSON.parse(fs.readFileSync(metaPath));
@@ -2428,6 +2439,70 @@ test('concurrent detailed-root admission rejects only diagnostic capture at its 
   assert.equal(Object.values(settings.health.dropReasons).reduce((a, b) => a + b, 0), 1);
 });
 
+test('legacy false migrates once to sanitized failures; local rejection, opt-out and restart remain truthful', async (t) => {
+  const upstream = http.createServer((req, res) => {
+    req.resume(); req.on('end', () => { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"mock failure"}}'); });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-detail-migration-'));
+  let running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, errorDetailLogging: false,
+    accounts: [{ id: 'a', name: 'A', key: 'local-migration-key', enabled: true, perModel: {} }], knownModels: ['migration'], perModel: {} }, dir);
+  t.after(async () => { if (running) await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  const configPath = path.join(dir, 'config.json');
+  assert.equal(JSON.parse(fs.readFileSync(configPath, 'utf8')).errorDetailMigrationVersion, 1);
+  const settings = async () => (await (await fetch(`http://127.0.0.1:${port}/api/logs/settings`)).json());
+  assert.equal((await settings()).errorDetailLogging, true);
+  assert.equal((await settings()).rawBodyLogging, false);
+  const local = await rawJson(port, '/v1/chat/completions', { messages: [{ role: 'user', content: 'local private message' }] });
+  assert.equal(local.status, 400);
+  const localDetail = await waitUntil(async () => { const result = await (await fetch(`http://127.0.0.1:${port}/api/logs/details/${local.headers['x-cline-request-id']}`)).json(); return result.request && result; });
+  assert.equal(localDetail.request.captureState, 'no-upstream-attempt');
+  assert.equal(localDetail.attempts.length, 0); assert.ok(localDetail.request.requestBody);
+  const tooLarge = await pausedOversizedJson(port, '/v1/chat/completions');
+  assert.equal(tooLarge.status, 413);
+  const omitted = await waitUntil(async () => { const result = await (await fetch(`http://127.0.0.1:${port}/api/logs/details/${tooLarge.headers['x-cline-request-id']}`)).json(); return result.request && result; });
+  assert.equal(omitted.request.captureState, 'no-upstream-attempt'); assert.equal(omitted.request.state, 'incomplete');
+  assert.equal(omitted.request.requestBody, undefined); assert.equal(omitted.attempts.length, 0);
+  assert.deepEqual(omitted.request.headers['[OMITTED: incomplete credential discovery]'], '[OMITTED: incomplete credential discovery]');
+  const failure = await rawJson(port, '/v1/chat/completions', { model: 'migration', echo: 'hidden-ingress-credential', api_key: 'hidden-ingress-credential', messages: [{ role: 'user', content: 'ingress private prompt' }] }, { 'X-Ordinary': 'normal header', 'X-Credential': 'Bearer api_key=hidden-ingress-credential' });
+  assert.equal(failure.status, 500);
+  const detail = await waitUntil(async () => { const result = await (await fetch(`http://127.0.0.1:${port}/api/logs/details/${failure.headers['x-cline-request-id']}`)).json(); return result.request && result; });
+  assert.equal(detail.request.profile, 'error'); assert.equal(detail.request.headers['x-ordinary'], 'normal header');
+  assert.doesNotMatch(JSON.stringify(detail), /hidden-ingress-credential|local-migration-key/);
+  assert.ok(detail.request.requestBody); assert.ok(detail.attempts[0].requestBody); assert.ok(detail.attempts[0].responseBody);
+  const getBody = async (bodyId) => (await (await fetch(`http://127.0.0.1:${port}/api/logs/details/${failure.headers['x-cline-request-id']}/bodies/${bodyId}`)).text());
+  assert.match(await getBody(detail.request.requestBody), /ingress private prompt/);
+  assert.doesNotMatch(await getBody(detail.attempts[0].requestBody), /hidden-ingress-credential|local-migration-key/);
+  assert.match(await getBody(detail.attempts[0].requestBody), /"model": "migration"/);
+  const detailFiles = (folder) => fs.readdirSync(folder, { withFileTypes: true }).map((entry) => entry.isDirectory() ? detailFiles(path.join(folder, entry.name)) : fs.readFileSync(path.join(folder, entry.name), 'utf8')).join('');
+  assert.doesNotMatch(detailFiles(path.join(dir, 'detailed-logs')), /hidden-ingress-credential|local-migration-key/);
+  const ordinary = fs.readdirSync(path.join(dir, 'logs')).map((name) => fs.readFileSync(path.join(dir, 'logs', name), 'utf8')).join('') + fs.readFileSync(path.join(dir, 'metadata.json'), 'utf8');
+  assert.doesNotMatch(ordinary, /ingress private prompt|local private message|local-migration-key|hidden-ingress-credential/);
+  assert.equal((await rawJson(port, '/api/logs/settings', { errorDetailLogging: false })).status, 200);
+  await stop(running.child); running = await startSwitcher(null, dir);
+  assert.equal((await settings()).errorDetailLogging, false);
+  const later = await rawJson(port, '/v1/chat/completions', { model: 'migration', messages: [] });
+  assert.equal(later.status, 500);
+  assert.equal((await (await fetch(`http://127.0.0.1:${port}/api/logs/details/${later.headers['x-cline-request-id']}`)).json()).error.message, 'detailed record unavailable');
+  await stop(running.child); running = null;
+  const invalid = JSON.parse(fs.readFileSync(configPath, 'utf8')); invalid.errorDetailMigrationVersion = 2;
+  const bytes = Buffer.from(JSON.stringify(invalid)); fs.writeFileSync(configPath, bytes);
+  const child = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: { ...process.env, DATA_DIR: dir, BIND_HOST: '127.0.0.1' }, stdio: 'ignore' });
+  const exit = await new Promise((resolve) => child.once('exit', resolve));
+  assert.notEqual(exit, 0); assert.deepEqual(fs.readFileSync(configPath), bytes);
+  const malformed = Buffer.from('{"errorDetailLogging":false,'); fs.writeFileSync(configPath, malformed);
+  const invalidJson = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: { ...process.env, DATA_DIR: dir, BIND_HOST: '127.0.0.1' }, stdio: 'ignore' });
+  assert.notEqual(await new Promise((resolve) => invalidJson.once('exit', resolve)), 0);
+  assert.deepEqual(fs.readFileSync(configPath), malformed);
+  const freshPort = await unusedPort();
+  const fresh = await startSwitcher({ port: freshPort, accounts: [] });
+  try {
+    const initial = await (await fetch(`http://127.0.0.1:${freshPort}/api/logs/settings`)).json();
+    assert.equal(initial.errorDetailLogging, true); assert.equal(initial.detailedLogging, false); assert.equal(initial.rawBodyLogging, false);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(fresh.dir, 'config.json'), 'utf8')).errorDetailMigrationVersion, 1);
+  } finally { await stop(fresh.child); fs.rmSync(fresh.dir, { recursive: true, force: true }); }
+});
+
 test('detailed logging settings, route matrix, actual-call groups and credential boundaries', async (t) => {
   const seen = [];
   const upstream = http.createServer((req, res) => {
@@ -2445,7 +2520,7 @@ test('detailed logging settings, route matrix, actual-call groups and credential
     });
   });
   const upstreamPort = await listen(upstream), port = await unusedPort();
-  let running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, proxyKey: 'detail-admin-secret', exposeCatalog: true, accounts: [{ id: 'a', name: 'Detail account', key: 'saved-detail-secret', enabled: true, perModel: {} }], knownModels: ['cline-pass/model', 'retry', 'probe'], modelAliases: { alias: 'cline-pass/model' }, perModel: { retry: { upstreams: ['first', 'second'], pinMode: 'strict' } }, accountErrorRules: {} });
+  let running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, proxyKey: 'detail-admin-secret', exposeCatalog: true, errorDetailMigrationVersion: 1, errorDetailLogging: false, accounts: [{ id: 'a', name: 'Detail account', key: 'saved-detail-secret', enabled: true, perModel: {} }], knownModels: ['cline-pass/model', 'retry', 'probe'], modelAliases: { alias: 'cline-pass/model' }, perModel: { retry: { upstreams: ['first', 'second'], pinMode: 'strict' } }, accountErrorRules: {} });
   t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
   const auth = { 'X-Admin-Key': 'detail-admin-secret', Cookie: 'session=incoming-cookie-secret' };
   const get = async (route, method = 'GET') => { const response = await fetch(`http://127.0.0.1:${port}${route}`, { method, headers: auth }); return { response, json: await response.json() }; };
@@ -2562,7 +2637,7 @@ test('error-only detail correlates every real failed chat attempt without copyin
   const upstreamPort = await listen(upstream), port = await unusedPort();
   const config = {
     port, upstreamBase: `http://127.0.0.1:${upstreamPort}`,
-    errorDetailLogging: false,
+    errorDetailLogging: false, errorDetailMigrationVersion: 1,
     accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }, { id: 'b', name: 'B', key: 'key-b', enabled: true, perModel: {} }],
     accountMode: 'single', activeAccount: 0,
     knownModels: ['success', 'retry', 'envelope', 'long', 'sse-error', 'stream-break', 'network', 'replace'],
@@ -2602,8 +2677,9 @@ test('error-only detail correlates every real failed chat attempt without copyin
   for (const [model, response] of responses) {
     const id = response.headers['x-cline-request-id'], row = byRequest.get(id); assert.ok(row, model);
     assert.equal(row.detailProfile, 'error'); assert.match(row.detailCallId, /^[0-9a-f-]{36}$/);
-    const group = await groupFor(id); assert.equal(group.request.profile, 'error'); assert.equal(group.request.requestBody, undefined); assert.equal(group.request.responseBody, undefined); assert.equal(group.request.headers, undefined);
+    const group = await groupFor(id); assert.equal(group.request.profile, 'error'); assert.ok(group.request.requestBody); assert.equal(group.request.responseBody, undefined); assert.ok(group.request.headers);
     const matched = group.attempts.filter((attempt) => attempt.attemptIndex === row.attemptIndex && attempt.callId === row.detailCallId); assert.equal(matched.length, 1, model);
+    assert.ok(matched[0].requestBody); assert.ok(matched[0].headers);
     if (model === 'network') { assert.equal(matched[0].captureState, 'no-response'); assert.equal(matched[0].responseBody, undefined); }
     else if (model === 'stream-break') { assert.equal(group.request.status, 200); assert.equal(group.request.result, 'failed'); assert.equal(matched[0].captureState, 'stream-transport-failed'); assert.equal(matched[0].httpStatus, 200); assert.equal(matched[0].outcomeStatus, 502); assert.equal(matched[0].responseBody, undefined); }
     else { assert.ok(matched[0].responseBody); const text = await (await fetch(`http://127.0.0.1:${port}/api/logs/details/${id}/bodies/${matched[0].responseBody}`)).text(); assert.equal(text.includes(responseSecret), false); }
@@ -2931,7 +3007,7 @@ test('detailed logging fails closed across APIs and files on capped or interrupt
     });
   });
   const upstreamPort = await listen(upstream), port = await unusedPort();
-  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'cap-account-key', enabled: true, perModel: {} }], knownModels: [...fixtures.keys()], perModel: {}, accountErrorRules: {} });
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, errorDetailMigrationVersion: 1, errorDetailLogging: false, accounts: [{ id: 'a', name: 'A', key: 'cap-account-key', enabled: true, perModel: {} }], knownModels: [...fixtures.keys()], perModel: {}, accountErrorRules: {} });
   t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
   const get = (route) => fetch(`http://127.0.0.1:${port}${route}`);
   const responseFor = (model, stream) => new Promise((resolve, reject) => {
@@ -3110,7 +3186,7 @@ fs.renameSync=(a,b)=>{if(b.endsWith('/config.json')&&fs.existsSync(${JSON.string
 fsp.rename=async(a,b)=>{if(b.includes('/detailed-logs/')&&fs.existsSync(${JSON.stringify(detailFault)}))throw Error('MOCK PRIVATE ENOSPC');return rename(a,b);};
 fsp.writeFile=async(a,...args)=>{while(String(a).endsWith('.txt')&&fs.existsSync(${JSON.stringify(slow)}))await new Promise(r=>setTimeout(r,5));return write(a,...args);};`);
   const extra = { NODE_OPTIONS: `--import=${loader}` };
-  let running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, detailedLogging: true, accounts: [{ id: 'a', name: 'A', key: 'fault-secret', enabled: true, headers: { 'X-Hold': 'yes' }, perModel: {} }], knownModels: ['hold'], perModel: {}, accountErrorRules: {} }, dir, extra);
+  let running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, detailedLogging: true, errorDetailMigrationVersion: 1, errorDetailLogging: false, accounts: [{ id: 'a', name: 'A', key: 'fault-secret', enabled: true, headers: { 'X-Hold': 'yes' }, perModel: {} }], knownModels: ['hold'], perModel: {}, accountErrorRules: {} }, dir, extra);
   t.after(async () => { await stop(running.child); for (const res of held) res.destroy(); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
   const pending = rawJson(port, '/v1/chat/completions', { model: 'hold', messages: [] }).catch(() => null);
   await waitUntil(() => held.length > 0);

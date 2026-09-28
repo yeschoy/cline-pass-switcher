@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "复核默认错误采集、安全隔离与脱敏保留"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "复核 Provider 归属、用量计价与未知语义"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "复核详细 UI 渲染与键盘/响应式行为"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "复核跨层契约一致性"}
+{"file": ".trellis/tasks/09-29-diagnostics-channel-peak-pricing/research/current-contract-and-pricing.md", "reason": "独立复核默认采集、Provider 与价格规则证据"}

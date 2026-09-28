@@ -128,7 +128,7 @@ test('low failures retain two detail/RPM attempts, high SSE fallback survives pi
   assert.ok(rows.some((row) => row.quotaRemovalAction === 'waiting-refresh'));
   const group = await waitFor(async () => { const value = await api(`/api/logs/details/${first.id}`); return value.request?.profile === 'error' && value; }, 'error detail publication');
   assert.equal(group.attempts.length, 2, 'successful high response and SSE heartbeat are not copied');
-  assert.equal(group.request.requestBody, undefined);
+  assert.ok(group.request.requestBody, 'sanitized failure details include bounded ingress diagnostics');
   for (const row of rows) {
     const [attempt] = group.attempts.filter((item) => item.attemptIndex === row.attemptIndex && item.callId === row.detailCallId);
     assert.ok(attempt, 'ordinary row matches exactly one native attempt');

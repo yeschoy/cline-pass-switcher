@@ -77,6 +77,21 @@ test('fixed drop reasons reconcile at every store admission edge, saturate and r
   assert.equal(store.health.dropped, Number.MAX_SAFE_INTEGER);
 });
 
+test('sanitized failure manifest keeps only group-owned body references and no downstream response', async (t) => {
+  const store = await setup(t), requestId = randomUUID(), callId = randomUUID(), ts = store.now();
+  const ingressId = randomUUID(), inputId = randomUUID(), outputId = randomUUID();
+  const descriptor = (bodyId) => ({ bodyId, capturedBytes: 2, observedBytes: 2, complete: true, truncated: false, state: 'complete', omittedTailBytes: 0, redacted: true });
+  const group = { request: { requestId, ts, profile: 'error', requestBody: ingressId },
+    attempts: [{ callId, attemptIndex: 0, headers: { authorization: '[REDACTED]' }, requestBody: inputId, responseBody: outputId }],
+    bodies: [ingressId, inputId, outputId].map(descriptor) };
+  assert.equal(store.validate(group, requestId), group);
+  assert.throws(() => store.validate({ ...group, request: { ...group.request, responseBody: randomUUID() } }, requestId), /invalid sanitized error manifest/);
+  assert.throws(() => store.validate({ ...group, attempts: [{ ...group.attempts[0], requestBody: randomUUID() }] }, requestId), /invalid sanitized error manifest/);
+  assert.throws(() => store.validate({ ...group, bodies: [descriptor(ingressId), descriptor(inputId), { ...descriptor(outputId), redacted: false }] }, requestId), /invalid sanitized error manifest/);
+  // Previously published response-only sanitized manifests remain readable.
+  assert.equal(store.validate({ ...group, request: { requestId, ts, profile: 'error' }, attempts: [{ callId, attemptIndex: 0, responseBody: outputId }], bodies: [descriptor(outputId)] }, requestId).attempts.length, 1);
+});
+
 test('late generation and open-root association fences count one reason and release publication', async (t) => {
   const store = await setup(t);
   const open = { requestId: randomUUID(), ts: store.now(), generation: store.generation, method: 'POST', pathname: '/v1/chat/completions' };

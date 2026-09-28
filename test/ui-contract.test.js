@@ -285,7 +285,8 @@ test('detailed logs have independent labelled controls, privacy/retention guidan
   assert.match(html, /<label for="errorDetailLogging"><input id="errorDetailLogging" type="checkbox" disabled/);
   assert.match(html, /<label for="rawBodyLogging"><input id="rawBodyLogging" type="checkbox" disabled/);
   assert.match(html, /id="detailsBodyWarning" role="status" aria-live="polite"/);
-  assert.match(html, /错误详情/); assert.match(html, /查看错误详情/); assert.match(html, /详情不可用（已过期、已清空、被容量边界丢弃或发布失败）/);
+  assert.match(html, /脱敏错误详情默认开启/); assert.match(html, /旧的关闭状态会一次性改为开启/);
+  assert.match(html, /无上游调用的本地拒绝/); assert.match(html, /查看错误详情/); assert.match(html, /详情不可用（已过期、已清空、被容量边界丢弃或发布失败）/);
   assert.match(html, /attemptIndex/); assert.match(html, /detailCallId/);
   assert.match(html, /5 MiB/); assert.match(html, /7 天/); assert.match(html, /1 GiB/); assert.match(html, /35 MiB/); assert.match(html, /48 小时/); assert.match(html, /512 MiB/); assert.match(html, /不提交账号草稿/);
   assert.match(html, /id="detailsStatus" aria-live="polite"/);
@@ -299,6 +300,8 @@ test('detailed logs have independent labelled controls, privacy/retention guidan
   assert.match(detailCode, /DETAIL_DROP_LABELS/);
   assert.match(detailCode, /detailCount\(reasons\[key\]\)/);
   assert.match(detailCode, /detailsMetadata'\)\.textContent=JSON\.stringify/);
+  assert.match(detailCode, /group\.request\.profile==='error'&&body\.bodyId===group\.request\.requestBody/);
+  assert.match(detailCode, /logChainHeaders'\+i\)\.textContent=/);
   assert.match(detailCode, /detailsText'\)\.value=text/);
   assert.match(detailCode, /navigator\.clipboard\.writeText\(text\)/);
 });

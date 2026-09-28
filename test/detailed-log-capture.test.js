@@ -119,6 +119,7 @@ test('error profile retains only failed response diagnostics with caller-owned a
   const before = captureBudget.used, active = DetailRoot.active;
   const root = new DetailRoot(req, res, store, ['account-secret'], { profile: 'error', requestId });
   assert.equal(opened, false); assert.equal(root.input, undefined); assert.equal(root.output, undefined);
+  root.ingressSource = Buffer.from(JSON.stringify({ model: 'client-alias', messages: [{ content: 'client prompt' }], echo: 'ephemeral-secret' }));
   const success = root.attempt({
     token: { attemptIndex: 0, callId: randomUUID() },
     url: 'https://example.test/chat/completions', account: { id: 'a', name: 'A', key: 'account-secret' },
@@ -142,11 +143,17 @@ test('error profile retains only failed response diagnostics with caller-owned a
   assert.equal(failed.requestSource, undefined);
   root.result = 'failed'; root.status = 502; root.finalize();
   assert.equal(group.request.profile, 'error'); assert.equal(group.request.requestId, requestId);
-  assert.equal(group.request.requestBody, undefined); assert.equal(group.request.responseBody, undefined); assert.equal(group.request.headers, undefined);
-  assert.equal(group.attempts.length, 1); assert.equal(group.attempts[0].attemptIndex, 1); assert.equal(group.attempts[0].callId, callId);
+  assert.ok(group.request.requestBody); assert.equal(group.request.responseBody, undefined);
+  assert.equal(group.request.headers.authorization, '[REDACTED]');
+  assert.equal(group.attempts.length, 1);
+  const ingress = group.bodies.find((body) => body.descriptor.bodyId === group.request.requestBody);
+  const outbound = group.bodies.find((body) => body.descriptor.bodyId === group.attempts[0].requestBody);
+  assert.match(ingress.text, /client-alias|client prompt/);
+  assert.match(outbound.text, /"model": "m"/);
+  assert.equal(group.attempts[0].headers.authorization, '[REDACTED]'); assert.equal(group.attempts[0].attemptIndex, 1); assert.equal(group.attempts[0].callId, callId);
   assert.equal(group.attempts[0].httpStatus, 200); assert.equal(group.attempts[0].outcomeStatus, 502); assert.equal(group.attempts[0].captureState, 'response-error');
-  assert.equal(group.bodies.length, 1); assert.equal(group.attempts[0].responseBody, group.bodies[0].descriptor.bodyId);
-  assert.doesNotMatch(JSON.stringify(group), /account-secret|ephemeral-secret|large success prompt/);
+  assert.equal(group.bodies.length, 3); assert.ok(group.bodies.some((body) => body.descriptor.bodyId === group.attempts[0].responseBody));
+  assert.doesNotMatch(JSON.stringify(group), /account-secret|ephemeral-secret|large success prompt|ingress-secret/);
   assert.equal(captureBudget.used, before); assert.equal(DetailRoot.active, active);
 });
 
@@ -187,7 +194,7 @@ test('resource-limited error request discovery fences response echoes group-wide
     root.settleAttempt(attempt, { failed: true, httpStatus: 500, outcomeStatus: 500, responseHeaders: { 'content-type': 'application/json' }, responseBody: JSON.stringify({ echo: 'request-only-secret' }), captureState: 'response-error' });
     root.finalize();
     assert.equal(group.request.state, 'resource-limited');
-    assert.equal(group.bodies[0].descriptor.state, 'resource-limited'); assert.equal(group.bodies[0].text, '');
+    assert.ok(group.bodies.some((body) => body.descriptor.state === 'resource-limited')); assert.equal(group.bodies.every((body) => !body.text.includes('request-only-secret')), true);
     assert.equal(JSON.stringify(group).includes('request-only-secret'), false);
   } finally { captureBudget.release(held); }
 });
@@ -819,7 +826,7 @@ test('error profile counts multiple limited responses once and attempt fence rem
     attempt.output.add('limited'); attempt.output.end();
   }
   root.finalize(); root.finalize();
-  assert.equal(group.request.state, 'resource-limited'); assert.equal(group.bodies.length, 2);
+  assert.equal(group.request.state, 'resource-limited'); assert.equal(group.bodies.length, 4);
   assert.equal(store.health.dropped, 1); assert.equal(store.health.dropReasons.captureBudget, 1);
   assert.equal(Object.values(store.health.dropReasons).reduce((a, b) => a + b, 0), 1);
   const limitedRoot = new DetailRoot(req, res, store, [], { profile: 'error' });

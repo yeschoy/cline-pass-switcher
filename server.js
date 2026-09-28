@@ -56,7 +56,8 @@ const DEFAULT_CONFIG = {
   clientKeys: [],       // additional downstream credentials; legacy secret stays in proxyKey
   publicBaseUrl: '',
   detailedLogging: false,
-  errorDetailLogging: false,
+  errorDetailLogging: true,
+  errorDetailMigrationVersion: 1, // one-time privacy migration; later explicit false persists
   rawBodyLogging: false,
   exposeCatalog: false,    // true 时 /v1/models 合并完整目录模型（默认仅订阅模型）
   upstreamBase: 'https://api.cline.bot/api/v1',
@@ -943,7 +944,7 @@ const LEGACY_REFERENCE_PRICE = Object.freeze({ version: 'clinepass-2026-09-24-v1
 });
 // Current ClinePass reference table (collected by this project, not an official effective date).
 // DeepSeek direct API supplies the off-peak Flash row; neither source proves the billed tier.
-const REFERENCE_PRICE = Object.freeze({ version: 'clinepass-2026-09-25-v2', collectedAt: '2026-09-25', effectiveAt: null,
+const PREVIOUS_REFERENCE_PRICE = Object.freeze({ version: 'clinepass-2026-09-25-v2', collectedAt: '2026-09-25', effectiveAt: null,
   source: 'https://docs.cline.bot/getting-started/clinepass', currency: 'USD', rateScale: 10000,
   models: {
     'cline-pass/glm-5.3': { tier: 'single', rates: [[14000,44000,2600,null]], source: 'https://docs.cline.bot/getting-started/clinepass' },
@@ -960,6 +961,9 @@ const REFERENCE_PRICE = Object.freeze({ version: 'clinepass-2026-09-25-v2', coll
     'cline-pass/qwen3.7-plus': { tier: 'context-band', rates: [[4000,16000,400,5000],[12000,48000,1200,15000]], source: 'https://docs.cline.bot/getting-started/clinepass' },
   },
 });
+// Same published rates, but a new frozen calculation contract. Historical v2
+// interval cells remain intervals; only future successes use the terminal UTC tier.
+const REFERENCE_PRICE = Object.freeze({ ...PREVIOUS_REFERENCE_PRICE, version: 'clinepass-2026-09-29-v3', collectedAt: '2026-09-29', selection: 'terminal-utc-weekdays-no-holidays' });
 const STATISTICS_VERSION = 5;
 const MAX_USAGE_MINUTE_CELLS = process.env.NODE_ENV === 'test' ? Math.max(1, Number(process.env.CLINE_PASS_TEST_USAGE_CELL_LIMIT) || 50000) : 50000;
 const MAX_VALUATION_MINUTE_CELLS = process.env.NODE_ENV === 'test' ? Math.max(1, Number(process.env.CLINE_PASS_TEST_VALUATION_CELL_LIMIT) || 50000) : 50000;
@@ -980,16 +984,22 @@ function validateValuation(value) {
 }
 function validatePriceSnapshot(snapshot) {
   const v2 = snapshot && Object.hasOwn(snapshot, 'rateScale');
-  if (!isPlainObject(snapshot) || Object.keys(snapshot).sort().join(',') !== (v2 ? 'collectedAt,currency,effectiveAt,models,rateScale,source,version' : 'collectedAt,currency,effectiveAt,models,source,version') || !validPriceVersion(snapshot.version) || !/^\d{4}-\d{2}-\d{2}$/.test(snapshot.collectedAt) || snapshot.effectiveAt !== null || snapshot.source !== LEGACY_REFERENCE_PRICE.source || snapshot.currency !== 'USD' || (v2 && snapshot.rateScale !== 10000) || !isPlainObject(snapshot.models) || Object.keys(snapshot.models).length > 16) throw new Error('invalid statistics price snapshot');
+  const selected = snapshot && Object.hasOwn(snapshot, 'selection');
+  if (!isPlainObject(snapshot) || Object.keys(snapshot).sort().join(',') !== (selected ? 'collectedAt,currency,effectiveAt,models,rateScale,selection,source,version' : v2 ? 'collectedAt,currency,effectiveAt,models,rateScale,source,version' : 'collectedAt,currency,effectiveAt,models,source,version') || !validPriceVersion(snapshot.version) || !/^\d{4}-\d{2}-\d{2}$/.test(snapshot.collectedAt) || snapshot.effectiveAt !== null || snapshot.source !== LEGACY_REFERENCE_PRICE.source || snapshot.currency !== 'USD' || (v2 && snapshot.rateScale !== 10000) || (selected && (snapshot.version !== REFERENCE_PRICE.version || snapshot.selection !== REFERENCE_PRICE.selection)) || !isPlainObject(snapshot.models) || Object.keys(snapshot.models).length > 16) throw new Error('invalid statistics price snapshot');
   for (const [id, price] of Object.entries(snapshot.models)) {
     if (!/^cline-pass\/[a-z0-9._-]{1,200}$/.test(id) || !isPlainObject(price) || Object.keys(price).sort().join(',') !== (v2 ? 'rates,source,tier' : 'rates,tier') || !['single','peak/off-peak range',...(v2 ? ['context-band'] : [])].includes(price.tier) || (v2 && ![snapshot.source,'https://api-docs.deepseek.com/quick_start/pricing/'].includes(price.source)) || !Array.isArray(price.rates) || price.rates.length !== (price.tier === 'single' ? 1 : 2) || price.rates.some((row) => !Array.isArray(row) || row.length !== (v2 ? 4 : 3) || row.some((rate,index) => v2 && index === 3 && rate === null ? false : !Number.isSafeInteger(rate) || rate < 0 || rate > 10000000))) throw new Error('invalid statistics price rates');
   }
 }
-function referenceValue(modelId, usage) {
+function referenceValue(modelId, usage, ts) {
   const price = Object.hasOwn(REFERENCE_PRICE.models, modelId) ? REFERENCE_PRICE.models[modelId] : null;
   if (!price || price.tier === 'context-band' || price.rates.some((row) => row[3] !== null) || !usage || ![usage.inputTokens,usage.outputTokens,usage.cachedTokens].every((n) => Number.isSafeInteger(n) && n >= 0) || usage.cachedTokens > usage.inputTokens) return null;
-  const amounts = price.rates.map(([input,output,cached]) => (BigInt(usage.inputTokens - usage.cachedTokens) * BigInt(input) + BigInt(usage.outputTokens) * BigInt(output) + BigInt(usage.cachedTokens) * BigInt(cached)) * 100n);
-  return { lowPicoUsd: amounts[0] <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(amounts[0]) : null, highPicoUsd: amounts.at(-1) <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(amounts.at(-1)) : null };
+  // UTC weekday windows are [01:00,04:00) and [06:00,10:00); holidays are deliberately ignored.
+  const date = new Date(ts), day = date.getUTCDay(), hour = date.getUTCHours();
+  const peak = day >= 1 && day <= 5 && (hour >= 1 && hour < 4 || hour >= 6 && hour < 10);
+  const [input, output, cached] = price.rates[price.tier === 'peak/off-peak range' && peak ? 1 : 0];
+  const amount = (BigInt(usage.inputTokens - usage.cachedTokens) * BigInt(input) + BigInt(usage.outputTokens) * BigInt(output) + BigInt(usage.cachedTokens) * BigInt(cached)) * 100n;
+  const fixed = amount <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(amount) : null;
+  return { lowPicoUsd: fixed, highPicoUsd: fixed };
 }
 const MAX_ACCOUNT_MINUTE_CELLS = process.env.NODE_ENV === 'test' ? Math.max(1, Number(process.env.CLINE_PASS_TEST_ACCOUNT_MINUTE_CELL_LIMIT) || 50000) : 50000;
 const MAX_MODEL_MINUTE_CELLS = process.env.NODE_ENV === 'test' ? Math.max(1, Number(process.env.CLINE_PASS_TEST_MODEL_CELL_LIMIT) || 50000) : 50000;
@@ -1034,7 +1044,7 @@ function validateStatistics(stats) {
       if (!isPlainObject(c[field]) || Object.keys(c[field]).length > MAX_USAGE_MINUTE_CELLS) throw new Error('invalid statistics coverage');
       for (const [id, minute] of Object.entries(c[field])) if (!validStatisticModelId(id) || !Number.isSafeInteger(minute) || minute < 0) throw new Error('invalid statistics coverage');
     }
-    for (const [version, snapshot] of Object.entries(stats.priceVersions)) { if (!validPriceVersion(version) || version !== snapshot?.version) throw new Error('invalid statistics price version'); validatePriceSnapshot(snapshot); if ((version === REFERENCE_PRICE.version && !isDeepStrictEqual(snapshot, REFERENCE_PRICE)) || (version === LEGACY_REFERENCE_PRICE.version && !isDeepStrictEqual(snapshot, LEGACY_REFERENCE_PRICE))) throw new Error('invalid current reference price snapshot'); }
+    for (const [version, snapshot] of Object.entries(stats.priceVersions)) { if (!validPriceVersion(version) || version !== snapshot?.version) throw new Error('invalid statistics price version'); validatePriceSnapshot(snapshot); if ((version === REFERENCE_PRICE.version && !isDeepStrictEqual(snapshot, REFERENCE_PRICE)) || (version === PREVIOUS_REFERENCE_PRICE.version && !isDeepStrictEqual(snapshot, PREVIOUS_REFERENCE_PRICE)) || (version === LEGACY_REFERENCE_PRICE.version && !isDeepStrictEqual(snapshot, LEGACY_REFERENCE_PRICE))) throw new Error('invalid current reference price snapshot'); }
   }
   if (Object.keys(stats.migration).some((key) => !['legacyStatsMigratedAt','legacyRequests','accountLegacyRequests','ambiguousNames','unmappedNames'].includes(key)) || !Number.isSafeInteger(stats.migration.legacyStatsMigratedAt) || stats.migration.legacyStatsMigratedAt < 0 || !Number.isSafeInteger(stats.migration.legacyRequests) || stats.migration.legacyRequests < 0 || !isPlainObject(stats.migration.accountLegacyRequests) || !Number.isSafeInteger(stats.migration.ambiguousNames) || stats.migration.ambiguousNames < 0 || !Number.isSafeInteger(stats.migration.unmappedNames) || stats.migration.unmappedNames < 0) throw new Error('invalid statistics migration');
   for (const [id, requests] of Object.entries(stats.migration.accountLegacyRequests)) if (!/^[A-Za-z0-9_-]{1,100}$/.test(id) || !Number.isSafeInteger(requests) || requests < 0) throw new Error('invalid statistics legacy account');
@@ -1194,6 +1204,12 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   let dirty = false;
   const protection = normalizeQuotaProtection(config.quotaProtection);
   if (JSON.stringify(config.quotaProtection) !== JSON.stringify(protection)) { config.quotaProtection = protection; dirty = true; }
+  if (Object.hasOwn(loadedConfig, 'errorDetailMigrationVersion') && loadedConfig.errorDetailMigrationVersion !== 1) throw new Error('invalid error detail migration version');
+  if (!Object.hasOwn(loadedConfig, 'errorDetailMigrationVersion')) {
+    // This explicitly upgrades legacy false (including intentional opt-outs) once.
+    // Do not commit either field until the existing atomic config save succeeds.
+    config.errorDetailLogging = true; config.errorDetailMigrationVersion = 1; dirty = true;
+  }
   for (const field of ['detailedLogging', 'errorDetailLogging', 'rawBodyLogging']) if (config[field] !== true && config[field] !== false) { config[field] = false; dirty = true; }
   if ((!Array.isArray(config.accounts) || config.accounts.length === 0) && config.apiKey) {
     config.accounts = [{ name: '默认账号', key: config.apiKey, enabled: true }];
@@ -2684,8 +2700,8 @@ function pruneStatistics(now = Date.now()) {
   // Historical price versions are metadata only; retain versions referenced by a cell.
   for (const version of Object.keys(stats.priceVersions)) if (version !== REFERENCE_PRICE.version && !stats.minuteBuckets.some((bucket) => Object.values(bucket.valuation).some((providers) => Object.values(providers).some((versions) => Object.hasOwn(versions,version))))) delete stats.priceVersions[version];
 }
-function addReferenceValuation(bucket, modelId, provider, usage) {
-  const value = referenceValue(modelId, usage);
+function addReferenceValuation(bucket, modelId, provider, usage, ts) {
+  const value = referenceValue(modelId, usage, ts);
   if (!value) return;
   const stats = META.statistics;
   if (!Object.hasOwn(stats.priceVersions, REFERENCE_PRICE.version)) {
@@ -2728,7 +2744,7 @@ function commitStatistics({ ts = Date.now(), modelId = null, finalProvider = nul
       const byModel = statisticCell(bucket.providerUsage,modelId,()=>({}));
       const delta = emptyAggregate(); addCounter(delta,'requests'); addUsage(delta,usage);
       mergeAggregate(aggregateCell(byModel,provider),delta);
-      addReferenceValuation(bucket,modelId,provider,usage);
+      addReferenceValuation(bucket,modelId,provider,usage,ts);
     }
   }
   const currentIds = new Set(config.accounts.map((account) => account.id));
@@ -4414,7 +4430,17 @@ async function handleChat(req, res, clientKeyId) {
   const detail = detailContext.getStore();
   const requestId = detail?.requestId || crypto.randomUUID();
   res.setHeader('X-Cline-Request-Id', requestId);
+  if (detail?.profile === 'error') detail.ingressUncaptured = true;
   const raw = await readBody(req);
+  // A small ingress snapshot holds a reference, not a second copy. Account for
+  // retained bytes under the existing sanitized capture fence; failed requests
+  // alone allocate an encoded diagnostic copy. Unknown input must fail closed.
+  if (detail?.profile === 'error' && raw.length <= MAX_BODY_BYTES) {
+    if (captureBudget.reserve(raw.length, false)) {
+      detail.ingressSource = raw; detail.ingressReservationBytes = raw.length;
+      detail.ingressUncaptured = false;
+    } else detail.ingressLimitReason = 'captureBudget';
+  }
   let body;
   try { body = JSON.parse(raw.toString('utf8')); } catch { return sendJSON(res, 400, { error: { message: 'invalid JSON body' } }); }
   if (detail?.profile === 'full') detail.redactor.learn(body);

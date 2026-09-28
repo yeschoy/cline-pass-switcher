@@ -38,7 +38,7 @@ async function stop(child) {
 
 // The fixture is an old configuration: both stable IDs predate clientKeyId.
 // No production state, live endpoint or operator secret is read by this test.
-test('legacy migration, exclusive same-session routing, v2 final usage and sanitized diagnostics coexist', { timeout: 15000 }, async (t) => {
+test('legacy migration, exclusive same-session routing, v3 final usage and sanitized diagnostics coexist', { timeout: 15000 }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-pricing-key-'));
   const attempts = [];
   const upstream = http.createServer((req, res) => {
@@ -132,8 +132,9 @@ test('legacy migration, exclusive same-session routing, v2 final usage and sanit
   ], 'every real attempt has the correct owner’s upstream credential, not a downstream Bearer');
   const stats = await manage('/api/statistics');
   assert.equal(stats.status, 200);
-  const v2 = 'clinepass-2026-09-25-v2';
-  assert.equal(stats.json.referencePrices.current.version, v2);
+  const v3 = 'clinepass-2026-09-29-v3';
+  assert.equal(stats.json.referencePrices.current.version, v3);
+  assert.equal(stats.json.referencePrices.current.selection, 'terminal-utc-weekdays-no-holidays');
   const byModel = (id) => stats.json.models.find((row) => row.id === id).providerStatistics;
   const mimoStats = byModel(mimo), deepseekStats = byModel(deepseek);
   assert.deepEqual([mimoStats.finalRequests.successes, mimoStats.finalRequests.failures, mimoStats.finalRequests.samples, mimoStats.finalRequests.successRate], [2, 0, 2, 1]);
@@ -144,8 +145,11 @@ test('legacy migration, exclusive same-session routing, v2 final usage and sanit
   assert.equal(firstProvider.usage.requests, 0, 'failed retries have no final usage');
   assert.deepEqual([firstProvider.health.samples, firstProvider.health.degrades, firstProvider.health.successRate], [2, 2, 0]);
   assert.deepEqual([secondProvider.health.samples, secondProvider.health.successes, secondProvider.health.successRate, secondProvider.usage.requests], [2, 2, 1, 2]);
-  assert.deepEqual([mimoStats.valuation.versions[v2].pricedRequests, mimoStats.valuation.versions[v2].lowPicoUsd, mimoStats.valuation.versions[v2].highPicoUsd], [2, 3096800, 3096800]);
-  assert.deepEqual([deepseekStats.valuation.versions[v2].pricedRequests, deepseekStats.valuation.versions[v2].lowPicoUsd, deepseekStats.valuation.versions[v2].highPicoUsd], [1, 2259000, 4518000]);
+  assert.deepEqual([mimoStats.valuation.versions[v3].pricedRequests, mimoStats.valuation.versions[v3].lowPicoUsd, mimoStats.valuation.versions[v3].highPicoUsd], [2, 3096800, 3096800]);
+  const firstValue = deepseekStats.valuation.versions[v3];
+  assert.equal(firstValue.pricedRequests, 1);
+  assert.equal(firstValue.lowPicoUsd, firstValue.highPicoUsd, 'new amount is selected, not an interval');
+  assert.ok([2259000,4518000].includes(firstValue.lowPicoUsd));
   assert.equal(stats.json.recent24h.global.usageRequests, 3);
 
   const rows = await waitFor(async () => {
@@ -210,7 +214,11 @@ test('legacy migration, exclusive same-session routing, v2 final usage and sanit
   const resumedStats = await request(port, '/api/statistics', { cookie: relogin.cookie });
   assert.equal(resumedStats.status, 200);
   const resumedModel = resumedStats.json.models.find((row) => row.id === deepseek).providerStatistics;
-  assert.deepEqual([resumedModel.finalRequests.successes, resumedModel.usage.requests,
-    resumedModel.valuation.versions[v2].pricedRequests, resumedModel.valuation.versions[v2].lowPicoUsd,
-    resumedModel.valuation.versions[v2].highPicoUsd], [2, 2, 2, 4518000, 9036000]);
+  const resumedValue = resumedModel.valuation.versions[v3];
+  assert.equal(resumedModel.finalRequests.successes, 2);
+  assert.equal(resumedModel.usage.requests, 2);
+  assert.equal(resumedValue.pricedRequests, 2);
+  assert.equal(resumedValue.lowPicoUsd, resumedValue.highPicoUsd);
+  assert.ok([firstValue.lowPicoUsd + 2259000,firstValue.lowPicoUsd + 4518000].includes(resumedValue.lowPicoUsd),
+    'a request crossing the UTC tier boundary between restarts keeps both independently frozen amounts');
 });

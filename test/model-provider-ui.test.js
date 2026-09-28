@@ -44,7 +44,7 @@ test('model and channel projections use distinct denominators, attribute only fi
   assert.match(channel,/retry-failed<\/td><td>0\.0% · 1 样本<\/td><td>无数据 \/ 无数据/);
   assert.match(channel,/&lt;script&gt;evil&lt;\/script&gt;<\/td><td>100\.0% · 1 样本/);
   assert.doesNotMatch(channel,/<script>evil<\/script>/);
-  assert.match(channel,/未知渠道<\/td><td>不适用（无具名尝试）<\/td><td>0 \/ 0<\/td><td>0 · 无数据<\/td><td>\$0\.000000000000 – \$0\.000000000000 · 峰谷参考区间 · 部分/);
+  assert.match(channel,/未知渠道<\/td><td>不适用（无具名尝试）<\/td><td>0 \/ 0<\/td><td>0 · 无数据<\/td><td>\$0\.000000000000 · 部分/);
   assert.match(channel,/渠道尝试成功率不适用（无具名尝试）<br>最终成功归属用量请求 1/);
   assert.match(channel,/渠道成功率按具名尝试计算；用量与金额仅按最终成功请求归属/);
   assert.equal(h.el('#modelProvidersBody').innerHTML,'','inactive model rows are removed');
@@ -91,6 +91,17 @@ test('v2 tariffs, frozen v1/v2 amounts and missing/zero remain distinct',async()
   assert.match(zero,/\$0\.000000000000/);assert.match(zero,/input\/output\/cached-read\/cached-write/);
   const inconsistent=h.run(`mpMoney({versions:{[${JSON.stringify(v2)}]:{pricedRequests:2,lowPicoUsd:0,highPicoUsd:0}},complete:false},{[${JSON.stringify(v2)}]:${JSON.stringify(current)}},'cline-pass/deepseek-v4.1-flash',1)`);
   assert.match(inconsistent,/已计 2 请求 · 最终成功请求数 1（覆盖不一致或计数溢出，不代表完整费用）/);
+});
+
+test('selected v3 reference stays single, while mixed historical intervals remain ranges',()=>{
+  const h=harness(),model='cline-pass/deepseek-v4.1-flash',v1='clinepass-2026-09-24-v1',v3='clinepass-2026-09-29-v3';
+  const snapshots={ [v1]:{models:{[model]:{tier:'peak/off-peak range'}}}, [v3]:{selection:'terminal-utc-weekdays-no-holidays',models:{[model]:{tier:'peak/off-peak range'}}} };
+  const selected={versions:{[v3]:{pricedRequests:1,lowPicoUsd:4518000,highPicoUsd:4518000}},complete:true};
+  assert.match(h.run(`mpMoney(${JSON.stringify(selected)},${JSON.stringify(snapshots)},${JSON.stringify(model)},1)`),/\$0\.000004518000 · 已计 1 \/ 1/);
+  assert.doesNotMatch(h.run(`mpMoney(${JSON.stringify(selected)},${JSON.stringify(snapshots)},${JSON.stringify(model)},1)`),/参考区间/);
+  selected.versions[v1]={pricedRequests:1,lowPicoUsd:2259000,highPicoUsd:4518000};
+  assert.match(h.run(`mpMoney(${JSON.stringify(selected)},${JSON.stringify(snapshots)},${JSON.stringify(model)},2)`),/\$0\.000006777000 – \$0\.000009036000 · 峰谷参考区间/);
+  assert.match(html,/不处理中国法定节假日/);
 });
 
 test('compact price is partial when final or model coverage is incomplete despite complete valuation',async()=>{

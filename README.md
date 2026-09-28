@@ -90,7 +90,7 @@ location / {
 
 ### 管理员首次初始化、升级及回滚
 
-在受信环境中生成**独立**随机初始化码（至少 16 字符），通过仓库外权限 0600 的私有环境文件/secret 注入 `CLINE_PASS_ADMIN_INIT_CODE`，并设置 `CLINE_PASS_ADMIN_BOOTSTRAP=1`。首次启动将当前**生效**的 `PROXY_KEY`（含环境覆盖值）作为初始管理员密码的哈希写入 `DATA_DIR/admin-auth.json`（新文件 0600）。客户端 key 为空时必须另配非空 `CLINE_PASS_ADMIN_INITIAL_PASSWORD`；空字符串永不能登录。浏览器首次远程访问须同时提交初始密码与独立初始化码，立即设定至少 12 字符的新管理员密码；此之前其他管理 API 均 401。完成后从运行环境移除初始化码、初始密码与启动标志并重启，已有管理员状态不受重启或客户端密钥轮换影响。管理员状态缺失或尚未完成首次改密期间，即使旧配置保留详细日志开关也不会捕获详细内容；完成改密后才恢复既有设置，迁移前请检查并按需关闭。不要把一次性码交给只持有客户端 key 的使用者。初始化和后续密码都不存浏览器 localStorage；旧 `cps_key` 被删除，不能迁移为管理身份。
+在受信环境中生成**独立**随机初始化码（至少 16 字符），通过仓库外权限 0600 的私有环境文件/secret 注入 `CLINE_PASS_ADMIN_INIT_CODE`，并设置 `CLINE_PASS_ADMIN_BOOTSTRAP=1`。首次启动将当前**生效**的 `PROXY_KEY`（含环境覆盖值）作为初始管理员密码的哈希写入 `DATA_DIR/admin-auth.json`（新文件 0600）。客户端 key 为空时必须另配非空 `CLINE_PASS_ADMIN_INITIAL_PASSWORD`；空字符串永不能登录。浏览器首次远程访问须同时提交初始密码与独立初始化码，立即设定至少 12 字符的新管理员密码；此之前其他管理 API 均 401。完成后从运行环境移除初始化码、初始密码与启动标志并重启，已有管理员状态不受重启或客户端密钥轮换影响。管理员状态缺失或尚未完成首次改密期间，即使配置启用错误详情也不会捕获详细内容；完成改密后按配置生效。升级到默认错误详情版本会把旧 `errorDetailLogging:false`（包括曾主动关闭）一次性改为开启；上线前须检查隐私、备份与访问权限，上线后可再次关闭并跨重启保持。不要把一次性码交给只持有客户端 key 的使用者。初始化和后续密码都不存浏览器 localStorage；旧 `cps_key` 被删除，不能迁移为管理身份。
 
 管理脚本必须改用 `POST /api/auth/login` 获取 `HttpOnly; SameSite=Strict` Cookie 和响应中的 CSRF token；非 GET 管理请求带 `X-CSRF-Token`。`GET /api/auth/session` 可在同一会话取 token；`POST /api/auth/logout`（JSON `{}`、CSRF）吊销单个会话；`POST /api/auth/password`（`currentPassword`/`newPassword`、CSRF）保存并吊销所有会话。会话最多 8 小时，重启也吊销；密码和会话只在受信反代（公网 HTTPS Origin、覆盖的 TLS Header 和独立反代 token 均匹配）或本机 loopback HTTP 受理。重启时如生效 `PROXY_KEY`（包括环境覆盖）等于已设的管理员密码，服务会拒绝启动；应在隔离状态下改正客户端 key，再启动。`GET /api/meta` 公开；`/v1/models`、`/api/v1/models`、`/models` 与聊天别名仅认客户端 key（为空时延续开放模型代理）；`/api/*` 其余端点仅认管理员会话。旧 `Authorization`/`X-Admin-Key` 不再授权管理 API。请先验证首次改密、管理读写与脚本改造，再开放详细日志。
 
@@ -161,7 +161,7 @@ location / {
 | `clientKeys` | 仅额外密钥的私有数组 `[{ id, name, key }]`，不重复存 Legacy；`id` 为稳定归属 ID，`key` 为明文私有凭据，不会出现在普通列表、公开 metadata 或日志中。最多 16 个，勿把真实或生成密钥放入示例/仓库；当前存储并不加密 |
 | `publicBaseUrl` | 公网代理地址，也是管理员远程 HTTPS Origin 校验值（应与浏览器域名一致） |
 | `detailedLogging` | 默认 `false`；完整详细捕获，也可在“详细日志”页面即时保存 |
-| `errorDetailLogging` | 默认 `false`；仅捕获真实失败聊天 attempt 的详情；完整模式同时开启时优先 |
+| `errorDetailLogging` | 默认 `true`；管理员初始化后自动捕获脱敏聊天失败详情；旧 `false` 首次升级也会改为 `true`，之后可显式关闭 |
 | `rawBodyLogging` | 默认 `false`；独立显式选择新详情正文未脱敏（必须另行启用完整/错误详情；需已完成管理员首次改密）。风险及备份前置条件见下文 |
 | `exposeCatalog` | `true` 时代理的 `/models`、`/v1/models`、`/api/v1/models` 会合并目录模型；上游目录只用该客户端归属的合格账号抓取，空池不会用其他客户端账号或合成回退。静态已知模型/别名 ID 仍可全局可见；默认 `false` 不抓取目录 |
 | `knownModels` | 订阅模型清单（控制台主表） |
@@ -257,7 +257,7 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 
 网页顶层“详细日志”右侧有只读 **模型和渠道** 页面（最近 1440 分钟）。模型成功率是最终成功请求 / 最终成功与失败请求，不计取消；渠道成功率是具名真实 attempt 成功 /（成功 + 降级），不是请求成功率。仅最终成功请求的明确 usage 计入 Token；最终成功的具名 attempt 与上游报告的实际 Provider 一致才归属该渠道，否则归“未知渠道”；失败重试无 Token。已知 0 不等于缺失；缓存 Token 占比和缓存命中请求率分母分别为明确配对的 input Token 与明确缓存字段的请求。迁移前历史不反填渠道数据，窗口未覆盖、分钟单元丢失或金额溢出均标注不完整/不可计算。
 
-页面金额为 **参考消费等值（USD），非订阅实际扣费**，与上文按社区 `$50 × 月剩余百分比` 独立估计的月参考额度完全不同；模型消费不会扣减该额度。当前冻结版本 `clinepass-2026-09-25-v2` 采集自 [ClinePass 参考价格表](https://docs.cline.bot/getting-started/clinepass)（12 个精确模型 ID，USD / 百万 Token），DeepSeek V4 Pro / V4.1 Flash 的峰谷完整费率参考[用户指定的 DeepSeek 直连 API 价格](https://api-docs.deepseek.com/quick_start/pricing/)；ClinePass 页面只列 V4.1 Flash 高峰一行。价格明细在页面展开后展示输入/输出/缓存读/缓存写、来源、档位和内部版本。采集日**不是官方生效日期**，官方生效日期未知。峰谷因中国法定节假日及适用档位未知仅显示参考区间，直连 API 价格不等于订阅实扣；旧 `clinepass-2026-09-24-v1` 四模型的已计金额保留原版本，不将旧 `cline-pass/deepseek-v4-flash` 自动当 V4.1 Flash。只有最终成功请求的明确、非负、一致的 input/output/cached-read 才按 `(input−cachedRead)×inputPrice + cachedRead×readPrice + output×outputPrice` / 1,000,000 计入；Qwen 的缓存写计数或上下文档位缺证据时仅展示单价、不编造全额。已知 0 与未知不同。版本与金额按请求冻结于 `metadata.json` 分钟桶，未来价格不追溯重算；最多保留 8 个价格版本、各 50,000 个渠道用量/估值单元。页面的“已计 X / Y 最终成功请求”及覆盖/溢出标记表示仅已计部分，不是完整账单或实际账号余额。
+页面金额为 **参考消费等值（USD），非订阅实际扣费**，与上文按社区 `$50 × 月剩余百分比` 独立估计的月参考额度完全不同；模型消费不会扣减该额度。当前估值版本 `clinepass-2026-09-29-v3` 沿用冻结的 v2 费率（`clinepass-2026-09-25-v2`），采集自 [ClinePass 参考价格表](https://docs.cline.bot/getting-started/clinepass)（12 个精确模型 ID，USD / 百万 Token），DeepSeek V4 Pro / V4.1 Flash 的峰谷完整费率参考[用户指定的 DeepSeek 直连 API 价格](https://api-docs.deepseek.com/quick_start/pricing/)；ClinePass 页面只列 V4.1 Flash 高峰一行。价格明细在页面展开后展示输入/输出/缓存读/缓存写、来源、档位和内部版本。采集日**不是官方生效日期**，官方生效日期未知。v3 新成功请求按**终态 UTC 时间**择档：周一至周五 01:00–04:00、06:00–10:00（左闭右开）为峰时，其余为谷时；**忽略中国法定节假日**，工作日假日峰时可能估高。旧 v1/v2 已冻结峰谷区间保持不变，历史混合汇总可能仍是区间；本地择档不证明上游实际计费档位，直连 API 价格不等于订阅实扣；旧 `clinepass-2026-09-24-v1` 四模型的已计金额保留原版本，不将旧 `cline-pass/deepseek-v4-flash` 自动当 V4.1 Flash。只有最终成功请求的明确、非负、一致的 input/output/cached-read 才按 `(input−cachedRead)×inputPrice + cachedRead×readPrice + output×outputPrice` / 1,000,000 计入；Qwen 的缓存写计数或上下文档位缺证据时仅展示单价、不编造全额。已知 0 与未知不同。版本与金额按请求冻结于 `metadata.json` 分钟桶，未来价格不追溯重算；最多保留 8 个价格版本、各 50,000 个渠道用量/估值单元。页面的“已计 X / Y 最终成功请求”及覆盖/溢出标记表示仅已计部分，不是完整账单或实际账号余额。v3 快照写入现有 v5 元数据，旧镜像可能无法读取，正式升级前须单独验证备份与回滚兼容性。未知渠道只表示未观察到可信最终 Provider，不能从已选目标或单一成功 attempt 推断网关内部实际渠道。
 
 ### 日志、代理和安全边界
 
@@ -269,13 +269,13 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 
 普通请求日志会保存亲和键类型/置信度、caller/派生上游 key 的安全来源枚举、`provider.order` 是否覆盖 sticky、以及依据最终明确 usage 得出的缓存三态（命中/明确未命中/未知）；Provider cooldown/half-open 动作只作为 bounded attempt 枚举。Provider 选择策略同样只投影有界枚举：`providerPlanSource` 为 `configured`/`discovered`/`auto`（候选来源），`providerMode` 为 `strict`/`preferred`，每次真实 attempt 的 `providerSelection` 为 `strict-first`/`health`/`compat-auto`（`compat-auto` 只属于完全无具名候选的那一次不归因请求）；候选成功率数值、候选表与真实网关顺序不会被记录。请求级重试证据只投影 `retryRuleId`/`retryDecision`（`stop`/`continue`）/`retryMatchedBy`（`status`/`body`），不记录 needle 或匹配片段。它不保存实际 prompt/session/thread key、派生 key、HMAC 指纹、账号 Key、代理 URL/认证值、Header 值、备注、消息正文或敏感上游正文。旧日志缺少字段时显示未知，绝不迁移或猜测。
 
-### 错误详情与完整详细日志（默认关闭）
+### 错误详情（默认开启）与完整详细日志（默认关闭）
 
-进入独立的 **详细日志** 板块，可分别启用 `errorDetailLogging`（仅真实失败的聊天上游 attempt）和 `detailedLogging`（完整捕获）。开关会立即独立保存，无需保存账号配置，也不改变账号、批量并发或原始调度草稿；只有配置写入成功后的新请求使用新模式。两者同时开启时完整模式优先，同一请求不会重复保存。必须先完成独立管理员密码首次改密；客户端 API key（即使为空）无权访问管理 API。
+进入独立的 **详细日志** 板块，可关闭或重新启用默认开启的 `errorDetailLogging`（脱敏聊天失败及无 attempt 的本地拒绝），并单独启用默认关闭的 `detailedLogging`（完整捕获）。升级会**一次性覆盖**旧配置的 `errorDetailLogging:false`（即使此前是主动关闭）；配置记录版本标记 `errorDetailMigrationVersion:1` 后，新关闭状态不会再被自动开启。上线前单独审查管理员访问、私人对话的保存范围、备份和回滚；迁移标记不能随意删除。开关会立即独立保存，无需保存账号配置，也不改变账号、批量并发或原始调度草稿；只有配置写入成功后的新请求使用新模式。两者同时开启时完整模式优先，同一请求不会重复保存。必须先完成独立管理员密码首次改密；客户端 API key（即使为空）无权访问管理 API。
 
-默认脱敏的错误详情模式不保存 ingress/outbound 请求正文、成功响应、完整成功 SSE 或最终客户端正文。它会保存失败 attempt 的脱敏响应 Header，以及已有模型路径已经读取的错误正文；SSE 只保留触发错误的完整事件。收到响应前失败显示 `no-response`，起流后断开显示 `stream-transport-failed` 并保留响应 Header。失败后重试成功或换号成功，先前失败 attempt 仍可通过普通错误行中的 `requestId + attemptIndex + detailCallId` 精确查看。普通 JSONL 仍不保存 Header 值或正文。
+默认脱敏的错误详情在失败后按需保存已读取的客户端入站 Header/正文（≤5 MiB）以及失败上游 attempt 改写后的请求 Header/正文和响应 Header/错误正文；无上游调用的本地拒绝只包含可获得的入站诊断，不伪造上游响应/错误行。超限请求、未读取的请求、容量/脱敏省略可能没有入站正文，未知入站凭据时其他 Header/正文也会为安全而省略。成功 attempt 的响应、完整成功 SSE 和最终客户端正文不保存；成功的请求不会单独发布详情。SSE 失败只保留触发错误的完整事件。收到响应前失败显示 `no-response`，起流后断开显示 `stream-transport-failed` 并保留响应 Header。失败后重试成功或换号成功，先前失败 attempt 仍可通过普通错误行中的 `requestId + attemptIndex + detailCallId` 精确查看。普通 JSONL 仍不保存 Header 值或正文。
 
-- 完整模式可按请求查看原始客户端输入、最终客户端响应及每次真实上游调用；错误模式只列出失败调用。正文按需加载，可复制脱敏文本。聊天 UUID 与普通请求日志一致；真实 native chat 调用拥有稳定的 attempt index 和独立调用 ID。`status` 是提交的 HTTP 状态，`result`（有值时）来自普通聊天终态；写出字节不证明客户端已收到。
+- 完整模式可按请求查看原始客户端输入、最终客户端响应及每次真实上游调用；错误模式仅列出失败的真实上游调用，无上游调用的本地拒绝只在详细日志页保留可用的入站诊断。正文按需加载，可复制脱敏文本。聊天 UUID 与普通请求日志一致；真实 native chat 调用拥有稳定的 attempt index 和独立调用 ID。`status` 是提交的 HTTP 状态，`result`（有值时）来自普通聊天终态；写出字节不证明客户端已收到。
 - 完整模式包含三种聊天别名、控制台测试/探测/渠道校验、账号/代理测试、模型列表及已有的 Responses 501/认证/验证拒绝；错误模式仅适用于三种聊天别名的真实失败上游调用。配置、日志查询、静态文件、后台额度及公开目录补充请求不记录；不捕获网关内部重试或代理/TLS 线缆数据。
 - Header 名称/值、结构化凭据字段、Bearer/Basic、Cookie、URL 认证/凭据查询参数及当前请求已知凭据回显会脱敏，原值不可恢复。普通模型参数与 usage 计数保留。无法识别任意自由文本中的未知秘密；不要把此功能当作通用数据脱敏或备份工具。
 - 每个请求/响应正文独立捕获最多 **5 MiB**，不截断实际流量。保留安全文本/JSON 前缀及完整 SSE 事件；缺失尾部、截断、未读、中断、无效编码或无法安全解释的片段有明确状态。部分 JSON 可能补齐结构后脱敏，因此不是可重放的原始请求。
@@ -300,7 +300,7 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 能。provider/unknown 429 优先采用合法 `Retry-After`，否则从 60 秒开始有界退避；冷却到期后渠道回到原人工位置接受半开请求，成功立即恢复。人工顺序不会被 `ok/degraded/unknown` 标签重排。
 
 **Q：如何确认一次 429 到底换了账号还是换了 provider？**
-先用响应的 `X-Cline-Request-Id` 查询 `/api/logs/requests?requestId=...` 与 `/api/logs/errors?requestId=...`：前者给出账号路径和全部真实 attempts，后者给出每次 `targetProvider/errorScope/scopeEvidence/accountAction`。`X-Cline-Target-Upstream` 只是规划目标，`X-Cline-Actual-Upstream: unknown` 只是未解析到终态 provider，二者都不是切换证据。若仍需区分 Cline 边缘 HTML 429 与内部 provider 限流，可短期启用“错误详情”，再从对应错误行按需查看精确 attempt 的脱敏 Header/正文；排障结束后关闭。
+先用响应的 `X-Cline-Request-Id` 查询 `/api/logs/requests?requestId=...` 与 `/api/logs/errors?requestId=...`：前者给出账号路径和全部真实 attempts，后者给出每次 `targetProvider/errorScope/scopeEvidence/accountAction`。`X-Cline-Target-Upstream` 只是规划目标，`X-Cline-Actual-Upstream: unknown` 只是未解析到终态 provider，二者都不是切换证据。若仍需区分 Cline 边缘 HTML 429 与内部 provider 限流，可从对应错误行按需查看精确 attempt 的脱敏 Header/正文；排障结束后可关闭默认开启的错误详情。
 
 **Q：直接用官方 API 写 `provider.only` 为什么不生效？**
 对规划器管道（走 Vercel AI Gateway 的模型）会被 Cline 网关丢弃，请改用 `providerOptions.gateway`，见上文。

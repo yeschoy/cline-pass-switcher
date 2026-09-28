@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "详细诊断采集/隔离/保留契约"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "错误生命周期、流式取消与失败透传"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "归属、统计版本与参考价格契约"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "配置与元数据迁移安全"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "日志详情与模型渠道页面状态所有权"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "跨层响应、持久化和浏览器数据流"}
+{"file": ".trellis/tasks/09-29-diagnostics-channel-peak-pricing/research/current-contract-and-pricing.md", "reason": "本任务的证据、用户决定及未验证边界"}

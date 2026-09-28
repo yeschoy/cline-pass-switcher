@@ -171,11 +171,11 @@
   <section id="modelProvidersPanel" aria-labelledby="modelProvidersTitle" hidden>
     <div class="card">
       <h2 id="modelProvidersTitle" tabindex="-1">模型和渠道 · 最近 24 小时</h2>
-      <p><b>参考消费等值（USD），非订阅实际扣费或余额</b>；仅按最终成功请求的明确 Token 用量和请求时冻结的模型参考单价计算，不从账号月额度参考剩余（$50 × 月剩余百分比）扣除。</p>
+      <p><b>参考消费等值（USD），非订阅实际扣费或余额</b>；仅按最终成功请求的明确 Token 用量和终态冻结的模型参考单价计算，不从账号月额度参考剩余（$50 × 月剩余百分比）扣除。</p>
       <details><summary>指标口径、覆盖和价格限制</summary><div class="dim" style="font-size:12px;line-height:1.7">
-        <p>请求成功率 = 最终成功 /（最终成功 + 失败），取消不计入；渠道尝试成功率 = 具名真实尝试成功 /（成功 + 降级）。同一请求可有失败重试，但 Token/参考金额仅归属最终成功，不重复计入失败尝试。未知渠道只代表最终成功用量无法唯一归属，不推测尝试率。</p>
+        <p>请求成功率 = 最终成功 /（最终成功 + 失败），取消不计入；渠道尝试成功率 = 具名真实尝试成功 /（成功 + 降级）。同一请求可有失败重试，但 Token/参考金额仅归属最终成功，不重复计入失败尝试。未知渠道只代表未观察到与最后具名成功尝试一致的最终渠道字段；选中的目标渠道不等于网关实际执行渠道，也不推测尝试率。</p>
         <p>模型 Token 可含旧版成功 usage；渠道用量自 v5 起跟踪。各字段仅累计上游明确返回的用量，已知 0 不等于缺失；total 不从 input + output 推算。缓存 Token 占比须有 input/cached-read 配对；命中请求率另以已知缓存请求为分母。迁移、容量丢失和未计价请求可能使覆盖不完整；金额只涵盖已计价请求，不能视为完整账单。</p>
-        <p>DeepSeek V4 Pro / V4.1 Flash 仅显示峰谷参考区间（节假日/适用档位未知）；ClinePass 表仅列 V4.1 Flash 高峰单价，低峰单价取自 DeepSeek 直连官网，其费率不代表 ClinePass 实际扣费。缓存写计数与 Qwen 上下文档位缺失时不推算完整金额。<a href="https://docs.cline.bot/getting-started/clinepass" target="_blank" rel="noopener noreferrer">ClinePass 参考表</a> · <a href="https://api-docs.deepseek.com/quick_start/pricing/" target="_blank" rel="noopener noreferrer">DeepSeek 直连价格</a>；<span id="modelProvidersPrice">本项目价格快照待加载</span>；采集日期非官方生效日期，官方生效时间未知。</p>
+        <p>新成功请求按终态 UTC 周一至周五 01:00–04:00、06:00–10:00（左闭右开）选峰时，其他时段选谷时；不处理中国法定节假日，工作日假日峰时参考值可能偏高。旧价格版本仍保留冻结峰谷参考区间，混合历史区间时汇总仍为区间。ClinePass 表仅列 V4.1 Flash 高峰单价，低峰单价取自 DeepSeek 直连官网；此规则和直连费率均不证明 ClinePass 实际扣费档位。缓存写计数与 Qwen 上下文档位缺失时不推算完整金额。<a href="https://docs.cline.bot/getting-started/clinepass" target="_blank" rel="noopener noreferrer">ClinePass 参考表</a> · <a href="https://api-docs.deepseek.com/quick_start/pricing/" target="_blank" rel="noopener noreferrer">DeepSeek 直连价格</a>；<span id="modelProvidersPrice">本项目价格快照待加载</span>；采集日期非官方生效日期，官方生效时间未知。</p>
       </div></details>
       <details><summary>当前模型参考单价（USD / 百万 Token）与来源</summary><div class="table-wrap" tabindex="0" role="region" aria-label="当前模型参考单价，可横向滚动"><table><thead><tr><th>模型</th><th>档位</th><th>输入 / 输出 / 缓存读 / 缓存写</th><th>来源 / 本项目快照</th></tr></thead><tbody id="modelProvidersTariffs"></tbody></table></div></details>
       <div class="model-provider-nav" role="group" aria-label="模型和渠道视图"><button id="modelProvidersModelTab" type="button" aria-pressed="true" aria-controls="modelProvidersModelView" onclick="selectModelProviderView('model')">模型</button><button id="modelProvidersChannelTab" class="ghost" type="button" aria-pressed="false" aria-controls="modelProvidersChannelView" onclick="selectModelProviderView('channel')">渠道</button></div>
@@ -197,10 +197,10 @@
   <section id="detailsPanel" aria-labelledby="detailsTitle" hidden>
     <div class="card">
       <h2 id="detailsTitle">详细日志</h2>
-      <p class="banner">捕获与原文模式均默认关闭。脱敏模式：错误详情仅保存真实失败上游调用的脱敏响应诊断；完整模式保存客户端请求、上游调用和最终响应；完整模式优先。脱敏正文最多 5 MiB、最长 7 天，保留预算最多 64 MiB。原文开关单独开启而两种捕获均关闭时不会采集；启用捕获后，新详情正文不再脱敏（原文可能包含任何密钥及私人对话），失败详情还会保存失败调用的请求正文；仅所选详情显示有限的安全 Header 名称及结构性值（未知值标为 [REDACTED]）；认证、Cookie、Set-Cookie 的固定名称只显示 [REDACTED]，从不保留其值；任意自定义 Header 与 URL 均不保留，列表仍不含 Header 或正文。原文每段最多 35 MiB，512 MiB 是原文可用时的共享保留预算而非 RSS 上限；原文须另经运行环境内存与运维准入，当前环境可能不可启用。原文由服务持有最长 48 小时，外部备份/复制不会自动清除。两类详情共用 1 GiB 磁盘上限，容量不足可提前淘汰；旧脱敏记录仍可读取。不要在未排除原文备份并演练回滚隔离前于生产开启。</p>
+      <p class="banner">完成独立管理员初始化后，脱敏错误详情默认开启；升级时旧的关闭状态会一次性改为开启，此后手动关闭可保持。它可能保存私人对话，请先检查备份与访问权限。完整捕获与未脱敏原文仍默认关闭。错误详情保存失败时客户端入站、失败上游调用的脱敏请求/响应；无上游调用的本地拒绝只保留可用的入站诊断；不保存成功调用的正文或最终响应；完整模式优先。脱敏正文最多 5 MiB、最长 7 天，保留预算最多 64 MiB。原文开关单独开启而两种捕获均关闭时不会采集；启用捕获后，新详情正文不再脱敏（原文可能包含任何密钥及私人对话），失败详情还会保存失败调用的请求正文；仅所选详情显示有限的安全 Header 名称及结构性值（未知值标为 [REDACTED]）；认证、Cookie、Set-Cookie 的固定名称只显示 [REDACTED]，从不保留其值；任意自定义 Header 与 URL 均不保留，列表仍不含 Header 或正文。原文每段最多 35 MiB，512 MiB 是原文可用时的共享保留预算而非 RSS 上限；原文须另经运行环境内存与运维准入，当前环境可能不可启用。原文由服务持有最长 48 小时，外部备份/复制不会自动清除。两类详情共用 1 GiB 磁盘上限，容量不足可提前淘汰；旧脱敏记录仍可读取。不要在未排除原文备份并演练回滚隔离前于生产开启。</p>
       <p id="detailsAuth" role="status">正在确认认证状态…</p>
       <p id="detailsRawAvailability" role="status" aria-live="polite">正在确认原文模式运行条件…</p>
-      <div class="toolbar"><label for="errorDetailLogging"><input id="errorDetailLogging" type="checkbox" disabled onchange="toggleErrorDetailLogging()"> 启用错误详情（仅失败 attempt）</label><label for="detailedLogging"><input id="detailedLogging" type="checkbox" disabled onchange="toggleDetailedLogging()"> 启用完整详细日志（立即独立保存，不提交账号草稿）</label><label for="rawBodyLogging"><input id="rawBodyLogging" type="checkbox" disabled onchange="toggleRawBodyLogging()"> 新请求正文改为未脱敏原文（高风险，独立保存）</label><button class="ghost" type="button" onclick="loadDetails()">刷新 / 筛选</button><button class="ghost" type="button" onclick="clearDetails()">清空详细日志</button></div>
+      <div class="toolbar"><label for="errorDetailLogging"><input id="errorDetailLogging" type="checkbox" disabled onchange="toggleErrorDetailLogging()"> 脱敏错误详情（默认开启，可关闭）</label><label for="detailedLogging"><input id="detailedLogging" type="checkbox" disabled onchange="toggleDetailedLogging()"> 启用完整详细日志（立即独立保存，不提交账号草稿）</label><label for="rawBodyLogging"><input id="rawBodyLogging" type="checkbox" disabled onchange="toggleRawBodyLogging()"> 新请求正文改为未脱敏原文（高风险，独立保存）</label><button class="ghost" type="button" onclick="loadDetails()">刷新 / 筛选</button><button class="ghost" type="button" onclick="clearDetails()">清空详细日志</button></div>
       <div class="toolbar"><label>请求 ID <input id="detailsRequestId"></label><label>模型 <input id="detailsModel"></label><label>账号 <input id="detailsAccount"></label><label>状态码 <input id="detailsStatusFilter" type="number" min="100" max="599"></label><label>结果 <select id="detailsResult"><option value="">全部</option><option value="success">成功</option><option value="client_cancelled">客户端取消</option><option value="failed">失败</option></select></label><label>开始时间 <input id="detailsFrom" type="datetime-local"></label><label>结束时间 <input id="detailsTo" type="datetime-local"></label></div>
       <p id="detailsStatus" aria-live="polite"></p>
       <p id="detailsDropReasons" aria-live="polite"></p>
@@ -1500,7 +1500,7 @@ function mpHealthCoverage(health){return health?.coverageComplete===true?'24h �
 function mpRate(n,scale){return n===null?'—':Number.isSafeInteger(n)&&n>=0&&scale===10000?(n/10000).toString():Number.isSafeInteger(n)&&n>=0?(n/1000).toString():'?';}
 function mpTariffRows(snapshot){
   const rows=Object.entries(snapshot?.models||{}).map(([id,price])=>{
-    const tier=price.tier==='peak/off-peak range'?'低峰 / 高峰（仅参考区间）':price.tier==='context-band'?'≤256K / >256K（档位未知）':'单档';
+    const tier=price.tier==='peak/off-peak range'?(snapshot.selection==='terminal-utc-weekdays-no-holidays'?'低峰 / 高峰（按终态 UTC 择档参考）':'低峰 / 高峰（历史参考区间）'):price.tier==='context-band'?'≤256K / >256K（档位未知）':'单档';
     const rates=(price.rates||[]).map((row,index)=>`${price.tier==='peak/off-peak range'?(index===0?'低峰：':'高峰：'):price.tier==='context-band'?(index===0?'≤256K：':'>256K：'):''}${Array.isArray(row)?row.map(n=>mpRate(n,snapshot.rateScale)).join(' / '):'费率未知'}`).join('；');
     const reason=price.tier==='context-band'?' · 上下文档位与缓存写计数未知，金额不可计算':price.rates?.some(row=>row[3]!==null&&row[3]!==undefined)?' · 缓存写计数未知，金额不可计算':'';
     return `<tr><th scope="row">${escapeHtml(id)}</th><td>${escapeHtml(tier)}</td><td>${escapeHtml(rates+reason)}</td><td>${escapeHtml(price.source||snapshot.source||'来源未知')} · ${escapeHtml(snapshot.version||'版本未知')} · 采集 ${escapeHtml(snapshot.collectedAt||'未知')} · 官方生效时间未知</td></tr>`;
@@ -1517,7 +1517,7 @@ function mpMoney(v,prices,modelId,successful,compact=false,complete=true){
   const low=entries.reduce((n,[,x])=>n+(Number.isSafeInteger(x.lowPicoUsd)?BigInt(x.lowPicoUsd):0n),0n),high=entries.reduce((n,[,x])=>n+(Number.isSafeInteger(x.highPicoUsd)?BigInt(x.highPicoUsd):0n),0n);
   if(entries.some(([,x])=>x.lowPicoUsd===null||x.highPicoUsd===null))return compact?'不可计算':'不可计算（金钱计数溢出）';
   const format=pico=>`$${(pico/1000000n/1000000n).toString()}.${(pico%1000000000000n).toString().padStart(12,'0')}`;
-  const ranged=entries.some(([id])=>prices[id]?.models?.[modelId]?.tier==='peak/off-peak range');
+  const ranged=low!==high;
   const amount=ranged?`${format(low)} – ${format(high)} · 峰谷参考区间`:format(low);
   if(compact)return `${amount}${v?.complete===true&&complete&&Number.isSafeInteger(successful)&&successful===eligible?'':' · 部分'}`;
   const versions=entries.map(([id])=>{const snapshot=prices[id],rates=snapshot.models?.[modelId]?.rates;return `${id}（采集 ${snapshot.collectedAt}；${modelId}；${Array.isArray(rates)?rates.map(row=>row.map(n=>mpRate(n,snapshot.rateScale)).join('/')).join(' ～ '):'费率未知'} USD / 百万 input/output/cached-read${snapshot.rateScale===10000?'/cached-write':''}；来源 ${snapshot.models?.[modelId]?.source||snapshot.source||'未知'}；官方生效时间未知）`;}).join('、');
@@ -1661,10 +1661,10 @@ async function selectDetail(requestId,expected=null){
   try{const group=await detailJSON('/api/logs/details/'+encodeURIComponent(requestId));if(id!==DETAIL_SELECTION_ID||!detailVisible())return;
     DETAIL_BODY_RAW=['raw-full','raw-error'].includes(group.request?.profile);
     let attempts=group.attempts||[],bodies=group.bodies||[];
-    if(expected){const matches=attempts.filter(attempt=>attempt.attemptIndex===expected.attemptIndex&&attempt.callId===expected.callId);if(matches.length!==1){$('#detailsMetadata').textContent='详情关联校验失败：attemptIndex 与 callId 不一致或不唯一';$('#detailsStatus').textContent='无法安全定位该失败调用';$('#detailsMetadata').focus();return;}const matched=matches[0];attempts=[matched];bodies=bodies.filter(body=>body.bodyId===matched.responseBody||(group.request.profile==='raw-error'&&body.bodyId===matched.requestBody));if(matched.captureState==='no-response')$('#detailsStatus').textContent='未收到上游响应，因此没有响应 Header/正文之外的可读内容';else if(matched.captureState==='stream-transport-failed')$('#detailsStatus').textContent='上游已返回 Header，但起流后传输失败；未复制此前成功 SSE 片段';}
+    if(expected){const matches=attempts.filter(attempt=>attempt.attemptIndex===expected.attemptIndex&&attempt.callId===expected.callId);if(matches.length!==1){$('#detailsMetadata').textContent='详情关联校验失败：attemptIndex 与 callId 不一致或不唯一';$('#detailsStatus').textContent='无法安全定位该失败调用';$('#detailsMetadata').focus();return;}const matched=matches[0];attempts=[matched];bodies=bodies.filter(body=>body.bodyId===matched.responseBody||body.bodyId===matched.requestBody||(group.request.profile==='error'&&body.bodyId===group.request.requestBody));if(matched.captureState==='no-response')$('#detailsStatus').textContent='未收到上游响应；入站/上游请求诊断可能仍可读取';else if(matched.captureState==='stream-transport-failed')$('#detailsStatus').textContent='上游已返回 Header，但起流后传输失败；未复制此前成功 SSE 片段';}
     $('#detailsMetadata').textContent=JSON.stringify({request:group.request,attempts,bodies},null,2);$('#detailsMetadata').focus();
     $('#detailsBodyWarning').textContent=DETAIL_BODY_RAW?'警告：仅所选详情的 Header 为安全投影；正文未脱敏，可能包含密码、密钥及私人对话；只在管理员授权环境按需查看，复制后自行保护。':'此详情正文已脱敏；仍可能含敏感对话。';
-    const labels=new Map([[group.request.requestBody,'客户端请求'],[group.request.responseBody,'最终客户端响应']]);for(const attempt of attempts){const index=Number.isSafeInteger(attempt.attemptIndex)?attempt.attemptIndex+1:'?';labels.set(attempt.requestBody,`调用 ${index} 请求`);labels.set(attempt.responseBody,`调用 ${index} 响应`);}
+    const labels=new Map([[group.request.requestBody,'客户端入站请求'],[group.request.responseBody,'最终客户端响应']]);for(const attempt of attempts){const index=Number.isSafeInteger(attempt.attemptIndex)?attempt.attemptIndex+1:'?';labels.set(attempt.requestBody,`调用 ${index} 请求`);labels.set(attempt.responseBody,`调用 ${index} 响应`);}
     $('#detailsBodies').innerHTML=bodies.map(body=>`<button type="button" class="ghost" onclick="loadDetailBody(${jsArg(requestId)},${jsArg(body.bodyId)},${jsArg(body.state)})">${escapeHtml(labels.get(body.bodyId)||'正文')} · ${escapeHtml(body.state)} · ${escapeHtml(body.capturedBytes)}/${escapeHtml(body.observedBytes)} bytes</button>`).join('');
   }catch(error){if(id===DETAIL_SELECTION_ID&&detailVisible()){$('#detailsMetadata').textContent=expected?'详情不可用（已过期、已清空、被容量边界丢弃或发布失败）':error.message;$('#detailsMetadata').focus();}}
 }
@@ -1712,7 +1712,7 @@ function renderLogChain(group,attempt){
   $('#logChainAttempts').textContent=`本组 ${group.attempts.length} 次原生上游调用：${group.attempts.map(item=>`尝试 ${Number.isSafeInteger(item.attemptIndex)?item.attemptIndex+1:'?'} HTTP ${item.httpStatus??item.status??'未收到'} / 结果 ${item.outcomeStatus??'未知'} · ${item.captureState||'状态未知'}（${item===attempt?'当前选中的失败调用':'仅显示状态，不读取正文'}）`).join(' · ')}`;
   $('#logChainWarning').textContent=raw?'警告：正文为单独授权的未脱敏原文，可能含密钥、密码和私人对话；Header 仅显示安全投影。每段最多采集 35 MiB、最长保留 48 小时且可能提前容量淘汰；点击某一段正文后才会读取，复制后请保护剪贴板。':'此记录是脱敏详情，不是未脱敏原文；未开启独立原文 opt-in 的历史正文无法恢复。Header 不提供原文安全投影。';
   const legs=[
-    ['客户端入站请求',full?group.request:null,'headers','requestBody'],
+    ['客户端入站请求',full||group.request.profile==='error'?group.request:null,'headers','requestBody'],
     [`上游调用 ${index} 请求（选中的失败 attempt）`,attempt,'headers','requestBody'],
     [`上游调用 ${index} 响应（不是最终客户端响应）`,attempt,'responseHeaders','responseBody'],
     ['最终客户端响应（请求级，可能是重试成功或流式中断）',full?group.request:null,'responseHeaders','responseBody']
@@ -1728,9 +1728,9 @@ function renderLogChain(group,attempt){
     const noResponse=i===2&&attempt.captureState==='no-response';
     const canLoad=!noResponse&&LOG_CHAIN.bodies.includes(descriptor)&&['complete','truncated','interrupted'].includes(state)&&(descriptor.capturedBytes>0||state==='complete');
     const note=!source?'该 profile 未采集此段':noResponse?'未收到上游响应；无响应 Header / 正文':!descriptor?'未采集或正文已缺失':state==='truncated'?'超过单体大小上限，只有前缀可读':state==='resource-limited'?'捕获容量省略，正文不可读':state==='omitted-for-safety'?'安全原因省略，正文不可读':state==='unread'?'请求正文未读取':state==='interrupted'?'传输中断，仅已采集前缀可读':state==='complete'?'已采集（按需读取）':`状态 ${state}，正文不可读`;
-    return `<div class="log-chain-leg"><h4>${escapeHtml(label)}</h4><p>Header（${raw?'安全投影':'脱敏模式不在此展示 Header'}）</p><pre id="logChainHeaders${i}"></pre><p>${escapeHtml(note)}${escapeHtml(bytes)}</p>${canLoad?`<button type="button" class="ghost" onclick="loadLogChainBody(${jsArg(descriptor.bodyId)})">加载${escapeHtml(label)}正文 · ${escapeHtml(state)}${escapeHtml(bytes)}</button>`:''}</div>`;
+    return `<div class="log-chain-leg"><h4>${escapeHtml(label)}</h4><p>Header（${raw?'安全投影':'脱敏值，仅管理员按需查看'}）</p><pre id="logChainHeaders${i}"></pre><p>${escapeHtml(note)}${escapeHtml(bytes)}</p>${canLoad?`<button type="button" class="ghost" onclick="loadLogChainBody(${jsArg(descriptor.bodyId)})">加载${escapeHtml(label)}正文 · ${escapeHtml(state)}${escapeHtml(bytes)}</button>`:''}</div>`;
   }).join('');
-  legs.forEach(([,source,headerKey],i)=>{$('#logChainHeaders'+i).textContent=!source?'未采集':i===2&&attempt.captureState==='no-response'?'未收到上游响应':raw?rawChainHeaders(source[headerKey]):'脱敏详情不提供原文 Header 安全投影；可使用独立详细日志页查看脱敏资料';});
+  legs.forEach(([,source,headerKey],i)=>{$('#logChainHeaders'+i).textContent=!source?'未采集':i===2&&attempt.captureState==='no-response'?'未收到上游响应':raw?rawChainHeaders(source[headerKey]):source[headerKey]?JSON.stringify(source[headerKey],null,2):'未采集 Header';});
   $('#logChainStatus').textContent=raw?`已关联调用 ${index}；${attempt.captureState==='stream-transport-failed'?'起流后传输失败，响应仅含已捕获前缀':attempt.captureState==='no-response'?'未收到上游响应':'请区分上游失败和最终客户端状态'}。请选择一段正文按需读取。`:`已关联调用 ${index}；此详情已脱敏，非原文。请选择一段已采集正文按需读取。`;
 }
 async function openLogChain(requestId,attemptIndex,detailCallId,detailProfile,button){

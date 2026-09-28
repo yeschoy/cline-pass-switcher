@@ -243,15 +243,20 @@ test('inline profiles are honest: raw-error has two upstream legs, sanitized mod
   const sanitized = rawGroup('raw-full'); sanitized.request.profile = 'full'; sanitized.bodies.forEach(body => { body.redacted = true; });
   h.context.handler = async () => sanitized; await h.open('full');
   assert.match(h.el('#logChainWarning').textContent, /不是未脱敏原文/);
-  assert.match(h.el('#logChainHeaders0').textContent, /不提供原文 Header 安全投影/);
+  assert.match(h.el('#logChainHeaders0').textContent, /"authorization": "\[REDACTED\]"/);
   assert.match(h.el('#logChainStatus').textContent, /已脱敏/);
   h.run('closeLogChain()');
   sanitized.request.profile = 'error'; delete sanitized.request.requestBody; delete sanitized.request.responseBody;
-  sanitized.attempts[0].responseHeaders = { authorization: '<do not expose>' };
+  sanitized.attempts[0].responseHeaders = { authorization: '[REDACTED]' };
   delete sanitized.attempts[0].requestBody;
   h.context.handler = async () => sanitized; await h.open('error');
   assert.equal((h.el('#logChainLegs').innerHTML.match(/加载.*?正文/g) || []).length, 1);
   assert.doesNotMatch(h.el('#logChainHeaders2').textContent, /do not expose/);
+  h.run('closeLogChain()');
+  sanitized.request.requestBody = bodyIds[0]; sanitized.attempts[0].requestBody = bodyIds[2];
+  h.context.handler = async () => sanitized; await h.open('error');
+  assert.equal((h.el('#logChainLegs').innerHTML.match(/加载.*?正文/g) || []).length, 3);
+  assert.match(h.el('#logChainHeaders1').textContent, /content-type/);
 });
 
 test('inline raw-full streaming failure distinguishes submitted final response from the failed upstream attempt', async () => {
