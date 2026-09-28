@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Ordinary request/error log projections, target vs attempts, retention and sensitive-data boundary"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Provider attempt planning, sticky binding, upstream affinity and real retry semantics"}
+{"file":".trellis/spec/backend/deployment-guidelines.md","reason":"Post-release cache metric attribution and stable observation window requirements"}
+{"file":".trellis/tasks/archive/2026-09/09-17-deploy-cache-pool-validation/research/version-boundary-20260927-load-health-code.md","reason":"Last verified deployment and earliest prior stable-window boundary; must recheck current version"}
+{"file":".trellis/tasks/archive/2026-09/09-17-deploy-cache-pool-validation/research/read-only-recheck-20260927.md","reason":"Earlier read-only cache snapshot and mixed-window limitations"}

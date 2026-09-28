@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Verify no candidate list is presented as actual attempts and safe diagnostic projections only"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Check provider/affinity/binding interpretations against executable contracts"}
+{"file":".trellis/spec/backend/deployment-guidelines.md","reason":"Independently check release attribution, exact UTC windows and coverage before metric claims"}
+{"file":".trellis/tasks/archive/2026-09/09-17-deploy-cache-pool-validation/research/version-boundary-20260927-load-health-code.md","reason":"Historical boundary used only as prior evidence, not current version proof"}
