@@ -16,7 +16,7 @@
 
 ## Tasks
 
-- Task1: pending.
+- Task1: complete. RED: module import failed before implementation. GREEN:9 pure contract tests passed, covering strict workflow validation, unknown-health100 without fake samples, minimum-count primary ordering, occupancy/rotation ties,181 selections over18 accounts, distinct alternate pickers, persisted state corruption and prototype-safe IDs. Node syntax passed.
 - Task2: pending.
 - Task3: pending.
 - Task4: pending.
