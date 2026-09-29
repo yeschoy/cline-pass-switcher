@@ -19,7 +19,7 @@ import { JsonlLogGroup } from './lib/jsonl-log-store.js';
 import { DetailRoot, DetailRedactor, detailContext, detailRoute, observeStream, MAX_BODY_BYTES, MAX_RAW_BODY_BYTES, MAX_PAYLOAD_BYTES, MAX_SANITIZED_PAYLOAD_BYTES, captureBudget } from './lib/detailed-log-capture.js';
 import { projectRawHeaders } from './lib/raw-detail-headers.js';
 import { DetailedLogStore, parseDetailQuery, MAX_AGE_MS, RAW_MAX_AGE_MS, MAX_TOTAL_BYTES } from './lib/detailed-log-store.js';
-import { defaultAccountWorkflow, normalizeAccountWorkflow, normalizeSelectionCounters, effectiveRoutingHealth, rankWorkflowCandidates } from './lib/account-workflow.js';
+import { WORKFLOW_SELECTORS, defaultAccountWorkflow, normalizeAccountWorkflow, normalizeSelectionCounters, effectiveRoutingHealth, rankWorkflowCandidates } from './lib/account-workflow.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || __dirname;
@@ -2064,6 +2064,11 @@ async function acquirePipelineAccountLease(identity, options = {}) {
 function configurationRevision() {
   return crypto.createHash('sha256').update(JSON.stringify(config)).digest('hex');
 }
+function checkConfigurationRevision(value, { required = false } = {}) {
+  if (value === undefined && !required) return;
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) throw Object.assign(new Error('expectedConfigurationRevision must be a configuration revision'), { statusCode: 400 });
+  if (value !== configurationRevision()) throw Object.assign(new Error('configuration changed; reload and review the draft before saving'), { statusCode: 409 });
+}
 function selectionCounterFor(id) {
   return Object.hasOwn(META.selectionCounters.accounts, id) ? META.selectionCounters.accounts[id] : { count: 0, lastSelected: 0 };
 }
@@ -2090,7 +2095,7 @@ function workflowFilteredCandidates(context, excludeId = null) {
   for (const step of policy.missSteps) {
     const before = candidates.length;
     const enabled = step === 'quota' ? policy.quotaFilter : policy.healthFilter;
-    if (step === 'quota' && enabled) candidates = candidates.filter(candidate => candidate.quota.pool !== 'reserve');
+    if (step === 'quota' && enabled) candidates = candidates.filter(candidate => policy.quotaPools.includes(candidate.quota.pool));
     if (step === 'health' && enabled) candidates = candidates.filter(candidate => {
       const rate = effectiveRoutingHealth(candidate.health.successRate, policy.unknownHealth);
       return rate !== null && rate >= policy.minimumHealth;
@@ -2178,7 +2183,7 @@ async function acquireWorkflowAccountLease(identity, { excludeIds = new Set(), o
         if (duration > 0) { await waitForCapacity(duration); continue; }
       }
     }
-    const chosen = tryWorkflowSelection(identity, context, { excludeId: bound?.account.id, kind: bound ? 'temporary-overflow' : 'new-selection' });
+    const chosen = tryWorkflowSelection(identity, context, { excludeId: bound?.account.id, kind: bound ? 'temporary-overflow' : excludeIds.size ? 'replacement' : 'new-selection' });
     if (chosen.result) {
       if (bound) { incrementBindingCounter('temporaryOverflows'); return attachBindingHit(chosen.result, identity, lookup.entry, 'temporary-overflow'); }
       return canBind ? attachBindingMiss(chosen.result, identity, ownerRequestId, lookup?.result || 'miss') : chosen.result;
@@ -2195,6 +2200,62 @@ async function acquireWorkflowAccountLease(identity, { excludeIds = new Set(), o
     workflowDecision(identity, context, { kind: 'capacity-blocked', trace: chosen.trace });
     return busyFailure(facts.blockedBy, facts.retryAt, 'workflow', budget, 'all upstream accounts are busy');
   }
+}
+function workflowPreviewRpmAvailable(account, now = Date.now()) {
+  const limit = rpmLimit(account), state = rpmWindows.get(account.id);
+  if (!limit || !state) return true;
+  const used = state.timestamps.slice(state.head).filter(timestamp => timestamp > now - RPM_WINDOW_MS).length;
+  return used + state.reservations < limit;
+}
+function previewAccountWorkflow(body) {
+  if (!isPlainObject(body) || Object.keys(body).some(key => !['accountWorkflow', 'accountPipeline', 'clientKeyId', 'boundAccountId'].includes(key))) throw Object.assign(new Error('invalid workflow preview input'), { statusCode: 400 });
+  const owner = body.clientKeyId;
+  if (typeof owner !== 'string' || !clientKeyInventory().some(item => item.id === owner)) throw Object.assign(new Error('unknown client key owner'), { statusCode: 400 });
+  if (body.boundAccountId !== undefined && body.boundAccountId !== null && (typeof body.boundAccountId !== 'string' || !config.accounts.some(account => account.id === body.boundAccountId && account.clientKeyId === owner))) throw Object.assign(new Error('bound account must belong to the selected owner'), { statusCode: 400 });
+  const policy = normalizeAccountWorkflow(body.accountWorkflow);
+  const pipeline = body.accountPipeline === undefined ? structuredClone(config.accountPipeline) : normalizeAccountPipeline(body.accountPipeline, { strict: true });
+  if (policy.enabled && pipeline.cachePoolSize < 1) throw Object.assign(new Error('enabled accountWorkflow requires a positive cachePoolSize'), { statusCode: 400 });
+  const revision = configurationRevision();
+  if (!policy.enabled) return { simulation: true, configurationRevision: revision, decision: { kind: 'legacy', counted: false, accountId: null, nodes: [{ node: 'workflow', result: 'disabled' }] } };
+  const identity = { clientKeyId: owner, workflowSnapshot: { policy, pipeline, revision, waits: admissionWaitBudgets() } };
+  const context = workflowSelectionContext(identity, { preview: true });
+  const available = account => accountHasCapacity(account) && workflowPreviewRpmAvailable(account);
+  const bound = policy.bindingEnabled ? context.active.find(candidate => candidate.account.id === body.boundAccountId) : null;
+  const finish = details => {
+    const decision = workflowDecision(identity, context, details);
+    decision.nodes.at(-1).result = decision.accountId ? 'predicted-admission' : 'predicted-block';
+    return { simulation: true, configurationRevision: revision, decision,
+      selectedAccountName: details.account?.name || null, candidateCount: context.active.length,
+      note: 'Prediction only: no lease, counter, binding or upstream request was changed.' };
+  };
+  if (bound && available(bound.account)) {
+    const count = selectionCounterFor(bound.account.id).count;
+    return finish({ account: bound.account, kind: 'binding-hit', before: count, after: count, trace: [{ node: 'binding', result: 'hit' }] });
+  }
+  if (bound && policy.onBindingBusy !== 'overflow') return finish({ kind: policy.onBindingBusy === 'reject' ? 'binding-busy' : 'binding-wait', trace: [{ node: 'binding', result: 'busy' }, { node: 'wait', result: policy.onBindingBusy === 'reject' ? 'disabled' : 'would-wait' }] });
+  const filtered = workflowFilteredCandidates(context, bound?.account.id);
+  const candidates = filtered.candidates.filter(candidate => available(candidate.account));
+  const trace = [...filtered.trace, { node: 'capacity', before: filtered.candidates.length, after: candidates.length, result: 'concurrency-and-rpm' }, { node: 'selector', result: policy.selector }];
+  const chosen = workflowRank(candidates, policy)[0];
+  if (!chosen) return finish({ kind: filtered.candidates.length ? 'capacity-blocked' : 'filtered', trace });
+  const count = selectionCounterFor(chosen.account.id).count;
+  if (count >= Number.MAX_SAFE_INTEGER || META.selectionCounters.sequence >= Number.MAX_SAFE_INTEGER) return finish({ kind: 'counter-exhausted', trace });
+  return finish({ account: chosen.account, kind: bound ? 'temporary-overflow' : 'new-selection', counted: true, before: count, after: count + 1, trace });
+}
+function projectWorkflowDiagnostics(value) {
+  if (!value || value.version !== 1 || !Array.isArray(value.decisions)) return null;
+  const kinds = new Set(['new-selection', 'binding-hit', 'temporary-overflow', 'replacement', 'binding-busy', 'filtered', 'capacity-blocked']);
+  const nodeNames = new Set(['eligibility', 'cache', 'quota', 'health', 'capacity', 'selector', 'binding', 'lease']);
+  const results = new Set(['owner-and-hard-state', 'active-cache', 'filtered', 'disabled', 'concurrency-and-rpm', 'least-selections', 'roundrobin', 'least-connections', 'health', 'hit', 'busy', 'admitted', 'blocked']);
+  const count = number => Number.isSafeInteger(number) && number >= 0 ? number : null;
+  const decisions = value.decisions.slice(0, 4).filter(row => row?.version === 1 && /^[a-f0-9]{64}$/.test(row.configurationRevision || '') && kinds.has(row.kind)).map(row => ({
+    version: 1, configurationRevision: row.configurationRevision,
+    selector: WORKFLOW_SELECTORS.includes(row.selector) ? row.selector : null,
+    kind: row.kind, accountId: typeof row.accountId === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(row.accountId) ? row.accountId : null,
+    counted: row.counted === true, countBefore: count(row.countBefore), countAfter: count(row.countAfter),
+    nodes: (Array.isArray(row.nodes) ? row.nodes : []).slice(0, 8).filter(node => nodeNames.has(node?.node) && results.has(node?.result)).map(node => ({ node: node.node, result: node.result, ...(count(node.before) !== null ? { before: node.before } : {}), ...(count(node.after) !== null ? { after: node.after } : {}) })),
+  }));
+  return decisions.length ? { version: 1, decisions } : null;
 }
 async function acquireAccountLease(identity, options = {}) {
   if (identity?.credentialValid && !identity.credentialValid()) return { error: 'client credential revoked', credentialRevoked: true, strategy: config.accountMode };
@@ -3050,6 +3111,9 @@ function record(modelId, info, detail = detailContext.getStore()) {
   META.models[modelId] = { ...(META.models[modelId] || {}), provider: info.provider, canonical: info.canonical, lastMs: info.ms };
   const result = ['success', 'client_cancelled', 'failed'].includes(info.result) ? info.result : (info.error ? 'failed' : 'success');
   const { sensitiveValues: _sensitiveValues, ...safeInfo } = info;
+  const workflow = projectWorkflowDiagnostics(info.workflow);
+  if (workflow) safeInfo.workflow = workflow;
+  else delete safeInfo.workflow;
   const legacy = {
     ts, model: modelId, ...safeInfo, result,
     error: safeInfo.error ? boundedReason(safeInfo.error, info.sensitiveValues).reason : safeInfo.error,
@@ -3061,6 +3125,7 @@ function record(modelId, info, detail = detailContext.getStore()) {
   recentHistory.unshift(legacy); if (recentHistory.length > 100) recentHistory.length = 100;
   const request = {
     ts, requestId: info.requestId || crypto.randomUUID(), requestedModel: info.requestedModel || modelId,
+    ...(workflow ? { workflow } : {}),
     resolvedModel: info.resolvedModel || modelId, stream: !!info.stream, strategy: info.strategy || config.accountMode,
     sessionSource: info.sessionSource || null,
     affinityKeyType: AFFINITY_KEY_TYPES.has(info.affinityKeyType) ? info.affinityKeyType : 'none',
@@ -4621,6 +4686,7 @@ async function handleChat(req, res, clientKeyId) {
   let providerOrderOverridesSticky = false;
   let selected;
   const affinityFacts = (usage = null) => ({
+    ...(identity.workflowDecisions?.length ? { workflow: { version: 1, decisions: identity.workflowDecisions } } : {}),
     sessionSource: identity.source,
     affinityKeyType: identity.keyType,
     affinityConfidence: identity.confidence,
@@ -5132,12 +5198,37 @@ async function dispatch(req, res) {
       const models = statisticsModelIds().map((id) => { const recent24h = projectAggregate(aggregateModelRange(id, generatedAt)); return { id, recent24h, coverage: modelCoverage(id, generatedAt), providerStatistics: modelProviderProjection(id,generatedAt) }; });
       return sendJSON(res, 200, { generatedAt, window: { kind: 'last-1440-minutes', from: (Math.floor(generatedAt/60000)-1439)*60000, to: generatedAt }, lifetime: { global: projectAggregate(META.statistics.lifetime.global) }, recent24h: { global: projectAggregate(recentGlobal) }, routingCoverage: routingCoverage(generatedAt), accounts, models, referencePrices: { current: projectReferencePrice(REFERENCE_PRICE), versions: Object.fromEntries(Object.entries(META.statistics.priceVersions).map(([version, snapshot]) => [version, projectReferencePrice(snapshot)])) }, migration: META.statistics.migration });
     }
+    if (req.method === 'POST' && p === '/api/account-workflow/preview') {
+      const body = await readJsonBody(req);
+      try { return sendJSON(res, 200, previewAccountWorkflow(body)); }
+      catch (error) { return sendJSON(res, error.statusCode || 400, { error: { message: safeReason(error.message) } }); }
+    }
+    if (req.method === 'POST' && p === '/api/account-workflow/reset-counts') {
+      const body = await readJsonBody(req);
+      if (!isPlainObject(body) || Object.keys(body).some(key => !['clientKeyId', 'expectedConfigurationRevision'].includes(key)) || typeof body.clientKeyId !== 'string' || !clientKeyInventory().some(item => item.id === body.clientKeyId)) return sendJSON(res, 400, { error: { message: 'expected a valid client key owner and configuration revision' } });
+      checkConfigurationRevision(body.expectedConfigurationRevision, { required: true });
+      const owned = config.accounts.filter(account => account.clientKeyId === body.clientKeyId);
+      const next = normalizeSelectionCounters(META.selectionCounters, new Set(config.accounts.map(account => account.id)));
+      for (const account of owned) Object.defineProperty(next.accounts, account.id, { value: { count: 0, lastSelected: 0 }, enumerable: true, configurable: true, writable: true });
+      // Persist first. A reset failure must not change the live counter map or bindings.
+      atomicWriteJson(META_PATH, { ...META, selectionCounters: next }, { pretty: false });
+      META.selectionCounters = next; selectionCounterPersistenceError = false;
+      return sendJSON(res, 200, { ok: true, resetAccounts: owned.length, clientKeyId: body.clientKeyId, configurationRevision: configurationRevision() });
+    }
     if (req.method === 'GET' && p === '/api/accounts') {
       clearExpiredCooldowns();
       const cacheRoles = cachePoolRoles();
       return sendJSON(res, 200, {
-        accounts: config.accounts.map((a) => { const recent = projectAggregate(aggregateRange(a.id).aggregate),lifetime=META.statistics.lifetime.accounts[a.id]; return { ...a, state: getAccountState(a.id), activeCount: activeCounts.get(a.id) || 0, rpm: rpmProjection(a), health: healthProjection(a), quota: quotaProjection(a.id), cachePoolRole: cacheRoles.get(a.id) ?? null, cachePoolQuotaRole: configuredCachePoolLowQuotaSize() > 0 && cacheRoles.get(a.id) === 'active' ? ({ hot: 'high', warm: 'low', unknown: 'unknown' }[quotaProjection(a.id).pool] || null) : null, statistics: { recent24h: recent, lifetimeRequests: lifetime ? lifetime.requests : 0, lifetimeErrors: lifetime ? lifetime.errors : 0 } }; }),
+        accounts: config.accounts.map((a) => {
+          const recent = projectAggregate(aggregateRange(a.id).aggregate), lifetime = META.statistics.lifetime.accounts[a.id], health = healthProjection(a);
+          return { ...a, state: getAccountState(a.id), activeCount: activeCounts.get(a.id) || 0, rpm: rpmProjection(a), health,
+            selectionCount: selectionCounterFor(a.id).count, effectiveRoutingHealth: effectiveRoutingHealth(health.successRate, config.accountWorkflow.unknownHealth),
+            quota: quotaProjection(a.id), cachePoolRole: cacheRoles.get(a.id) ?? null, cachePoolQuotaRole: configuredCachePoolLowQuotaSize() > 0 && cacheRoles.get(a.id) === 'active' ? ({ hot: 'high', warm: 'low', unknown: 'unknown' }[quotaProjection(a.id).pool] || null) : null,
+            statistics: { recent24h: recent, lifetimeRequests: lifetime ? lifetime.requests : 0, lifetimeErrors: lifetime ? lifetime.errors : 0 } };
+        }),
         mode: config.accountMode, active: config.activeAccount, concurrencyWaitMs: config.concurrencyWaitMs, poolFullWaitMs: config.poolFullWaitMs,
+        accountWorkflow: config.accountWorkflow, configurationRevision: configurationRevision(),
+        selectionCounters: { persistent: true, persistenceError: selectionCounterPersistenceError, sequence: META.selectionCounters.sequence },
         quotaProtection: config.quotaProtection, errorRules: config.errorRules, retryRules: config.retryRules, accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline,
         cachePool: { minSize: configuredCachePoolSize(), maxSize: configuredCachePoolMaxSize(), lowSize: configuredCachePoolLowQuotaSize(), targetSize: configuredCachePoolTargetSize(), scope: 'per-client-key', actual: cachePoolActualByOwner(), binding: sessionBindingSummary() },
         stats: Object.fromEntries(config.accounts.map((a) => [a.name, { requests: META.statistics.lifetime.accounts[a.id]?.requests ?? 0 }])),
@@ -5146,13 +5237,15 @@ async function dispatch(req, res) {
     if (req.method === 'POST' && p === '/api/accounts') {
       const body = await readJsonBody(req);
       if (!body || typeof body !== 'object' || !Array.isArray(body.accounts)) return sendJSON(res, 400, { error: { message: 'accounts array is required' } });
+      checkConfigurationRevision(body.expectedConfigurationRevision);
       if (!ACCOUNT_MODES.has(body.mode)) return sendJSON(res, 400, { error: { message: 'invalid account mode' } });
       const wait = Number(body.concurrencyWaitMs ?? 2000);
       if (!Number.isInteger(wait) || wait < 0 || wait > 30000) return sendJSON(res, 400, { error: { message: 'concurrencyWaitMs must be an integer from 0 to 30000' } });
       const poolWait = body.poolFullWaitMs === undefined ? config.poolFullWaitMs : body.poolFullWaitMs;
       if (poolWait !== null && (!Number.isInteger(poolWait) || poolWait < 0 || poolWait > 30000)) return sendJSON(res, 400, { error: { message: 'poolFullWaitMs must be null or an integer from 0 to 30000' } });
-      let requestedErrorRules = config.errorRules, requestedPipeline = config.accountPipeline, requestedRetryRules = config.retryRules, requestedProtection = config.quotaProtection;
+      let requestedErrorRules = config.errorRules, requestedPipeline = config.accountPipeline, requestedRetryRules = config.retryRules, requestedProtection = config.quotaProtection, requestedWorkflow = config.accountWorkflow;
       try {
+        if (body.accountWorkflow !== undefined) requestedWorkflow = normalizeAccountWorkflow(body.accountWorkflow);
         if (body.errorRules !== undefined) requestedErrorRules = normalizeErrorRules(body.errorRules, { strict: true });
         else {
           const legacy = legacyRuleProjection(config.errorRules);
@@ -5175,6 +5268,7 @@ async function dispatch(req, res) {
           fallbackSessionBindingMaxEntries: config.accountPipeline.sessionBindingMaxEntries,
         });
       } catch (e) { return sendJSON(res, 400, { error: { message: e.message } }); }
+      if (requestedWorkflow.enabled && requestedPipeline.cachePoolSize < 1) return sendJSON(res, 400, { error: { message: 'enabled accountWorkflow requires a positive cachePoolSize' } });
       if (body.mode === 'load-health' && requestedPipeline.sticky) return sendJSON(res, 400, { error: { message: 'load-health cannot enable sticky' } });
       if (!Number.isInteger(Number(body.active ?? 0)) || Number(body.active ?? 0) < 0 || Number(body.active ?? 0) >= body.accounts.length) return sendJSON(res, 400, { error: { message: 'active account index is out of range' } });
       const existingIds = new Set(config.accounts.map((a) => a.id));
@@ -5212,7 +5306,7 @@ async function dispatch(req, res) {
       const nextActive = requestedActive >= 0 ? requestedActive : Math.min(Math.max(0, Number(body.active) || 0), accs.length - 1);
       const next = { ...config, accounts: accs, accountMode: body.mode, activeAccount: nextActive,
         concurrencyWaitMs: wait, poolFullWaitMs: poolWait, errorRules: requestedErrorRules, retryRules: requestedRetryRules,
-        quotaProtection: requestedProtection, ...legacyRuleProjection(requestedErrorRules), accountPipeline: requestedPipeline };
+        quotaProtection: requestedProtection, ...legacyRuleProjection(requestedErrorRules), accountPipeline: requestedPipeline, accountWorkflow: requestedWorkflow };
       // A failed config rename must not change live owner routing, invalidate bindings,
       // or clear existing RPM/quota state before the client sees a failed save.
       atomicWriteJson(CONFIG_PATH, next);

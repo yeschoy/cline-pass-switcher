@@ -40,6 +40,12 @@ test('unknown routing health100 does not invent observed statistics', () => {
   assert.deepEqual(candidate, { id: 'new', healthRate: null, successes: 0, samples: 0 });
 });
 
+test('quota workflow node accepts explicit active-pool roles and rejects hidden reserve routing', () => {
+  assert.deepEqual(defaultAccountWorkflow().quotaPools, ['hot', 'warm', 'unknown']);
+  assert.deepEqual(normalizeAccountWorkflow({ ...defaultAccountWorkflow(), quotaPools: ['warm'] }).quotaPools, ['warm']);
+  for (const pools of [[], ['hot', 'hot'], ['reserve'], 'hot']) assert.throws(() => normalizeAccountWorkflow({ ...defaultAccountWorkflow(), quotaPools: pools }));
+});
+
 test('minimum selection count dominates health and current load', () => {
   const rows = [{ id: 'a', healthRate: 1 }, { id: 'b', healthRate: .2 }, { id: 'c', healthRate: null }];
   const counts = { a: { count: 9 }, b: { count: 0 }, c: { count: 2 } };

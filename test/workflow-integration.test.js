@@ -194,3 +194,103 @@ test('workflow metadata write failure keeps live counting and releases model lea
   await f.chat('write-failure'); assert.equal(f.total(), 1);
   await f.restart(); assert.equal(f.total(), 1);
 });
+
+function accountSave(view, patch = {}) {
+  return { accounts: view.accounts, mode: view.mode, active: view.active, concurrencyWaitMs: view.concurrencyWaitMs,
+    poolFullWaitMs: view.poolFullWaitMs, accountPipeline: view.accountPipeline,
+    accountWorkflow: view.accountWorkflow, expectedConfigurationRevision: view.configurationRevision, ...patch };
+}
+
+test('workflow API projects effective health and rejects invalid/stale saves without losing fields', async t => {
+  const f = await fixture(t, { configure: c => ({ ...c, accounts: c.accounts.map(a => ({ ...a, note: 'retained note', headers: { 'X-Fixture': 'retained-header' }, perModel: { 'other-model': { upstreams: ['one'], pinMode: 'strict' } } })) }) });
+  const view = (await f.admin('/api/accounts')).body;
+  assert.equal(view.accountWorkflow.enabled, true); assert.match(view.configurationRevision, /^[a-f0-9]{64}$/);
+  assert.ok(view.accounts.every(a => a.selectionCount === 0 && a.effectiveRoutingHealth === 1 && a.health.successRate === null));
+  const before = fs.readFileSync(path.join(f.dir, 'config.json'), 'utf8');
+  assert.equal((await f.admin('/api/accounts', accountSave(view, { accountWorkflow: { ...view.accountWorkflow, injected: 'bad' } }))).status, 400);
+  assert.equal(fs.readFileSync(path.join(f.dir, 'config.json'), 'utf8'), before);
+  const changed = accountSave(view, { accountWorkflow: { ...view.accountWorkflow, missSteps: ['health', 'quota'] } });
+  assert.equal((await f.admin('/api/accounts', changed)).status, 200);
+  const latest = (await f.admin('/api/accounts')).body;
+  assert.notEqual(latest.configurationRevision, view.configurationRevision);
+  assert.equal((await f.admin('/api/accounts', accountSave(view))).status, 409);
+  assert.ok(latest.accounts.every(a => a.note === 'retained note' && a.headers['X-Fixture'] === 'retained-header' && a.perModel['other-model'].upstreams[0] === 'one'));
+  const compatible = accountSave(latest); delete compatible.accountWorkflow;
+  assert.equal((await f.admin('/api/accounts', compatible)).status, 200);
+  assert.deepEqual((await f.admin('/api/accounts')).body.accountWorkflow, latest.accountWorkflow);
+});
+
+test('workflow preview traces decisions but never calls upstream or changes count/binding state', async t => {
+  const f = await fixture(t);
+  const view = (await f.admin('/api/accounts')).body;
+  const before = f.counts(), requests = f.seen.length, binding = view.cachePool.binding;
+  const preview = await f.admin('/api/account-workflow/preview', { accountWorkflow: { ...defaultAccountWorkflow(), enabled: true }, clientKeyId: 'legacy' });
+  assert.equal(preview.status, 200); assert.equal(preview.body.simulation, true);
+  assert.equal(preview.body.decision.counted, true); assert.equal(preview.body.decision.countBefore, 0); assert.equal(preview.body.decision.countAfter, 1);
+  assert.ok(preview.body.decision.nodes.some(node => node.node === 'selector'));
+  assert.equal(f.seen.length, requests); assert.deepEqual(f.counts(), before);
+  assert.deepEqual((await f.admin('/api/accounts')).body.cachePool.binding, binding);
+  const hit = await f.admin('/api/account-workflow/preview', { accountWorkflow: { ...defaultAccountWorkflow(), enabled: true }, clientKeyId: 'legacy', boundAccountId: 'a1' });
+  assert.equal(hit.status, 200); assert.equal(hit.body.decision.kind, 'binding-hit'); assert.equal(hit.body.decision.counted, false);
+  assert.equal(hit.body.decision.countAfter, 0); assert.equal(f.total(), 0);
+  const actual = await f.chat('after-preview'); assert.equal(actual.success, true);
+  assert.equal(f.seen.at(-1).account, preview.body.decision.accountId);
+});
+
+test('workflow preview is owner-scoped and forbidden to model-only credentials', async t => {
+  const f = await fixture(t, { count: 2, configure: c => ({ ...c, clientKeys: [{ id: 'tenant-b', name: 'Tenant B', key: 'fixture-client-b' }], accounts: c.accounts.map((a, i) => ({ ...a, clientKeyId: i ? 'tenant-b' : 'legacy' })) }) });
+  const body = { accountWorkflow: { ...defaultAccountWorkflow(), enabled: true }, clientKeyId: 'legacy', boundAccountId: 'a1' };
+  assert.equal((await f.admin('/api/account-workflow/preview', body)).status, 400);
+  const denied = await fetch(`http://127.0.0.1:${f.port}/api/account-workflow/preview`, { method: 'POST', headers: { Authorization: 'Bearer fixture-client', 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  assert.equal(denied.status, 401); assert.equal(f.seen.length, 0); assert.equal(f.total(), 0);
+});
+
+test('workflow quota node role filter is applied in preview and runtime without changing pool membership', async t => {
+  const f = await fixture(t, { configure: c => ({ ...c, accountWorkflow: { ...c.accountWorkflow, quotaPools: ['warm'] } }) });
+  const preview = await f.admin('/api/account-workflow/preview', { accountWorkflow: { ...defaultAccountWorkflow(), enabled: true, quotaPools: ['warm'] }, clientKeyId: 'legacy' });
+  assert.equal(preview.status, 200); assert.equal(preview.body.decision.kind, 'filtered');
+  assert.equal(preview.body.decision.nodes.find(n => n.node === 'quota').after, 0);
+  assert.equal((await f.chat('filtered-quota')).status, 503);
+  assert.equal(f.total(), 0); assert.equal(f.seen.length, 0);
+  const view = (await f.admin('/api/accounts')).body;
+  assert.equal((await f.admin('/api/accounts', accountSave(view, { accountWorkflow: { ...view.accountWorkflow, quotaFilter: false } }))).status, 200);
+  assert.equal((await f.chat('quota-node-disabled')).success, true); assert.equal(f.total(), 1);
+});
+
+test('workflow reset affects only the requested owner and leaves bindings/caps intact', async t => {
+  const f = await fixture(t, { count: 4, configure: c => ({ ...c, clientKeys: [{ id: 'tenant-b', name: 'Tenant B', key: 'fixture-client-b' }], accounts: c.accounts.map((a, i) => ({ ...a, clientKeyId: i >= 2 ? 'tenant-b' : 'legacy' })) }) });
+  await f.chat('owner-a'); await f.chat('owner-b', 'fixture-client-b');
+  const view = (await f.admin('/api/accounts')).body, before = f.counts();
+  const reset = await f.admin('/api/account-workflow/reset-counts', { clientKeyId: 'legacy', expectedConfigurationRevision: view.configurationRevision });
+  assert.equal(reset.status, 200); assert.equal(reset.body.resetAccounts, 2);
+  const after = f.counts(); assert.equal((after.a0?.count || 0) + (after.a1?.count || 0), 0);
+  assert.equal((after.a2?.count || 0) + (after.a3?.count || 0), (before.a2?.count || 0) + (before.a3?.count || 0));
+  const bindings = (await f.admin('/api/accounts')).body.cachePool.binding;
+  assert.equal(bindings.size, view.cachePool.binding.size);
+  await f.chat('owner-a'); assert.equal(f.total(), 1, 'reset must not clear the original binding, so its hit stays uncounted');
+  await f.restart(); assert.equal(f.total(), 1);
+});
+
+test('workflow reset failure preserves live counts and stale reset is rejected', async t => {
+  const f = await fixture(t); await f.chat('reset-fail');
+  const view = (await f.admin('/api/accounts')).body;
+  assert.equal((await f.admin('/api/account-workflow/reset-counts', { clientKeyId: 'legacy', expectedConfigurationRevision: '0'.repeat(64) })).status, 409);
+  const filename = path.join(f.dir, 'metadata.json'), original = fs.readFileSync(filename);
+  fs.renameSync(filename, filename + '.fixture-backup'); fs.mkdirSync(filename);
+  try { assert.equal((await f.admin('/api/account-workflow/reset-counts', { clientKeyId: 'legacy', expectedConfigurationRevision: view.configurationRevision })).status, 500); }
+  finally { fs.rmdirSync(filename); fs.writeFileSync(filename, original); }
+  const latest = (await f.admin('/api/accounts')).body;
+  assert.equal(latest.accounts.reduce((n, a) => n + a.selectionCount, 0), 1);
+  assert.ok(latest.accounts.every(a => a.activeCount === 0));
+});
+
+test('workflow ordinary logs distinguish counted selections from hits without leaking identities', async t => {
+  const f = await fixture(t);
+  const first = await f.chat('private-session-value'), hit = await f.chat('private-session-value');
+  const rows = (await f.admin('/api/logs/requests?limit=200')).body.items;
+  const selected = rows.find(row => row.requestId === first.requestId), reused = rows.find(row => row.requestId === hit.requestId);
+  assert.equal(selected.workflow.decisions[0].kind, 'new-selection'); assert.equal(selected.workflow.decisions[0].countAfter, 1);
+  assert.equal(reused.workflow.decisions[0].kind, 'binding-hit'); assert.equal(reused.workflow.decisions[0].counted, false);
+  assert.ok(!JSON.stringify(rows).includes('private-session-value'));
+  assert.ok(!JSON.stringify(selected.workflow).includes('fixture-'));
+});
