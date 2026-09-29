@@ -19,6 +19,7 @@ import { JsonlLogGroup } from './lib/jsonl-log-store.js';
 import { DetailRoot, DetailRedactor, detailContext, detailRoute, observeStream, MAX_BODY_BYTES, MAX_RAW_BODY_BYTES, MAX_PAYLOAD_BYTES, MAX_SANITIZED_PAYLOAD_BYTES, captureBudget } from './lib/detailed-log-capture.js';
 import { projectRawHeaders } from './lib/raw-detail-headers.js';
 import { DetailedLogStore, parseDetailQuery, MAX_AGE_MS, RAW_MAX_AGE_MS, MAX_TOTAL_BYTES } from './lib/detailed-log-store.js';
+import { defaultAccountWorkflow, normalizeAccountWorkflow, normalizeSelectionCounters, effectiveRoutingHealth, rankWorkflowCandidates } from './lib/account-workflow.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || __dirname;
@@ -68,6 +69,7 @@ const DEFAULT_CONFIG = {
   poolFullWaitMs: null, // null inherits concurrencyWaitMs
   errorRules: [],          // canonical ordered account/provider-model failure rules
   retryRules: [],          // canonical ordered request-level retry-stop rules
+  accountWorkflow: defaultAccountWorkflow(), // disabled preserves legacy routing
   quotaProtection: { monthlyThresholdUsd: 0.20 }, // community-reference $50 monthly cap
   accountErrorRules: {},   // legacy compatibility projection only
   accountContentErrorRules: [], // legacy compatibility projection only
@@ -190,9 +192,11 @@ if (loadedAdminState !== MISSING_ADMIN && loadedAdminState.initialized) for (con
     throw new Error('client key must differ from the administrator password');
 }
 const META = loadJson(META_PATH, { models: {}, history: [], catalog: null, orModelsFetchedAt: 0, orModelList: null });
+let selectionCounterPersistenceError = false;
 const saveConfig = () => atomicWriteJson(CONFIG_PATH, config);
 const saveMeta = () => {
   atomicWriteJson(META_PATH, META, { pretty: false });
+  selectionCounterPersistenceError = false;
   // A successful write of the current META also commits any confirmed monthly bans.
   for (const [id, pending] of quotaProvisional) if (pending.persistRetryAt !== undefined) quotaProvisional.delete(id);
 };
@@ -1206,6 +1210,8 @@ function normalizeCachePoolTarget(pipeline = config.accountPipeline) {
 }
 function normalizeConfigAndMeta({ persist = false } = {}) {
   let dirty = false;
+  const workflow = normalizeAccountWorkflow(config.accountWorkflow);
+  if (JSON.stringify(config.accountWorkflow) !== JSON.stringify(workflow)) { config.accountWorkflow = workflow; dirty = true; }
   const protection = normalizeQuotaProtection(config.quotaProtection);
   if (JSON.stringify(config.quotaProtection) !== JSON.stringify(protection)) { config.quotaProtection = protection; dirty = true; }
   if (Object.hasOwn(loadedConfig, 'errorDetailMigrationVersion') && loadedConfig.errorDetailMigrationVersion !== 1) throw new Error('invalid error detail migration version');
@@ -1258,6 +1264,9 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   if (normalizeAccountStates()) dirty = true;
   if (normalizeStatistics()) dirty = true;
   if (normalizeAccountQuotas()) dirty = true;
+  const selectionCounters = normalizeSelectionCounters(META.selectionCounters, new Set(config.accounts.map(account => account.id)));
+  if (JSON.stringify(META.selectionCounters) !== JSON.stringify(selectionCounters)) { META.selectionCounters = selectionCounters; dirty = true; }
+  if (config.accountWorkflow.enabled && pipeline.cachePoolSize < 1) throw new Error('enabled accountWorkflow requires a positive cachePoolSize');
   if (pipeline.cachePoolLowQuotaSize > 0 && pipeline.cachePoolSize > 0 && (config.accountMode === 'sticky' || pipeline.sticky)) for (const account of config.accounts) {
     const quota = META.accountQuotas[account.id];
     if (!quota?.snapshot || quota.lastSuccessAt !== quota.snapshot.fetchedAt) continue;
@@ -1455,8 +1464,8 @@ function clearExpiredCooldowns() {
   if (dirty) try { saveMeta(); }
   catch (error) { console.error(`[账号] 过期冷却状态持久化失败：${safeReason(error.message)}`); }
 }
-function enabledAccounts({ excludeIds = new Set(), clientKeyId = null } = {}) {
-  clearExpiredCooldowns();
+function enabledAccounts({ excludeIds = new Set(), clientKeyId = null, pruneCooldowns = true } = {}) {
+  if (pruneCooldowns) clearExpiredCooldowns();
   return (config.accounts || []).filter((a) => {
     if (!a || !a.key || a.enabled === false || excludeIds.has(a.id) || (clientKeyId !== null && a.clientKeyId !== clientKeyId)) return false;
     const st = getAccountState(a.id);
@@ -1631,8 +1640,8 @@ function configuredCachePoolMaxSize() { return Number.isInteger(config.accountPi
 function configuredCachePoolLowQuotaSize() { return Number.isInteger(config.accountPipeline?.cachePoolLowQuotaSize) ? config.accountPipeline.cachePoolLowQuotaSize : 0; }
 function configuredCachePoolTargetSize() { return cachePoolTargetFor(config.accountPipeline); }
 function stickyEffective() { return config.accountMode === 'sticky' || config.accountPipeline?.sticky === true; }
-function cachePoolEnabled() { return configuredCachePoolSize() > 0 && stickyEffective(); }
-function sessionBindingConfigured() { return stickyEffective() && config.accountPipeline?.healthSort === true; }
+function cachePoolEnabled() { return configuredCachePoolSize() > 0 && (config.accountWorkflow?.enabled || stickyEffective()); }
+function sessionBindingConfigured() { return config.accountWorkflow?.enabled ? config.accountWorkflow.bindingEnabled : stickyEffective() && config.accountPipeline?.healthSort === true; }
 function sessionBindingEnabled(identity, ownerRequestId) { return sessionBindingConfigured() && !!identity?.fingerprint && !!ownerRequestId; }
 function pipelineEnabled() { return cachePoolEnabled() || PIPELINE_KEYS.some((key) => config.accountPipeline?.[key]); }
 function quotaRoutingEnabled() { return config.accountPipeline?.quotaPool === true || cachePoolEnabled(); }
@@ -1700,19 +1709,21 @@ function buildPipelineGroups(list, identity, candidates = pipelineCandidates(lis
   if (!skipSticky && config.accountMode === 'sticky' && !config.accountPipeline.sticky) applySticky();
   return { groups: groups.map((group) => ({ accounts: group.candidates.map((candidate) => candidate.account), quota: group.quota, health: group.health })), diagnostics, stickyApplied };
 }
-function cachePoolMembership(list, candidates = null) {
-  if (!cachePoolEnabled()) return null;
+function cachePoolMembership(list, candidates = null, settings = null) {
+  if (!(settings?.enabled ?? cachePoolEnabled())) return null;
   candidates ||= pipelineCandidates(list);
-  const size = configuredCachePoolSize(), maxSize = configuredCachePoolMaxSize(), targetSize = configuredCachePoolTargetSize();
+  const pipeline = settings?.pipeline || config.accountPipeline;
+  const size = pipeline.cachePoolSize, maxSize = pipeline.cachePoolMaxSize, targetSize = cachePoolTargetFor(pipeline, settings?.targetSize ?? META.cachePoolTargetSize);
+  const lowSize = pipeline.cachePoolLowQuotaSize;
   const stable = (left, right) => (left.account.priority || 100) - (right.account.priority || 100) || (left.account.id < right.account.id ? -1 : left.account.id > right.account.id ? 1 : 0);
   let eligibleCandidates = candidates.filter((candidate) => candidate.quota.pool !== 'reserve').sort(stable);
   let activeCandidates;
-  if (configuredCachePoolLowQuotaSize() > 0) {
+  if (lowSize > 0) {
     const remaining = (candidate) => 100 - Math.max(...Object.values(candidate.quota.limits).map((limit) => limit.percentUsed));
     const low = eligibleCandidates.filter((candidate) => candidate.quota.pool === 'warm').sort((a,b) => remaining(a) - remaining(b) || stable(a,b));
     const high = eligibleCandidates.filter((candidate) => candidate.quota.pool === 'hot').sort((a,b) => remaining(b) - remaining(a) || stable(a,b));
     const unknown = eligibleCandidates.filter((candidate) => candidate.quota.pool === 'unknown');
-    const lowTarget = configuredCachePoolLowQuotaSize();
+    const lowTarget = lowSize;
     const selected = [...low.slice(0, lowTarget), ...high.slice(0, targetSize - lowTarget)];
     const chosen = new Set(selected.map((candidate) => candidate.account.id));
     // Known filler is real high/low, never relabelled to satisfy a target. Unknown is last.
@@ -1721,7 +1732,7 @@ function cachePoolMembership(list, candidates = null) {
   } else activeCandidates = eligibleCandidates.slice(0, targetSize);
   const activeIds = new Set(activeCandidates.map((candidate) => candidate.account.id));
   const actual = { high: activeCandidates.filter((c) => c.quota.pool === 'hot').length, low: activeCandidates.filter((c) => c.quota.pool === 'warm').length, unknown: activeCandidates.filter((c) => c.quota.pool === 'unknown').length };
-  return { size, maxSize, lowSize: configuredCachePoolLowQuotaSize(), targetSize, actual, activeIds, activeCandidates, eligibleCandidates, candidates, byId: new Map(candidates.map((candidate) => [candidate.account.id, candidate])) };
+  return { size, maxSize, lowSize, targetSize, actual, activeIds, activeCandidates, eligibleCandidates, candidates, byId: new Map(candidates.map((candidate) => [candidate.account.id, candidate])) };
 }
 function rpmProjection(account, now = Date.now()) {
   const limit = rpmLimit(account), state = rpmWindowState(account.id);
@@ -2050,10 +2061,146 @@ async function acquirePipelineAccountLease(identity, options = {}) {
     await waitForCapacity(duration);
   }
 }
+function configurationRevision() {
+  return crypto.createHash('sha256').update(JSON.stringify(config)).digest('hex');
+}
+function selectionCounterFor(id) {
+  return Object.hasOwn(META.selectionCounters.accounts, id) ? META.selectionCounters.accounts[id] : { count: 0, lastSelected: 0 };
+}
+function workflowSnapshot(identity) {
+  if (!identity.workflowSnapshot) identity.workflowSnapshot = {
+    policy: structuredClone(config.accountWorkflow), pipeline: structuredClone(config.accountPipeline),
+    revision: configurationRevision(), waits: admissionWaitBudgets(),
+  };
+  return identity.workflowSnapshot;
+}
+function workflowSelectionContext(identity, { excludeIds = new Set(), preview = false, snapshot = workflowSnapshot(identity) } = {}) {
+  const list = enabledAccounts({ excludeIds, clientKeyId: identity.clientKeyId ?? null, pruneCooldowns: !preview });
+  const candidates = pipelineCandidates(list);
+  const membership = cachePoolMembership(list, candidates, { enabled: snapshot.pipeline.cachePoolSize > 0, pipeline: snapshot.pipeline });
+  return { list, candidates, membership, active: membership?.activeCandidates || [], snapshot };
+}
+function workflowFilteredCandidates(context, excludeId = null) {
+  const policy = context.snapshot.policy;
+  let candidates = context.active.filter(candidate => candidate.account.id !== excludeId);
+  const trace = [
+    { node: 'eligibility', before: context.list.length, after: context.list.length, result: 'owner-and-hard-state' },
+    { node: 'cache', before: context.candidates.length, after: context.active.length, result: 'active-cache' },
+  ];
+  for (const step of policy.missSteps) {
+    const before = candidates.length;
+    const enabled = step === 'quota' ? policy.quotaFilter : policy.healthFilter;
+    if (step === 'quota' && enabled) candidates = candidates.filter(candidate => candidate.quota.pool !== 'reserve');
+    if (step === 'health' && enabled) candidates = candidates.filter(candidate => {
+      const rate = effectiveRoutingHealth(candidate.health.successRate, policy.unknownHealth);
+      return rate !== null && rate >= policy.minimumHealth;
+    });
+    trace.push({ node: step, before, after: candidates.length, result: enabled ? 'filtered' : 'disabled' });
+  }
+  return { candidates, trace };
+}
+function workflowRank(candidates, policy) {
+  const byId = new Map(candidates.map(candidate => [candidate.account.id, candidate]));
+  return rankWorkflowCandidates(candidates.map(candidate => ({ id: candidate.account.id, healthRate: candidate.health.successRate })), {
+    selector: policy.selector, counts: META.selectionCounters.accounts, activeCounts,
+    cursor: META.selectionCounters.sequence, unknownHealth: policy.unknownHealth,
+  }).map(row => byId.get(row.id));
+}
+function recordWorkflowSelection(account) {
+  const state = META.selectionCounters, previous = selectionCounterFor(account.id);
+  // Checked before the lease is claimed; this guard also protects future callers.
+  if (previous.count >= Number.MAX_SAFE_INTEGER || state.sequence >= Number.MAX_SAFE_INTEGER) throw Object.assign(new Error('selection counter limit reached; explicit reset required'), { statusCode: 503 });
+  const before = previous.count;
+  state.sequence++;
+  Object.defineProperty(state.accounts, account.id, { value: { count: before + 1, lastSelected: state.sequence }, enumerable: true, configurable: true, writable: true });
+  try { saveMeta(); } catch { selectionCounterPersistenceError = true; console.error('[工作流] 选号计数暂未持久化'); }
+  return { before, after: before + 1 };
+}
+function workflowDecision(identity, context, { account = null, kind, counted = false, before = null, after = null, trace = [] }) {
+  const decision = {
+    version: 1, configurationRevision: context.snapshot.revision, selector: context.snapshot.policy.selector,
+    kind, accountId: account?.id || null, counted, countBefore: before, countAfter: after,
+    nodes: [...trace, { node: 'lease', result: account ? 'admitted' : 'blocked' }].slice(0, 8),
+  };
+  identity.workflowDecisions ||= [];
+  if (identity.workflowDecisions.length < 4) identity.workflowDecisions.push(decision);
+  return decision;
+}
+function tryWorkflowSelection(identity, context, { excludeId = null, kind = 'new-selection' } = {}) {
+  const filtered = workflowFilteredCandidates(context, excludeId);
+  const available = filtered.candidates.filter(candidate => accountHasCapacity(candidate.account) && rpmAvailable(candidate.account));
+  const trace = [...filtered.trace, { node: 'capacity', before: filtered.candidates.length, after: available.length, result: 'concurrency-and-rpm' }];
+  for (const candidate of workflowRank(available, context.snapshot.policy)) {
+    const counter = selectionCounterFor(candidate.account.id);
+    if (counter.count >= Number.MAX_SAFE_INTEGER || META.selectionCounters.sequence >= Number.MAX_SAFE_INTEGER) throw Object.assign(new Error('selection counter limit reached; explicit reset required'), { statusCode: 503 });
+    const claimed = tryLeaseResult(candidate.account, Date.now(), identity.clientKeyId ?? null);
+    if (!claimed.lease) continue;
+    // There is no await between ranking, lease reservation and count update.
+    const count = recordWorkflowSelection(candidate.account);
+    const result = selectionResult(claimed.lease, 'workflow', candidate.account, `workflow-${kind}`, identity, kind === 'temporary-overflow');
+    result.pipeline = cachePipelineFacts({ diagnostics: [] }, context.membership, candidate, 'active', kind === 'temporary-overflow');
+    result.workflow = workflowDecision(identity, context, { account: candidate.account, kind, counted: true, ...count, trace: [...trace, { node: 'selector', result: context.snapshot.policy.selector }] });
+    return { result, filtered, trace };
+  }
+  return { result: null, filtered, trace };
+}
+async function acquireWorkflowAccountLease(identity, { excludeIds = new Set(), ownerRequestId, allowOverflow = true } = {}) {
+  const snapshot = workflowSnapshot(identity), policy = snapshot.policy, start = Date.now();
+  let lookup = null, expanded = false;
+  const canBind = policy.bindingEnabled && !!identity.fingerprint && !!ownerRequestId;
+  while (true) {
+    if (identity.credentialValid && !identity.credentialValid()) return { error: 'client credential revoked', credentialRevoked: true, strategy: 'workflow' };
+    const context = workflowSelectionContext(identity, { excludeIds, snapshot });
+    if (!context.list.length) return { error: 'no available upstream account', strategy: 'workflow' };
+    if (!context.membership) return { error: 'workflow requires an active cache pool', workflowFiltered: true, strategy: 'workflow' };
+    if (canBind) {
+      const current = sessionBindings.get(identity.fingerprint);
+      if (!lookup?.entry || current !== lookup.entry || current.expiresAt <= Date.now() || !context.membership.activeIds.has(current.accountId)) lookup = findSessionBinding(identity, context.membership.activeIds);
+    }
+    const bound = lookup?.entry ? context.membership.byId.get(lookup.entry.accountId) : null;
+    if (bound) {
+      const lease = tryLease(bound.account, Date.now(), identity.clientKeyId ?? null);
+      if (lease) {
+        const count = selectionCounterFor(bound.account.id).count;
+        const result = selectionResult(lease, 'workflow', bound.account, 'workflow-binding-hit', identity);
+        result.pipeline = cachePipelineFacts({ diagnostics: [] }, context.membership, bound, 'active', false);
+        result.workflow = workflowDecision(identity, context, { account: bound.account, kind: 'binding-hit', before: count, after: count, trace: [{ node: 'binding', result: 'hit' }] });
+        return attachBindingHit(result, identity, lookup.entry, lookup.result);
+      }
+      if (policy.onBindingBusy === 'reject' || !allowOverflow) {
+        const facts = selectionBlockFacts([bound.account]);
+        workflowDecision(identity, context, { kind: 'binding-busy', trace: [{ node: 'binding', result: 'busy' }] });
+        return busyFailure(facts.blockedBy, facts.retryAt, 'workflow', 0, 'bound account is busy');
+      }
+      if (policy.onBindingBusy === 'wait-overflow') {
+        const facts = selectionBlockFacts([bound.account]);
+        const { duration } = poolWaitForBlock(start, context.active.map(candidate => candidate.account), facts, snapshot.waits);
+        if (duration > 0) { await waitForCapacity(duration); continue; }
+      }
+    }
+    const chosen = tryWorkflowSelection(identity, context, { excludeId: bound?.account.id, kind: bound ? 'temporary-overflow' : 'new-selection' });
+    if (chosen.result) {
+      if (bound) { incrementBindingCounter('temporaryOverflows'); return attachBindingHit(chosen.result, identity, lookup.entry, 'temporary-overflow'); }
+      return canBind ? attachBindingMiss(chosen.result, identity, ownerRequestId, lookup?.result || 'miss') : chosen.result;
+    }
+    if (!chosen.filtered.candidates.length && !bound) {
+      workflowDecision(identity, context, { kind: 'filtered', trace: chosen.trace });
+      return { error: 'no active account satisfies workflow filters', workflowFiltered: true, strategy: 'workflow' };
+    }
+    const pool = context.active.map(candidate => candidate.account), facts = selectionBlockFacts(pool);
+    const { budget, duration } = poolWaitForBlock(start, pool, facts, snapshot.waits);
+    if (duration > 0) { await waitForCapacity(duration); continue; }
+    // A concurrent operator edit cannot let an older request grow the new pool policy.
+    if (allowOverflow && !expanded && snapshot.revision === configurationRevision() && growCachePoolOne(context.membership)) { expanded = true; continue; }
+    workflowDecision(identity, context, { kind: 'capacity-blocked', trace: chosen.trace });
+    return busyFailure(facts.blockedBy, facts.retryAt, 'workflow', budget, 'all upstream accounts are busy');
+  }
+}
 async function acquireAccountLease(identity, options = {}) {
   if (identity?.credentialValid && !identity.credentialValid()) return { error: 'client credential revoked', credentialRevoked: true, strategy: config.accountMode };
   const admission = { ...options, waitBudgets: admissionWaitBudgets() };
-  const selected = await (pipelineEnabled() ? acquirePipelineAccountLease(identity, admission) : acquireLegacyAccountLease(identity, admission));
+  const snapshot = workflowSnapshot(identity);
+  const selected = await (snapshot.policy.enabled ? acquireWorkflowAccountLease(identity, admission) : pipelineEnabled() ? acquirePipelineAccountLease(identity, admission) : acquireLegacyAccountLease(identity, admission));
   // A rotation may race a capacity wait. Only an already leased request may proceed.
   if (identity?.credentialValid && !identity.credentialValid()) {
     cleanupSessionBindingSelection(selected);
@@ -4489,7 +4636,7 @@ async function handleChat(req, res, clientKeyId) {
   if (!selected.lease) {
     if (selected.credentialRevoked) return unauthorized(res);
     const protectedAccounts = config.accounts.filter((a) => a.clientKeyId === clientKeyId && a.enabled !== false && a.key && (getAccountState(a.id)?.protectionMonthlyAt || getAccountState(a.id)?.protectionShortAt || (quotaProvisional.get(a.id)?.until || 0) > Date.now()));
-    const status = enabledAccounts({ clientKeyId }).length ? 429 : 503;
+    const status = !selected.workflowFiltered && enabledAccounts({ clientKeyId }).length ? 429 : 503;
     const protectionBlocked = protectedAccounts.length > 0 && !enabledAccounts({ clientKeyId }).length;
     if (protectionBlocked) {
       const next = protectedAccounts.map((a) => getAccountState(a.id)?.protectionRetryAt || quotaProvisional.get(a.id)?.until || 0).filter((at) => at > Date.now());
@@ -5088,6 +5235,7 @@ async function dispatch(req, res) {
         if (quota?.snapshot && quota.lastSuccessAt === quota.snapshot.fetchedAt) reconcileQuotaDisposition(account.id, quota.snapshot);
       }
       for (const id of Object.keys(META.accountStates || {})) if (!seen.has(id)) delete META.accountStates[id];
+      META.selectionCounters = normalizeSelectionCounters(META.selectionCounters, seen);
       for (const id of Object.keys(META.statistics.lifetime.accounts)) if (!seen.has(id)) delete META.statistics.lifetime.accounts[id];
       for (const bucket of META.statistics.minuteBuckets) for (const id of new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health),...Object.keys(bucket.accountHealth)])) if (!seen.has(id)) { delete bucket.accounts[id]; delete bucket.health[id]; delete bucket.accountHealth[id]; }
       for (const id of Object.keys(META.statistics.recentCoverage.accountIncompleteAt)) if (!seen.has(id)) delete META.statistics.recentCoverage.accountIncompleteAt[id];
