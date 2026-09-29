@@ -5340,7 +5340,7 @@ async function dispatch(req, res) {
       pruneOrphanProviderStates();
       reconcileSessionBindings();
       saveMeta(); RR_COUNTER = 0; strategyCounters.clear(); pruneProxyAgents(); scheduleQuotaRefresh();
-      return sendJSON(res, 200, { ok: true, accounts: accs.length, mode: config.accountMode, active: config.activeAccount });
+      return sendJSON(res, 200, { ok: true, accounts: accs.length, mode: config.accountMode, active: config.activeAccount, accountWorkflowEnabled: config.accountWorkflow.enabled, configurationRevision: configurationRevision() });
     }
     if (req.method === 'POST' && p === '/api/accounts/quota-recover') {
       const body = await readJsonBody(req);

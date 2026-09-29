@@ -1,0 +1,14 @@
+{
+  "url": "http://127.0.0.1:61160",
+  "dataDir": "/var/folders/h7/1s08hdn51x778k3dtg4ytt140000gn/T/cps-workflow-browser-hmPLlw",
+  "requests": [
+    "e9fe83bc-16bb-4fe5-b7a0-e8906aad7504",
+    "5fa867bc-b787-419f-9189-b9d409b19faa",
+    "a5b577b8-842b-4bfa-8dd2-f0ef79165df4",
+    "e8b39df9-9ce7-4fa8-93a3-451fe87fdd3e",
+    "ab894322-6caa-4de7-a7dc-cd59594d131b"
+  ],
+  "synthetic": true,
+  "modelHits": 5,
+  "stopped": false
+}

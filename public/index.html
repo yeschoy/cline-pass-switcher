@@ -119,6 +119,48 @@
   .trace .tr { font-family: Consolas, monospace; }
   .trace .tr.ok { color: var(--green); }
   .trace .tr.bad { color: var(--orange); }
+  .workflow-editor { margin:18px 0; border:1px solid var(--border); border-radius:10px; overflow:hidden; scroll-margin-top:20px; }
+  .workflow-header { padding:15px 17px; background:var(--card2); display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+  .workflow-header h3 { margin:0; font-size:16px; }
+  .workflow-header .workflow-enable { margin-left:auto; font-size:13px; }
+  .workflow-status { padding:10px 17px; border-bottom:1px solid var(--border); font-size:12px; line-height:1.7; color:var(--dim); }
+  .workflow-layout { display:grid; grid-template-columns:minmax(0,1fr) 290px; }
+  .workflow-canvas { padding:20px; min-width:0; background:var(--bg); }
+  .workflow-node { position:relative; border:1px solid var(--border); border-radius:7px; background:var(--card); text-align:left; margin:0; }
+  .workflow-node.selected { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
+  .workflow-node.off { opacity:.65; }
+  .workflow-node-select { width:100%; padding:11px 13px; border-radius:7px; background:transparent; color:var(--text); text-align:left; }
+  .workflow-node-select strong { display:block; font-size:13px; line-height:1.5; }
+  .workflow-node-select small,.workflow-fixed small { display:block; margin-top:3px; font-size:12px; color:var(--dim); line-height:1.5; }
+  .workflow-fixed { padding:11px 13px; color:var(--dim); font-size:12px; }
+  .workflow-spine { max-width:430px; margin:auto; }
+  .workflow-arrow { text-align:center; color:var(--dim); line-height:25px; font-size:15px; }
+  .workflow-branches { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:24px; position:relative; margin-top:17px; padding-top:15px; border-top:1px solid var(--border); }
+  .workflow-branch-label { margin:0 0 10px; font-size:12px; font-weight:600; color:var(--dim); text-align:center; }
+  .workflow-hit { border-left:2px solid var(--green); }
+  .workflow-hit-note { padding:12px 4px; font-size:12px; line-height:1.7; color:var(--dim); }
+  .workflow-filter-list { list-style:none; padding:0; margin:0; }
+  .workflow-filter-list .workflow-node { margin-bottom:12px; }
+  .workflow-step-actions { display:flex; align-items:center; gap:5px; padding:0 10px 9px; }
+  .workflow-step-actions button { font-size:11px; padding:3px 8px; }
+  .workflow-step-actions button:disabled { cursor:not-allowed; }
+  .workflow-drag { color:var(--dim); font-size:11px; margin-right:auto; }
+  .workflow-properties { padding:17px; border-left:1px solid var(--border); min-width:0; }
+  .workflow-properties h4 { font-size:14px; margin:0 0 13px; }
+  .workflow-properties label { display:block; font-size:12px; margin:13px 0 5px; line-height:1.5; }
+  .workflow-properties label.check { display:flex; align-items:center; gap:6px; }
+  .workflow-properties select,.workflow-properties input[type=number] { width:100%; box-sizing:border-box; }
+  .workflow-properties p { font-size:12px; line-height:1.8; color:var(--dim); }
+  .workflow-footer { padding:14px 17px; border-top:1px solid var(--border); }
+  .workflow-footer .toolbar { margin-bottom:10px; gap:8px; }
+  .workflow-result { font-size:12px; line-height:1.8; overflow-wrap:anywhere; }
+  .workflow-trace { margin:8px 0; padding:9px 11px; background:var(--card2); border-left:2px solid var(--accent); }
+  .workflow-trace ol { padding-left:20px; margin:6px 0; }
+  .workflow-counter-table { min-width:720px; }
+  .workflow-counter-table td,.workflow-counter-table th { font-size:12px; }
+  .workflow-help { padding:0 17px 13px; font-size:12px; line-height:1.8; color:var(--dim); }
+  @media(max-width:1000px) { .workflow-layout { grid-template-columns:minmax(0,1fr); } .workflow-properties { border-left:0; border-top:1px solid var(--border); } }
+  @media(max-width:620px) { .workflow-canvas { padding:13px; } .workflow-branches { grid-template-columns:1fr; gap:14px; } .workflow-header .workflow-enable { margin-left:0; } .workflow-footer .toolbar>* { max-width:100%; } }
 </style>
 </head>
 <body>
@@ -257,7 +299,7 @@
       <label class="dim" style="font-size:12px" for="sessionBindingFallbackTtlMs">消息回退 TTL(ms) <input id="sessionBindingFallbackTtlMs" type="number" min="60000" max="604800000" step="1" value="900000" aria-describedby="cachePoolHelp" style="width:120px"></label>
       <label class="dim" style="font-size:12px" for="sessionBindingMaxEntries">会话绑定上限 <input id="sessionBindingMaxEntries" type="number" min="1" max="100000" step="1" value="50000" aria-describedby="cachePoolHelp" style="width:100px"></label>
       <select id="preset"><option value="">策略预设…</option><option value="cache">缓存命中优先</option><option value="stable">会话稳定</option><option value="throughput">最大吞吐</option><option value="even">均匀分摊</option><option value="quota">按额度分摊</option><option value="failover">主备容灾</option><option value="safe">保守防封</option></select>
-      <button class="ghost" onclick="previewPreset()">预览应用</button>
+      <button id="accountPresetPreview" class="ghost" onclick="previewPreset()">预览应用</button>
       <input id="accSearch" placeholder="搜索名称或备注" oninput="clearBulkSelection()" style="background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px">
       <label for="newAccountOwner" class="dim">新账号归属 <select id="newAccountOwner" aria-label="新账号归属客户端密钥"><option value="legacy">Legacy</option></select></label>
       <button class="ghost" onclick="addAccountRow()">＋ 添加账号</button>
@@ -265,7 +307,7 @@
       <span class="dim" style="font-size:12px" id="accMsg" aria-live="polite"></span>
     </div>
     <p class="dim" style="font-size:12px">仅真实上游 429 且明确账号额度不足、刷新后月参考余额严格低于阈值才手动解封式隔离；以社区参考月上限 $50 估算，非真实账单。5 小时/每周耗尽由新鲜完整额度快照确认恢复。解封前请确认额度；解封后可能再次失败。</p>
-    <p id="cachePoolHelp" class="dim" style="font-size:12px;margin-bottom:6px">缓存池最小总数 0 = 关闭，低额度槽 0 = 保持旧调度；多客户端密钥时同一目标数分别用于各归属池，实际高/低/未知为各池合计，不是每 Key 独立配额。仅在 sticky 模式或启用会话粘性步骤时生效。正数低额度槽优先消耗已用 80%–&lt;95% 的账号，已用 &lt;80% 作高额度兜底，≥95% 不入池，未知最后补位；仅在同角色内应用健康/会话排序。低额度账号级降级会等待真实额度刷新，耗尽状态按窗口重置重评；人工恢复只清规则状态。只有全部活跃账号有限并发满载且 RPM 未耗尽，等待超时后才 grow-one 高额度目标；压力下降不缩容。max=min 可关闭自动扩容。</p>
+    <p id="cachePoolHelp" class="dim" style="font-size:12px;margin-bottom:6px">缓存池最小总数 0 = 关闭，低额度槽 0 = 保持旧调度；多客户端密钥时同一目标数分别用于各归属池，实际高/低/未知为各池合计，不是每 Key 独立配额。旧策略仅在 sticky 模式或启用会话粘性步骤时生效；启用下方工作流也会启用活动缓存。正数低额度槽优先消耗已用 80%–&lt;95% 的账号，已用 &lt;80% 作高额度兜底，≥95% 不入池，未知最后补位；旧策略仅在同角色内应用健康/会话排序；工作流重新选号按节点规则处理整个允许的活动集合，不隐含健康层或角色优先。低额度账号级降级会等待真实额度刷新，耗尽状态按窗口重置重评；人工恢复只清规则状态。只有全部活跃账号有限并发满载且 RPM 未耗尽，等待超时后才 grow-one 高额度目标；压力下降不缩容。max=min 可关闭自动扩容。</p>
     <p id="cachePoolRuntime" class="dim" aria-live="polite" style="font-size:12px;margin-bottom:10px">当前目标与会话绑定状态加载中…</p>
     <div class="toolbar">
       <label><input id="bulkSelectAll" type="checkbox" onchange="selectAllAccounts(this.checked)"> 选择当前搜索结果全部账号</label>
@@ -309,7 +351,20 @@
         <div class="toolbar" style="margin-top:8px"><button type="button" onclick="applyAdvancedRetryRules()">应用到页面草稿</button><button type="button" class="ghost" onclick="refreshAdvancedRetryRules()">从当前草稿刷新</button></div>
       </details>
     </section>
-    <fieldset style="border:1px solid var(--border);padding:10px;margin-top:12px"><legend class="dim">会话命中条件门与未命中调度步骤（可选）</legend>
+    <section id="workflowEditor" class="workflow-editor" aria-labelledby="workflowTitle">
+      <div class="workflow-header"><h3 id="workflowTitle" tabindex="-1">选号工作流</h3><span id="workflowRevision" class="badge">配置版本</span><label class="workflow-enable"><input id="workflowEnabled" type="checkbox" onchange="updateWorkflowField('enabled',this.checked)"> 启用此工作流（草稿）</label></div>
+      <div id="workflowStatus" class="workflow-status" aria-live="polite"></div>
+      <div class="workflow-layout"><div id="workflowCanvas" class="workflow-canvas" aria-label="选号流程图，点击节点编辑，筛选步骤支持拖动和上移下移"></div><aside class="workflow-properties" aria-labelledby="workflowPropertyTitle"><h4 id="workflowPropertyTitle" tabindex="-1">节点属性</h4><div id="workflowProperties"></div></aside></div>
+      <div class="workflow-footer">
+        <div class="toolbar"><button type="button" class="ghost" onclick="validateAccountWorkflowDraft()">校验草稿</button><button type="button" id="workflowSave" onclick="saveAccounts()">保存账号与工作流</button><label for="workflowOwner" class="dim">模拟/计数号池</label><select id="workflowOwner" onchange="changeWorkflowOwner(this.value)"></select><label for="workflowBoundAccount" class="dim">模拟绑定</label><select id="workflowBoundAccount" onchange="invalidateWorkflowPreview('模拟条件已改变')"><option value="">未命中 / 新会话</option></select><button type="button" id="workflowPreviewButton" class="ghost" onclick="previewAccountWorkflowDraft()">模拟当前草稿</button></div>
+        <div id="workflowPreviewResult" class="workflow-result" aria-live="polite">模拟只读取已保存账号状态，不调用模型、不占用名额、不增加计数。</div>
+        <button type="button" class="ghost" style="margin-top:8px" onclick="discardAccountWorkflowDraft()">放弃工作流草稿</button>
+        <div class="toolbar" style="margin-top:12px"><label for="workflowRequestId" class="dim">真实请求 ID</label><input id="workflowRequestId" placeholder="粘贴请求 ID 查看选号轨迹" style="min-width:230px;flex:1" oninput="invalidateWorkflowPreview('请求 ID 已改变')"><button type="button" id="workflowTraceButton" class="ghost" onclick="loadAccountWorkflowTrace()">查看执行轨迹</button></div>
+        <details><summary id="workflowCountSummary">账号选号计数</summary><p class="dim" style="font-size:12px">计数跨重启保存；绑定直接命中不增加。新账号从0开始，低计数账号进入活动池时可能优先追赶。下表健康统计与草稿参与值分开显示。</p><div class="table-wrap" tabindex="0" role="region" aria-label="账号选号计数，可横向滚动"><table class="workflow-counter-table"><thead><tr><th>账号</th><th>缓存角色</th><th>已保存选号计数</th><th>当前占用</th><th>实测健康 / 样本</th><th>草稿选号健康</th></tr></thead><tbody id="workflowCounterBody"></tbody></table></div><button type="button" id="workflowResetCounts" class="ghost" style="margin-top:10px" onclick="resetAccountSelectionCounts()">重置所选号池的计数…</button><span id="workflowCounterStatus" class="dim" style="font-size:12px;margin-left:8px"></span></details>
+      </div>
+      <p class="workflow-help">固定系统节点不可移动。可拖动未命中分支的筛选节点，也可用上移/下移按钮；点击节点修改参数。编辑和模拟均不会立即生效，保存时会检查配置版本。真实执行轨迹按当时记录的节点顺序展示。</p>
+    </section>
+    <fieldset id="legacyPipelineFieldset" style="border:1px solid var(--border);padding:10px;margin-top:12px"><legend class="dim">旧版兼容：会话命中条件门与未命中调度步骤</legend>
       <ol id="pipelineSteps" class="pipeline-list" aria-describedby="pipelineOrderHelp">
         <li class="pipeline-step" draggable="true" data-pipeline-step="quotaPool" ondragstart="startPipelineDrag(event,'quotaPool')" ondragover="overPipelineDrag(event)" ondrop="dropPipelineDrag(event,'quotaPool')" ondragend="endPipelineDrag()"><span class="pipeline-drag-handle" aria-hidden="true" title="拖动排序">⠿</span><span class="pipeline-position" aria-label="当前位置 1">1</span><label><input id="pipelineQuotaPool" type="checkbox"> Cline 额度热池</label><span class="pipeline-step-actions"><button type="button" class="ghost pipeline-move-up" aria-label="上移 Cline 额度热池" disabled onclick="movePipelineStep('quotaPool',-1,this)">↑</button><button type="button" class="ghost pipeline-move-down" aria-label="下移 Cline 额度热池" onclick="movePipelineStep('quotaPool',1,this)">↓</button></span></li>
         <li class="pipeline-step" draggable="true" data-pipeline-step="healthSort" ondragstart="startPipelineDrag(event,'healthSort')" ondragover="overPipelineDrag(event)" ondrop="dropPipelineDrag(event,'healthSort')" ondragend="endPipelineDrag()"><span class="pipeline-drag-handle" aria-hidden="true" title="拖动排序">⠿</span><span class="pipeline-position" aria-label="当前位置 2">2</span><label><input id="pipelineHealthSort" type="checkbox"> 账号成功率排序</label><span class="pipeline-step-actions"><button type="button" class="ghost pipeline-move-up" aria-label="上移账号成功率排序" onclick="movePipelineStep('healthSort',-1,this)">↑</button><button type="button" class="ghost pipeline-move-down" aria-label="下移账号成功率排序" onclick="movePipelineStep('healthSort',1,this)">↓</button></span></li>
@@ -459,6 +514,7 @@ async function api(path, body, method, asText=false, options={}) {
 }
 
 function showLogin() {
+  invalidateWorkflowPreview();
   resetLogChain();
   closeClientKeySecret(true,false);
   resetDetailSelection();
@@ -675,10 +731,12 @@ function renderCatalog() {
 }
 
 async function loadAll() {
+  const workflowLoadGeneration=WORKFLOW_GENERATION,workflowWasDirty=WORKFLOW_SUPPORTED&&workflowDirty();
   const accountId = $('#routeScope')?.value || '';
   const [models, accs, sec, meta, aliases, statistics, keyList] = await Promise.all([api('/api/models' + (accountId ? '?accountId=' + encodeURIComponent(accountId) : '')), api('/api/accounts'), api('/api/security'), api('/api/meta'), api('/api/model-aliases'), api('/api/statistics'), api('/api/security/client-keys')]);
   const modelStatistics=new Map((statistics?.models||[]).map(item=>[item.id,item]));
   DATA = {...models,subscription:(models.subscription||[]).map(item=>({...item,statistics:modelStatistics.get(item.id)||null}))};
+  const pendingWorkflowContext=WORKFLOW_SUPPORTED&&(workflowWasDirty||WORKFLOW_GENERATION!==workflowLoadGeneration)?captureWorkflowContext():null;
   ACCS = accs; ALIASES = aliases;
   CLIENT_KEYS = Array.isArray(keyList?.keys) && keyList.keys.some(k => k.id === 'legacy') ? keyList.keys.map(({id,name}) => ({id,name})) : [{id:'legacy',name:'Legacy'}];
   $('#accMode').value = ACCS.mode; $('#concurrencyWaitMs').value = ACCS.concurrencyWaitMs ?? 2000; $('#poolFullWaitMs').value = ACCS.poolFullWaitMs ?? '';
@@ -693,6 +751,8 @@ async function loadAll() {
   hydrateRetryRuleDraft(ACCS.retryRules || []);
   setPipelineOrder(ACCS.accountPipeline?.order || PIPELINE_DEFAULT_ORDER);
   $('#pipelineQuotaPool').checked=!!ACCS.accountPipeline?.quotaPool;$('#pipelineHealthSort').checked=!!ACCS.accountPipeline?.healthSort;$('#pipelineSticky').checked=!!ACCS.accountPipeline?.sticky;
+  if(pendingWorkflowContext)restoreWorkflowContext(pendingWorkflowContext);
+  hydrateAccountWorkflow(ACCS);
   BULK_SELECTION.clear(); $('#bulkFeedback').textContent = '';
   $('#rawSchedulingFeedback').textContent = '';
   $('#aliasEditor').value = Object.entries(aliases.aliases || {}).map(([a,t]) => `${a} = ${t}`).join('\n');
@@ -1228,9 +1288,10 @@ function renderAccounts() {
   if (!ACCS) return;
   updateBulkSelection();
   renderClientKeys();
+  renderAccountWorkflow();
   const rows = visibleAccountRows().map(({a,i}) => {
     const checked=$('#accMode').value==='single'&&i===ACCS.active,statistics=a.statistics||{},recent=statistics.recent24h||{},health=a.health||{};
-    const roleAware=(ACCS.accountPipeline?.cachePoolLowQuotaSize??0)>0&&(ACCS.accountPipeline?.cachePoolSize??0)>0&&(ACCS.mode==='sticky'||ACCS.accountPipeline?.sticky===true);
+    const roleAware=(ACCS.accountPipeline?.cachePoolLowQuotaSize??0)>0&&(ACCS.accountPipeline?.cachePoolSize??0)>0&&(ACCS.accountWorkflow?.enabled||ACCS.mode==='sticky'||ACCS.accountPipeline?.sticky===true);
     const disposition=roleAware?a.state?.quotaDisposition:null;
     const state=health.disabled?'已禁用':a.state?.protectionMonthlyAt?(a.quota?.protectionPersistence==='pending'?'月额度封禁（写盘待重试 · 须手动解封）':'月额度封禁（须手动解封）'):a.state?.protectionShortAt?'短窗口耗尽（待全部恢复）':a.quota?.protectionPendingUntil?'额度核验中':health.hardQuarantined?'硬隔离':health.cooling?`冷却至 ${new Date(health.cooldownUntil).toLocaleTimeString()}`:disposition==='waiting-refresh'?'等待额度刷新':disposition==='quota-exhausted'?'额度耗尽':'可调度';
     const rate=health.successRate===null||health.successRate===undefined?'无数据':`${(Number(health.successRate)*100).toFixed(1)}%`;
@@ -1336,13 +1397,204 @@ function presetDiffLines(before,after){const beforeMap=new Map(before.map(rule=>
 function previewRetryPreset(){const retryBefore=cloneRetryRuleDraft(),errorBefore=cloneRuleDraft();const retryAfter=mergeRulesById(retryBefore,RETRY_PRESET.retryRules),errorAfter=mergeRulesById(errorBefore,RETRY_PRESET.errorRules);PENDING_RETRY_PRESET={retryRules:retryAfter,errorRules:errorAfter};$('#retryPresetDiff').textContent=`retryRules:\n${presetDiffLines(retryBefore,retryAfter)}\n\nerrorRules:\n${presetDiffLines(errorBefore,errorAfter)}`;$('#retryPresetModal').style.display='flex';}
 function closeRetryPreset(){$('#retryPresetModal').style.display='none';PENDING_RETRY_PRESET=null;}
 async function applyRetryPreset(){if(!PENDING_RETRY_PRESET)return;const pending=PENDING_RETRY_PRESET;try{validateRetryRuleDraft(pending.retryRules);validateErrorRuleDraft(pending.errorRules);}catch(error){retryRuleFailure(error);return;}closeRetryPreset();commitRetryRuleDraft(pending.retryRules,'停止重试预设已应用到页面草稿');commitErrorRuleDraft(pending.errorRules,'预设健康规则已应用到页面草稿');await saveAccounts();}
+const WORKFLOW_SELECTOR_LABELS = {'least-selections':'计数轮询：最少选号次数','roundrobin':'传统游标轮询','least-connections':'最少当前连接','health':'健康度优先'};
+const WORKFLOW_NODE_LABELS = {cache:'活动缓存池',binding:'会话绑定',quota:'额度筛选',health:'健康处理',selector:'选号方式'};
+let WORKFLOW_DRAFT=null,WORKFLOW_BASE=null,WORKFLOW_BASE_CONTEXT='',WORKFLOW_CONFIGURATION_REVISION=null,WORKFLOW_SUPPORTED=false,WORKFLOW_SERVER_ENABLED=false,WORKFLOW_CONFLICT=false,WORKFLOW_CONTEXT_DIRTY=false,WORKFLOW_GENERATION=0,WORKFLOW_OWNER='legacy',WORKFLOW_SELECTED_NODE='selector',WORKFLOW_DRAG_STEP=null,WORKFLOW_PREVIEW_ID=0,WORKFLOW_PREVIEW_CONTROLLER=null,WORKFLOW_ACCOUNTS=[];
+function acceptWorkflowAccountSnapshot(accounts){WORKFLOW_ACCOUNTS=(Array.isArray(accounts)?accounts:[]).filter(a=>typeof a.id==='string').map(a=>({id:a.id,name:a.name,clientKeyId:a.clientKeyId||'legacy',enabled:a.enabled!==false,selectionCount:a.selectionCount,activeCount:a.activeCount,maxConcurrent:a.maxConcurrent,health:{...(a.health||{})},cachePoolRole:a.cachePoolRole}));}
+function accountWorkflowDefaults(){return {version:1,enabled:false,bindingEnabled:true,onBindingBusy:'overflow',missSteps:['quota','health'],quotaFilter:true,quotaPools:['hot','warm','unknown'],healthFilter:false,minimumHealth:0,unknownHealth:'optimistic',selector:'least-selections'};}
+function normalizedWorkflowDraft(value){
+  const base=accountWorkflowDefaults();
+  if(value===undefined)return base;
+  if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(key=>!Object.hasOwn(base,key)))throw Error('工作流包含不支持的字段');
+  const out={...base,...value};
+  if(out.version!==1)throw Error('不支持的工作流版本');
+  for(const key of ['enabled','bindingEnabled','quotaFilter','healthFilter'])if(typeof out[key]!=='boolean')throw Error('工作流开关必须为布尔值');
+  if(!Object.hasOwn(WORKFLOW_SELECTOR_LABELS,out.selector))throw Error('不支持的选号方式');
+  if(!['overflow','wait-overflow','reject'].includes(out.onBindingBusy))throw Error('绑定忙时的分支无效');
+  if(!['optimistic','unknown-last'].includes(out.unknownHealth))throw Error('未知健康策略无效');
+  if(typeof out.minimumHealth!=='number'||!Number.isFinite(out.minimumHealth)||out.minimumHealth<0||out.minimumHealth>1)throw Error('健康阈值必须为0–100%的数字');
+  if(!Array.isArray(out.missSteps)||out.missSteps.length!==2||new Set(out.missSteps).size!==2||out.missSteps.some(step=>!['quota','health'].includes(step)))throw Error('筛选节点必须各出现一次');
+  if(!Array.isArray(out.quotaPools)||!out.quotaPools.length||out.quotaPools.length>3||new Set(out.quotaPools).size!==out.quotaPools.length||out.quotaPools.some(pool=>!['hot','warm','unknown'].includes(pool)))throw Error('至少选择一个有效的活动额度组');
+  return {...out,missSteps:[...out.missSteps],quotaPools:[...out.quotaPools]};
+}
+function workflowContextSignature(){
+  return JSON.stringify(captureWorkflowContext());
+}
+function captureWorkflowContext(){return Object.fromEntries(['cachePoolSize','cachePoolMaxSize','cachePoolLowQuotaSize','sessionBindingExplicitTtlMs','sessionBindingFallbackTtlMs','sessionBindingMaxEntries','concurrencyWaitMs','poolFullWaitMs'].map(id=>[id,String($('#'+id)?.value??'')]));}
+function restoreWorkflowContext(values){for(const [id,value] of Object.entries(values))if($('#'+id))$('#'+id).value=value;}
+function workflowDirty(){return !!WORKFLOW_DRAFT&&(JSON.stringify(WORKFLOW_DRAFT)!==JSON.stringify(WORKFLOW_BASE)||WORKFLOW_CONTEXT_DIRTY||workflowContextSignature()!==WORKFLOW_BASE_CONTEXT);}
+function collectAccountWorkflow(){
+  const flow=normalizedWorkflowDraft(WORKFLOW_DRAFT||ACCS?.accountWorkflow);
+  if(flow.enabled&&cachePoolSizeDraft()<1)throw Error('启用工作流前，请设置至少1个活动缓存池名额');
+  return flow;
+}
+function hydrateAccountWorkflow(snapshot,{force=false}={}){
+  const dirty=workflowDirty();
+  acceptWorkflowAccountSnapshot(snapshot?.accounts);
+  let accepted;
+  try{accepted=normalizedWorkflowDraft(snapshot?.accountWorkflow);}catch(error){WORKFLOW_SUPPORTED=false;$('#workflowStatus').textContent=error.message;return;}
+  WORKFLOW_SUPPORTED=snapshot?.accountWorkflow?.version===1&&/^[a-f0-9]{64}$/.test(snapshot?.configurationRevision||'');
+  WORKFLOW_SERVER_ENABLED=accepted.enabled;
+  if(!force&&WORKFLOW_SUPPORTED&&WORKFLOW_DRAFT&&dirty){WORKFLOW_CONFLICT=WORKFLOW_CONFLICT||WORKFLOW_CONFIGURATION_REVISION!==snapshot.configurationRevision;}
+  else{WORKFLOW_DRAFT=accepted;WORKFLOW_BASE=JSON.parse(JSON.stringify(accepted));WORKFLOW_BASE_CONTEXT=workflowContextSignature();WORKFLOW_CONTEXT_DIRTY=false;WORKFLOW_CONFLICT=false;WORKFLOW_CONFIGURATION_REVISION=WORKFLOW_SUPPORTED?snapshot.configurationRevision:null;}
+  invalidateWorkflowPreview();renderAccountWorkflow();
+}
+function invalidateWorkflowPreview(message=''){
+  WORKFLOW_PREVIEW_ID++;WORKFLOW_PREVIEW_CONTROLLER?.abort();WORKFLOW_PREVIEW_CONTROLLER=null;
+  const button=$('#workflowPreviewButton');if(button)button.disabled=!WORKFLOW_SUPPORTED;
+  const trace=$('#workflowTraceButton');if(trace)trace.disabled=!WORKFLOW_SUPPORTED;
+  if(message&&$('#workflowPreviewResult')){$('#workflowPreviewResult').innerHTML='';$('#workflowPreviewResult').textContent=message;}
+}
+function markWorkflowEdited(){WORKFLOW_GENERATION++;invalidateWorkflowPreview('草稿已改变，之前的模拟结果已作废');renderWorkflowCanvas();renderWorkflowStatus();renderWorkflowCounters();}
+function updateWorkflowField(field,value){
+  if(!WORKFLOW_DRAFT)WORKFLOW_DRAFT=accountWorkflowDefaults();
+  if(!Object.hasOwn(accountWorkflowDefaults(),field)||field==='version'||field==='missSteps')return false;
+  WORKFLOW_DRAFT[field]=Array.isArray(value)?[...value]:value;
+  const focus=document.activeElement?.id;
+  markWorkflowEdited();
+  if(['enabled','bindingEnabled','quotaFilter','healthFilter','unknownHealth','selector'].includes(field)){renderWorkflowProperties();if(focus)$('#'+focus)?.focus?.();}
+  return true;
+}
+function setWorkflowQuotaPool(pool,checked){if(!['hot','warm','unknown'].includes(pool))return;const next=(WORKFLOW_DRAFT.quotaPools||[]).filter(item=>item!==pool);if(checked)next.push(pool);updateWorkflowField('quotaPools',next);}
+function updateWorkflowContext(id,value){
+  if(!['cachePoolSize','cachePoolMaxSize','cachePoolLowQuotaSize','sessionBindingExplicitTtlMs','sessionBindingFallbackTtlMs','sessionBindingMaxEntries','concurrencyWaitMs','poolFullWaitMs'].includes(id))return;
+  $('#'+id).value=value;WORKFLOW_CONTEXT_DIRTY=workflowContextSignature()!==WORKFLOW_BASE_CONTEXT;markWorkflowEdited();
+}
+function moveWorkflowStep(step,direction){
+  if(!WORKFLOW_DRAFT||!['quota','health'].includes(step)||![-1,1].includes(direction))return false;
+  const order=[...WORKFLOW_DRAFT.missSteps],index=order.indexOf(step),target=index+direction;
+  if(index<0||target<0||target>=order.length)return false;
+  [order[index],order[target]]=[order[target],order[index]];WORKFLOW_DRAFT.missSteps=order;WORKFLOW_SELECTED_NODE=step;
+  markWorkflowEdited();renderWorkflowProperties();$('#workflowNode-'+step)?.focus?.();return true;
+}
+function startWorkflowDrag(event,step){if(!['quota','health'].includes(step))return;WORKFLOW_DRAG_STEP=step;event.dataTransfer?.setData('text/plain',step);if(event.dataTransfer)event.dataTransfer.effectAllowed='move';}
+function dropWorkflowStep(event,target){event.preventDefault();const source=WORKFLOW_DRAG_STEP;WORKFLOW_DRAG_STEP=null;if(!['quota','health'].includes(source)||!['quota','health'].includes(target)||source===target)return;moveWorkflowStep(source,WORKFLOW_DRAFT.missSteps.indexOf(target)>WORKFLOW_DRAFT.missSteps.indexOf(source)?1:-1);}
+function selectWorkflowNode(node){if(!Object.hasOwn(WORKFLOW_NODE_LABELS,node))return;WORKFLOW_SELECTED_NODE=node;renderWorkflowCanvas();renderWorkflowProperties();$('#workflowPropertyTitle')?.focus?.();}
+function workflowNodeMarkup(node,title,subtitle,extra=''){
+  return `<div class="workflow-node${WORKFLOW_SELECTED_NODE===node?' selected':''}"><button type="button" id="workflowNode-${node}" class="workflow-node-select" aria-pressed="${WORKFLOW_SELECTED_NODE===node}" aria-controls="workflowProperties" onclick="selectWorkflowNode('${node}')"><strong>${escapeHtml(title)}</strong><small>${escapeHtml(subtitle)}</small></button>${extra}</div>`;
+}
+function renderWorkflowCanvas(){
+  if(!WORKFLOW_DRAFT||!$('#workflowCanvas'))return;
+  const flow=WORKFLOW_DRAFT,busy={overflow:'绑定号忙：立即临时溢出','wait-overflow':'绑定号忙：等待后临时溢出',reject:'绑定号忙：直接拒绝'}[flow.onBindingBusy]||'分支待校验';
+  const filters=flow.missSteps.map((step,index)=>{
+    const enabled=step==='quota'?flow.quotaFilter:flow.healthFilter;
+    const text=step==='quota'?(enabled?'只保留勾选的活动额度组':'节点已关闭，候选直接通过'):(enabled?`健康阈值 ${typeof flow.minimumHealth==='number'?(flow.minimumHealth*100).toFixed(1):'待填写'}%`:'不按健康度切层，避免头部账号独占');
+    const actions=`<div class="workflow-step-actions"><span class="workflow-drag">拖动排序</span><button type="button" class="ghost" ${index===0?'disabled':''} aria-label="上移${WORKFLOW_NODE_LABELS[step]}" onclick="moveWorkflowStep('${step}',-1)">上移</button><button type="button" class="ghost" ${index===flow.missSteps.length-1?'disabled':''} aria-label="下移${WORKFLOW_NODE_LABELS[step]}" onclick="moveWorkflowStep('${step}',1)">下移</button></div>`;
+    return `<li draggable="true" data-workflow-step="${step}" ondragstart="startWorkflowDrag(event,'${step}')" ondragover="event.preventDefault()" ondrop="dropWorkflowStep(event,'${step}')" ondragend="WORKFLOW_DRAG_STEP=null">${workflowNodeMarkup(step,WORKFLOW_NODE_LABELS[step],text,actions)}</li>`;
+  }).join('');
+  $('#workflowCanvas').innerHTML=`<div class="workflow-spine"><div class="workflow-node workflow-fixed" data-workflow-system="entry"><strong>固定系统入口</strong><small>客户端Key所属号池 · 禁用/冷却/保护/排除名单</small></div><div class="workflow-arrow" aria-hidden="true">↓</div>${workflowNodeMarkup('cache','当前活动缓存池',`当前目标 ${ACCS?.cachePool?.targetSize??'未知'} · 草稿最小 ${$('#cachePoolSize')?.value||'0'} / 上限 ${$('#cachePoolMaxSize')?.value||'0'}`)}<div class="workflow-arrow" aria-hidden="true">↓</div>${workflowNodeMarkup('binding',flow.bindingEnabled?'会话绑定条件门':'会话绑定已关闭',flow.bindingEnabled?busy:'所有请求进入重新选号分支')}</div><div class="workflow-branches"><div><p class="workflow-branch-label">${flow.bindingEnabled?'有效绑定命中':'命中分支已关闭'}</p><div class="workflow-node workflow-fixed workflow-hit${flow.bindingEnabled?'':' off'}"><strong>复用绑定账号</strong><small>不增加选号计数</small></div><p class="workflow-hit-note">绑定号忙时按上方分支处理。临时溢出会重新选号并计数，但保留原绑定。</p></div><div><p class="workflow-branch-label">未命中 / 失效 / 临时溢出</p><ol class="workflow-filter-list">${filters}</ol>${workflowNodeMarkup('selector',WORKFLOW_SELECTOR_LABELS[flow.selector]||'选号方式待校验',flow.selector==='least-selections'?'先取选号次数最少者；并列看当前占用与稳定轮转':'只改变新选号，不改已有绑定')}</div></div><div class="workflow-arrow" aria-hidden="true">↓</div><div class="workflow-spine"><div class="workflow-node workflow-fixed" data-workflow-system="lease"><strong>固定系统准入与结算</strong><small>原子检查并发/RPM并占槽；重新选号 +1，直接命中不加；失败/完成释放槽位。</small></div><p class="workflow-hit-note">后续Provider与错误/停止规则独立执行；同账号换Provider不增加计数。</p></div>`;
+}
+function workflowInput(id,label,value,oninput,min=0,max=100000){return `<label for="${id}">${escapeHtml(label)}</label><input id="${id}" type="number" min="${min}" max="${max}" value="${escapeHtml(String(value??''))}" oninput="${oninput}">`;}
+function renderWorkflowProperties(){
+  if(!WORKFLOW_DRAFT||!$('#workflowProperties'))return;
+  const f=WORKFLOW_DRAFT,n=WORKFLOW_SELECTED_NODE;
+  $('#workflowPropertyTitle').textContent=WORKFLOW_NODE_LABELS[n]||'节点属性';
+  let content='';
+  if(n==='cache'){
+    content='<p>范围固定为当前Key所属的活动缓存成员。成员生成参数与上方账号配置共用，不会悄悄扩大到整个号池。</p>';
+    for(const [id,label] of [['cachePoolSize','最小账号数'],['cachePoolMaxSize','自动扩容上限'],['cachePoolLowQuotaSize','低额度成员槽数']])content+=workflowInput('wf-'+id,label,$('#'+id).value,`updateWorkflowContext('${id}',this.value)`);
+    content+='<p>额度瓶颈：最小剩余比例＝100%－最大已用比例。缓存成员规则与后面的可选筛选节点分别生效。</p>';
+  }else if(n==='binding'){
+    content=`<label class="check"><input id="wfBindingEnabled" type="checkbox" ${f.bindingEnabled?'checked':''} onchange="updateWorkflowField('bindingEnabled',this.checked)"> 复用有效绑定，命中不计数</label><label for="wfBindingBusy">绑定账号没有名额时</label><select id="wfBindingBusy" ${f.bindingEnabled?'':'disabled'} onchange="updateWorkflowField('onBindingBusy',this.value)">${[['overflow','立即临时溢出'],['wait-overflow','等待后临时溢出'],['reject','拒绝本次请求']].map(([v,l])=>`<option value="${v}" ${f.onBindingBusy===v?'selected':''}>${l}</option>`).join('')}</select><p>临时溢出不覆盖原绑定；真正另选账号才 +1。关闭绑定后每次请求都需要选号。</p>`;
+    content+=workflowInput('wf-explicitTtl','显式绑定TTL（毫秒）',$('#sessionBindingExplicitTtlMs').value,"updateWorkflowContext('sessionBindingExplicitTtlMs',this.value)",60000,604800000);
+    content+=workflowInput('wf-fallbackTtl','消息回退TTL（毫秒）',$('#sessionBindingFallbackTtlMs').value,"updateWorkflowContext('sessionBindingFallbackTtlMs',this.value)",60000,604800000);
+  }else if(n==='quota'){
+    content=`<label class="check"><input id="wfQuotaFilter" type="checkbox" ${f.quotaFilter?'checked':''} onchange="updateWorkflowField('quotaFilter',this.checked)"> 启用额度组筛选</label><p>只筛选已经进入活动缓存池的账号，不增加备用或reserve账号。</p>${[['hot','高额度'],['warm','低额度'],['unknown','额度未知']].map(([v,l])=>`<label class="check"><input type="checkbox" ${f.quotaPools.includes(v)?'checked':''} ${f.quotaFilter?'':'disabled'} onchange="setWorkflowQuotaPool('${v}',this.checked)"> ${l}</label>`).join('')}<p>选择多个组不会在计数选号前暗中按组优先级拆层。</p>`;
+  }else if(n==='health'){
+    content=`<label for="wfUnknownHealth">未知账号健康度</label><select id="wfUnknownHealth" onchange="updateWorkflowField('unknownHealth',this.value)"><option value="optimistic" ${f.unknownHealth==='optimistic'?'selected':''}>按100%参与选号（未采样）</option><option value="unknown-last" ${f.unknownHealth==='unknown-last'?'selected':''}>保持未知，健康优先时放后</option></select><label class="check"><input id="wfHealthFilter" type="checkbox" ${f.healthFilter?'checked':''} onchange="updateWorkflowField('healthFilter',this.checked)"> 使用最低健康阈值</label><label for="wfMinimumHealth">最低健康百分比</label><input id="wfMinimumHealth" type="number" min="0" max="100" step="0.1" ${f.healthFilter?'':'disabled'} value="${escapeHtml(typeof f.minimumHealth==='number'?String(f.minimumHealth*100):String(f.minimumHealth))}" oninput="updateWorkflowField('minimumHealth',this.value.trim()===''?'':Number(this.value)/100)"><p>实测统计仍是“未采样 / 0样本”，不会伪造成功。此节点只过滤；是否按健康排序由选号节点决定。</p>`;
+  }else{
+    content=`<label for="wfSelector">重新选号的方法</label><select id="wfSelector" onchange="updateWorkflowField('selector',this.value)">${Object.entries(WORKFLOW_SELECTOR_LABELS).map(([v,l])=>`<option value="${v}" ${f.selector===v?'selected':''}>${l}</option>`).join('')}</select><p>计数轮询：当前可准入活动账号中，先选计数最少者；相同计数再看占用和稳定轮转。</p><p>计数跨重启保存，新账号从0开始。绑定直接命中、同账号Provider重试和模拟不增加计数。</p><p>低计数新账号可能优先追赶；这不等于按总请求量、Token或成本均摊。</p>`;
+    content+=workflowInput('wf-wait','候选名额等待（毫秒）',$('#concurrencyWaitMs').value,"updateWorkflowContext('concurrencyWaitMs',this.value)",0,30000);
+  }
+  $('#workflowProperties').innerHTML=content;
+}
+function renderWorkflowStatus(){
+  if(!WORKFLOW_DRAFT||!$('#workflowStatus'))return;
+  let invalid='';try{collectAccountWorkflow();pipelineNumberDraft();}catch(error){invalid=error.message;}
+  const state=!WORKFLOW_SUPPORTED?'后端未提供工作流接口；保持兼容模式':WORKFLOW_SERVER_ENABLED?'服务器已启用工作流':'服务器仍运行旧版兼容策略';
+  const dirty=workflowDirty();
+  $('#workflowStatus').textContent=`${state}。${dirty?'有未保存草稿，编辑尚未生效。':'草稿与已载入配置一致。'}${WORKFLOW_CONFLICT?'服务器配置已变化，请重新载入并合并草稿；不会自动覆盖。':''}${invalid?'校验：'+invalid:''}`;
+  $('#workflowStatus').style.color=invalid||WORKFLOW_CONFLICT?'var(--orange)':'var(--dim)';
+  $('#workflowRevision').textContent=WORKFLOW_CONFIGURATION_REVISION?`版本 ${WORKFLOW_CONFIGURATION_REVISION.slice(0,8)}`:'兼容配置';
+  $('#workflowEnabled').checked=WORKFLOW_DRAFT.enabled;$('#workflowEnabled').disabled=!WORKFLOW_SUPPORTED;
+  $('#workflowSave').disabled=!!invalid||WORKFLOW_CONFLICT;$('#workflowPreviewButton').disabled=!WORKFLOW_SUPPORTED||!!invalid||!!WORKFLOW_PREVIEW_CONTROLLER;
+  const legacy=$('#legacyPipelineFieldset');if(legacy){legacy.disabled=WORKFLOW_DRAFT.enabled;legacy.style.opacity=WORKFLOW_DRAFT.enabled?'.55':'1';legacy.style.pointerEvents=WORKFLOW_DRAFT.enabled?'none':'';}
+  $('#accMode').disabled=WORKFLOW_DRAFT.enabled;
+  if($('#preset'))$('#preset').disabled=WORKFLOW_DRAFT.enabled;
+  if($('#accountPresetPreview'))$('#accountPresetPreview').disabled=WORKFLOW_DRAFT.enabled;
+}
+function renderWorkflowOwners(){
+  if(!CLIENT_KEYS.some(key=>key.id===WORKFLOW_OWNER))WORKFLOW_OWNER=CLIENT_KEYS[0]?.id||'legacy';
+  const owner=$('#workflowOwner');owner.innerHTML=CLIENT_KEYS.map(key=>`<option value="${escapeHtml(key.id)}">${escapeHtml(key.name)}</option>`).join('');owner.value=WORKFLOW_OWNER;
+  const bound=$('#workflowBoundAccount'),previous=bound.value;
+  const accounts=WORKFLOW_ACCOUNTS.filter(a=>a.clientKeyId===WORKFLOW_OWNER);
+  bound.innerHTML='<option value="">未命中 / 新会话</option>'+accounts.map(a=>`<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`).join('');
+  bound.value=accounts.some(a=>a.id===previous)?previous:'';
+}
+function changeWorkflowOwner(owner){if(!CLIENT_KEYS.some(key=>key.id===owner))return;WORKFLOW_OWNER=owner;invalidateWorkflowPreview('模拟号池已改变');renderWorkflowOwners();renderWorkflowCounters();}
+function renderWorkflowCounters(){
+  if(!ACCS||!WORKFLOW_DRAFT||!$('#workflowCounterBody'))return;
+  const rows=WORKFLOW_ACCOUNTS.filter(a=>a.clientKeyId===WORKFLOW_OWNER);
+  $('#workflowCountSummary').textContent=`账号选号计数 · ${rows.length}个账号（含备用/禁用）`;
+  $('#workflowCounterBody').innerHTML=rows.map(a=>{
+    const known=typeof a.health?.successRate==='number'&&Number.isFinite(a.health.successRate),rate=known?`${(a.health.successRate*100).toFixed(1)}%`:'未采样';
+    const effective=known?rate:WORKFLOW_DRAFT.unknownHealth==='optimistic'?'100%（未采样默认）':'未知';
+    const count=Number.isSafeInteger(a.selectionCount)&&a.selectionCount>=0?String(a.selectionCount):'未提供';
+    const role=a.enabled===false?'禁用':a.cachePoolRole==='active'?'活动':a.cachePoolRole==='standby'?'备用':'未知';
+    return `<tr><td>${escapeHtml(a.name)}</td><td>${role}</td><td>${count}</td><td>${Number.isSafeInteger(a.activeCount)?a.activeCount:'—'} / ${a.maxConcurrent===0?'不限':Number.isSafeInteger(a.maxConcurrent)?a.maxConcurrent:'—'}</td><td>${rate} · ${Number.isSafeInteger(a.health?.samples)?a.health.samples:'未知'}样本</td><td>${effective}</td></tr>`;
+  }).join('')||'<tr><td colspan="6" class="empty">所选号池没有账号</td></tr>';
+  $('#workflowResetCounts').disabled=!WORKFLOW_SUPPORTED||!rows.length;
+  $('#workflowCounterStatus').textContent=ACCS.selectionCounters?.persistenceError?'警告：内存计数已更新，但最近持久化失败':'计数按账号ID持久保存；重置不清除会话绑定';
+}
+function renderAccountWorkflow(){if(!$('#workflowEditor')||!ACCS)return;if(!WORKFLOW_DRAFT){hydrateAccountWorkflow(ACCS);return;}renderWorkflowCanvas();renderWorkflowProperties();renderWorkflowOwners();renderWorkflowCounters();renderWorkflowStatus();}
+function validateAccountWorkflowDraft(){try{collectAccountWorkflow();pipelineNumberDraft();$('#workflowStatus').textContent='草稿校验通过；尚未提交，后端保存时还会再次校验。';}catch(error){$('#workflowStatus').textContent=error.message;}}
+function discardAccountWorkflowDraft(){
+  if(workflowDirty()&&!confirm('放弃未保存的工作流及其缓存/等待/TTL参数草稿，恢复最近载入的配置？账号行的其他编辑不会在此清除。'))return;
+  for(const [key,id] of Object.entries(PIPELINE_NUMBER_CONTROLS))$('#'+id).value=String(ACCS?.accountPipeline?.[key]??'');
+  $('#concurrencyWaitMs').value=String(ACCS?.concurrencyWaitMs??2000);$('#poolFullWaitMs').value=ACCS?.poolFullWaitMs??'';
+  hydrateAccountWorkflow(ACCS,{force:true});
+}
+function workflowTraceMarkup(decision){
+  if(!decision||typeof decision!=='object')return '<p>没有可显示的选号轨迹</p>';
+  const kinds={'new-selection':'新选号','binding-hit':'绑定命中','temporary-overflow':'临时溢出',replacement:'换号','binding-busy':'绑定号忙','binding-wait':'等待绑定号',filtered:'筛选后无账号','capacity-blocked':'无可用名额','counter-exhausted':'计数需要重置',legacy:'旧版兼容路径'};
+  const nodes={eligibility:'系统资格',cache:'活动缓存池',binding:'会话绑定',quota:'额度筛选',health:'健康筛选',capacity:'并发/RPM',selector:'选号器',lease:'租约',wait:'等待'};
+  const results={'owner-and-hard-state':'所属号池与硬状态校验','active-cache':'活动缓存集合',filtered:'已筛选',disabled:'已关闭，直接通过','concurrency-and-rpm':'并发与RPM名额检查','least-selections':'最少选号次数',roundrobin:'按游标轮询','least-connections':'当前占用最少',health:'健康度优先',hit:'绑定命中',busy:'暂无名额',admitted:'已取得租约',blocked:'未取得租约','predicted-admission':'预测可准入，未占用名额','predicted-block':'预测不可准入','would-wait':'将等待名额'};
+  const account=WORKFLOW_ACCOUNTS.find(a=>a.id===decision.accountId);
+  const count=Number.isSafeInteger(decision.countBefore)&&Number.isSafeInteger(decision.countAfter)?`${decision.countBefore} → ${decision.countAfter}`:'—';
+  return `<div class="workflow-trace"><strong>${escapeHtml(Object.hasOwn(kinds,decision.kind)?kinds[decision.kind]:'未知分支')}</strong>${decision.accountId?` · 账号 ${escapeHtml(account?.name||decision.accountId)}`:''}<div>选号计数 ${count} · ${decision.counted?'重新选号 +1':'本次不增加'}</div><ol>${(Array.isArray(decision.nodes)?decision.nodes:[]).slice(0,8).filter(node=>Object.hasOwn(nodes,node.node)).map(node=>`<li>${nodes[node.node]}：${Object.hasOwn(results,node.result)?results[node.result]:'未知结果'}${Number.isSafeInteger(node.before)&&Number.isSafeInteger(node.after)?`（候选 ${node.before} → ${node.after}）`:''}</li>`).join('')}</ol></div>`;
+}
+async function previewAccountWorkflowDraft(){
+  let payload;try{if(!WORKFLOW_SUPPORTED)throw Error('后端未提供工作流接口');payload={accountWorkflow:collectAccountWorkflow(),accountPipeline:{...(ACCS.accountPipeline||{}),...pipelineNumberDraft()},clientKeyId:WORKFLOW_OWNER};const bound=$('#workflowBoundAccount').value;if(bound)payload.boundAccountId=bound;}catch(error){$('#workflowPreviewResult').textContent=error.message;return;}
+  invalidateWorkflowPreview();const id=WORKFLOW_PREVIEW_ID,controller=new AbortController();WORKFLOW_PREVIEW_CONTROLLER=controller;renderWorkflowStatus();$('#workflowPreviewResult').textContent='正在模拟；不会调用模型或增加计数…';
+  try{const result=await api('/api/account-workflow/preview',payload,'POST',false,{signal:controller.signal});if(id!==WORKFLOW_PREVIEW_ID)return;if(!result.simulation)throw Error(result.error?.message||'模拟失败');$('#workflowPreviewResult').innerHTML='<p><strong>预测结果，未实际执行。</strong> 使用已保存账号状态和当前节点草稿；未来槽位/绑定变化可能改变实际选择。</p>'+workflowTraceMarkup(result.decision);}
+  catch(error){if(id===WORKFLOW_PREVIEW_ID&&error?.name!=='AbortError')$('#workflowPreviewResult').textContent=error.message;}
+  finally{if(id===WORKFLOW_PREVIEW_ID){WORKFLOW_PREVIEW_CONTROLLER=null;renderWorkflowStatus();}}
+}
+async function loadAccountWorkflowTrace(){
+  const requestId=$('#workflowRequestId').value.trim();if(!/^[a-f0-9-]{36}$/i.test(requestId)){$('#workflowPreviewResult').textContent='请输入完整的请求ID';return;}
+  invalidateWorkflowPreview();const id=WORKFLOW_PREVIEW_ID,controller=new AbortController();WORKFLOW_PREVIEW_CONTROLLER=controller;$('#workflowTraceButton').disabled=true;$('#workflowPreviewResult').textContent='正在读取普通请求日志…';
+  try{const result=await api('/api/logs/requests?requestId='+encodeURIComponent(requestId)+'&limit=10',null,'GET',false,{signal:controller.signal});if(id!==WORKFLOW_PREVIEW_ID)return;const row=(result.items||[]).find(item=>item.requestId===requestId);if(!row)throw Error('请求日志不存在或已经过期');const decisions=row.workflow?.decisions;if(!Array.isArray(decisions)||!decisions.length){$('#workflowPreviewResult').textContent='该请求没有工作流轨迹，可能使用旧策略或来自旧版本日志。';return;}$('#workflowPreviewResult').innerHTML=`<p><strong>真实请求记录</strong> · ${escapeHtml(requestId)} · ${escapeHtml(String(row.status??''))} / ${escapeHtml(row.result||'未知')}。以下按当时节点顺序展示，不借当前草稿推断历史。</p>`+decisions.slice(0,4).map(workflowTraceMarkup).join('');}
+  catch(error){if(id===WORKFLOW_PREVIEW_ID&&error?.name!=='AbortError')$('#workflowPreviewResult').textContent=error.message;}
+  finally{if(id===WORKFLOW_PREVIEW_ID){WORKFLOW_PREVIEW_CONTROLLER=null;$('#workflowTraceButton').disabled=false;renderWorkflowStatus();}}
+}
+async function resetAccountSelectionCounts(){
+  if(!WORKFLOW_SUPPORTED||!WORKFLOW_CONFIGURATION_REVISION)return;
+  const owner=WORKFLOW_OWNER,rows=WORKFLOW_ACCOUNTS.filter(a=>a.clientKeyId===owner),name=CLIENT_KEYS.find(key=>key.id===owner)?.name||owner;
+  if(!confirm(`重置号池「${name}」的${rows.length}个账号选号计数？包含备用和禁用账号；不会清除绑定或中断在途请求。`))return;
+  const button=$('#workflowResetCounts');button.disabled=true;let resetApplied=false;
+  try{const result=await api('/api/account-workflow/reset-counts',{clientKeyId:owner,expectedConfigurationRevision:WORKFLOW_CONFIGURATION_REVISION});if(!result.ok)throw Error(result.error?.message||'重置失败');resetApplied=true;$('#workflowCounterStatus').textContent=`已重置${result.resetAccounts}个账号的计数，正在刷新…`;const latest=await api('/api/accounts');if(!Array.isArray(latest.accounts))throw Error('计数已重置，但读取最新状态失败；请手动刷新，不要重复提交');acceptWorkflowAccountSnapshot(latest.accounts);const byId=new Map(latest.accounts.map(a=>[a.id,a]));for(const account of ACCS.accounts){const current=byId.get(account.id);if(current)account.selectionCount=current.selectionCount;}ACCS.selectionCounters=latest.selectionCounters;if(latest.configurationRevision!==WORKFLOW_CONFIGURATION_REVISION)WORKFLOW_CONFLICT=true;renderWorkflowCounters();renderWorkflowStatus();$('#workflowCounterStatus').textContent=`已重置${result.resetAccounts}个账号的计数；未改变当前工作流草稿或绑定。`;}
+  catch(error){$('#workflowCounterStatus').textContent=resetApplied?'计数已重置，但刷新失败；请手动刷新，不要重复提交。'+error.message:error.message;}
+  finally{button.disabled=false;}
+}
+if(typeof window!=='undefined')window.addEventListener('pagehide',()=>{invalidateWorkflowPreview();});
 const RAW_PIPELINE_CONTROLS = {quotaPool:'pipelineQuotaPool',healthSort:'pipelineHealthSort',sticky:'pipelineSticky'};
 const PIPELINE_NUMBER_CONTROLS = {cachePoolSize:'cachePoolSize',cachePoolMaxSize:'cachePoolMaxSize',cachePoolLowQuotaSize:'cachePoolLowQuotaSize',sessionBindingExplicitTtlMs:'sessionBindingExplicitTtlMs',sessionBindingFallbackTtlMs:'sessionBindingFallbackTtlMs',sessionBindingMaxEntries:'sessionBindingMaxEntries'};
+for(const id of [...Object.values(PIPELINE_NUMBER_CONTROLS),'concurrencyWaitMs','poolFullWaitMs'])$('#'+id).addEventListener('input',()=>{if(!WORKFLOW_DRAFT||!WORKFLOW_SUPPORTED)return;WORKFLOW_CONTEXT_DIRTY=workflowContextSignature()!==WORKFLOW_BASE_CONTEXT;markWorkflowEdited();renderWorkflowProperties();});
 function rawSchedulingControls() {
   const accountPipeline=Object.fromEntries(Object.entries(RAW_PIPELINE_CONTROLS).map(([key,id]) => [key,$('#'+id).checked]));
   accountPipeline.order=pipelineOrder();
   for(const [key,id] of Object.entries(PIPELINE_NUMBER_CONTROLS))accountPipeline[key]=$('#'+id).value;
-  return {accountMode:$('#accMode').value, concurrencyWaitMs:$('#concurrencyWaitMs').value,poolFullWaitMs:$('#poolFullWaitMs').value,errorRules:JSON.stringify(ERROR_RULE_DRAFT),retryRules:JSON.stringify(RETRY_RULE_DRAFT),accountPipeline};
+  return {accountMode:$('#accMode').value, concurrencyWaitMs:$('#concurrencyWaitMs').value,poolFullWaitMs:$('#poolFullWaitMs').value,errorRules:JSON.stringify(ERROR_RULE_DRAFT),retryRules:JSON.stringify(RETRY_RULE_DRAFT),accountPipeline,...(WORKFLOW_SUPPORTED?{accountWorkflow:JSON.stringify(WORKFLOW_DRAFT)}:{})};
 }
 function pipelineIntegerDraft(id,label,min,max) {
   const raw=String($('#'+id).value),value=Number(raw);
@@ -1427,8 +1679,31 @@ function applyRawScheduling() {
   $('#rawSchedulingFeedback').textContent = '草稿已更新，尚未生效；请保存账号配置';
 }
 function monthlyQuotaDraft(){const text=$('#monthlyQuotaThreshold').value.trim(),amount=Number(text);if(!/^\d+(?:\.\d{1,2})?$/.test(text)||amount<0.01||amount>50)throw Error('月参考余额阈值必须是 $0.01–$50.00，最多两位小数');return {monthlyThresholdUsd:amount};}
-function collectAccounts(){validateErrorRuleDraft(ERROR_RULE_DRAFT);validateRetryRuleDraft(RETRY_RULE_DRAFT);const rules=cloneRuleDraft(),retryRules=cloneRetryRuleDraft(),poolFullWaitMs=poolFullWaitDraft();if($('#accMode').value==='load-health'&&$('#pipelineSticky').checked)throw Error('负载与健康模式不能开启会话粘性');return {quotaProtection:monthlyQuotaDraft(),accounts:ACCS.accounts.map(a=>({id:a.id,name:a.name,note:a.note||'',key:a.key||'',enabled:a.enabled!==false,maxConcurrent:Number(a.maxConcurrent)||0,maxRpm:Number(a.maxRpm)||0,weight:Number(a.weight)||1,priority:Number(a.priority)||100,proxyUrl:a.proxyUrl||'',headers:a.headers||{},perModel:a.perModel||{},clientKeyId:a.clientKeyId??'legacy'})),mode:$('#accMode').value,active:ACCS.active||0,poolFullWaitMs,errorRules:rules,retryRules,accountPipeline:{quotaPool:$('#pipelineQuotaPool').checked,healthSort:$('#pipelineHealthSort').checked,sticky:$('#pipelineSticky').checked,order:pipelineOrder(),...pipelineNumberDraft()}};}
-async function saveAccounts(payload=null){if(!payload){try{payload=collectAccounts();}catch(e){return accMsg(e.message,true);}}try{payload.concurrencyWaitMs=pipelineIntegerDraft('concurrencyWaitMs','首选账号/RPM 等待',0,30000);payload.poolFullWaitMs=poolFullWaitDraft();}catch(e){return accMsg(e.message,true);}if(payload.errorRules===undefined)payload.errorRules=cloneRuleDraft();if(!payload.accounts.some(a=>a.key))return accMsg('至少需要一个 key 非空的账号',true);const r=await api('/api/accounts',payload);if(!r.ok)return accMsg(r.error?.message||'保存失败',true);accMsg(`已保存：${r.accounts} 个账号 · ${r.mode}`);await loadAll();}
+function collectAccounts(){validateErrorRuleDraft(ERROR_RULE_DRAFT);validateRetryRuleDraft(RETRY_RULE_DRAFT);const rules=cloneRuleDraft(),retryRules=cloneRetryRuleDraft(),poolFullWaitMs=poolFullWaitDraft();if($('#accMode').value==='load-health'&&$('#pipelineSticky').checked)throw Error('负载与健康模式不能开启会话粘性');return {...(WORKFLOW_SUPPORTED?{accountWorkflow:collectAccountWorkflow(),expectedConfigurationRevision:WORKFLOW_CONFIGURATION_REVISION}:{}),quotaProtection:monthlyQuotaDraft(),accounts:ACCS.accounts.map(a=>({id:a.id,name:a.name,note:a.note||'',key:a.key||'',enabled:a.enabled!==false,maxConcurrent:Number(a.maxConcurrent)||0,maxRpm:Number(a.maxRpm)||0,weight:Number(a.weight)||1,priority:Number(a.priority)||100,proxyUrl:a.proxyUrl||'',headers:a.headers||{},perModel:a.perModel||{},clientKeyId:a.clientKeyId??'legacy'})),mode:$('#accMode').value,active:ACCS.active||0,poolFullWaitMs,errorRules:rules,retryRules,accountPipeline:{quotaPool:$('#pipelineQuotaPool').checked,healthSort:$('#pipelineHealthSort').checked,sticky:$('#pipelineSticky').checked,order:pipelineOrder(),...pipelineNumberDraft()}};}
+async function saveAccounts(payload=null){
+  if(!payload){try{payload=collectAccounts();}catch(error){return accMsg(error.message,true);}}
+  try{
+    payload.concurrencyWaitMs=pipelineIntegerDraft('concurrencyWaitMs','首选账号/RPM 等待',0,30000);payload.poolFullWaitMs=poolFullWaitDraft();
+    if(WORKFLOW_SUPPORTED){payload.accountWorkflow=payload.accountWorkflow===undefined?collectAccountWorkflow():normalizedWorkflowDraft(payload.accountWorkflow);payload.expectedConfigurationRevision=WORKFLOW_CONFIGURATION_REVISION;}
+  }catch(error){return accMsg(error.message,true);}
+  if(payload.errorRules===undefined)payload.errorRules=cloneRuleDraft();
+  if(!payload.accounts.some(account=>account.key))return accMsg('至少需要一个 key 非空的账号',true);
+  const generation=WORKFLOW_GENERATION,contextAtSend=workflowContextSignature();
+  let saved=false;
+  try{
+    const result=await api('/api/accounts',payload);
+    if(!result.ok)return accMsg(result.error?.message||'保存失败',true);
+    saved=true;
+    if(WORKFLOW_SUPPORTED&&payload.accountWorkflow){
+      WORKFLOW_BASE=JSON.parse(JSON.stringify(payload.accountWorkflow));WORKFLOW_BASE_CONTEXT=contextAtSend;WORKFLOW_SERVER_ENABLED=payload.accountWorkflow.enabled;WORKFLOW_CONFLICT=false;
+      if(/^[a-f0-9]{64}$/.test(result.configurationRevision||''))WORKFLOW_CONFIGURATION_REVISION=result.configurationRevision;
+      if(generation===WORKFLOW_GENERATION){WORKFLOW_DRAFT=JSON.parse(JSON.stringify(payload.accountWorkflow));WORKFLOW_CONTEXT_DIRTY=false;}
+    }
+    accMsg(`已保存：${result.accounts} 个账号 · ${result.accountWorkflowEnabled?'可视化工作流':result.mode}`);
+    await loadAll();
+  }catch(error){accMsg(saved?'保存已生效，但读取最新状态失败；请保留草稿并手动刷新，不要重复提交。':error.message,true);}
+}
+
 async function recoverAccount(id){const r=await api('/api/accounts/recover',{id});if(r.ok){accMsg('账号已恢复');await loadAll();}}
 async function recoverMonthlyQuota(id){if(!confirm('确定解除月额度封禁？该账号可能再次额度不足并产生失败请求。请先核对额度。'))return;const r=await api('/api/accounts/quota-recover',{id});if(!r.ok)return accMsg(r.error?.message||'解除失败',true);accMsg('月额度封禁已解除，请注意后续失败');await loadAll();}
 async function recoverProvider(model,provider){const r=await api('/api/providers/recover',{model,provider});if(!r.ok){$('#accLive').textContent=r.error?.message||'Provider 恢复失败';return;}$('#accLive').textContent=`已恢复 ${model} / ${provider}`;await loadAll();}
@@ -1597,6 +1872,7 @@ function restoreStatisticsVisit(){if(!$('#statisticsPanel').hidden&&STATISTICS_T
 if(typeof window!=='undefined'){window.addEventListener('pagehide',()=>{closeClientKeySecret(true,false);stopStatisticsVisit();stopModelProviders();LOG_QUERY_ID++;resetLogChain();resetDetailSelection();});window.addEventListener('pageshow',()=>!$('#statisticsPanel').hidden?restoreStatisticsVisit():!$('#modelProvidersPanel').hidden?loadModelProviders():null);}
 async function switchSection(section){
   const isConsole=section==='console',isStatistics=section==='statistics',type=section==='errors'?'errors':'requests';
+  if(!isConsole)invalidateWorkflowPreview('已离开账号页；未完成的模拟或轨迹读取已取消，草稿保留。');
   closeClientKeySecret(true,false);
   stopStatisticsVisit();stopModelProviders();LOG_QUERY_ID++;resetLogChain();STATISTICS_QUERY_ID++;DETAIL_LIST_ID++;DETAIL_NAV_ID++;resetDetailSelection();
   $('#consolePanel').hidden=!isConsole;$('#statisticsPanel').hidden=!isStatistics;$('#modelProvidersPanel').hidden=section!=='modelProviders';$('#logPanel').hidden=isConsole||isStatistics||section==='details'||section==='modelProviders';$('#detailsPanel').hidden=section!=='details';
