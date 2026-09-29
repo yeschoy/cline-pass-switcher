@@ -32,6 +32,12 @@ Current branch: `feature/diagnostics-channel-peak-pricing` (based on `main`). Do
 - Real-browser interactive acceptance is **blocked**, not passed: the parent `agent_browser` reported missing binary even after a temporary local install and child session did not expose the native tool. A local temporary server was stopped. Focus/keyboard/narrow viewport need a later Pi browser-capable session; static/VM tests do not substitute.
 - 用户随后明确要求“直接合并然后部署”，覆盖了此前浏览器验收后才合并的顺序；**真实浏览器交互仍未验证**，不得将此豁免描述为通过。已快进合并并推送 `main`（`5fdb652`），合并后完整测试 369/369 通过；生产只读预检发现旧镜像回滚与持续停写栅栏未准备好，因此**尚未部署或修改生产**，详见 `research/deployment-readonly-preflight.md`。浏览器工具和本地测试的 `/tmp` 产物及临时符号链接，仍待用户同意后清理。
 
+## Production release checkpoint (2026-09-29, not switched)
+
+- Repeated operator approval permits preparing a release but does not establish a continuous ingress/all-writers fence. Non-live staging and exact prior-image parser compatibility are recorded in `research/deployment-candidate-compatibility.md`. The original candidate is superseded by a locally tested v3 persisted-shape compatibility fix; rebuild only after the new `main` commit is pushed.
+- The API still projects the selected UTC rule, but persisted v3 snapshots now retain the seven-key v2 shape. The exact old production image accepted a synthetic v3 snapshot and valuation cell on a remote private no-network copy. This narrows, but does not certify, complete rollback safety. The host has no persisted v3 yet; other installations with the earlier eight-key draft need a separately reviewed migration.
+- Do not stop the old service or install Compose until fresh backup, exact final-image copied-data and old/new isolated startup, source/mode/cgroup gates, scratch atomic replace/restore, ingress/write ownership and compatible rollback are verified. Never present an old-image parser test or operator assent alone as a continuous writer fence.
+
 ## Rollback checkpoints
 
 - Each implementation phase is committed or reviewable independently on the feature branch; on failure revert its scoped diff, not unrelated task state.

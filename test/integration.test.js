@@ -1644,6 +1644,7 @@ test('current 12-model reference snapshot prices only evidenced final usage and 
   assert.equal(row('minimax-m3').usage.cacheKnownRequests,0,'missing cached read remains unknown');
   const before=structuredClone(stats.models),metaPath=path.join(dir,'metadata.json');await stop(running.child);running.child=null;
   const meta=JSON.parse(fs.readFileSync(metaPath));
+  assert.equal(Object.hasOwn(meta.statistics.priceVersions[v3],'selection'),false,'persisted v3 must remain readable by the previous v2-shaped snapshot validator');
   const historical={version:v1,collectedAt:'2026-09-24',effectiveAt:null,source:cline,currency:'USD',models:{
     'cline-pass/kimi-k3':{tier:'single',rates:[[3000,15000,300]]},'cline-pass/glm-5.3':{tier:'single',rates:[[1400,4400,260]]},
     'cline-pass/deepseek-v4-flash':{tier:'peak/off-peak range',rates:[[220,660,7],[440,1320,14]]},
@@ -1667,6 +1668,8 @@ test('current 12-model reference snapshot prices only evidenced final usage and 
   assert.equal(stats.models.length,before.length);
   assert.equal(stats.referencePrices.versions[v1].models['cline-pass/kimi-k3'].rates[0][0],3000);
   assert.equal(stats.referencePrices.versions[v2].models['cline-pass/mimo-v2.5'].rates[0][2],28);
+  assert.equal(stats.referencePrices.versions[v3].selection,'terminal-utc-weekdays-no-holidays','API derives the v3 schedule label after restart');
+  assert.equal(Object.hasOwn(stats.referencePrices.versions[v2],'selection'),false,'historical snapshots remain intervals');
   await stop(running.child);running.child=null;
   const countBoundary=JSON.parse(fs.readFileSync(metaPath));
   countBoundary.statistics.minuteBuckets.at(-1).valuation['cline-pass/kimi-k3'].second[v3].pricedRequests=Number.MAX_SAFE_INTEGER;
@@ -1686,6 +1689,7 @@ test('current 12-model reference snapshot prices only evidenced final usage and 
     m=>{m.statistics.priceVersions[v3].models['cline-pass/mimo-v2.5'].rates[0][0]=null;},
     m=>{m.statistics.priceVersions[v3].models['cline-pass/mimo-v2.5'].source='https://example.invalid/';},
     m=>{m.statistics.priceVersions[v3].selection='untrusted-rule';},
+    m=>{m.statistics.priceVersions[v3].selection='terminal-utc-weekdays-no-holidays';},
     m=>{m.statistics.priceVersions[v2].models['cline-pass/mimo-v2.5'].rates[0][0]=1;},
     m=>{m.statistics.priceVersions[v1].rateScale=10000;},
     m=>{m.statistics.priceVersions[v1].models['cline-pass/kimi-k3'].rates[0][0]=30000;},

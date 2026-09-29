@@ -963,7 +963,12 @@ const PREVIOUS_REFERENCE_PRICE = Object.freeze({ version: 'clinepass-2026-09-25-
 });
 // Same published rates, but a new frozen calculation contract. Historical v2
 // interval cells remain intervals; only future successes use the terminal UTC tier.
-const REFERENCE_PRICE = Object.freeze({ ...PREVIOUS_REFERENCE_PRICE, version: 'clinepass-2026-09-29-v3', collectedAt: '2026-09-29', selection: 'terminal-utc-weekdays-no-holidays' });
+const REFERENCE_PRICE = Object.freeze({ ...PREVIOUS_REFERENCE_PRICE, version: 'clinepass-2026-09-29-v3', collectedAt: '2026-09-29' });
+// Keep the persisted snapshot readable by the previous v2-only image. The
+// calculation rule is fixed by the version; expose its label only in the API.
+function projectReferencePrice(snapshot) {
+  return snapshot.version === REFERENCE_PRICE.version ? { ...snapshot, selection: 'terminal-utc-weekdays-no-holidays' } : snapshot;
+}
 const STATISTICS_VERSION = 5;
 const MAX_USAGE_MINUTE_CELLS = process.env.NODE_ENV === 'test' ? Math.max(1, Number(process.env.CLINE_PASS_TEST_USAGE_CELL_LIMIT) || 50000) : 50000;
 const MAX_VALUATION_MINUTE_CELLS = process.env.NODE_ENV === 'test' ? Math.max(1, Number(process.env.CLINE_PASS_TEST_VALUATION_CELL_LIMIT) || 50000) : 50000;
@@ -984,8 +989,7 @@ function validateValuation(value) {
 }
 function validatePriceSnapshot(snapshot) {
   const v2 = snapshot && Object.hasOwn(snapshot, 'rateScale');
-  const selected = snapshot && Object.hasOwn(snapshot, 'selection');
-  if (!isPlainObject(snapshot) || Object.keys(snapshot).sort().join(',') !== (selected ? 'collectedAt,currency,effectiveAt,models,rateScale,selection,source,version' : v2 ? 'collectedAt,currency,effectiveAt,models,rateScale,source,version' : 'collectedAt,currency,effectiveAt,models,source,version') || !validPriceVersion(snapshot.version) || !/^\d{4}-\d{2}-\d{2}$/.test(snapshot.collectedAt) || snapshot.effectiveAt !== null || snapshot.source !== LEGACY_REFERENCE_PRICE.source || snapshot.currency !== 'USD' || (v2 && snapshot.rateScale !== 10000) || (selected && (snapshot.version !== REFERENCE_PRICE.version || snapshot.selection !== REFERENCE_PRICE.selection)) || !isPlainObject(snapshot.models) || Object.keys(snapshot.models).length > 16) throw new Error('invalid statistics price snapshot');
+  if (!isPlainObject(snapshot) || Object.keys(snapshot).sort().join(',') !== (v2 ? 'collectedAt,currency,effectiveAt,models,rateScale,source,version' : 'collectedAt,currency,effectiveAt,models,source,version') || !validPriceVersion(snapshot.version) || !/^\d{4}-\d{2}-\d{2}$/.test(snapshot.collectedAt) || snapshot.effectiveAt !== null || snapshot.source !== LEGACY_REFERENCE_PRICE.source || snapshot.currency !== 'USD' || (v2 && snapshot.rateScale !== 10000) || !isPlainObject(snapshot.models) || Object.keys(snapshot.models).length > 16) throw new Error('invalid statistics price snapshot');
   for (const [id, price] of Object.entries(snapshot.models)) {
     if (!/^cline-pass\/[a-z0-9._-]{1,200}$/.test(id) || !isPlainObject(price) || Object.keys(price).sort().join(',') !== (v2 ? 'rates,source,tier' : 'rates,tier') || !['single','peak/off-peak range',...(v2 ? ['context-band'] : [])].includes(price.tier) || (v2 && ![snapshot.source,'https://api-docs.deepseek.com/quick_start/pricing/'].includes(price.source)) || !Array.isArray(price.rates) || price.rates.length !== (price.tier === 'single' ? 1 : 2) || price.rates.some((row) => !Array.isArray(row) || row.length !== (v2 ? 4 : 3) || row.some((rate,index) => v2 && index === 3 && rate === null ? false : !Number.isSafeInteger(rate) || rate < 0 || rate > 10000000))) throw new Error('invalid statistics price rates');
   }
@@ -4979,7 +4983,7 @@ async function dispatch(req, res) {
       const generatedAt = Date.now(), recentGlobal = aggregateRange().aggregate;
       const accounts = config.accounts.map((account) => { const recent = aggregateRange(account.id).aggregate; return { id: account.id, name: account.name, enabled: account.enabled !== false, lifetime: projectAggregate(META.statistics.lifetime.accounts[account.id] || emptyAggregate()), recent24h: projectAggregate(recent), health: healthProjection(account), quota: statisticsQuotaProjection(account, generatedAt) }; });
       const models = statisticsModelIds().map((id) => { const recent24h = projectAggregate(aggregateModelRange(id, generatedAt)); return { id, recent24h, coverage: modelCoverage(id, generatedAt), providerStatistics: modelProviderProjection(id,generatedAt) }; });
-      return sendJSON(res, 200, { generatedAt, window: { kind: 'last-1440-minutes', from: (Math.floor(generatedAt/60000)-1439)*60000, to: generatedAt }, lifetime: { global: projectAggregate(META.statistics.lifetime.global) }, recent24h: { global: projectAggregate(recentGlobal) }, routingCoverage: routingCoverage(generatedAt), accounts, models, referencePrices: { current: REFERENCE_PRICE, versions: META.statistics.priceVersions }, migration: META.statistics.migration });
+      return sendJSON(res, 200, { generatedAt, window: { kind: 'last-1440-minutes', from: (Math.floor(generatedAt/60000)-1439)*60000, to: generatedAt }, lifetime: { global: projectAggregate(META.statistics.lifetime.global) }, recent24h: { global: projectAggregate(recentGlobal) }, routingCoverage: routingCoverage(generatedAt), accounts, models, referencePrices: { current: projectReferencePrice(REFERENCE_PRICE), versions: Object.fromEntries(Object.entries(META.statistics.priceVersions).map(([version, snapshot]) => [version, projectReferencePrice(snapshot)])) }, migration: META.statistics.migration });
     }
     if (req.method === 'GET' && p === '/api/accounts') {
       clearExpiredCooldowns();
