@@ -30,7 +30,7 @@ Current branch: `feature/diagnostics-channel-peak-pricing` (based on `main`). Do
 - Steps 1–4 and cross-layer docs/spec are implemented; focused tests 219/219, complete project tests 369/369, JS and inline-script syntax checks and `git diff --check` pass. Independent `trellis-check` corrected one README detail.
 - Step 5 used its **single** allowed paid upstream request against the existing production server's official upstream via a bounded in-container direct HTTPS call (not through Switcher because the configured route allows a second attempt). It returned JSON HTTP 500 without a trusted final Provider or successful output. Safe preflight, response projection and limits are in `research/one-call-upstream-observation.md`; no repeat without a new request/approval.
 - Real-browser interactive acceptance is **blocked**, not passed: the parent `agent_browser` reported missing binary even after a temporary local install and child session did not expose the native tool. A local temporary server was stopped. Focus/keyboard/narrow viewport need a later Pi browser-capable session; static/VM tests do not substitute.
-- Do not merge into `main` or archive as fully accepted while that browser gate remains open. No deployment or production configuration changes occurred. Browser-tool and test fixtures/logs in `/tmp` and a temporary symlink remain pending user-approved cleanup.
+- 用户随后明确要求“直接合并然后部署”，覆盖了此前浏览器验收后才合并的顺序；**真实浏览器交互仍未验证**，不得将此豁免描述为通过。合并、发布仍分别受 committed/pushed main、生产隐私迁移、v3 旧镜像不可直接读取、私有备份与停止写入栅栏等硬性安全门槛约束。浏览器工具和本地测试的 `/tmp` 产物及临时符号链接，仍待用户同意后清理。
 
 ## Rollback checkpoints
 
