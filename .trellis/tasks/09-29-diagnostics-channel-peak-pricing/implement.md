@@ -38,6 +38,11 @@ Current branch: `feature/diagnostics-channel-peak-pricing` (based on `main`). Do
 - The API still projects the selected UTC rule, but persisted v3 snapshots now retain the seven-key v2 shape. The exact old production image accepted a synthetic v3 snapshot and valuation cell on a remote private no-network copy. This narrows, but does not certify, complete rollback safety. The host has no persisted v3 yet; other installations with the earlier eight-key draft need a separately reviewed migration.
 - Do not stop the old service or install Compose until fresh backup, exact final-image copied-data and old/new isolated startup, source/mode/cgroup gates, scratch atomic replace/restore, ingress/write ownership and compatible rollback are verified. Never present an old-image parser test or operator assent alone as a continuous writer fence.
 
+## Production switch result (2026-09-29)
+
+- After the compatibility fix was committed/pushed as `1910b66`, the final image was rebuilt from that exact `main` archive. Full 369-test gate, source hashes, copied-data migration, new→old→new v3-cell round trip, 512 MiB synthetic capture stress, private sidecar backup, config prediction and scratch Compose transaction passed; see `research/production-release-20260929.md`.
+- Production now runs `1910b66` / `sha256:30491891ef2da9471fea4ba04d4612f8db6ab9b161d45a4fcfd775a691471c77`, healthy, zero restarts/OOM. Local/public/internal meta 200, 48 stable accounts, sticky mode, predicted one-time error-capture migration and raw off were verified. The release record is `awaiting-admin-acceptance` because positive independently authenticated administrator reads, safe quota-refresh rejection and real-browser interaction are not verified. Preserve actual rollback artifacts and do not close this task as fully accepted yet.
+
 ## Rollback checkpoints
 
 - Each implementation phase is committed or reviewable independently on the feature branch; on failure revert its scoped diff, not unrelated task state.
