@@ -1,0 +1,20 @@
+{
+  "synthetic": true,
+  "cells": 50000,
+  "accountCount": 43,
+  "wholeMetaBytes": 25472576,
+  "compactBytes": 1580,
+  "wholeMetaCallsOnNewPath": 0,
+  "oldFullMetadataWrite": {
+    "meanMs": 61.67646679999999,
+    "p95Ms": 64.19470899999999,
+    "samples": 5
+  },
+  "newActualSelectionRecord": {
+    "meanMs": 0.2756124600000032,
+    "p95Ms": 0.3224999999999909,
+    "samples": 100
+  },
+  "temporaryDataDirectory": "/var/folders/h7/1s08hdn51x778k3dtg4ytt140000gn/T/cps-counter-cost-zix7sh",
+  "limitations": "Serialization + synchronous atomic rename on this local disk only; existing completion-time full metadata writes are unchanged. This is not end-to-end production admission, crash/fsync durability, or an upstream capacity test."
+}

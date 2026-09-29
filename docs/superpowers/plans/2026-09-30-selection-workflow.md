@@ -16,7 +16,7 @@
 - Unknown observed health stays null/sample0; effective account routing health is100% in optimistic mode. Provider health unchanged.
 - Minimum selection count is primary; lower live occupancy and stable rotation break ties. Successful new lease selection increments once; direct hit and same-account Provider retry do not.
 - Counters persist by stable account ID; new accounts0; explicit owner-scoped reset; no inferred history or automatic rebasing.
-- Reuse the existing atomic lease/RPM path and metadata writer. No new scheduling queue/store, no live credentials in tests, no production changes/deployment.
+- Reuse the existing atomic lease/RPM path and metadata writer. No new scheduling queue or state owner; the final-review performance ruling adds a compact counter snapshot under the same atomic writer, no live credentials in tests, no production changes/deployment.
 - Legacy configuration remains behaviorally unchanged while accountWorkflow.enabled=false. Preserve account IDs, keys, owner, note, headers, proxy, perModel and unrelated drafts.
 - Source main is clean at e16db146; isolated branch codex/selection-workflow. Baseline369/369 tests passed on Node26.
 
@@ -34,7 +34,7 @@ Add optional root config accountWorkflow with version1, enabled(boolean), bindin
 
 The graph is deliberately guided: fixed system entry and atomic lease exit, explicit binding hit/miss/busy branches, draggable typed miss filters and a selectable terminal picker. It is not a general graph interpreter. Existing accountPipeline owns cache/TTL settings; graph property controls edit that same draft rather than introducing duplicates.
 
-Metadata selectionCounters is a version1 object keyed by stable ID with count and bounded tie sequence. Missing state initializes empty; malformed state fails without overwriting. A selected lease updates count synchronously and uses saveMeta. Persistence failure remains visible and in-memory counts remain effective; explicit reset is persist-first and never changes leases/bindings. Any chosen account at the numeric safe limit is reported explicitly, never wrapped or silently reset.
+Metadata selectionCounters is a version1 object keyed by stable ID with count and bounded tie sequence. Missing state initializes empty; malformed state fails without overwriting. A selected lease updates count synchronously and atomically writes only selection-counters.json, following the final-review performance ruling. The server remains the sole state/writer owner; metadata is a compatibility mirror. Persistence failure remains visible and in-memory counts remain effective; explicit reset is persist-first and never changes leases/bindings. Any chosen account at the numeric safe limit is reported explicitly, never wrapped or silently reset.
 
 GET /api/accounts adds workflow, configurationRevision, account.selectionCount, effectiveRoutingHealth and counter persistence status. POST /api/accounts preserves omitted workflow for old clients, validates supplied workflow and optional expectedConfigurationRevision, persists together with the full account save before publishing. Guided drafts send the revision.
 
@@ -46,10 +46,10 @@ POST /api/account-workflow/preview accepts workflow, owner and optional boundAcc
 
 **Interfaces:** normalizeAccountWorkflow(value); normalizeSelectionCounters(value,validIds); effectiveRoutingHealth(observed,policy); rankWorkflowCandidates(candidates,{selector,counts,activeCounts,cursor,unknownHealth}); defaultAccountWorkflow().
 
-- [ ] Write tests for defaults/invalid nodes/unknown fields, thresholds, unknown-vs-observed statistics, minimum count before health/load, stable ties, invalid/overflow counters and immutable inputs.
-- [ ] Run node --test test/account-workflow.test.js and confirm intended failures.
-- [ ] Implement only pure validation/ranking/state projection, with no transport or filesystem.
-- [ ] Run focused tests and node --check; commit.
+- [x] Write tests for defaults/invalid nodes/unknown fields, thresholds, unknown-vs-observed statistics, minimum count before health/load, stable ties, invalid/overflow counters and immutable inputs.
+- [x] Run node --test test/account-workflow.test.js and confirm intended failures.
+- [x] Implement only pure validation/ranking/state projection, with no transport or filesystem.
+- [x] Run focused tests and node --check; commit.
 
 ### Task2: Guided admission, binding and persistent counts
 
@@ -57,12 +57,12 @@ POST /api/account-workflow/preview accepts workflow, owner and optional boundAcc
 
 **Interfaces:** workflowSelectionContext(identity,options); acquireWorkflowAccountLease(identity,options); recordWorkflowSelection(lease); selectionCountProjection(account); config.accountWorkflow and META.selectionCounters.
 
-- [ ] Write isolated43-account/mock tests: equal new sessions, repeated same-session hits, unknown health, concurrency cap, disabled/cooled/foreign accounts, replacement and same-account Provider retry, restart/rename/reactivation.
-- [ ] Observe the first focused failures, implement guided dispatch only when enabled, retain original legacy path.
-- [ ] Use current cache membership and flatten applicable miss candidates for the count selector; do not run hidden exact-health/low-role rank ahead of it. Reuse atomic tryLeaseResult, bindings, waiters and grow-one.
-- [ ] Record once at new lease selection, not when headers/token/Provider attempt happen. Preserve original binding on temporary overflow; maintain request-local excludes on replacement.
-- [ ] Validate/init persisted counts, preserve counts while absent from active membership and after rename, remove only deleted IDs; exercise save failure/restart boundaries.
-- [ ] Run focused + existing routing suites; commit.
+- [x] Write isolated43-account/mock tests: equal new sessions, repeated same-session hits, unknown health, concurrency cap, disabled/cooled/foreign accounts, replacement and same-account Provider retry, restart/rename/reactivation.
+- [x] Observe the first focused failures, implement guided dispatch only when enabled, retain original legacy path.
+- [x] Use current cache membership and flatten applicable miss candidates for the count selector; do not run hidden exact-health/low-role rank ahead of it. Reuse atomic tryLeaseResult, bindings, waiters and grow-one.
+- [x] Record once at new lease selection, not when headers/token/Provider attempt happen. Preserve original binding on temporary overflow; maintain request-local excludes on replacement.
+- [x] Validate/init persisted counts, preserve counts while absent from active membership and after rename, remove only deleted IDs; exercise save failure/restart boundaries.
+- [x] Run focused + existing routing suites; commit.
 
 ### Task3: Management contract, preview/reset and bounded diagnostics
 
@@ -70,10 +70,10 @@ POST /api/account-workflow/preview accepts workflow, owner and optional boundAcc
 
 **Interfaces:** GET /api/accounts extensions, expectedConfigurationRevision on POST, POST preview/reset-counts, optional request.workflow diagnostics.
 
-- [ ] Write failing tests for invalid/stale saves, omitted-field preservation, zero-side-effect preview, reset owner isolation and failed-write rollback.
-- [ ] Add normalization before persistence, opaque config revision and admin-only preview/reset routes. Preview eligibility must not call pruning paths that mutate state.
-- [ ] Add bounded workflow traces and counts to ordinary request logs; ensure existing outputs still omit secrets and raw affinity.
-- [ ] Verify no profile/body capture changes and no upstream call from preview/reset; commit.
+- [x] Write failing tests for invalid/stale saves, omitted-field preservation, zero-side-effect preview, reset owner isolation and failed-write rollback.
+- [x] Add normalization before persistence, opaque config revision and admin-only preview/reset routes. Preview eligibility must not call pruning paths that mutate state.
+- [x] Add bounded workflow traces and counts to ordinary request logs; ensure existing outputs still omit secrets and raw affinity.
+- [x] Verify no profile/body capture changes and no upstream call from preview/reset; commit.
 
 ### Task4: Guided flow UI and actual browser behavior
 
@@ -81,17 +81,17 @@ POST /api/account-workflow/preview accepts workflow, owner and optional boundAcc
 
 **Interfaces:** workflow draft hydration/collection; renderWorkflow; moveWorkflowStep; previewWorkflow; resetWorkflowCounts; account configuration revision snapshot. Reuse api(), existing account draft ownership and saveAccounts().
 
-- [ ] Write production-VM tests for draft persistence, readonly system guards, draggable/keyboard step ordering, selector parameters, unsampled100 copy, counter table and stale preview responses.
-- [ ] Render fixed entry/cache/binding/lease nodes and hit/miss/busy edges, movable supported filters, parameter panel, compatibility toggle, validation/preview, explicit save and reset confirmation.
-- [ ] Keep existing account fields/presets/raw editors coherent; preserve workflow/revision through programmatic saves and reject unsupported combinations clearly.
-- [ ] Add selection diagnostics to request details without a generic new store. Show when legacy mode is active and do not claim an unapplied draft is live.
+- [x] Write production-VM tests for draft persistence, readonly system guards, draggable/keyboard step ordering, selector parameters, unsampled100 copy, counter table and stale preview responses.
+- [x] Render fixed entry/cache/binding/lease nodes and hit/miss/busy edges, movable supported filters, parameter panel, compatibility toggle, validation/preview, explicit save and reset confirmation.
+- [x] Keep existing account fields/presets/raw editors coherent; preserve workflow/revision through programmatic saves and reject unsupported combinations clearly.
+- [x] Add selection diagnostics to request details without a generic new store. Show when legacy mode is active and do not claim an unapplied draft is live.
 - [ ] Verify actual local browser interactions at desktop/narrow widths, keyboard reorder/focus, unsaved edits, preview no mutation and reset; commit.
 
 ### Task5: Contracts, full verification and review
 
 **Files:** README.md; config.example.json; .trellis/spec/backend/{database,quality,logging}-guidelines.md; .trellis/spec/frontend/{state-management,quality-guidelines}.md; task check report.
 
-- [ ] Document workflow/counter fields, save/reset behavior, first-time counter initialization, catch-up consequence, compatibility and deployment/rollback limits.
+- [x] Document workflow/counter fields, save/reset behavior, first-time counter initialization, catch-up consequence, compatibility and deployment/rollback limits.
 - [ ] Run all source syntax and full npm test with credential env scrubbed, git diff --check and relevant browser evidence.
-- [ ] Perform one fresh-context whole-branch review per executing-plans; address important findings with regression tests and record rulings.
+- [x] Perform one fresh-context whole-branch review per executing-plans; address important findings with regression tests and record rulings.
 - [ ] Commit remaining artifacts and journal. Do not push/merge/deploy or delete static artifacts without the user's applicable authorization. Deliver implemented local result plus answers to all nine annotations.

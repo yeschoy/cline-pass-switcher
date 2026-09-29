@@ -25,6 +25,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 const META_PATH = path.join(DATA_DIR, 'metadata.json');
+const SELECTION_COUNTERS_PATH = path.join(DATA_DIR, 'selection-counters.json');
 const ADMIN_PATH = path.join(DATA_DIR, 'admin-auth.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const LOG_DIR = path.join(DATA_DIR, 'logs');
@@ -192,11 +193,23 @@ if (loadedAdminState !== MISSING_ADMIN && loadedAdminState.initialized) for (con
     throw new Error('client key must differ from the administrator password');
 }
 const META = loadJson(META_PATH, { models: {}, history: [], catalog: null, orModelsFetchedAt: 0, orModelList: null });
-let selectionCounterPersistenceError = false;
+// The compact snapshot is authoritative when present; metadata supplies a one-time legacy fallback.
+const loadedSelectionCounters = loadJson(SELECTION_COUNTERS_PATH, undefined);
+if (loadedSelectionCounters !== undefined) META.selectionCounters = loadedSelectionCounters;
+let selectionCounterPersistenceError = false, selectionCountersDirty = loadedSelectionCounters === undefined;
+function persistSelectionCounters() {
+  atomicWriteJson(SELECTION_COUNTERS_PATH, META.selectionCounters, { pretty: false });
+  selectionCountersDirty = false; selectionCounterPersistenceError = false;
+}
+function flushSelectionCounters() {
+  if (!selectionCountersDirty) return;
+  try { persistSelectionCounters(); }
+  catch { selectionCounterPersistenceError = true; console.error('[workflow] selection counter persistence failed'); }
+}
 const saveConfig = () => atomicWriteJson(CONFIG_PATH, config);
 const saveMeta = () => {
+  flushSelectionCounters();
   atomicWriteJson(META_PATH, META, { pretty: false });
-  selectionCounterPersistenceError = false;
   // A successful write of the current META also commits any confirmed monthly bans.
   for (const [id, pending] of quotaProvisional) if (pending.persistRetryAt !== undefined) quotaProvisional.delete(id);
 };
@@ -1264,8 +1277,6 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   if (normalizeAccountStates()) dirty = true;
   if (normalizeStatistics()) dirty = true;
   if (normalizeAccountQuotas()) dirty = true;
-  const selectionCounters = normalizeSelectionCounters(META.selectionCounters, new Set(config.accounts.map(account => account.id)));
-  if (JSON.stringify(META.selectionCounters) !== JSON.stringify(selectionCounters)) { META.selectionCounters = selectionCounters; dirty = true; }
   if (config.accountWorkflow.enabled && pipeline.cachePoolSize < 1) throw new Error('enabled accountWorkflow requires a positive cachePoolSize');
   if (pipeline.cachePoolLowQuotaSize > 0 && pipeline.cachePoolSize > 0 && (config.accountMode === 'sticky' || pipeline.sticky)) for (const account of config.accounts) {
     const quota = META.accountQuotas[account.id];
@@ -1281,6 +1292,9 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   const ids = new Set((config.accounts || []).map((a) => a.id));
   const envKey = String(process.env.CLINE_PASS_KEY || '').trim();
   if (envKey) ids.add(envAccountId(envKey));
+  const selectionCounters = normalizeSelectionCounters(META.selectionCounters, ids);
+  if (JSON.stringify(META.selectionCounters) !== JSON.stringify(selectionCounters)) { META.selectionCounters = selectionCounters; selectionCountersDirty = true; dirty = true; }
+  if (persist && selectionCountersDirty) persistSelectionCounters();
   for (const id of Object.keys(META.accountStates)) if (!ids.has(id)) { delete META.accountStates[id]; dirty = true; }
   for (const id of Object.keys(META.accountQuotas)) if (!ids.has(id)) { delete META.accountQuotas[id]; dirty = true; }
   for (const id of Object.keys(META.statistics.lifetime.accounts)) if (!ids.has(id)) { delete META.statistics.lifetime.accounts[id]; dirty = true; }
@@ -2118,7 +2132,8 @@ function recordWorkflowSelection(account) {
   const before = previous.count;
   state.sequence++;
   Object.defineProperty(state.accounts, account.id, { value: { count: before + 1, lastSelected: state.sequence }, enumerable: true, configurable: true, writable: true });
-  try { saveMeta(); } catch { selectionCounterPersistenceError = true; console.error('[工作流] 选号计数暂未持久化'); }
+  selectionCountersDirty = true;
+  flushSelectionCounters();
   return { before, after: before + 1 };
 }
 function workflowDecision(identity, context, { account = null, kind, counted = false, before = null, after = null, trace = [] }) {
@@ -5211,8 +5226,8 @@ async function dispatch(req, res) {
       const next = normalizeSelectionCounters(META.selectionCounters, new Set(config.accounts.map(account => account.id)));
       for (const account of owned) Object.defineProperty(next.accounts, account.id, { value: { count: 0, lastSelected: 0 }, enumerable: true, configurable: true, writable: true });
       // Persist first. A reset failure must not change the live counter map or bindings.
-      atomicWriteJson(META_PATH, { ...META, selectionCounters: next }, { pretty: false });
-      META.selectionCounters = next; selectionCounterPersistenceError = false;
+      atomicWriteJson(SELECTION_COUNTERS_PATH, next, { pretty: false });
+      META.selectionCounters = next; selectionCountersDirty = false; selectionCounterPersistenceError = false;
       return sendJSON(res, 200, { ok: true, resetAccounts: owned.length, clientKeyId: body.clientKeyId, configurationRevision: configurationRevision() });
     }
     if (req.method === 'GET' && p === '/api/accounts') {
@@ -5329,7 +5344,7 @@ async function dispatch(req, res) {
         if (quota?.snapshot && quota.lastSuccessAt === quota.snapshot.fetchedAt) reconcileQuotaDisposition(account.id, quota.snapshot);
       }
       for (const id of Object.keys(META.accountStates || {})) if (!seen.has(id)) delete META.accountStates[id];
-      META.selectionCounters = normalizeSelectionCounters(META.selectionCounters, seen);
+      META.selectionCounters = normalizeSelectionCounters(META.selectionCounters, seen); selectionCountersDirty = true;
       for (const id of Object.keys(META.statistics.lifetime.accounts)) if (!seen.has(id)) delete META.statistics.lifetime.accounts[id];
       for (const bucket of META.statistics.minuteBuckets) for (const id of new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health),...Object.keys(bucket.accountHealth)])) if (!seen.has(id)) { delete bucket.accounts[id]; delete bucket.health[id]; delete bucket.accountHealth[id]; }
       for (const id of Object.keys(META.statistics.recentCoverage.accountIncompleteAt)) if (!seen.has(id)) delete META.statistics.recentCoverage.accountIncompleteAt[id];
@@ -5571,11 +5586,13 @@ function shutdown(signal) {
   shutdownPromise = (async () => {
     const deadline = Date.now() + SHUTDOWN_TIMEOUT_MS;
     stopQuotaWork();
+    flushSelectionCounters();
     try { server.close(); } catch {}
     server.closeIdleConnections?.();
     const finalizersDone = activeResponses === 0 || await beforeDeadline(new Promise((resolve) => activeResponseWaiters.add(resolve)), deadline);
     if (!finalizersDone) {
       console.error(`[退出] ${signal} 等待活动请求超时，正在强制关闭连接`);
+      flushSelectionCounters();
       destroyRuntimeConnections();
       void ordinaryLogs.close(); void detailedLogs.close();
       process.exit(0);
@@ -5583,6 +5600,7 @@ function shutdown(signal) {
     }
     const drained = await beforeDeadline(Promise.allSettled([ordinaryLogs.close(), detailedLogs.close()]), deadline);
     if (!drained) console.error(`[退出] ${signal} 日志 drain 超时，正在强制收敛`);
+    flushSelectionCounters();
     destroyRuntimeConnections();
     process.exit(0);
   })();

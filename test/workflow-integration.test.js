@@ -23,7 +23,7 @@ function success(res, content = 'OK') {
   res.writeHead(200, { 'Content-Type': 'text/event-stream' });
   res.end(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\ndata: [DONE]\n\n`);
 }
-async function fixture(t, { count = 3, cap = 7, configure = c => c, onChat, metadata } = {}) {
+async function fixture(t, { count = 3, cap = 7, configure = c => c, onChat, metadata, envKey } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-workflow-'));
   const seen = [], held = new Set(), children = [];
   const upstream = http.createServer((req, res) => {
@@ -52,7 +52,7 @@ async function fixture(t, { count = 3, cap = 7, configure = c => c, onChat, meta
   prepareAdminFixture(dir);
   const state = { dir, cfg, seen, held, upstream, child: null, port: cfg.port };
   state.start = async () => {
-    const child = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: { PATH: process.env.PATH, NODE_ENV: 'test', BIND_HOST: '127.0.0.1', DATA_DIR: dir, PORT: String(state.port) }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: { PATH: process.env.PATH, NODE_ENV: 'test', BIND_HOST: '127.0.0.1', DATA_DIR: dir, PORT: String(state.port), ...(envKey ? { CLINE_PASS_KEY: envKey } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
     children.push(child); state.child = child;
     let output = ''; child.stdout.on('data', data => { output += data; }); child.stderr.on('data', data => { output += data; });
     for (let i = 0; i < 250; i++) {
@@ -73,7 +73,7 @@ async function fixture(t, { count = 3, cap = 7, configure = c => c, onChat, meta
     const text = await response.text();
     return { status: response.status, text, requestId: response.headers.get('x-cline-request-id'), success: response.ok && text.includes('[DONE]') };
   };
-  state.counts = () => JSON.parse(fs.readFileSync(path.join(dir, 'metadata.json'), 'utf8')).selectionCounters?.accounts || {};
+  state.counts = () => JSON.parse(fs.readFileSync(path.join(dir, 'selection-counters.json'), 'utf8')).accounts;
   state.total = () => Object.values(state.counts()).reduce((sum, row) => sum + row.count, 0);
   t.after(async () => { for (const res of held) res.destroy(); for (const child of children) await stop(child); upstream.closeAllConnections?.(); await new Promise(resolve => upstream.close(resolve)); fs.rmSync(dir, { recursive: true, force: true }); });
   await state.start(); return state;
@@ -207,9 +207,9 @@ test('workflow newly added account starts at zero and catches up without rebasin
   assert.equal(f.counts().a0.count, 3); assert.equal(f.counts().a1.count, 3);
 });
 
-test('workflow metadata write failure keeps live counting and releases model leases', async t => {
+test('workflow counter snapshot write failure keeps live counting and releases model leases', async t => {
   const f = await fixture(t);
-  const filename = path.join(f.dir, 'metadata.json'), original = fs.readFileSync(filename);
+  const filename = path.join(f.dir, 'selection-counters.json'), original = fs.readFileSync(filename);
   fs.renameSync(filename, filename + '.fixture-backup'); fs.mkdirSync(filename);
   try {
     assert.equal((await f.chat('write-failure')).success, true);
@@ -300,7 +300,7 @@ test('workflow reset failure preserves live counts and stale reset is rejected',
   const f = await fixture(t); await f.chat('reset-fail');
   const view = (await f.admin('/api/accounts')).body;
   assert.equal((await f.admin('/api/account-workflow/reset-counts', { clientKeyId: 'legacy', expectedConfigurationRevision: '0'.repeat(64) })).status, 409);
-  const filename = path.join(f.dir, 'metadata.json'), original = fs.readFileSync(filename);
+  const filename = path.join(f.dir, 'selection-counters.json'), original = fs.readFileSync(filename);
   fs.renameSync(filename, filename + '.fixture-backup'); fs.mkdirSync(filename);
   try { assert.equal((await f.admin('/api/account-workflow/reset-counts', { clientKeyId: 'legacy', expectedConfigurationRevision: view.configurationRevision })).status, 500); }
   finally { fs.rmdirSync(filename); fs.writeFileSync(filename, original); }
@@ -318,4 +318,51 @@ test('workflow ordinary logs distinguish counted selections from hits without le
   assert.equal(reused.workflow.decisions[0].kind, 'binding-hit'); assert.equal(reused.workflow.decisions[0].counted, false);
   assert.ok(!JSON.stringify(rows).includes('private-session-value'));
   assert.ok(!JSON.stringify(selected.workflow).includes('fixture-'));
+});
+
+
+test('workflow injected environment account keeps its stable count across restart', async t => {
+  const f = await fixture(t, { count: 1, envKey: 'fixture-env-only', configure: c => ({ ...c, accounts: [] }) });
+  await f.chat('env-one'); await f.chat('env-two');
+  assert.equal(f.total(), 2); const before = f.counts();
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.dir, 'config.json'))).accounts, []);
+  await f.restart(); assert.deepEqual(f.counts(), before); assert.equal(f.total(), 2);
+});
+
+test('workflow counter snapshot persists before upstream completion without rewriting bulk metadata', async t => {
+  let hold = false;
+  const f = await fixture(t, { count: 1, onChat(_entry, res, { held }) {
+    if (!hold) return success(res);
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.write('data: {"choices":[{"delta":{"content":"held"}}]}\n\n'); held.add(res);
+  } });
+  await f.chat('snapshot-prime'); await sleep(200);
+  const before = fs.readFileSync(path.join(f.dir, 'metadata.json'));
+  hold = true; const pending = f.chat('snapshot-held');
+  for (let i = 0; i < 100 && f.seen.length < 2; i++) await sleep(10);
+  assert.equal(f.seen.length, 2);
+  const snapshot = JSON.parse(fs.readFileSync(path.join(f.dir, 'selection-counters.json')));
+  assert.equal(snapshot.accounts.a0.count, 2);
+  assert.deepEqual(fs.readFileSync(path.join(f.dir, 'metadata.json')), before);
+  for (const res of f.held) res.end('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+  assert.equal((await pending).success, true);
+  await f.restart(); assert.equal(f.total(), 2);
+});
+
+test('workflow imports legacy counters once; reset snapshot wins over an older metadata mirror', async t => {
+  const f = await fixture(t, { count: 1, metadata: { selectionCounters: { version: 1, sequence: 7, accounts: { a0: { count: 7, lastSelected: 7 } } } } });
+  assert.equal(f.total(), 7);
+  const view = (await f.admin('/api/accounts')).body;
+  assert.equal((await f.admin('/api/account-workflow/reset-counts', {clientKeyId:'legacy',expectedConfigurationRevision:view.configurationRevision})).status, 200);
+  assert.equal(f.total(), 0);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.dir,'metadata.json'))).selectionCounters.accounts.a0.count, 7);
+  await f.restart(); assert.equal(f.total(), 0);
+});
+
+test('workflow corrupt authoritative counter snapshot fails startup without overwriting it', async t => {
+  const f = await fixture(t); await f.chat('before-corruption'); await stop(f.child);
+  const filename = path.join(f.dir,'selection-counters.json'), bad = '{"version":99,"sequence":0,"accounts":{}}';
+  fs.writeFileSync(filename,bad);
+  await assert.rejects(f.start(), /invalid selectionCounters/);
+  assert.equal(fs.readFileSync(filename,'utf8'),bad);
 });

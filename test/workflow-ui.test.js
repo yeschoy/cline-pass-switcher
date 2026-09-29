@@ -154,3 +154,27 @@ test('guided mode disables the legacy preset action as well as its picker', () =
   const h = harness(); h.run("updateWorkflowField('enabled',true)");
   assert.equal(h.el('#accountPresetPreview').disabled, true);
 });
+
+
+test('pending count reset stays disabled through workflow redraw and cannot reenter', async () => {
+  const h = harness(); let finish;
+  h.context.promise = new Promise(resolve => { finish = resolve; });
+  h.run("api=async(path,body)=>{calls.push({path,body});return promise}");
+  const pending = h.run('resetAccountSelectionCounts()'); await Promise.resolve();
+  assert.equal(h.el('#workflowResetCounts').disabled, true);
+  h.run("updateWorkflowField('selector','health')");
+  assert.equal(h.el('#workflowResetCounts').disabled, true);
+  await h.run('resetAccountSelectionCounts()'); assert.equal(h.calls.length, 1);
+  finish({ok:false,error:{message:'fixture failed'}}); await pending;
+  assert.equal(h.el('#workflowResetCounts').disabled, false);
+});
+
+test('clean refresh adopts new workflow context instead of creating a false conflict', () => {
+  const h = harness(); assert.equal(h.run('workflowDirty()'), false);
+  h.context.newSnapshot = {...h.context.fixture,configurationRevision:'2'.repeat(64)};
+  h.el('#cachePoolSize').value='4';
+  h.run('hydrateAccountWorkflow(newSnapshot,{wasDirty:false})');
+  assert.equal(h.run('WORKFLOW_CONFLICT'), false);
+  assert.equal(h.run('WORKFLOW_CONFIGURATION_REVISION'), '2'.repeat(64));
+  assert.equal(h.run('workflowDirty()'), false);
+});
