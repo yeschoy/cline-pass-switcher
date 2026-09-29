@@ -535,3 +535,9 @@ if (visitId === STATISTICS_VISIT_ID &&
   statisticsStatus.textContent = quotaRefreshSummary(data);
 }
 ```
+
+## Guided account-selection editor
+
+`WORKFLOW_DRAFT` is independent from the last loaded server config; cache/TTL/wait controls edit the existing pipeline draft, not duplicate state. Capture its revision and preserve dirty drafts across reads; a newer server revision sets a conflict instead of silently rebasing a save. Full account save includes the workflow and its expected revision while preserving account IDs, ownership and hidden settings. Mid-save edits remain dirty. Old backend responses without the contract keep compatibility mode.
+
+Read-only workflow account projections come from the saved snapshot, not mutable account rows. Reset confirmation therefore describes actual saved owner membership including standby/disabled members. Reset updates count projections without discarding unrelated edits. Successful mutation followed by failed refresh must explicitly say the write succeeded. Preview/trace responses have their own abort/generation owner, invalidated by edits, navigation and login; never reuse statistics generations. “Discard draft” restores loaded state, not historical server rollback.

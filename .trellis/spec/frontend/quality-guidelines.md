@@ -338,3 +338,7 @@ const paused = roleAware && !!account.state?.quotaDisposition;
 ```
 
 Use `textContent` for the aggregate runtime line and `escapeHtml()` for server-controlled row strings. These VM/static contracts do not substitute for real-browser responsive/ARIA review.
+
+## Workflow UI checks
+
+Fixed system nodes cannot move; quota/health nodes support both drag and keyboard up/down with focus recovery. Clearly label live versus draft mode, pure simulation versus actual request traces, and unsampled observed health versus optimistic routing health. Count tables escape names and omit credentials. Check stale preview suppression, configuration-conflict retention, invalid numbers preventing writes, reset scope/confirmation, narrow layout and browser save/reload. Never claim a browser gesture passed when automation was blocked.

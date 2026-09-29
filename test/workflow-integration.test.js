@@ -120,6 +120,31 @@ test('workflow concurrent admissions obey caps and count only actual overflow se
   assert.ok((await Promise.all(pending)).every(row => row.success));
 });
 
+test('workflow43 accounts reserve258 leases without account overcommit; default256 sockets queue two', async t => {
+  let release = false;
+  const f = await fixture(t, { count: 43, cap: 6, onChat(_entry, res, { held }) {
+    if (release) return success(res);
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.write('data: {"choices":[{"delta":{"content":"held"}}]}\n\n'); held.add(res);
+  } });
+  const started = performance.now();
+  const pending = Array.from({ length: 258 }, (_, i) => f.chat(`capacity43-${i}`));
+  for (let i = 0; i < 1000 && (f.total() < 258 || f.seen.length < 256); i++) await sleep(10);
+  assert.equal(f.total(), 258);
+  assert.equal(f.seen.length, 256, 'direct Agent default is256 sockets per origin');
+  const view = (await f.admin('/api/accounts')).body;
+  assert.equal(view.accounts.length, 43);
+  assert.ok(view.accounts.every(a => a.activeCount === 6 && a.selectionCount === 6));
+  assert.equal((await f.chat('full43')).status, 429);
+  assert.equal(f.total(), 258);
+  const reserveMs = performance.now() - started;
+  release = true;
+  for (const res of f.held) res.end('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+  assert.ok((await Promise.all(pending)).every(row => row.success));
+  assert.equal(f.seen.length, 258);
+  t.diagnostic(`synthetic43x6:258 leases,256 direct sockets, reserve-check ${reserveMs.toFixed(1)}ms; metadata ${fs.statSync(path.join(f.dir, 'metadata.json')).size} bytes after completion. Not a production capacity measurement.`);
+});
+
 test('workflow busy bound account temporarily overflows and counts only the new choice', async t => {
   let hold = false;
   const f = await fixture(t, { count: 2, cap: 1, onChat(_entry, res, { held }) { if (!hold) return success(res); res.writeHead(200, { 'Content-Type': 'text/event-stream' }); res.write('data: {"choices":[{"delta":{"content":"held"}}]}\n\n'); held.add(res); } });

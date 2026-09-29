@@ -448,3 +448,9 @@ else validateStatistics(META.statistics);
 ```
 
 The same fail-closed rule applies to quota snapshots, the canonical quota disposition and overflow metadata. For example, do **not** repair `{ quotaDisposition: 'waiting-refresh', quotaRetryAt: 5 }` into a valid-looking hold: reject the existing metadata without overwriting it; only legacy absence receives defaults.
+
+## Guided workflow selection counters
+
+`META.selectionCounters` version1 is validated before normalization. Missing state starts empty; malformed counters/sequence fail without overwriting. Keys are stable configured account IDs (including prototype-like strings); all counts/sequences are nonnegative safe integers. Disable, rename or cache eviction must preserve counts; only deletion prunes them. New IDs read0. Never infer counts from request statistics or silently rebase.
+
+The existing single-process `saveMeta()` atomic writer remains the only persistence owner. New guided lease acquisition increments synchronously before another admission; binding hits and same-account Provider retries do not. Write failure leaves live counters effective and a visible persistence error; it must not fabricate an upstream failure. Explicit owner-scoped reset is persist-first, preserves bindings/leases, and rolls back on write failure. Shared data directories across worker processes are unsupported.

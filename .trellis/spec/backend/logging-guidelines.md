@@ -439,3 +439,7 @@ const rawText = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decod
 ```
 
 Local-mock integration verifies JSON/SSE component and repeated-query echoes are absent from detail metadata/body/list APIs, detailed/ordinary files, metadata and service output while actual client/upstream traffic remains unchanged. Ten cap/interruption cases cover JSON/SSE API-key/quoted-Cookie fields plus non-JSON SSE Bearer tails with exact off/on client bytes/status/completeness and upstream input equality; short-secret fixtures verify readable single markers for small inputs and resource-limited omission only after the match budget is exceeded, without changing HTTP output or retaining leases. Store and API tests reject explicit empty cursors with 400. These checks apply to new publications; they do not migrate previously persisted content.
+
+## Guided workflow projection
+
+Ordinary request records may include an allowlisted workflow version/revision and at most4 decisions with at most8 nodes each: branch, stable account ID, selector, bounded node/result enums, candidate cardinalities and before/after selection counts. Do not include raw session affinity, account keys, headers, candidate credentials or arbitrary runtime objects. A request trace describes the captured execution path; the UI must not derive historical nodes from the current editable draft. Logs from the legacy path legitimately lack workflow facts.

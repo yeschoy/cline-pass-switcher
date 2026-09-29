@@ -885,3 +885,7 @@ if (windows.length === 3 && windows.every(w => w.percentUsed < 100) &&
     quotaDispositionAt: 0, quotaRetryAt: 0, quotaReason: null };
 record(modelId, { pipeline: selected?.pipeline ?? null });
 ```
+
+## Guided account workflow regression gate
+
+Run `test/account-workflow.test.js`, `test/workflow-integration.test.js` and `test/workflow-ui.test.js` plus the existing routing/admin/UI suite when changing workflow contracts. Prove active-cache and client-owner boundaries, cap/RPM admission, equal-counter concurrent selections, zero-count binding hits, temporary overflow retaining bindings, replacement exclusions, same-account Provider retries, restart and new-account0 catch-up. Preserve legacy behavior when disabled. Preview must not prune metadata, create bindings, advance counters or invoke upstream. Reset must check revision/admin/CSRF, include disabled/standby owner members, and publish only after successful persistence.

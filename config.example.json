@@ -37,7 +37,9 @@
       "scope": "account",
       "action": "cooldown",
       "when": {
-        "statuses": [429],
+        "statuses": [
+          429
+        ],
         "body_contains": "account quota exhausted"
       },
       "reset": {
@@ -49,7 +51,9 @@
     }
   ],
   "retryRules": [],
-  "quotaProtection": { "monthlyThresholdUsd": 0.20 },
+  "quotaProtection": {
+    "monthlyThresholdUsd": 0.2
+  },
   "accountPipeline": {
     "quotaPool": false,
     "healthSort": false,
@@ -95,5 +99,25 @@
       "maxRetries": null,
       "providerCooldownMs": 0
     }
+  },
+  "accountWorkflow": {
+    "version": 1,
+    "enabled": false,
+    "bindingEnabled": true,
+    "onBindingBusy": "overflow",
+    "missSteps": [
+      "quota",
+      "health"
+    ],
+    "quotaFilter": true,
+    "quotaPools": [
+      "hot",
+      "warm",
+      "unknown"
+    ],
+    "healthFilter": false,
+    "minimumHealth": 0,
+    "unknownHealth": "optimistic",
+    "selector": "least-selections"
   }
 }
