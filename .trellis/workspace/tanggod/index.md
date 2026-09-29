@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 47
-- **Last Active**: 2026-09-28
+- **Total Sessions**: 48
+- **Last Active**: 2026-09-30
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1159 | Active |
+| `journal-1.md` | ~1187 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 48 | 2026-09-30 | 完成本地选号工作流与持久计数，待浏览器解锁验收 | `b78f50a`, `b66bf6b`, `92adcc1`, `701d998`, `001a9c1`, `849cc24`, `9bb8f79` | `codex/selection-workflow` |
 | 47 | 2026-09-28 | 按用户要求行政归档剩余任务 | - | `feat/raw-detail-safe-headers` |
 | 46 | 2026-09-28 | 最新分支生产发布与指标验收规范 | `a17eef6`, `8214ab4`, `b22064d` | `feat/raw-detail-safe-headers` |
 | 45 | 2026-09-28 | 错误诊断、负载调度、长密钥与性能调查集成交付 | `378ff1f`, `5598984`, `3726388` | `feat/raw-detail-safe-headers` |

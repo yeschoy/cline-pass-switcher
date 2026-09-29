@@ -1157,3 +1157,31 @@ Committed-main raw-detail code is deployed raw-off at 512 MiB with 32 Legacy-own
 ### Next Steps
 
 - 若将来需要验证缓存策略、开启原文采集或完成管理员页面验收，须重新确定授权和独立证据；不得以 Trellis completed 状态代替生产验收。
+
+
+## Session 48: 完成本地选号工作流与持久计数，待浏览器解锁验收
+<!-- trellis-session: v=2 fp=db26dd35a3dadf2e -->
+
+**Date**: 2026-09-30
+**Task**: 完成本地选号工作流与持久计数，待浏览器解锁验收
+**Branch**: `codex/selection-workflow`
+
+### Summary
+
+受约束工作流、活动缓存池最少选号计数、绑定命中不加、未知健康100、独立原子计数快照、模拟与轨迹UI均完成。独立审查重要项已修复，最终414/414测试通过。43×6本地预占258租约无超额，默认256连接排队2个后全部成功；未部署、未压生产。Mac锁屏阻断拖动/窄屏/确认取消，任务保持in_progress等待解锁验证。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b78f50a` | docs: plan guided account workflow and persisted selection counts |
+| `b66bf6b` | feat: define guided workflow and selection counter contracts |
+| `92adcc1` | feat: route guided selections through persistent account counts |
+| `701d998` | feat: expose workflow preview reset and decision diagnostics |
+| `001a9c1` | feat: add guided workflow editor and counter controls |
+| `849cc24` | docs: document workflow contracts and verify 43-account admission |
+| `9bb8f79` | fix: preserve counters and bound selection persistence cost |
+
+### Status
+
+[OK] **Completed**
