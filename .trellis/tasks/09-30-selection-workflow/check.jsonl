@@ -1,0 +1,4 @@
+{"file": "docs/superpowers/specs/2026-09-30-selection-workflow-design.md", "reason": "User-confirmed behavior and scope"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Lease, routing and test invariants"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Atomic persistence and schema safety"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Preserve complete account drafts and stale-response ownership"}
