@@ -1185,3 +1185,37 @@ Committed-main raw-detail code is deployed raw-off at 512 MiB with 32 Legacy-own
 ### Status
 
 [OK] **Completed**
+
+
+## Session 49: 45账号池并发瓶颈与出口限流归因报告
+<!-- trellis-session: v=2 fp=0bcfc99142f46838 -->
+
+**Date**: 2026-10-01
+**Task**: 45账号池并发瓶颈与出口限流归因报告
+**Branch**: `codex/concurrency-root-cause-report`
+
+### Summary
+
+完成中文详细报告：当前45个不同凭据每号6，健康新选号候选43；独立复算历史80/64工况、双出口交叉和十号各6实测，证据指向出口相关共享限制，准确阈值与当前持续容量仍未知。只读生产，无追加模型请求或部署。
+
+### Main Changes
+
+- 归档报告及生产安全快照、历史复算、调查脚本与验证记录；保留用户AGENTS.md改动。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ea1548b` | docs: investigate account pool concurrency and egress limits |
+
+### Testing
+
+- [OK] 历史原始证据全部断言通过；聚焦选号测试36/36；Python与远端脚本语法、敏感模式扫描、链接和diff检查通过。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 如需容量验收，先确认Cline接入限额，再单独授权有界持续压测和错误规则改动。
