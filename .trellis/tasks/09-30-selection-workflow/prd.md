@@ -48,6 +48,10 @@ Make the real account-selection branches visible and editable in a guided flowch
 - General429 narrowing and maxSockets256 were questions to explain. No production rule edits, socket changes, load tests or deployment are performed merely as part of this design.
 - Do not bundle the incomplete-SSE success-statistics defect into this feature without separate scope.
 
+## Authorized follow-on scope (2026-09-30)
+
+The user explicitly extended this in-progress task after commit `9bb8f79`; the following supersedes the original socket/load-test exclusion above. Keep the existing guided workflow and compact counter snapshot. Raise the default direct Agent socket limit from256 to512 with the existing1–1024 override validation; document other admission/queue/time limits and test 43 accounts x6 plus a500-request local burst without changing per-account caps. Reuse the existing optional health filter, keep its enablement off by default, offer20% as the enabled default, apply the inclusive threshold to new selections, replacements and binding hits, and preserve unsampled accounts as100% eligible with null/zero measured samples. Make a newly ineligible binding migrate through a real counted selection, return an explicit empty-pool reason and align UI, preview and logs. Verify synchronous lease/counter admission and reset/config/deletion interleavings, restart and write failures; measure ranking, health scans, config hashing, serialization, persistence, throughput and event-loop delay. Establish the deployed process topology from repository evidence; do not infer cross-process atomicity, deploy, or send live upstream pressure. Commit code, docs and Trellis updates; retain static intermediates without cleanup permission.
+
 ## Review status
 
 All material interview choices are answered. The authoritative written design is ready for review before implementation planning. This task remains planning.

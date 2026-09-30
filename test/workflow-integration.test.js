@@ -23,7 +23,7 @@ function success(res, content = 'OK') {
   res.writeHead(200, { 'Content-Type': 'text/event-stream' });
   res.end(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\ndata: [DONE]\n\n`);
 }
-async function fixture(t, { count = 3, cap = 7, configure = c => c, onChat, metadata, envKey } = {}) {
+async function fixture(t, { count = 3, cap = 7, configure = c => c, onChat, metadata, envKey, directSockets, perfHook = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-workflow-'));
   const seen = [], held = new Set(), children = [];
   const upstream = http.createServer((req, res) => {
@@ -52,7 +52,7 @@ async function fixture(t, { count = 3, cap = 7, configure = c => c, onChat, meta
   prepareAdminFixture(dir);
   const state = { dir, cfg, seen, held, upstream, child: null, port: cfg.port };
   state.start = async () => {
-    const child = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: { PATH: process.env.PATH, NODE_ENV: 'test', BIND_HOST: '127.0.0.1', DATA_DIR: dir, PORT: String(state.port), ...(envKey ? { CLINE_PASS_KEY: envKey } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [...(perfHook ? ['--require', path.resolve('.trellis/tasks/09-30-selection-workflow/research/workflow-perf-hook.cjs')] : []), 'server.js'], { cwd: path.resolve('.'), env: { PATH: process.env.PATH, NODE_ENV: 'test', BIND_HOST: '127.0.0.1', DATA_DIR: dir, PORT: String(state.port), ...(envKey ? { CLINE_PASS_KEY: envKey } : {}), ...(directSockets === undefined ? {} : { CLINE_PASS_DIRECT_MAX_SOCKETS: String(directSockets) }), ...(perfHook ? { CLINE_PASS_TEST_PERF_PATH: path.join(dir, 'perf.json') } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
     children.push(child); state.child = child;
     let output = ''; child.stdout.on('data', data => { output += data; }); child.stderr.on('data', data => { output += data; });
     for (let i = 0; i < 250; i++) {
@@ -93,12 +93,74 @@ test('workflow distributes new selections and direct binding hits never incremen
 });
 
 test('workflow unknown health is eligible at100 without falsifying observed samples', async t => {
-  const f = await fixture(t, { configure: c => ({ ...c, accountWorkflow: { ...c.accountWorkflow, healthFilter: true, minimumHealth: .95 } }) });
+  const f = await fixture(t, { configure: c => ({ ...c, accountWorkflow: { ...c.accountWorkflow, healthFilter: true, minimumHealth: .95, unknownHealth: 'unknown-last' } }) });
   assert.equal((await f.chat('unsampled')).success, true);
   assert.equal(f.total(), 1);
   const view = await f.admin('/api/accounts');
   const untouched = view.body.accounts.filter(a => a.id !== f.seen[0].account);
   assert.ok(untouched.every(a => a.health.successRate === null && a.health.samples === 0));
+  const preview = await f.admin('/api/account-workflow/preview', { accountWorkflow: view.body.accountWorkflow, clientKeyId: 'legacy' });
+  assert.equal(preview.body.decision.nodes.find(node => node.node === 'health').minimumHealth, .95);
+  assert.notEqual(preview.body.decision.kind, 'filtered', 'unknown-last sorting must not exclude unsampled accounts');
+});
+
+test('minimum health includes the boundary and migrates an unhealthy binding as a counted new selection', async t => {
+  const f = await fixture(t, { count: 2,
+    configure: c => ({ ...c, perModel: { [model]: { upstreams: ['first'], pinMode: 'strict', maxRetries: 0 } },
+      errorRules: [{ id: 'health-degrade', scope: 'account', action: 'degrade', when: { statuses: [500] } }] }),
+    onChat(entry, res, { seen }) {
+      if (entry.account !== 'a0' || seen.length === 1) return success(res);
+      res.writeHead(500, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"synthetic degradation"}}');
+    } });
+  assert.equal((await f.chat('health-bound')).success, true);
+  for (let i = 0; i < 4; i++) assert.equal((await f.chat('health-bound')).status, 500);
+  let view = (await f.admin('/api/accounts')).body;
+  assert.equal(view.accounts[0].health.successRate, .2);
+  assert.equal(view.accounts[0].health.samples, 5);
+  assert.equal(view.accounts[1].health.successRate, null);
+  assert.equal(view.accounts[1].health.samples, 0);
+  assert.equal((await f.admin('/api/accounts', accountSave(view, { accountWorkflow: { ...view.accountWorkflow, healthFilter: true, minimumHealth: .2 } }))).status, 200);
+  const before = f.total();
+  assert.equal((await f.chat('health-bound')).status, 500, 'exactly20% remains eligible as a binding hit');
+  assert.equal(f.total(), before);
+  view = (await f.admin('/api/accounts')).body;
+  assert.equal(view.accounts[0].health.successRate, 1 / 6);
+  const preview = await f.admin('/api/account-workflow/preview', { accountWorkflow: view.accountWorkflow, clientKeyId: 'legacy', boundAccountId: 'a0' });
+  assert.equal(preview.body.decision.kind, 'new-selection');
+  assert.equal(preview.body.decision.accountId, 'a1');
+  assert.equal(preview.body.decision.nodes[0].result, 'invalidated');
+  assert.equal(preview.body.decision.nodes.find(node => node.node === 'health').minimumHealth, .2);
+  assert.equal(f.total(), before, 'simulation does not count');
+  const migratedRequest = await f.chat('health-bound');
+  assert.equal(migratedRequest.success, true);
+  assert.equal(f.seen.at(-1).account, 'a1');
+  assert.equal(f.total(), before + 1);
+  const rows = (await f.admin('/api/logs/requests?limit=200')).body.items;
+  const migrated = rows.find(row => row.requestId === migratedRequest.requestId);
+  assert.equal(migrated.workflow.decisions[0].kind, 'new-selection');
+  assert.equal(migrated.workflow.decisions[0].counted, true);
+  assert.equal(migrated.workflow.decisions[0].nodes[0].result, 'invalidated');
+  assert.equal(migrated.workflow.decisions[0].nodes.find(node => node.node === 'health').minimumHealth, .2);
+  assert.equal((await f.chat('health-bound')).success, true);
+  assert.equal(f.total(), before + 1, 'new healthy binding is reused without counting');
+});
+
+test('minimum health rejects all sampled-below-threshold accounts without fallback', async t => {
+  const f = await fixture(t, { count: 1, configure: c => ({ ...c,
+    errorRules: [{ id: 'health-degrade', scope: 'account', action: 'degrade', when: { statuses: [500] } }] }),
+    onChat(_entry, res) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"synthetic degradation"}}'); } });
+  assert.equal((await f.chat('sample-low')).status, 500);
+  const view = (await f.admin('/api/accounts')).body;
+  assert.equal(view.accounts[0].health.successRate, 0);
+  assert.equal((await f.admin('/api/accounts', accountSave(view, { accountWorkflow: { ...view.accountWorkflow, healthFilter: true, minimumHealth: .2 } }))).status, 200);
+  const before = f.total(), calls = f.seen.length;
+  const preview = await f.admin('/api/account-workflow/preview', { accountWorkflow: { ...view.accountWorkflow, healthFilter: true, minimumHealth: .2 }, clientKeyId: 'legacy', boundAccountId: 'a0' });
+  assert.equal(preview.body.decision.kind, 'filtered');
+  const blocked = await f.chat('sample-low');
+  assert.equal(blocked.status, 503);
+  assert.match(blocked.text, /minimum health 20%/);
+  assert.equal(f.total(), before);
+  assert.equal(f.seen.length, calls);
 });
 
 test('workflow concurrent admissions obey caps and count only actual overflow selections', async t => {
@@ -120,7 +182,7 @@ test('workflow concurrent admissions obey caps and count only actual overflow se
   assert.ok((await Promise.all(pending)).every(row => row.success));
 });
 
-test('workflow43 accounts reserve258 leases without account overcommit; default256 sockets queue two', async t => {
+test('workflow43 accounts reserve258 leases and default512 direct sockets send all upstream', async t => {
   let release = false;
   const f = await fixture(t, { count: 43, cap: 6, onChat(_entry, res, { held }) {
     if (release) return success(res);
@@ -129,9 +191,9 @@ test('workflow43 accounts reserve258 leases without account overcommit; default2
   } });
   const started = performance.now();
   const pending = Array.from({ length: 258 }, (_, i) => f.chat(`capacity43-${i}`));
-  for (let i = 0; i < 1000 && (f.total() < 258 || f.seen.length < 256); i++) await sleep(10);
+  for (let i = 0; i < 1000 && (f.total() < 258 || f.seen.length < 258); i++) await sleep(10);
   assert.equal(f.total(), 258);
-  assert.equal(f.seen.length, 256, 'direct Agent default is256 sockets per origin');
+  assert.equal(f.seen.length, 258, 'all leased requests reached the local upstream with the512 default');
   const view = (await f.admin('/api/accounts')).body;
   assert.equal(view.accounts.length, 43);
   assert.ok(view.accounts.every(a => a.activeCount === 6 && a.selectionCount === 6));
@@ -142,7 +204,58 @@ test('workflow43 accounts reserve258 leases without account overcommit; default2
   for (const res of f.held) res.end('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
   assert.ok((await Promise.all(pending)).every(row => row.success));
   assert.equal(f.seen.length, 258);
-  t.diagnostic(`synthetic43x6:258 leases,256 direct sockets, reserve-check ${reserveMs.toFixed(1)}ms; metadata ${fs.statSync(path.join(f.dir, 'metadata.json')).size} bytes after completion. Not a production capacity measurement.`);
+  t.diagnostic(`synthetic43x6:258 leases,258 upstream arrivals,0 socket-queued, reserve-check ${reserveMs.toFixed(1)}ms; metadata ${fs.statSync(path.join(f.dir, 'metadata.json')).size} bytes after completion. Not a production capacity measurement.`);
+});
+
+test('direct socket override queues transport after lease while zero falls back to512', { timeout: 30000 }, async t => {
+  const onChat = (_entry, res, { held }) => { res.writeHead(200, { 'Content-Type': 'text/event-stream' }); res.write('data: {"choices":[{"delta":{"content":"held"}}]}\n\n'); held.add(res); };
+  const f = await fixture(t, { count: 3, cap: 1, directSockets: 2, onChat });
+  const pending = Array.from({ length: 3 }, (_, i) => f.chat(`socket-two-${i}`));
+  for (let i = 0; i < 200 && (f.total() < 3 || f.seen.length < 2); i++) await sleep(10);
+  assert.equal(f.total(), 3);
+  assert.equal(f.seen.length, 2, 'third request owns a lease but awaits the direct Agent');
+  for (const res of [...f.held]) res.end('data: [DONE]\n\n');
+  for (let i = 0; i < 200 && f.seen.length < 3; i++) await sleep(10);
+  assert.equal(f.seen.length, 3);
+  for (const res of f.held) if (!res.writableEnded) res.end('data: [DONE]\n\n');
+  assert.ok((await Promise.all(pending)).every(row => row.success));
+
+  const g = await fixture(t, { count: 43, cap: 12, directSockets: 0, onChat });
+  const zeroPending = Array.from({ length: 513 }, (_, i) => g.chat(`socket-zero-${i}`));
+  for (let i = 0; i < 1500 && (g.total() < 513 || g.seen.length < 512); i++) await sleep(10);
+  assert.equal(g.total(), 513);
+  assert.equal(g.seen.length, 512, 'invalid zero falls back to the512-socket cap rather than unlimited');
+  [...g.held][0].end('data: [DONE]\n\n');
+  for (let i = 0; i < 200 && g.seen.length < 513; i++) await sleep(10);
+  assert.equal(g.seen.length, 513);
+  for (const res of g.held) if (!res.writableEnded) res.end('data: [DONE]\n\n');
+  assert.ok((await Promise.all(zeroPending)).every(row => row.success));
+});
+
+test('500 simultaneous requests retain the43x6 cap and distinguish leases from upstream arrivals', { timeout: 30000 }, async t => {
+  const f = await fixture(t, { count: 43, cap: 6, perfHook: true, onChat(_entry, res, { held }) {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.write('data: {"choices":[{"delta":{"content":"held"}}]}\n\n'); held.add(res);
+  } });
+  let rejected = 0;
+  const started = performance.now();
+  const pending = Array.from({ length: 500 }, (_, i) => f.chat(`load-${i}`).then(row => { if (row.status === 429) rejected++; return row; }));
+  for (let i = 0; i < 1500 && (f.total() < 258 || f.seen.length < 258 || rejected < 242); i++) await sleep(10);
+  assert.equal(f.total(), 258, 'only the configured258 account slots may lease');
+  assert.equal(f.seen.length, 258, 'all leases reached the local upstream with no direct-Agent queue');
+  assert.equal(rejected, 242, 'the remaining requests are locally rejected without selection counts');
+  const view = (await f.admin('/api/accounts')).body;
+  assert.ok(view.accounts.every(account => account.activeCount === 6 && account.selectionCount === 6));
+  const admissionMs = performance.now() - started;
+  for (const res of f.held) res.end('data: [DONE]\n\n');
+  const results = await Promise.all(pending);
+  assert.equal(results.filter(row => row.success).length, 258);
+  assert.equal(results.filter(row => row.status === 429).length, 242);
+  const totalMs = performance.now() - started;
+  await stop(f.child);
+  const perf = JSON.parse(fs.readFileSync(path.join(f.dir, 'perf.json'), 'utf8'));
+  assert.ok(perf.loop.p99Ms >= 0 && perf.persistence.writes >= 258);
+  t.diagnostic(`synthetic500:258 leased/in-flight upstream,0 socket-queued,242 local429,43 accounts x6; admission ${admissionMs.toFixed(1)}ms, total ${totalMs.toFixed(1)}ms, ${Math.round(500000 / totalMs)} requests/s; server loop p99 ${perf.loop.p99Ms.toFixed(2)}ms/max ${perf.loop.maxMs.toFixed(2)}ms; counter write mean ${perf.persistence.meanWriteMs.toFixed(3)}ms/p95 ${perf.persistence.p95WriteMs.toFixed(3)}ms, ${perf.persistence.writes} writes/${perf.persistence.bytes} bytes. Not real upstream throughput.`);
 });
 
 test('workflow busy bound account temporarily overflows and counts only the new choice', async t => {
@@ -161,7 +274,7 @@ test('workflow busy bound account temporarily overflows and counts only the new 
 });
 
 test('workflow replacement increments another account but Provider retry does not', async t => {
-  const f = await fixture(t, { configure: c => ({ ...c, errorRules: [{ id: 'fixture429', scope: 'account', action: 'cooldown', when: { statuses: [429] }, reset: { fallback: '10s', max: '10s' } }] }), onChat(_entry, res, { seen }) { if (seen.length === 1) { res.writeHead(429, { 'Content-Type': 'text/html' }); res.end('shared fixture rejection'); } else success(res); } });
+  const f = await fixture(t, { configure: c => ({ ...c, accountWorkflow: { ...c.accountWorkflow, healthFilter: true, minimumHealth: .2 }, errorRules: [{ id: 'fixture429', scope: 'account', action: 'cooldown', when: { statuses: [429] }, reset: { fallback: '10s', max: '10s' } }] }), onChat(_entry, res, { seen }) { if (seen.length === 1) { res.writeHead(429, { 'Content-Type': 'text/html' }); res.end('shared fixture rejection'); } else success(res); } });
   assert.equal((await f.chat('replacement')).success, true);
   assert.equal(f.seen.length, 2); assert.notEqual(f.seen[0].account, f.seen[1].account); assert.equal(f.total(), 2);
 
@@ -307,6 +420,41 @@ test('workflow reset failure preserves live counts and stale reset is rejected',
   const latest = (await f.admin('/api/accounts')).body;
   assert.equal(latest.accounts.reduce((n, a) => n + a.selectionCount, 0), 1);
   assert.ok(latest.accounts.every(a => a.activeCount === 0));
+});
+
+test('reset, disable, config save and account deletion interleave with held leases without resurrecting counts', async t => {
+  const f = await fixture(t, { count: 2, cap: 1, onChat(_entry, res, { held }) {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.write('data: {"choices":[{"delta":{"content":"held"}}]}\n\n'); held.add(res);
+  } });
+  const first = f.chat('held-old');
+  for (let i = 0; i < 200 && f.seen.length < 1; i++) await sleep(10);
+  assert.equal(f.seen[0].account, 'a0'); assert.equal(f.total(), 1);
+  const before = (await f.admin('/api/accounts')).body;
+  const [read, reset] = await Promise.all([
+    f.admin('/api/accounts'),
+    f.admin('/api/account-workflow/reset-counts', { clientKeyId: 'legacy', expectedConfigurationRevision: before.configurationRevision }),
+  ]);
+  assert.equal(read.status, 200); assert.equal(reset.status, 200);
+  assert.ok([0, 1].includes(read.body.accounts.find(account => account.id === 'a0').selectionCount));
+  assert.equal(f.total(), 0, 'reset persists before publishing while the old lease remains active');
+  const view = (await f.admin('/api/accounts')).body;
+  assert.equal(view.accounts.find(account => account.id === 'a0').activeCount, 1);
+  const disabled = accountSave(view, { accounts: view.accounts.map(account => ({ ...account, enabled: account.id !== 'a0' })),
+    accountWorkflow: { ...view.accountWorkflow, healthFilter: true, minimumHealth: .2 } });
+  assert.equal((await f.admin('/api/accounts', disabled)).status, 200);
+  const second = f.chat('held-new');
+  for (let i = 0; i < 200 && f.seen.length < 2; i++) await sleep(10);
+  assert.equal(f.seen[1].account, 'a1'); assert.equal(f.total(), 1);
+  const afterDisable = (await f.admin('/api/accounts')).body;
+  assert.equal((await f.admin('/api/accounts', accountSave(afterDisable, { accounts: afterDisable.accounts.filter(account => account.id !== 'a0'),
+    accountPipeline: { ...afterDisable.accountPipeline, cachePoolSize: 1, cachePoolMaxSize: 1 } }))).status, 200);
+  assert.equal(f.counts().a0, undefined);
+  for (const res of f.held) res.end('data: [DONE]\n\n');
+  assert.ok((await Promise.all([first, second])).every(row => row.success));
+  await f.restart();
+  assert.equal(f.total(), 1);
+  assert.equal(f.counts().a0, undefined, 'completion of a deleted in-flight account cannot restore its count');
 });
 
 test('workflow ordinary logs distinguish counted selections from hits without leaking identities', async t => {

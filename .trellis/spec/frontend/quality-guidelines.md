@@ -194,6 +194,8 @@ Copy uses only `DETAIL_BODY_TEXT` obtained from the authenticated body API; warn
 
 `test/detailed-log-ui.test.js` executes production-script VM coverage for safe text/copy, settings rollback, stale list/selection/body/clear and filter invalidation, and bulk/raw/account draft preservation. It does not prove browser clipboard permissions, keyboard focus, announcements, responsive layout or visual readability; those remain manual acceptance items.
 
+The guided workflow reuses `accountWorkflow.healthFilter` and `minimumHealth`. Keep filtering off for old configurations, offer 20% when enabled from the default or a zero-valued disabled draft, and preserve a nonzero saved threshold across toggles. The account table separates measured null/zero-sample health from the effective 100% filter value for unsampled accounts, even when `unknown-last` keeps them behind known rates in the separate health-priority selector. Preview and recorded execution render the health threshold and binding invalidation from bounded server trace fields; editing remains a draft until the explicit save.
+
 #### Rendering safety
 
 Every server-controlled value inserted via `innerHTML` passes through `escapeHtml()`; JavaScript string arguments use `jsArg()`. Prefer `textContent` for drawer/status text. Authentication failures continue to show the login overlay rather than rendering partial sensitive state.

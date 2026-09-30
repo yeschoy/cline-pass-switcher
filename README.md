@@ -36,15 +36,16 @@ Node.js 本地/服务器代理 + 网页控制台，用于 [Cline Pass](https://c
 - 真正取得新账号租约时计数 `+1`，包括临时溢出、失败后的换号。直接命中原会话绑定、同账号换Provider和模拟均不增加。
 - 计数按账号稳定ID保存在轻量原子快照 `selection-counters.json`（同一服务写入，`metadata.json.selectionCounters`仅为兼容镜像），正常重启恢复；改名、停用、移出再进入活动集合均保留。删除账号时清除其计数，新账号从0开始，不从历史请求统计推算。
 - 低计数账号进入活动集合后可能优先追赶。此规则均衡的是重新选号次数，不保证总请求量、Token、成本或在途连接完全均衡。
-- 未知账号健康默认按100%参与工作流，实测统计仍显示“未采样 / 0样本”；不改变Provider健康规则。多额度窗口的瓶颈仍是最大已用比例，即最小剩余比例。
+- 健康筛选默认关闭，开启时界面提供20%阈值（可设0–100%或再次关闭）：低于阈值排除，等于阈值允许。已有绑定在新请求准入时同样复核，失格后安全重新选号并计数；在途请求不被中断。无合格账号返回明确的筛选错误，不绕过阈值。
+- 未采样账号在健康筛选中始终按100%参与，实测统计仍显示“未采样 / 0样本”；`unknown-last`只影响显式健康优先排序，不改变这个过滤规则，也不改变Provider健康规则。多额度窗口的瓶颈仍是最大已用比例，即最小剩余比例。
 
 `accountWorkflow`字段见 `config.example.json`：`onBindingBusy` 支持 `overflow`（默认）、`wait-overflow`、`reject`；`missSteps`必须为 `quota`/`health` 的排列；`quotaPools`可选 `hot`/`warm`/`unknown`，只筛选已在活动池的成员；`minimumHealth`为0–1；`unknownHealth`支持 `optimistic`/`unknown-last`；`selector`支持 `least-selections`、`roundrobin`、`least-connections`、`health`。选择其他选号器属于显式策略变化。
 
 编辑仅改变草稿。“模拟当前草稿”读取已保存账号状态及节点草稿，不发模型请求、不占槽、不更新绑定或计数；它不预测未来等待期间的状态。“保存账号与工作流”与账号配置一起提交，并用 `expectedConfigurationRevision` 拒绝过期覆盖；冲突后需重新载入、合并编辑。“放弃工作流草稿”恢复最近载入的配置，不是服务器历史版本回滚。真实请求ID可查看当时记录的节点路径、账号和计数变化；旧请求可能没有工作流轨迹。
 
-重置操作需要明确确认所选密钥号池的账号数量，范围包含备用、禁用账号，既不清绑定也不中断在途请求。新管理API `POST /api/account-workflow/preview`、`POST /api/account-workflow/reset-counts` 沿用独立管理员会话与CSRF保护；重置还要求当前配置版本。启动优先读取计数快照；仅当快照缺失时从旧metadata计数字段迁移，没有两者则从0开始。已有快照损坏会拒绝启动且保留原文件。计数写盘失败时内存调度继续且控制台显示警告，重启可能丢失未保存增量；重置则必须落盘成功才发布，失败保留原值。计数依附当前单进程元数据写入者，**不支持多个进程共享数据目录进行全局原子选号**。
+重置操作需要明确确认所选密钥号池的账号数量，范围包含备用、禁用账号，既不清绑定也不中断在途请求。新管理API `POST /api/account-workflow/preview`、`POST /api/account-workflow/reset-counts` 沿用独立管理员会话与CSRF保护；重置还要求当前配置版本。启动优先读取计数快照；仅当快照缺失时从旧metadata计数字段迁移，没有两者则从0开始。已有快照损坏会拒绝启动且保留原文件。每次新选号同步写入小快照，不使用防抖或批量丢增量窗口；正常重启恢复成功落盘的计数。写盘失败时内存调度继续且控制台显示警告，重启可能丢失未保存增量；重置则必须落盘成功才发布，失败保留原值。原子替换未执行 `fsync`，不能承诺断电后的物理落盘。当前启动脚本与Compose均为单个Node进程/单个应用容器，进程内无异步间隙的准入与计数只在该实例内成立，**不支持多个进程共享数据目录进行全局原子选号**。
 
-部署时先备份config/meta/selection-counters三个文件并发布配套后端和页面；默认不自动启用，也不修改错误规则、重试停止规则、连接池大小。回滚优先关闭工作流；回退旧二进制之前备份计数快照和元数据，旧版本不会维护新增快照；重新升级时需明确保留旧进度还是通过重置清零。本地验证不能证明上游IP限流消失或生产极限并发提升。
+部署时先备份config/meta/selection-counters三个文件并发布配套后端和页面；工作流与健康筛选默认不自动启用，也不修改错误规则或重试停止规则。直连Agent每个HTTP/HTTPS源的默认活跃socket上限调整为512，可由环境变量覆盖；代理Agent仍默认32，单号 `maxConcurrent`/`maxRpm` 和等待超时独立生效。回滚优先关闭工作流；回退旧二进制之前备份计数快照和元数据，旧版本不会维护新增快照；重新升级时需明确保留旧进度还是通过重置清零。本地验证不能证明上游IP限流消失或生产极限并发提升。
 
 ---
 
@@ -160,10 +161,10 @@ location / {
 | `CLINE_PASS_SSE_FIRST_EVENT_MS`（首响应/首个 data 硬期限） | 120000 | 100～120000 |
 | `CLINE_PASS_SSE_STREAM_IDLE_MS`（起流后 Cline socket idle） | 360000 | 200～600000 |
 | `CLINE_PASS_SSE_HEARTBEAT_MS`（下游静默注释；0 关闭） | 25000 | 0～60000 |
-| `CLINE_PASS_DIRECT_MAX_SOCKETS` / `CLINE_PASS_DIRECT_MAX_FREE_SOCKETS` | 256 / 32 | 1～1024 / 1～64 |
+| `CLINE_PASS_DIRECT_MAX_SOCKETS` / `CLINE_PASS_DIRECT_MAX_FREE_SOCKETS` | 512 / 32 | 1～1024 / 1～64 |
 | `CLINE_PASS_PROXY_MAX_SOCKETS` / `CLINE_PASS_PROXY_MAX_FREE_SOCKETS` | 32 / 2 | 1～128 / 1～16 |
 
-空闲上限不会超过同池活跃上限；最多缓存 128 个已保存代理 URL，超过后使用请求级一次性 agent，draft 代理测试同样一次性销毁。`NODE_ENV=test` 下可用对应 `CLINE_PASS_TEST_*` 毫秒变量覆盖上表四项时间设置，遵守相同范围；非测试环境忽略测试变量。
+`CLINE_PASS_DIRECT_MAX_SOCKETS=0` 或越界值会回退到512，绝不表示无限制。取得账号租约、等待Agent socket、真正到达上游是不同阶段：租约数受活动账号 `maxConcurrent` 总量约束，若已租约数超过直连socket名额，余量在Node Agent队列中等待；代理账号另受每个代理Agent默认32 socket限制。首个 `data:` 的120秒硬期限含排队/连接/响应时间，起流后还有360秒上游socket idle限制。空闲上限不会超过同池活跃上限；最多缓存 128 个已保存代理 URL，超过后使用请求级一次性 agent，draft 代理测试同样一次性销毁。`NODE_ENV=test` 下可用对应 `CLINE_PASS_TEST_*` 毫秒变量覆盖上表四项时间设置，遵守相同范围；非测试环境忽略测试变量。
 
 ---
 

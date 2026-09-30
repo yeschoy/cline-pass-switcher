@@ -13,6 +13,7 @@ services:
     restart: unless-stopped
     environment:
       - DATA_DIR=/data
+      - CLINE_PASS_DIRECT_MAX_SOCKETS=${CLINE_PASS_DIRECT_MAX_SOCKETS:-512}
       - BIND_HOST=0.0.0.0
       - PUBLIC_BASE_URL=${CPASS_PUBLIC_ORIGIN:-}
       - CLINE_PASS_ADMIN_PROXY_TOKEN=${CPASS_ADMIN_PROXY_TOKEN:?set a private 64-hex reverse proxy token}

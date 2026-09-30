@@ -13,6 +13,7 @@ test('workflow defaults preserve legacy routing and expose optimistic account he
   assert.equal(flow.selector, 'least-selections');
   assert.equal(flow.unknownHealth, 'optimistic');
   assert.equal(flow.healthFilter, false);
+  assert.equal(flow.minimumHealth, .2);
   assert.deepEqual(flow.missSteps, ['quota', 'health']);
   flow.missSteps.reverse();
   assert.deepEqual(defaultAccountWorkflow().missSteps, ['quota', 'health']);

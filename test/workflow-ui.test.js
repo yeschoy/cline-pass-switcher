@@ -61,6 +61,22 @@ test('workflow unknown-health copy and counter table never expose keys or raw ac
   assert.doesNotMatch(h.el('#workflowCounterBody').innerHTML, /fixture-secret|<img/);
 });
 
+test('health filter offers20% by default and upgrades an old zero draft only when enabled', () => {
+  const h = harness();
+  h.run("selectWorkflowNode('health')");
+  assert.match(h.el('#workflowProperties').innerHTML, /value="20"/);
+  h.run("updateWorkflowField('minimumHealth',0); updateWorkflowField('healthFilter',true)");
+  assert.equal(h.run('collectAccountWorkflow().minimumHealth'), .2);
+  h.run("updateWorkflowField('minimumHealth',.35); updateWorkflowField('healthFilter',false); updateWorkflowField('healthFilter',true)");
+  assert.equal(h.run('collectAccountWorkflow().minimumHealth'), .35);
+  assert.equal(h.calls.length, 0, 'editing the threshold does not save until the explicit action');
+  h.run("updateWorkflowField('unknownHealth','unknown-last'); renderWorkflowCounters()");
+  assert.match(h.el('#workflowCounterBody').innerHTML, /筛选100% · 健康优先靠后/);
+  const markup = h.run("workflowTraceMarkup({kind:'new-selection',counted:true,countBefore:0,countAfter:1,nodes:[{node:'binding',result:'invalidated'},{node:'health',result:'filtered',minimumHealth:.2,before:2,after:1}]})");
+  assert.match(markup, /绑定已失格，重新选号/);
+  assert.match(markup, /阈值 20%/);
+});
+
 test('invalid workflow numeric drafts stay visible and prevent writes', async () => {
   const h = harness();
   h.run("updateWorkflowField('enabled',true); updateWorkflowField('minimumHealth','')");

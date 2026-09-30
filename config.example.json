@@ -116,7 +116,7 @@
       "unknown"
     ],
     "healthFilter": false,
-    "minimumHealth": 0,
+    "minimumHealth": 0.2,
     "unknownHealth": "optimistic",
     "selector": "least-selections"
   }

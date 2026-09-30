@@ -30,7 +30,7 @@
 
 ## Contract decisions
 
-Add optional root config accountWorkflow with version1, enabled(boolean), bindingEnabled(boolean), onBindingBusy(overflow|wait-overflow|reject), missSteps(exact permutation of quota and health), quotaFilter(boolean), quotaPools(subset of hot|warm|unknown), healthFilter(boolean), minimumHealth(number0..1), unknownHealth(optimistic|unknown-last), selector(least-selections|roundrobin|least-connections|health). Defaults: disabled compatibility; when enabled, binding on, overflow, quota/health order, quota filter on, health threshold off, minimum0, optimistic and least-selections. Active-cache size must be positive while enabled.
+Add optional root config accountWorkflow with version1, enabled(boolean), bindingEnabled(boolean), onBindingBusy(overflow|wait-overflow|reject), missSteps(exact permutation of quota and health), quotaFilter(boolean), quotaPools(subset of hot|warm|unknown), healthFilter(boolean), minimumHealth(number0..1), unknownHealth(optimistic|unknown-last), selector(least-selections|roundrobin|least-connections|health). Defaults: disabled compatibility; when enabled, binding on, overflow, quota/health order, quota filter on, health threshold off, minimum0.2 (follow-on amendment), optimistic and least-selections. Active-cache size must be positive while enabled.
 
 The graph is deliberately guided: fixed system entry and atomic lease exit, explicit binding hit/miss/busy branches, draggable typed miss filters and a selectable terminal picker. It is not a general graph interpreter. Existing accountPipeline owns cache/TTL settings; graph property controls edit that same draft rather than introducing duplicates.
 
