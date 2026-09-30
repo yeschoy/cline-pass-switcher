@@ -13,3 +13,7 @@ Execute [the five-task plan](../../../docs/superpowers/plans/2026-09-30-selectio
 3. Change only the direct socket default to512, update the Compose/operator examples, and distinguish lease, Agent queue and upstream arrival in local mock tests.
 4. Profile the small selector and counter snapshot plus large synthetic health scans; optimize repeated health projections without changing per-selection durable writes.
 5. Test 43x6, a500-request burst, concurrent admin read/reset/config/disable/delete with held leases, restart and persistence errors. Run focused checks, full project gate and available real-browser interactions. Record results and limitations, then commit all code and Trellis changes; do not deploy or clean static artifacts.
+
+## Explicit production-deployment follow-on (2026-09-30)
+
+The user subsequently requested deployment to the canonical OVH target after merging and pushing `main`. Follow `research/ovh-deployment-plan-20260930.md` and the backend deployment/schema-changing guides. This is authorization for the scoped release, not for live model stress, raw capture enablement, production policy changes or cleanup. Record actual machine gates and administrator-acceptance limitations in this task before committing its Trellis evidence.
