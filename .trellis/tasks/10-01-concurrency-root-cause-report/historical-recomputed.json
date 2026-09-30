@@ -1,0 +1,561 @@
+{
+  "offlineOnly": true,
+  "modelRequestsIssued": 0,
+  "allAssertionsPassed": true,
+  "sources": [
+    {
+      "path": "runs/20260930-workflow-pool-v2/requests-compact.jsonl",
+      "bytes": 338746,
+      "sha256": "2b0dc2737f5969a75037ed21af4a185752f3d3a289387f35d8d174263df18ad3"
+    },
+    {
+      "path": "runs/20260930-workflow-pool-v2/stage-summary.json",
+      "bytes": 12261,
+      "sha256": "70bb7709cadc350f435903103bf93a1d1a2351f87ad7e49972839140a5e237f4"
+    },
+    {
+      "path": "diagnostics/workflow-pool-burst80-routing-20260930.json",
+      "bytes": 212244,
+      "sha256": "ee233546f6f2fe7b189fb630e6a85409b6b15ad6159d4c61884738c172f5c660"
+    },
+    {
+      "path": "diagnostics/workflow-pool-paced80-routing-20260930.json",
+      "bytes": 90521,
+      "sha256": "d90224a324845fa672e3e74089525b154b6b51d78e6796b59b93d9526aa8d5c3"
+    },
+    {
+      "path": "diagnostics/workflow-pool-tail-routing-20260930.json",
+      "bytes": 168080,
+      "sha256": "ca9db3a165b787126ad66471e685eefd6f366094f90215033cc81e9def7b59ba"
+    },
+    {
+      "path": "diagnostics/ip-scope-crossover-20260929.jsonl",
+      "bytes": 160695,
+      "sha256": "53b613705e0777613e4ced558c1663da59a50e7ed29989ea803f67436c029a4a"
+    },
+    {
+      "path": "diagnostics/ip-route-postflight.json",
+      "bytes": 329,
+      "sha256": "e30b6befe77bc77f7bd1a70029ee3363db44a64a727bd689ec067b9215483f27"
+    },
+    {
+      "path": "diagnostics/cap-six-ten-20260929.jsonl",
+      "bytes": 66023,
+      "sha256": "50ac004d675f46a60c39eb486c58d4c9f42ed1e0c1614cd5cd090d4c57f20f70"
+    },
+    {
+      "path": "diagnostics/account-count-2v10-20260929.jsonl",
+      "bytes": 208823,
+      "sha256": "b57012bedf2209e2a791250d93b95ca472714cf70e4419db8c8b9d4904f143e0"
+    }
+  ],
+  "workflowStages": [
+    {
+      "stage": "burst80",
+      "targetConcurrency": 80,
+      "issued": 80,
+      "strictSuccess": 67,
+      "successRate": 0.8375,
+      "maxOutputTokens": 4096,
+      "targetRps": null,
+      "clientOverlap": {
+        "peak": 80,
+        "atPeak": {
+          "longestSeconds": 3.9538955688476562,
+          "totalSeconds": 3.9538955688476562
+        },
+        "atTarget": {
+          "longestSeconds": 3.9538955688476562,
+          "totalSeconds": 3.9538955688476562
+        }
+      },
+      "successfulGeneration": {
+        "peak": 67,
+        "atPeak": {
+          "longestSeconds": 8.227694511413574,
+          "totalSeconds": 8.227694511413574
+        },
+        "atTarget": {
+          "longestSeconds": 0.0,
+          "totalSeconds": 0.0
+        }
+      },
+      "serverMatched": 80,
+      "strategyCounts": {
+        "workflow": 80
+      },
+      "accountsUsed": 30,
+      "accountSuccessfulGenerationAtPeak": {
+        "P18": 5,
+        "P29": 4,
+        "P16": 4,
+        "P25": 4,
+        "P36": 4,
+        "P12": 5,
+        "P20": 4,
+        "P44": 4,
+        "P32": 4,
+        "P46": 3,
+        "P15": 5,
+        "P43": 4,
+        "P35": 4,
+        "P45": 3,
+        "P17": 4,
+        "P03": 3,
+        "P01": 3
+      },
+      "upstreamAttempts": 93,
+      "upstream429Attempts": 26,
+      "terminal429": 13,
+      "distinct429Accounts": 26,
+      "extraAttemptsFromTerminal429": 13,
+      "localAdmissionRejections": 0,
+      "workflowHealthNodeCounts": {
+        "17": 93
+      }
+    },
+    {
+      "stage": "paced80_rps4",
+      "targetConcurrency": 80,
+      "issued": 79,
+      "strictSuccess": 70,
+      "successRate": 0.8860759493670886,
+      "maxOutputTokens": 4096,
+      "targetRps": 4,
+      "clientOverlap": {
+        "peak": 79,
+        "atPeak": {
+          "longestSeconds": 0.08209371566772461,
+          "totalSeconds": 0.08209371566772461
+        },
+        "atTarget": {
+          "longestSeconds": 0.0,
+          "totalSeconds": 0.0
+        }
+      },
+      "successfulGeneration": {
+        "peak": 70,
+        "atPeak": {
+          "longestSeconds": 7.078227281570435,
+          "totalSeconds": 7.078227281570435
+        },
+        "atTarget": {
+          "longestSeconds": 0.0,
+          "totalSeconds": 0.0
+        }
+      },
+      "serverMatched": 79,
+      "strategyCounts": {
+        "workflow": 79
+      },
+      "accountsUsed": 22,
+      "accountSuccessfulGenerationAtPeak": {
+        "P15": 4,
+        "P43": 5,
+        "P46": 5,
+        "P45": 5,
+        "P32": 5,
+        "P20": 4,
+        "P18": 4,
+        "P35": 5,
+        "P01": 5,
+        "P44": 5,
+        "P12": 5,
+        "P36": 5,
+        "P03": 5,
+        "P25": 4,
+        "P29": 4
+      },
+      "upstreamAttempts": 88,
+      "upstream429Attempts": 18,
+      "terminal429": 9,
+      "distinct429Accounts": 11,
+      "extraAttemptsFromTerminal429": 9,
+      "localAdmissionRejections": 0,
+      "workflowHealthNodeCounts": {}
+    },
+    {
+      "stage": "paced64_rps4",
+      "targetConcurrency": 64,
+      "issued": 64,
+      "strictSuccess": 64,
+      "successRate": 1.0,
+      "maxOutputTokens": 4096,
+      "targetRps": 4,
+      "clientOverlap": {
+        "peak": 64,
+        "atPeak": {
+          "longestSeconds": 11.259535312652588,
+          "totalSeconds": 11.259535312652588
+        },
+        "atTarget": {
+          "longestSeconds": 11.259535312652588,
+          "totalSeconds": 11.259535312652588
+        }
+      },
+      "successfulGeneration": {
+        "peak": 64,
+        "atPeak": {
+          "longestSeconds": 9.191235065460205,
+          "totalSeconds": 9.191235065460205
+        },
+        "atTarget": {
+          "longestSeconds": 9.191235065460205,
+          "totalSeconds": 9.191235065460205
+        }
+      },
+      "serverMatched": 64,
+      "strategyCounts": {
+        "workflow": 64
+      },
+      "accountsUsed": 15,
+      "accountSuccessfulGenerationAtPeak": {
+        "P45": 5,
+        "P25": 5,
+        "P29": 5,
+        "P44": 4,
+        "P03": 4,
+        "P43": 4,
+        "P46": 4,
+        "P01": 4,
+        "P36": 4,
+        "P12": 4,
+        "P32": 4,
+        "P15": 4,
+        "P18": 4,
+        "P35": 4,
+        "P20": 5
+      },
+      "upstreamAttempts": 64,
+      "upstream429Attempts": 0,
+      "terminal429": 0,
+      "distinct429Accounts": 0,
+      "extraAttemptsFromTerminal429": 0,
+      "localAdmissionRejections": 0,
+      "workflowHealthNodeCounts": {}
+    },
+    {
+      "stage": "paced80_rps2_long",
+      "targetConcurrency": 80,
+      "issued": 71,
+      "strictSuccess": 68,
+      "successRate": 0.9577464788732394,
+      "maxOutputTokens": 8192,
+      "targetRps": 2,
+      "clientOverlap": {
+        "peak": 71,
+        "atPeak": {
+          "longestSeconds": 0.47632551193237305,
+          "totalSeconds": 0.47632551193237305
+        },
+        "atTarget": {
+          "longestSeconds": 0.0,
+          "totalSeconds": 0.0
+        }
+      },
+      "successfulGeneration": {
+        "peak": 68,
+        "atPeak": {
+          "longestSeconds": 2.2890915870666504,
+          "totalSeconds": 2.2890915870666504
+        },
+        "atTarget": {
+          "longestSeconds": 0.0,
+          "totalSeconds": 0.0
+        }
+      },
+      "serverMatched": 71,
+      "strategyCounts": {
+        "workflow": 71
+      },
+      "accountsUsed": 18,
+      "accountSuccessfulGenerationAtPeak": {
+        "P36": 5,
+        "P44": 5,
+        "P46": 5,
+        "P20": 4,
+        "P12": 5,
+        "P01": 5,
+        "P03": 5,
+        "P43": 5,
+        "P45": 5,
+        "P15": 4,
+        "P18": 4,
+        "P35": 4,
+        "P32": 4,
+        "P29": 4,
+        "P25": 4
+      },
+      "upstreamAttempts": 74,
+      "upstream429Attempts": 6,
+      "terminal429": 3,
+      "distinct429Accounts": 6,
+      "extraAttemptsFromTerminal429": 3,
+      "localAdmissionRejections": 0,
+      "workflowHealthNodeCounts": {}
+    }
+  ],
+  "twoEgress": {
+    "requests": 216,
+    "successes": 207,
+    "statuses": {
+      "200": 207,
+      "429": 9
+    },
+    "egressA": "167.114.158.4",
+    "egressB": "104.202.107.56",
+    "errorFingerprints": {
+      "6ff059e12183cc1b0cea42b12c922ecedd2c6400fc4948d4e257b9fcbb152515": 9
+    },
+    "idleAccountNotInLoad": true,
+    "crossovers": [
+      {
+        "stage": "A_load_100_cross",
+        "limitedRoute": "A",
+        "triggerStartedAt": "2026-09-29T06:15:02.938Z",
+        "launchSpreadMs": 2.000093460083008,
+        "rows": [
+          {
+            "account": "P1",
+            "route": "A",
+            "status": 429,
+            "success": false
+          },
+          {
+            "account": "P1",
+            "route": "B",
+            "status": 200,
+            "success": true
+          },
+          {
+            "account": "P2",
+            "route": "A",
+            "status": 429,
+            "success": false
+          },
+          {
+            "account": "P2",
+            "route": "B",
+            "status": 200,
+            "success": true
+          },
+          {
+            "account": "P3",
+            "route": "A",
+            "status": 429,
+            "success": false
+          },
+          {
+            "account": "P3",
+            "route": "B",
+            "status": 200,
+            "success": true
+          }
+        ]
+      },
+      {
+        "stage": "B_load_100_cross",
+        "limitedRoute": "B",
+        "triggerStartedAt": "2026-09-29T06:18:12.768Z",
+        "launchSpreadMs": 0.9999275207519531,
+        "rows": [
+          {
+            "account": "P1",
+            "route": "A",
+            "status": 200,
+            "success": true
+          },
+          {
+            "account": "P1",
+            "route": "B",
+            "status": 429,
+            "success": false
+          },
+          {
+            "account": "P2",
+            "route": "A",
+            "status": 200,
+            "success": true
+          },
+          {
+            "account": "P2",
+            "route": "B",
+            "status": 429,
+            "success": false
+          },
+          {
+            "account": "P3",
+            "route": "A",
+            "status": 200,
+            "success": true
+          },
+          {
+            "account": "P3",
+            "route": "B",
+            "status": 429,
+            "success": false
+          }
+        ]
+      }
+    ],
+    "stageSummaries": [
+      {
+        "kind": "stage_complete",
+        "stage": "B_preflight",
+        "route": "B",
+        "pool_size": 2,
+        "target_rpm": 20,
+        "issued": 2,
+        "success": 2,
+        "statuses": {
+          "200": 2
+        },
+        "per_account": {
+          "P1": 1,
+          "P2": 1
+        },
+        "elapsed_s": 6.53401323,
+        "peak_inflight": 2,
+        "max_scheduler_lag_ms": 0.15892900000108057,
+        "new_quota_attempts_at_least": 2,
+        "background_switcher_requests": 0,
+        "total_sent": 2,
+        "stopped_early": false,
+        "next_allowed_at": "2026-09-29T06:14:05.694Z"
+      },
+      {
+        "kind": "stage_complete",
+        "stage": "A_load_100",
+        "route": "A",
+        "pool_size": 2,
+        "target_rpm": 100,
+        "issued": 64,
+        "success": 63,
+        "statuses": {
+          "200": 63,
+          "429": 1
+        },
+        "per_account": {
+          "P1": 32,
+          "P2": 32
+        },
+        "elapsed_s": 38.41451149,
+        "peak_inflight": 3,
+        "max_scheduler_lag_ms": 1.003740000014659,
+        "new_quota_attempts_at_least": 4,
+        "background_switcher_requests": 5,
+        "total_sent": 66,
+        "stopped_early": true,
+        "next_allowed_at": "2026-09-29T06:16:33.553Z"
+      },
+      {
+        "kind": "stage_complete",
+        "stage": "B_load_100",
+        "route": "B",
+        "pool_size": 2,
+        "target_rpm": 100,
+        "issued": 138,
+        "success": 136,
+        "statuses": {
+          "200": 136,
+          "429": 2
+        },
+        "per_account": {
+          "P1": 69,
+          "P2": 69
+        },
+        "elapsed_s": 83.28428655599996,
+        "peak_inflight": 5,
+        "max_scheduler_lag_ms": 1.3961489999783225,
+        "new_quota_attempts_at_least": 14,
+        "background_switcher_requests": 19,
+        "total_sent": 210,
+        "stopped_early": true,
+        "next_allowed_at": "2026-09-29T06:19:44.452Z"
+      }
+    ],
+    "freshEgressEchoes": [
+      {
+        "route": "A",
+        "ip": "167.114.158.4"
+      },
+      {
+        "route": "B",
+        "ip": "104.202.107.56"
+      },
+      {
+        "route": "B",
+        "ip": "104.202.107.56"
+      },
+      {
+        "route": "B",
+        "ip": "104.202.107.56"
+      }
+    ]
+  },
+  "tenAccountSix": {
+    "sampleCount": 31,
+    "initialSuccesses": 60,
+    "perAccountLeasePeak": [
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6
+    ],
+    "generationOverlap": {
+      "peak": 60,
+      "atPeak": {
+        "longestSeconds": 30.445766925811768,
+        "totalSeconds": 30.445766925811768
+      },
+      "atTarget": {
+        "longestSeconds": 30.445766925811768,
+        "totalSeconds": 30.445766925811768
+      }
+    },
+    "liveOverflow": {
+      "status": 429,
+      "capacity_message": "all upstream accounts are busy",
+      "elapsed_ms": 1004.49337500002,
+      "success": false
+    },
+    "mockReleaseRefillVerified": true,
+    "finalLeases": 0
+  },
+  "twoVsTen": [
+    {
+      "stage": "A1-two-80rpm",
+      "accountsUsed": 2,
+      "issued": 84,
+      "success": 83,
+      "terminal429": 1
+    },
+    {
+      "stage": "B1-ten-80rpm",
+      "accountsUsed": 10,
+      "issued": 80,
+      "success": 79,
+      "terminal429": 1
+    },
+    {
+      "stage": "B2-ten-80rpm",
+      "accountsUsed": 10,
+      "issued": 113,
+      "success": 112,
+      "terminal429": 1
+    },
+    {
+      "stage": "A2-two-80rpm",
+      "accountsUsed": 2,
+      "issued": 89,
+      "success": 88,
+      "terminal429": 1
+    }
+  ]
+}

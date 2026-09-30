@@ -1,0 +1,1781 @@
+{
+  "checkedAt": "2026-09-30T20:18:56.285000+00:00",
+  "readOnly": true,
+  "modelRequestsIssued": 0,
+  "health": "healthy",
+  "restarts": 0,
+  "containerStartedAt": "2026-09-30T06:54:09.663593543Z",
+  "image": "sha256:0176e1ee8739e0a96c1481b4f6c344b76dc41979c1db2832bf465a47d7e8411a",
+  "sourceSha256": "21a44c246c4fcda0c47e18e06843fe4b2ef700bda3f51ccb13420c39191419f8",
+  "configSha256": "cb948fc8bcdbcad5ee291fb29e0582606e699151767d2ab94473425077a22440",
+  "configUnchangedDuringRead": true,
+  "metadataSha256": "4c88b3edfce0ece34281b3648af76c3c654160ca50349b55e5a792aeb7cbedaf",
+  "safeEnv": {
+    "NODE_ENV": "production"
+  },
+  "totalAccounts": 51,
+  "enabledAccounts": 45,
+  "distinctEnabledCredentialCount": 45,
+  "ownerPools": [
+    {
+      "owner": "Legacy",
+      "enabled": 45
+    },
+    {
+      "owner": "K1",
+      "enabled": 0
+    }
+  ],
+  "maxConcurrentCounts": {
+    "6": 45
+  },
+  "maxRpmCounts": {
+    "0": 45
+  },
+  "proxyEnabledAccounts": 0,
+  "accountMode": "sticky",
+  "accountWorkflow": {
+    "version": 1,
+    "enabled": true,
+    "bindingEnabled": true,
+    "onBindingBusy": "overflow",
+    "missSteps": [
+      "quota",
+      "health"
+    ],
+    "quotaFilter": true,
+    "quotaPools": [
+      "hot",
+      "warm",
+      "unknown"
+    ],
+    "healthFilter": true,
+    "minimumHealth": 0.2,
+    "unknownHealth": "optimistic",
+    "selector": "least-selections"
+  },
+  "accountPipeline": {
+    "quotaPool": true,
+    "healthSort": true,
+    "sticky": true,
+    "order": [
+      "healthSort",
+      "quotaPool",
+      "sticky"
+    ],
+    "cachePoolSize": 100,
+    "cachePoolMaxSize": 100,
+    "cachePoolLowQuotaSize": 1
+  },
+  "cacheTargetPersisted": 100,
+  "concurrencyWaitMs": 1000,
+  "poolFullWaitMs": null,
+  "globalRoutes": {
+    "cline-pass/glm-5.3": {
+      "upstream": "togetherai",
+      "upstreams": [
+        "togetherai",
+        "friendli",
+        "deepinfra",
+        "modal",
+        "digitalocean",
+        "parasail",
+        "crusoe",
+        "runware",
+        "fireworks",
+        "inceptron",
+        "alibaba",
+        "inference-net",
+        "baseten",
+        "morph",
+        "zai",
+        "gmicloud",
+        "novita",
+        "wafer",
+        "streamlake"
+      ],
+      "exclude": [],
+      "pinMode": "strict",
+      "sort": null,
+      "maxRetries": 1,
+      "providerCooldownMs": 0
+    },
+    "cline-pass/deepseek-v4.1-flash": {
+      "upstream": "deepseek",
+      "upstreams": [
+        "deepseek",
+        "fireworks",
+        "alibaba",
+        "gmicloud",
+        "deepinfra",
+        "baseten",
+        "modal",
+        "morph",
+        "relace",
+        "togetherai",
+        "particle",
+        "novita",
+        "parasail",
+        "runware",
+        "boundless"
+      ],
+      "exclude": [],
+      "pinMode": "strict",
+      "sort": null,
+      "maxRetries": 1,
+      "providerCooldownMs": 0
+    },
+    "cline-pass/deepseek-v4-flash": {
+      "upstream": "openai-compatible-private",
+      "upstreams": [
+        "openai-compatible-private"
+      ],
+      "exclude": [],
+      "pinMode": "strict",
+      "sort": "ttft",
+      "maxRetries": 1,
+      "providerCooldownMs": 0
+    },
+    "cline-pass/deepseek-v4-pro": {
+      "upstream": "deepseek",
+      "upstreams": [
+        "deepseek",
+        "baseten",
+        "azure",
+        "alibaba",
+        "deepinfra",
+        "novita"
+      ],
+      "exclude": [],
+      "pinMode": "strict",
+      "sort": null,
+      "maxRetries": 1,
+      "providerCooldownMs": 0
+    },
+    "cline-pass/mimo-v2.5": {
+      "upstream": "xiaomi",
+      "upstreams": [
+        "xiaomi",
+        "gmicloud",
+        "deepinfra",
+        "streamlake",
+        "novita",
+        "venice"
+      ],
+      "exclude": [],
+      "pinMode": "preferred",
+      "sort": null,
+      "maxRetries": 1,
+      "providerCooldownMs": 0
+    },
+    "cline-pass/glm-5.3-flash": {
+      "upstream": "z-ai",
+      "upstreams": [
+        "z-ai",
+        "phala",
+        "cloudflare",
+        "gmicloud",
+        "novita",
+        "friendli"
+      ],
+      "exclude": [
+        "crusoe",
+        "fireworks"
+      ],
+      "pinMode": "strict",
+      "sort": null,
+      "maxRetries": 1,
+      "providerCooldownMs": 0
+    },
+    "cline-pass/kimi-k3": {
+      "upstream": "openai-compatible-private",
+      "upstreams": [
+        "openai-compatible-private"
+      ],
+      "exclude": [],
+      "pinMode": "strict",
+      "sort": null,
+      "maxRetries": 1,
+      "providerCooldownMs": 0
+    },
+    "cline-pass/qwen3.8-max": {
+      "upstream": "openai-compatible-private",
+      "upstreams": [
+        "openai-compatible-private"
+      ],
+      "exclude": [],
+      "pinMode": "strict",
+      "sort": null,
+      "maxRetries": 1,
+      "providerCooldownMs": 0
+    },
+    "cline-pass/minimax-m3": {
+      "upstream": "minimax",
+      "upstreams": [
+        "minimax",
+        "fireworks"
+      ],
+      "exclude": [],
+      "pinMode": "strict",
+      "sort": null,
+      "maxRetries": 1,
+      "providerCooldownMs": 0
+    },
+    "cline-pass/glm-5.2": {
+      "upstream": "openai-compatible-private",
+      "upstreams": [
+        "openai-compatible-private"
+      ],
+      "exclude": [],
+      "pinMode": "preferred",
+      "sort": null,
+      "maxRetries": 1,
+      "providerCooldownMs": 0
+    },
+    "cline-pass/mimo-v2.5-pro": {
+      "upstream": "xiaomi",
+      "upstreams": [
+        "xiaomi",
+        "gmicloud",
+        "deepinfra",
+        "atlas-cloud",
+        "digitalocean",
+        "novita",
+        "streamlake"
+      ],
+      "exclude": [],
+      "pinMode": "preferred",
+      "sort": null,
+      "maxRetries": 1,
+      "providerCooldownMs": 0
+    },
+    "cline-pass/kimi-k2.6": {
+      "upstream": "moonshotai",
+      "upstreams": [
+        "moonshotai",
+        "baseten",
+        "fireworks",
+        "novita"
+      ],
+      "exclude": [],
+      "pinMode": "preferred",
+      "sort": null,
+      "maxRetries": 1,
+      "providerCooldownMs": 0
+    },
+    "cline-pass/qwen3.7-plus": {
+      "upstream": "alibaba",
+      "upstreams": [
+        "alibaba"
+      ],
+      "exclude": [],
+      "pinMode": "preferred",
+      "sort": null,
+      "maxRetries": 1,
+      "providerCooldownMs": 0
+    },
+    "cline-pass/kimi-k2.7-code": {
+      "upstream": "moonshotai",
+      "upstreams": [
+        "moonshotai",
+        "baseten",
+        "deepinfra",
+        "fireworks"
+      ],
+      "exclude": [],
+      "pinMode": "preferred",
+      "sort": null,
+      "maxRetries": 1,
+      "providerCooldownMs": 0
+    },
+    "cline-pass/qwen3.7-max": {
+      "upstream": "alibaba",
+      "upstreams": [
+        "alibaba"
+      ],
+      "exclude": [],
+      "pinMode": "preferred",
+      "sort": null,
+      "maxRetries": 1,
+      "providerCooldownMs": 0
+    },
+    "cline-pass/muse-spark-1.3-contributor": {
+      "upstream": "meta",
+      "upstreams": [
+        "meta"
+      ],
+      "exclude": [],
+      "pinMode": "preferred",
+      "sort": null,
+      "maxRetries": 1,
+      "providerCooldownMs": 0
+    },
+    "cline-pass/mimo-v2.6-flash": {
+      "upstream": "xiaomi",
+      "upstreams": [
+        "xiaomi"
+      ],
+      "exclude": [],
+      "pinMode": "preferred",
+      "sort": null,
+      "maxRetries": null,
+      "providerCooldownMs": 0
+    },
+    "cline-pass/mimo-v2.6-pro": {
+      "upstream": "xiaomi",
+      "upstreams": [
+        "xiaomi",
+        "deepinfra"
+      ],
+      "exclude": [],
+      "pinMode": "strict",
+      "sort": null,
+      "maxRetries": null,
+      "providerCooldownMs": 0
+    }
+  },
+  "accountRouteOverrideCount": 0,
+  "errorRules": [
+    {
+      "order": 1,
+      "id": "400-ignore",
+      "scope": "account",
+      "action": "ignore",
+      "when": {
+        "statuses": [
+          400
+        ]
+      }
+    },
+    {
+      "order": 2,
+      "id": "tpm-429",
+      "scope": "provider-model",
+      "action": "cooldown",
+      "when": {
+        "statuses": [
+          429
+        ],
+        "body_contains": "input tokens per minute (per region) was reached"
+      },
+      "reset": {
+        "fallback": "5s",
+        "max": "6s"
+      }
+    },
+    {
+      "order": 3,
+      "id": "general-429",
+      "scope": "account",
+      "action": "cooldown",
+      "when": {
+        "statuses": [
+          429
+        ]
+      },
+      "reset": {
+        "fallback": "3s",
+        "max": "20s"
+      }
+    },
+    {
+      "order": 4,
+      "id": "500-empty-resp",
+      "scope": "account",
+      "action": "ignore",
+      "when": {
+        "statuses": [
+          500
+        ],
+        "body_contains": "empty response content"
+      }
+    },
+    {
+      "order": 5,
+      "id": "provider-status-500",
+      "scope": "provider-model",
+      "action": "cooldown",
+      "when": {
+        "statuses": [
+          500
+        ]
+      },
+      "reset": {
+        "fallback": "20s",
+        "max": "20s"
+      }
+    },
+    {
+      "order": 6,
+      "id": "deepseek-stream-terminated-502",
+      "scope": "provider-model",
+      "action": "cooldown",
+      "providers": [
+        "deepseek"
+      ],
+      "models": [
+        "cline-pass/deepseek-v4.1-flash"
+      ],
+      "when": {
+        "statuses": [
+          502
+        ],
+        "body_contains": [
+          "gateway_stream_terminated"
+        ]
+      },
+      "reset": {
+        "fallback": "8s",
+        "max": "20s"
+      }
+    },
+    {
+      "order": 7,
+      "id": "ignore-empty-system-message",
+      "scope": "account",
+      "action": "ignore",
+      "when": {
+        "statuses": [
+          502
+        ],
+        "body_contains": "system message must have content"
+      }
+    },
+    {
+      "order": 8,
+      "id": "user-not-subscribe",
+      "scope": "account",
+      "action": "hard-quarantine",
+      "when": {
+        "statuses": [
+          403
+        ],
+        "body_contains": "the user is not subscribed to required model plan"
+      }
+    }
+  ],
+  "retryRules": [
+    {
+      "order": 1,
+      "id": "stop-empty-system-message",
+      "decision": "stop",
+      "when": {
+        "statuses": [
+          502
+        ],
+        "body_contains": "system message must have content"
+      }
+    },
+    {
+      "order": 2,
+      "id": "stop-400",
+      "decision": "stop",
+      "when": {
+        "statuses": [
+          400
+        ],
+        "body_contains": "replace-me"
+      }
+    },
+    {
+      "order": 3,
+      "id": "stop-500",
+      "decision": "stop",
+      "when": {
+        "statuses": [
+          500
+        ],
+        "body_contains": "empty response content"
+      }
+    }
+  ],
+  "accounts": [
+    {
+      "label": "P01",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 18,
+        "degrades": 1,
+        "samples": 19,
+        "successRate": 0.9473684210526315
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 9,
+        "lastAttemptAt": 1790799370571,
+        "fetchedAt": 1790799370655,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P02",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 18,
+        "degrades": 5,
+        "samples": 23,
+        "successRate": 0.782608695652174
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 10,
+        "lastAttemptAt": 1790799245646,
+        "fetchedAt": 1790799245761,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P03",
+      "owner": "Legacy",
+      "enabled": false,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [
+        "disabled"
+      ],
+      "health": {
+        "successes": 15,
+        "degrades": 7,
+        "samples": 22,
+        "successRate": 0.6818181818181818
+      },
+      "quota": {
+        "fresh": false,
+        "pool": "unknown",
+        "maximumUsedPercent": 0,
+        "lastAttemptAt": 1790783293140,
+        "fetchedAt": 1790780897300,
+        "errorCategory": "http"
+      }
+    },
+    {
+      "label": "P04",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 9,
+        "degrades": 0,
+        "samples": 9,
+        "successRate": 1.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 77,
+        "lastAttemptAt": 1790799215157,
+        "fetchedAt": 1790799215244,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P05",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 6,
+        "degrades": 0,
+        "samples": 6,
+        "successRate": 1.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 63,
+        "lastAttemptAt": 1790799457189,
+        "fetchedAt": 1790799457241,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P06",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 13,
+        "degrades": 3,
+        "samples": 16,
+        "successRate": 0.8125
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 10,
+        "lastAttemptAt": 1790799333383,
+        "fetchedAt": 1790799333430,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P07",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 23,
+        "degrades": 0,
+        "samples": 23,
+        "successRate": 1.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 61,
+        "lastAttemptAt": 1790799234368,
+        "fetchedAt": 1790799234425,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P08",
+      "owner": "Legacy",
+      "enabled": false,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [
+        "disabled"
+      ],
+      "health": {
+        "successes": 0,
+        "degrades": 0,
+        "samples": 0,
+        "successRate": null
+      },
+      "quota": {
+        "fresh": false,
+        "pool": "unknown",
+        "maximumUsedPercent": 70,
+        "lastAttemptAt": 1790447911382,
+        "fetchedAt": 1790447911561,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P09",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 11,
+        "degrades": 0,
+        "samples": 11,
+        "successRate": 1.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 68,
+        "lastAttemptAt": 1790799285042,
+        "fetchedAt": 1790799285114,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P10",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 8,
+        "degrades": 0,
+        "samples": 8,
+        "successRate": 1.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 46,
+        "lastAttemptAt": 1790799300133,
+        "fetchedAt": 1790799300185,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P11",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 24,
+        "degrades": 3,
+        "samples": 27,
+        "successRate": 0.8888888888888888
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 11,
+        "lastAttemptAt": 1790799316243,
+        "fetchedAt": 1790799316313,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P12",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 7,
+        "degrades": 0,
+        "samples": 7,
+        "successRate": 1.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 36,
+        "lastAttemptAt": 1790799270910,
+        "fetchedAt": 1790799271022,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P13",
+      "owner": "Legacy",
+      "enabled": false,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [
+        "disabled"
+      ],
+      "health": {
+        "successes": 0,
+        "degrades": 0,
+        "samples": 0,
+        "successRate": null
+      },
+      "quota": {
+        "fresh": false,
+        "pool": "unknown",
+        "maximumUsedPercent": 0,
+        "lastAttemptAt": 1790621234190,
+        "fetchedAt": 1790621234240,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P14",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 22,
+        "degrades": 0,
+        "samples": 22,
+        "successRate": 1.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 8,
+        "lastAttemptAt": 1790799193810,
+        "fetchedAt": 1790799193905,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P15",
+      "owner": "Legacy",
+      "enabled": false,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [
+        "disabled"
+      ],
+      "health": {
+        "successes": 0,
+        "degrades": 0,
+        "samples": 0,
+        "successRate": null
+      },
+      "quota": {
+        "fresh": false,
+        "pool": "unknown",
+        "maximumUsedPercent": 57,
+        "lastAttemptAt": 1790447911381,
+        "fetchedAt": 1790447911457,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P16",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 7,
+        "degrades": 0,
+        "samples": 7,
+        "successRate": 1.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 20,
+        "lastAttemptAt": 1790799193811,
+        "fetchedAt": 1790799193862,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P17",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 12,
+        "degrades": 2,
+        "samples": 14,
+        "successRate": 0.8571428571428571
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 10,
+        "lastAttemptAt": 1790799411686,
+        "fetchedAt": 1790799411762,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P18",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 13,
+        "degrades": 2,
+        "samples": 15,
+        "successRate": 0.8666666666666667
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 9,
+        "lastAttemptAt": 1790799285042,
+        "fetchedAt": 1790799285092,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P19",
+      "owner": "Legacy",
+      "enabled": false,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [
+        "disabled"
+      ],
+      "health": {
+        "successes": 0,
+        "degrades": 0,
+        "samples": 0,
+        "successRate": null
+      },
+      "quota": {
+        "fresh": false,
+        "pool": "unknown",
+        "maximumUsedPercent": 4,
+        "lastAttemptAt": 1790621212264,
+        "fetchedAt": 1790621212341,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P20",
+      "owner": "Legacy",
+      "enabled": false,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [
+        "disabled"
+      ],
+      "health": {
+        "successes": 0,
+        "degrades": 0,
+        "samples": 0,
+        "successRate": null
+      },
+      "quota": {
+        "fresh": false,
+        "pool": "unknown",
+        "maximumUsedPercent": null,
+        "lastAttemptAt": 1790620941230,
+        "fetchedAt": null,
+        "errorCategory": "auth"
+      }
+    },
+    {
+      "label": "P21",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 0,
+        "degrades": 1,
+        "samples": 1,
+        "successRate": 0.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 0,
+        "lastAttemptAt": 1790799207038,
+        "fetchedAt": 1790799207109,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P22",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 0,
+        "degrades": 1,
+        "samples": 1,
+        "successRate": 0.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 0,
+        "lastAttemptAt": 1790799351448,
+        "fetchedAt": 1790799351526,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P23",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 15,
+        "degrades": 1,
+        "samples": 16,
+        "successRate": 0.9375
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 0,
+        "lastAttemptAt": 1790799179436,
+        "fetchedAt": 1790799179488,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P24",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 7,
+        "degrades": 3,
+        "samples": 10,
+        "successRate": 0.7
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 10,
+        "lastAttemptAt": 1790799184620,
+        "fetchedAt": 1790799184668,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P25",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 15,
+        "degrades": 2,
+        "samples": 17,
+        "successRate": 0.8823529411764706
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 8,
+        "lastAttemptAt": 1790799181528,
+        "fetchedAt": 1790799181598,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P26",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 4,
+        "degrades": 0,
+        "samples": 4,
+        "successRate": 1.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 13,
+        "lastAttemptAt": 1790799481529,
+        "fetchedAt": 1790799481788,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P27",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 25,
+        "degrades": 3,
+        "samples": 28,
+        "successRate": 0.8928571428571429
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 10,
+        "lastAttemptAt": 1790799257787,
+        "fetchedAt": 1790799257891,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P28",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 9,
+        "degrades": 2,
+        "samples": 11,
+        "successRate": 0.8181818181818182
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 10,
+        "lastAttemptAt": 1790799224263,
+        "fetchedAt": 1790799224316,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P29",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 13,
+        "degrades": 2,
+        "samples": 15,
+        "successRate": 0.8666666666666667
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 10,
+        "lastAttemptAt": 1790799257787,
+        "fetchedAt": 1790799257859,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P30",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 19,
+        "degrades": 1,
+        "samples": 20,
+        "successRate": 0.95
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 8,
+        "lastAttemptAt": 1790799506831,
+        "fetchedAt": 1790799506919,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P31",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 7,
+        "degrades": 2,
+        "samples": 9,
+        "successRate": 0.7777777777777778
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 10,
+        "lastAttemptAt": 1790799532942,
+        "fetchedAt": 1790799533051,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P32",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 6,
+        "degrades": 2,
+        "samples": 8,
+        "successRate": 0.75
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 10,
+        "lastAttemptAt": 1790799506830,
+        "fetchedAt": 1790799506901,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P33",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 7,
+        "degrades": 1,
+        "samples": 8,
+        "successRate": 0.875
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 11,
+        "lastAttemptAt": 1790799532943,
+        "fetchedAt": 1790799533016,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P34",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 16,
+        "degrades": 1,
+        "samples": 17,
+        "successRate": 0.9411764705882353
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 8,
+        "lastAttemptAt": 1790799245645,
+        "fetchedAt": 1790799245702,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P35",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 62,
+        "degrades": 1,
+        "samples": 63,
+        "successRate": 0.9841269841269841
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 10,
+        "lastAttemptAt": 1790799370571,
+        "fetchedAt": 1790799370623,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P36",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 14,
+        "degrades": 1,
+        "samples": 15,
+        "successRate": 0.9333333333333333
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 10,
+        "lastAttemptAt": 1790799316242,
+        "fetchedAt": 1790799316360,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P37",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 18,
+        "degrades": 1,
+        "samples": 19,
+        "successRate": 0.9473684210526315
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 8,
+        "lastAttemptAt": 1790799224263,
+        "fetchedAt": 1790799224344,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P38",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 5,
+        "degrades": 0,
+        "samples": 5,
+        "successRate": 1.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 12,
+        "lastAttemptAt": 1790799457189,
+        "fetchedAt": 1790799457504,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P39",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 28,
+        "degrades": 0,
+        "samples": 28,
+        "successRate": 1.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 24,
+        "lastAttemptAt": 1790799188712,
+        "fetchedAt": 1790799188792,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P40",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 18,
+        "degrades": 1,
+        "samples": 19,
+        "successRate": 0.9473684210526315
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 8,
+        "lastAttemptAt": 1790799181528,
+        "fetchedAt": 1790799181578,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P41",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 35,
+        "degrades": 1,
+        "samples": 36,
+        "successRate": 0.9722222222222222
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 8,
+        "lastAttemptAt": 1790799411687,
+        "fetchedAt": 1790799411812,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P42",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 7,
+        "degrades": 0,
+        "samples": 7,
+        "successRate": 1.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 11,
+        "lastAttemptAt": 1790799215157,
+        "fetchedAt": 1790799215208,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P43",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 13,
+        "degrades": 0,
+        "samples": 13,
+        "successRate": 1.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 10,
+        "lastAttemptAt": 1790799188712,
+        "fetchedAt": 1790799188763,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P44",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 17,
+        "degrades": 0,
+        "samples": 17,
+        "successRate": 1.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 11,
+        "lastAttemptAt": 1790799481528,
+        "fetchedAt": 1790799481812,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P45",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 23,
+        "degrades": 0,
+        "samples": 23,
+        "successRate": 1.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 12,
+        "lastAttemptAt": 1790799270910,
+        "fetchedAt": 1790799270986,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P46",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 8,
+        "degrades": 0,
+        "samples": 8,
+        "successRate": 1.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 8,
+        "lastAttemptAt": 1790799207037,
+        "fetchedAt": 1790799207132,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P47",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 23,
+        "degrades": 0,
+        "samples": 23,
+        "successRate": 1.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 12,
+        "lastAttemptAt": 1790799433838,
+        "fetchedAt": 1790799434122,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P48",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 16,
+        "degrades": 1,
+        "samples": 17,
+        "successRate": 0.9411764705882353
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 9,
+        "lastAttemptAt": 1790799300133,
+        "fetchedAt": 1790799300218,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P49",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 145,
+        "degrades": 0,
+        "samples": 145,
+        "successRate": 1.0
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 7,
+        "lastAttemptAt": 1790799433838,
+        "fetchedAt": 1790799434165,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P50",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 18,
+        "degrades": 1,
+        "samples": 19,
+        "successRate": 0.9473684210526315
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 7,
+        "lastAttemptAt": 1790799351449,
+        "fetchedAt": 1790799351548,
+        "errorCategory": null
+      }
+    },
+    {
+      "label": "P51",
+      "owner": "Legacy",
+      "enabled": true,
+      "maxConcurrent": 6,
+      "maxRpm": 0,
+      "proxyConfigured": false,
+      "headerCount": 0,
+      "persistentReasons": [],
+      "health": {
+        "successes": 22,
+        "degrades": 2,
+        "samples": 24,
+        "successRate": 0.9166666666666666
+      },
+      "quota": {
+        "fresh": true,
+        "pool": "hot",
+        "maximumUsedPercent": 9,
+        "lastAttemptAt": 1790799234369,
+        "fetchedAt": 1790799234622,
+        "errorCategory": null
+      }
+    }
+  ],
+  "recent30m": {
+    "fromMs": 1790797736285,
+    "toMs": 1790799536285,
+    "requests": 207,
+    "scanBytes": 1192391,
+    "scanTruncated": false,
+    "malformed": 0,
+    "statuses": {
+      "200": 205,
+      "499": 1,
+      "500": 1
+    },
+    "results": {
+      "success": 205,
+      "client_cancelled": 1,
+      "failed": 1
+    },
+    "attempts": 207,
+    "upstreamStatuses": {
+      "200": 206,
+      "500": 1
+    },
+    "localAdmissionRejections": 0,
+    "upstream429Scopes": {},
+    "upstream429Evidence": {},
+    "upstream429Shapes": {},
+    "upstream429Rules": {},
+    "requestsWithUpstream429": 0,
+    "successfulRequestsWithUpstream429": 0,
+    "distinctFinalAccounts": 17,
+    "workflowStrategies": {
+      "workflow": 207
+    },
+    "workflowCacheTargets": {
+      "100": 207
+    },
+    "workflowHealthCandidateCounts": {
+      "1": 192,
+      "43": 15
+    }
+  },
+  "unknownRuntimeState": [
+    "activeCounts",
+    "rpmWindows",
+    "sessionBindings",
+    "providerCircuits",
+    "quotaProvisional",
+    "exactUpstreamArrivalRate",
+    "actualClineEgressIp"
+  ],
+  "localSourceMatches": true
+}
