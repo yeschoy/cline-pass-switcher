@@ -941,4 +941,8 @@ test('probe recovery fences an earlier pending status read without replacing an 
   assert.equal(h.el('#probeDay').value,'23');
   assert.doesNotMatch(h.el('#probeEvidenceBody').innerHTML,/已避开（仅此账号）/);
   assert.match(h.el('#probeScheduleFeedback').textContent,/已恢复/);
+  assert.equal(h.el('#probeAccountScope').focused,true,'a removed recovery button returns focus to the persistent account scope');
+  h.el('#probeAccountScope').focused=false;h.el('#consolePanel').hidden=true;
+  await h.run("recoverProbeHold('id0','model','one',{disabled:false})");
+  assert.equal(h.el('#probeAccountScope').focused,false,'a late recovery does not focus the hidden console');
 });

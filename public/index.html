@@ -963,7 +963,7 @@ async function saveProbeSchedule(button){
 async function recoverProbeHold(accountId,model,provider,button){
   if(!confirm(`仅恢复账号 ${accountId}、模型 ${model}、渠道 ${provider} 的自动避开？人工排除/硬隔离不受影响。`))return;
   button.disabled=true;
-  try{const response=await api('/api/providers/probe-recover',{accountId,model,provider});if(!response.schedule)throw Error(response.error?.message||'恢复失败');probeReadGeneration++;probeScheduleSnapshot=response;renderProbeSchedule();$('#probeScheduleFeedback').textContent='已恢复精确账号/模型/渠道的自动证据';}
+  try{const response=await api('/api/providers/probe-recover',{accountId,model,provider});if(!response.schedule)throw Error(response.error?.message||'恢复失败');probeReadGeneration++;probeScheduleSnapshot=response;renderProbeSchedule();$('#probeScheduleFeedback').textContent='已恢复精确账号/模型/渠道的自动证据';if(!$('#consolePanel').hidden&&$('#loginOverlay').style.display!=='flex')$('#probeAccountScope').focus();}
   catch(error){$('#probeScheduleFeedback').textContent='恢复失败：'+(error.message||'未知错误');button.disabled=false;}
 }
 async function probe(id, btn) {
