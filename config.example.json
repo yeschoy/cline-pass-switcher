@@ -32,6 +32,7 @@
   "concurrencyWaitMs": 2000,
   "poolFullWaitMs": null,
   "sessionProviderAffinityEnabled": true,
+  "providerProbeSchedule": { "enabled": true, "intervalMs": 300000, "maxPerRound": 2, "maxPer24h": 100, "failureThreshold": 3 },
   "errorRules": [
     {
       "id": "account-rate-limit",

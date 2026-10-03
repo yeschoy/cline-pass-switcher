@@ -1,0 +1,10 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend owner and coding entry point"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Account lease/RPM, provider planning and probe semantics"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Strict config and bounded metadata migration/atomic budget"}
+{"file":".trellis/spec/backend/client-key-guidelines.md","reason":"Per-account owner isolation and admin probe access"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Unknown-vs-failure and fail-open diagnostic boundaries"}
+{"file":".trellis/spec/frontend/index.md","reason":"Single-document console conventions"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Authenticated snapshots/drafts for model and account settings"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Provider status, focus, escaping and real browser checks"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Reuse existing scheduler, transport, metadata and validation owners"}
+{"file":".trellis/tasks/10-02-compare-go-upstream-monitoring/research/upstream-pinning-comparison.md","reason":"Go pin validation and current probe limitations"}

@@ -4937,3 +4937,697 @@ test('pre-stream account replacement revalidates remembered Provider against the
   assert.equal((await call('allowed', 'normal')).status, 200);
   assert.deepEqual(seen, [['Bearer second-secret', 'b']], 'the new account may reuse a still-allowed hint');
 });
+
+test('scheduled Provider probes debit persisted budget before a mocked call and never start immediately', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    if (req.url !== '/chat/completions') { res.writeHead(404); return res.end('{}'); }
+    let raw = ''; req.on('data', (part) => { raw += part; }); req.on('end', () => {
+      const body = JSON.parse(raw); seen.push(body.provider?.only?.[0] || body.providerOptions?.gateway?.only?.[0]);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }], provider: seen.at(-1) }));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-probe-'));
+  let running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'local-secret', enabled: true, perModel: {} }], knownModels: ['m'], perModel: { m: { upstreams: ['one', 'two'] } }, providerProbeSchedule: { enabled: true, intervalMs: 300000, maxPerRound: 2, maxPer24h: 1, failureThreshold: 3 } }, dir, { NODE_ENV: 'test', CLINE_PASS_TEST_PROBE_INTERVAL_MS: '80' });
+  t.after(async () => { if (running?.child) await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  assert.equal(seen.length, 0, 'startup must not call upstream');
+  assert.equal((await bareFetch(`http://127.0.0.1:${port}/api/providers/probe-schedule`)).status, 401, 'status requires administrator');
+  const invalid = await rawJson(port, '/api/providers/probe-schedule', { enabled: true, intervalMs: 1, maxPerRound: 2, maxPer24h: 100, failureThreshold: 3 });
+  assert.equal(invalid.status, 400, 'invalid admin input cannot trigger probe work');
+  await waitUntil(() => seen.length === 1, 3000, 'one scheduled mock call');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'metadata.json'), 'utf8')).providerProbe.budget.length, 1, 'reservation persisted before response');
+  await new Promise((resolve) => setTimeout(resolve, 240));
+  assert.equal(seen.length, 1, 'rolling 24-hour cap blocks all later rounds');
+  await stop(running.child); running.child = null;
+  running = await startSwitcher(null, dir, { NODE_ENV: 'test', CLINE_PASS_TEST_PROBE_INTERVAL_MS: '80' });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(seen.length, 1, 'restart cannot reset the debit');
+});
+
+test('scheduled evidence is account-scoped, three separate rounds hold, and all-held tries one safe target', async (t) => {
+  const seen = [];
+  let scheduled = true;
+  const upstream = http.createServer((req, res) => {
+    let text = ''; req.on('data', (chunk) => { text += chunk; }); req.on('end', () => {
+      const body = JSON.parse(text), provider = body.provider?.only?.[0];
+      seen.push({ provider, account: req.headers.authorization });
+      res.setHeader('Content-Type', 'application/json');
+      if (scheduled) { res.statusCode = 404; res.end(JSON.stringify({ error: { message: 'provider rejected model', provider } })); }
+      else if (req.headers.authorization === 'Bearer b-secret' && provider === 'one') { res.statusCode = 502; res.end(JSON.stringify({ error: { message: 'temporary gateway error' } })); }
+      else res.end(JSON.stringify({ choices: [{ message: { content: 'done' } }], provider }));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-probe-hold-'));
+  let running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'a-secret', enabled: true, perModel: {} }, { id: 'b', name: 'B', key: 'b-secret', enabled: false, perModel: {} }], knownModels: ['m'], perModel: { m: { upstreams: ['one', 'two'] } }, providerProbeSchedule: { enabled: true, intervalMs: 300000, maxPerRound: 2, maxPer24h: 100, failureThreshold: 3 } }, dir, { NODE_ENV: 'test', CLINE_PASS_TEST_PROBE_INTERVAL_MS: '90' });
+  t.after(async () => { if (running?.child) await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  const status = async () => (await (await fetch(`http://127.0.0.1:${port}/api/providers/probe-schedule`)).json());
+  const firstStatus = await status(); assert.ok(Array.isArray(firstStatus.cells), JSON.stringify(firstStatus));
+  const held = await waitUntil(async () => { const s = await status(); return s.cells.filter((c) => c.accountId === 'a' && c.held).length === 2 && s; }, 4000, 'two held providers');
+  assert.ok(held.cells.every((c) => c.streak >= 3 && c.evidence === 'reliable'));
+  assert.ok(!held.cells.some((c) => c.accountId === 'b'));
+  const disabled = await rawJson(port, '/api/providers/probe-schedule', { ...held.schedule, enabled: false }); assert.equal(disabled.status, 200);
+  await stop(running.child); running.child = null;
+  running = await startSwitcher(null, dir, { NODE_ENV: 'test', CLINE_PASS_TEST_PROBE_INTERVAL_MS: '90' });
+  assert.equal((await status()).cells.filter((c) => c.held).length, 2, 'holds survive a restart and disabled schedule');
+  const securitySave = await rawJson(port, '/api/security', { exposeCatalog: false });
+  assert.equal(securitySave.status, 200);
+  await stop(running.child); running.child = null;
+  running = await startSwitcher(null, dir, { NODE_ENV: 'test', CLINE_PASS_TEST_PROBE_INTERVAL_MS: '90' });
+  assert.equal((await status()).cells.filter((c) => c.held).length, 2, 'an unrelated security config save must not clear durable holds');
+  const before = seen.length; scheduled = false;
+  const response = await rawJson(port, '/v1/chat/completions', { model: 'm', messages: [{ role: 'user', content: 'hello' }] });
+  assert.equal(response.status, 200); assert.equal(seen.length, before + 1, 'only one held Provider is explored');
+  const explorationLog = await waitUntil(async () => {
+    const page = await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${response.headers['x-cline-request-id']}`)).json();
+    return page.items?.[0];
+  }, 3000, 'exploration request projection');
+  assert.equal(explorationLog.attempts[0].providerSelection, 'probe-exploration', 'the safe one-shot override explains its reason');
+  const view = await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+  const enabledB = await rawJson(port, '/api/accounts', { accounts: view.accounts.map((a) => ({ ...a, enabled: true })), mode: 'single', active: 1, concurrencyWaitMs: 0, accountErrorRules: {}, accountPipeline: view.accountPipeline });
+  assert.equal(enabledB.status, 200, JSON.stringify(enabledB.json));
+  const bStart = seen.length, bResponse = await rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] });
+  assert.equal(bResponse.status, 200, 'B may fall back despite A holds');
+  assert.equal(seen.length, bStart + 2, 'B gets normal two-provider fallback, never inherits A hold');
+  const recovered = await rawJson(port, '/api/providers/probe-recover', { accountId: 'a', model: 'm', provider: 'one' });
+  assert.equal(recovered.status, 200); assert.equal(recovered.json.cells.filter((c) => c.held).length, 1);
+  const beforeRotation = await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+  const rotated = await rawJson(port, '/api/accounts', { accounts: beforeRotation.accounts.map((a) => a.id === 'a' ? { ...a, key: 'a-rotated-secret' } : a), mode: 'single', active: 1, concurrencyWaitMs: 0, accountErrorRules: {}, accountPipeline: beforeRotation.accountPipeline });
+  assert.equal(rotated.status, 200);
+  assert.equal((await status()).cells.filter((c) => c.accountId === 'a').length, 0, 'key rotation invalidates old account verdicts');
+  const excluded = await rawJson(port, '/api/config', { perModel: { m: { upstreams: ['one', 'two'], exclude: ['one', 'two'] } } });
+  assert.equal(excluded.status, 200);
+  const blocked = await rawJson(port, '/v1/chat/completions', { model: 'm', messages: [] });
+  assert.equal(blocked.status, 503, 'manual exclude wins');
+});
+
+test('scheduled debit persistence failure fails closed and mismatched actual Provider stays unknown', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    let text = ''; req.on('data', (chunk) => { text += chunk; }); req.on('end', () => {
+      seen.push(JSON.parse(text)); res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ choices: [{ message: { content: 'done' } }], provider: 'different' }));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-probe-fail-'));
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'local-secret', enabled: true, perModel: {}, maxRpm: 2 }], knownModels: ['m'], perModel: { m: { upstreams: ['one'] } }, providerProbeSchedule: { enabled: true, intervalMs: 300000, maxPerRound: 1, maxPer24h: 2, failureThreshold: 3 } }, dir, { NODE_ENV: 'test', CLINE_PASS_TEST_PROBE_INTERVAL_MS: '80' });
+  t.after(async () => { fs.chmodSync(dir, 0o700); await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  fs.chmodSync(dir, 0o500);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.equal(seen.length, 0, 'no call while budget cannot be durably written');
+  fs.chmodSync(dir, 0o700);
+  await waitUntil(() => seen.length === 2, 3000, 'mock calls after storage recovery');
+  assert.equal(seen.length, 2, 'daily cap still applies after recovery');
+  const state = await (await fetch(`http://127.0.0.1:${port}/api/providers/probe-schedule`)).json();
+  assert.equal(state.cells[0].outcome, 'unknown');
+  assert.equal(state.cells[0].held, false);
+  assert.equal(state.cells[0].streak, 0);
+  const bytes = fs.readFileSync(path.join(dir, 'metadata.json'), 'utf8');
+  assert.equal(bytes.includes('local-secret'), false);
+  assert.equal(bytes.includes('done'), false);
+});
+
+test('scheduled probes share manual account RPM and never debit when local admission is blocked', async (t) => {
+  const requests=[];
+  const upstream=http.createServer((req,res)=>{
+    let raw='';req.on('data',chunk=>{raw+=chunk;});req.on('end',()=>{
+      requests.push(JSON.parse(raw));res.setHeader('Content-Type','application/json');
+      res.end(JSON.stringify({choices:[{message:{content:'done'}}],provider:'one'}));
+    });
+  });
+  const upstreamPort=await listen(upstream),port=await unusedPort();
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts:[{id:'a',name:'A',key:'local',enabled:true,maxRpm:1,perModel:{}}],knownModels:['m'],perModel:{m:{upstreams:['one']}},providerProbeSchedule:{enabled:true,intervalMs:300000,maxPerRound:2,maxPer24h:100,failureThreshold:3}},null,{NODE_ENV:'test',CLINE_PASS_TEST_PROBE_INTERVAL_MS:'80'});
+  t.after(async()=>{await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  const manual=await rawJson(port,'/api/test',{model:'m',accountId:'a',upstreams:['one']});
+  assert.equal(manual.status,200);
+  await new Promise(resolve=>setTimeout(resolve,260));
+  assert.equal(requests.length,1,'automated check cannot bypass the manual call RPM window');
+  const status=await(await fetch(`http://127.0.0.1:${port}/api/providers/probe-schedule`)).json();
+  assert.equal(status.budgetRemaining,100,'blocked probes do not pre-debit before admission');
+});
+
+test('shutdown aborts the bounded scheduled transport and retains its pre-send debit', async (t) => {
+  let calls=0, closed=0;
+  const upstream=http.createServer((req,res)=>{req.resume();req.on('end',()=>{calls++;res.on('close',()=>{closed++;});});});
+  const upstreamPort=await listen(upstream),port=await unusedPort();
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-probe-stop-'));
+  const config={port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts:[{id:'a',name:'A',key:'local',enabled:true,perModel:{}}],knownModels:['m'],perModel:{m:{upstreams:['one']}},providerProbeSchedule:{enabled:true,intervalMs:300000,maxPerRound:1,maxPer24h:1,failureThreshold:3}};
+  const running=await startSwitcher(config,dir,{NODE_ENV:'test',CLINE_PASS_TEST_PROBE_INTERVAL_MS:'80',CLINE_PASS_SHUTDOWN_MS:'1000'});
+  t.after(async()=>{if(running.child.exitCode===null)await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
+  await waitUntil(()=>calls===1,3000,'mock transport reaches upstream');
+  const budgetBefore=JSON.parse(fs.readFileSync(path.join(dir,'metadata.json'),'utf8')).providerProbe.budget.length;
+  assert.equal(budgetBefore,1);
+  await stop(running.child);
+  await waitUntil(()=>closed===1,3000,'shutdown aborts upstream socket');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'metadata.json'),'utf8')).providerProbe.budget.length,1);
+});
+
+test('account-scoped automatic hold precedes a successful explicit session Provider hint', async (t) => {
+  const seen=[];
+  const upstream=http.createServer((req,res)=>{
+    let raw='';req.on('data',chunk=>{raw+=chunk;});req.on('end',()=>{
+      const body=JSON.parse(raw),provider=body.provider?.only?.[0]||body.providerOptions?.gateway?.only?.[0];
+      seen.push({provider,content:body.messages?.[0]?.content});res.setHeader('Content-Type','application/json');
+      if(body.messages?.[0]?.content==='hi'&&provider==='one'){res.statusCode=404;res.end(JSON.stringify({error:{message:'provider rejected',provider}}));}
+      else res.end(JSON.stringify({choices:[{message:{content:'done'}}],provider}));
+    });
+  });
+  const upstreamPort=await listen(upstream),port=await unusedPort();
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts:[{id:'a',name:'A',key:'local',enabled:true,perModel:{}}],knownModels:['m'],perModel:{m:{upstreams:['one','two']}},providerProbeSchedule:{enabled:true,intervalMs:300000,maxPerRound:2,maxPer24h:100,failureThreshold:3}},null,{NODE_ENV:'test',CLINE_PASS_TEST_PROBE_INTERVAL_MS:'100'});
+  t.after(async()=>{await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
+  const headers={'Session-Id':'explicit-probe-hint'};
+  const prewarm=await rawJson(port,'/v1/chat/completions',{model:'m',messages:[{role:'user',content:'prewarm'}]},headers);
+  assert.equal(prewarm.status,200);assert.equal(seen[0].provider,'one');
+  await waitUntil(async()=>{
+    const status=await(await fetch(`http://127.0.0.1:${port}/api/providers/probe-schedule`)).json();
+    return status.cells.some(c=>c.provider==='one'&&c.held)&&status.cells.some(c=>c.provider==='two'&&!c.held);
+  },3500,'only failing channel held');
+  const disabled=await rawJson(port,'/api/providers/probe-schedule',{enabled:false,intervalMs:300000,maxPerRound:2,maxPer24h:100,failureThreshold:3});assert.equal(disabled.status,200);
+  const start=seen.length;
+  const again=await rawJson(port,'/v1/chat/completions',{model:'m',messages:[{role:'user',content:'next'}]},headers);
+  assert.equal(again.status,200);assert.equal(seen.length,start+1);
+  assert.equal(seen.at(-1).provider,'two','stale explicit-session preference cannot revive held channel');
+});
+
+test('malformed persisted scheduled budget rejects startup without rewriting metadata', async (t) => {
+  const port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-probe-corrupt-'));
+  const running=await startSwitcher({port,accounts:[],knownModels:['m'],perModel:{}},dir,{NODE_ENV:'test'});
+  t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  await stop(running.child);
+  const file=path.join(dir,'metadata.json'),metadata=JSON.parse(fs.readFileSync(file,'utf8'));
+  metadata.providerProbe.budget=['not-a-timestamp'];
+  const bytes=JSON.stringify(metadata);fs.writeFileSync(file,bytes);
+  await assert.rejects(startSwitcher(null,dir,{NODE_ENV:'test'}),/invalid providerProbe metadata/);
+  assert.equal(fs.readFileSync(file,'utf8'),bytes,'invalid existing operator bytes must be untouched');
+});
+
+test('scheduled rounds prioritize recent use while reserving rotating cold coverage', async (t) => {
+  const seen=[];
+  const upstream=http.createServer((req,res)=>{let raw='';req.on('data',part=>{raw+=part;});req.on('end',()=>{
+    const body=JSON.parse(raw),provider=body.provider?.only?.[0]||body.providerOptions?.gateway?.only?.[0];
+    seen.push({model:body.model,provider,at:Date.now(),manual:body.messages[0]?.content!=='hi'});
+    res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:'ok'}}],provider}));
+  });});
+  const upstreamPort=await listen(upstream),port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-probe-fair-'));
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts:[{id:'a',name:'A',key:'local',enabled:true,perModel:{}}],knownModels:['m1','m2','m3'],perModel:{m1:{upstreams:['one']},m2:{upstreams:['two']},m3:{upstreams:['three']}},providerProbeSchedule:{enabled:true,intervalMs:300000,maxPerRound:2,maxPer24h:4,failureThreshold:3}},dir,{NODE_ENV:'test',CLINE_PASS_TEST_PROBE_INTERVAL_MS:'100'});
+  t.after(async()=>{await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
+  assert.equal((await rawJson(port,'/v1/chat/completions',{model:'m1',messages:[{role:'user',content:'hot'}]})).status,200);
+  await waitUntil(()=>seen.filter(s=>!s.manual).length===4,3000,'two rounds of bounded automated mock calls');
+  const auto=seen.filter(s=>!s.manual);
+  assert.deepEqual(new Set(auto.map(s=>s.model)),new Set(['m1','m2','m3']));
+  assert.ok(auto[2].at-auto[0].at>=40,'next round does not fan out immediately');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'metadata.json'),'utf8')).providerProbe.budget.length,4);
+});
+
+test('one reliable scheduled recovery clears a durable hold and resets the failure streak', async (t) => {
+  let responseMode='bad';
+  const upstream=http.createServer((req,res)=>{let raw='';req.on('data',part=>{raw+=part;});req.on('end',()=>{
+    const body=JSON.parse(raw),provider=body.provider?.only?.[0];res.setHeader('Content-Type','application/json');
+    if(responseMode==='bad'){res.statusCode=404;res.end(JSON.stringify({error:{message:'channel rejected',provider}}));}
+    else if(responseMode==='unknown'){res.statusCode=429;res.end(JSON.stringify({error:{message:'gateway busy'}}));}
+    else res.end(JSON.stringify({choices:[{message:{content:'ok'}}],provider}));
+  });});
+  const upstreamPort=await listen(upstream),port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-probe-recover-'));
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts:[{id:'a',name:'A',key:'local',enabled:true,perModel:{}}],knownModels:['m'],perModel:{m:{upstreams:['one']}},providerProbeSchedule:{enabled:true,intervalMs:300000,maxPerRound:1,maxPer24h:10,failureThreshold:3}},dir,{NODE_ENV:'test',CLINE_PASS_TEST_PROBE_INTERVAL_MS:'90'});
+  t.after(async()=>{await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
+  const status=async()=>await(await fetch(`http://127.0.0.1:${port}/api/providers/probe-schedule`)).json();
+  const held=await waitUntil(async()=>{const view=await status();return view.cells[0]?.held&&view;},3000,'three reliable failures');
+  assert.equal(held.cells[0].streak,3);
+  const reliableAt=held.cells[0].lastReliableAt;
+  assert.ok(reliableAt>0);
+  responseMode='unknown';
+  const unknown=await waitUntil(async()=>{const view=await status();return view.cells[0]?.lastRound>held.cells[0].lastRound&&view;},3000,'unknown attempt does not refresh reliable hold evidence');
+  assert.equal(unknown.cells[0].held,true);assert.equal(unknown.cells[0].lastReliableAt,reliableAt);
+  responseMode='ok';
+  const restored=await waitUntil(async()=>{const view=await status();return view.cells[0]?.outcome==='ok'&&view;},3000,'reliable recovery');
+  assert.equal(restored.cells[0].held,false);assert.equal(restored.cells[0].streak,0);
+  assert.equal(restored.cells[0].pinCapability,'unknown','a matched response is not a capability calibration');
+  responseMode='bad';
+  const heldAgain=await waitUntil(async()=>{const view=await status();return view.cells[0]?.held&&view;},3000,'new three-round failure streak');
+  assert.equal(heldAgain.cells[0].streak,3);
+});
+
+test('automatic channel verdicts keep account auth, ambiguous gateway, empty completion and mismatched metadata unknown', async (t) => {
+  const cases = [
+    { http: 400, json: { error: { provider: 'one', message: 'invalid account api key' } } },
+    { http: 400, json: { error: { provider: 'one', message: 'invalid request shape' } } },
+    { http: 404, json: { error: { provider: 'one', message: 'model not found' } } },
+    { http: 429, json: { error: { message: 'gateway busy' } } },
+    { http: 500, json: { error: { provider: 'one', message: 'server unavailable' } } },
+    { http: 200, json: { provider: 'one', choices: [{ message: { content: '' } }] } },
+    { http: 200, json: { provider: 'different', choices: [{ message: { content: 'ok' } }] } },
+    { http: 404, json: { error: { provider: 'one', message: 'channel rejected this model' } } },
+  ];
+  let called = 0;
+  const upstream = http.createServer((req, res) => {
+    req.resume(); req.on('end', () => {
+      const sample = cases[called++] || cases.at(-1);
+      res.writeHead(sample.http, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(sample.json));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'fixture-only', enabled: true, perModel: {} }], knownModels: ['m'], perModel: { m: { upstreams: ['one'] } }, providerProbeSchedule: { enabled: true, intervalMs: 300000, maxPerRound: 1, maxPer24h: cases.length, failureThreshold: 3 } }, null, { NODE_ENV: 'test', CLINE_PASS_TEST_PROBE_INTERVAL_MS: '120' });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  for (let i = 1; i <= cases.length; i++) {
+    const cell = await waitUntil(async () => {
+      const projection = await (await fetch(`http://127.0.0.1:${port}/api/providers/probe-schedule`)).json();
+      return projection.cells[0]?.lastRound >= i && projection.cells[0];
+    }, 3000, `scheduled evidence ${i}`);
+    assert.equal(cell.streak, i < cases.length ? 0 : 1);
+    assert.equal(cell.outcome, i < cases.length ? 'unknown' : 'bad');
+    assert.equal(cell.held, false);
+  }
+  assert.equal(called, cases.length);
+});
+
+test('held Provider evidence ages from the last reliable verdict rather than a newer unknown check', async (t) => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-probe-age-')),port=await unusedPort();
+  const config={port,accounts:[{id:'a',name:'A',key:'fixture',enabled:true,perModel:{}}],knownModels:['m'],perModel:{m:{upstreams:['one']}},providerProbeSchedule:{enabled:false,intervalMs:300000,maxPerRound:2,maxPer24h:100,failureThreshold:3}};
+  let running=await startSwitcher(config,dir,{NODE_ENV:'test'});
+  t.after(async()=>{if(running?.child)await stop(running.child);fs.rmSync(dir,{recursive:true,force:true});});
+  await stop(running.child);running.child=null;
+  const file=path.join(dir,'metadata.json'),metadata=JSON.parse(fs.readFileSync(file,'utf8'));
+  metadata.providerProbe.cells[JSON.stringify(['a','m','one'])]={checkedAt:Date.now(),lastReliableAt:Date.now()-2*86400000,outcome:'unknown',evidence:'unknown',streak:3,held:true,lastRound:4};
+  fs.writeFileSync(file,JSON.stringify(metadata));
+  running=await startSwitcher(null,dir,{NODE_ENV:'test'});
+  const view=await(await fetch(`http://127.0.0.1:${port}/api/providers/probe-schedule`)).json();
+  assert.equal(view.cells[0].held,true);
+  assert.equal(view.cells[0].outcome,'unknown');
+  assert.equal(view.cells[0].stale,true,'unknown resampling does not renew the old reliable evidence');
+});
+
+test('probe identity MAC preserves unrelated writes, rejects same-mtime identity edits and migrates old budget only', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-probe-mac-')), port = await unusedPort();
+  let running = await startSwitcher({ port, accounts: [{ id: 'a', name: 'A', key: 'secret-a', enabled: true, perModel: {} },
+    { id: 'b', name: 'B', key: 'secret-b', enabled: false, perModel: {} }], knownModels: ['m'],
+    perModel: { m: { upstreams: ['one'] } }, providerProbeSchedule: { enabled: false, intervalMs: 300000, maxPerRound: 2, maxPer24h: 1, failureThreshold: 3 } }, dir, { NODE_ENV: 'test' });
+  t.after(async () => { if (running?.child) await stop(running.child); fs.rmSync(dir, { recursive: true, force: true }); });
+  const configFile = path.join(dir, 'config.json'), metaFile = path.join(dir, 'metadata.json');
+  const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+  assert.match(config.providerProbeIdentityKey, /^[a-f0-9]{64}$/);
+  const readStatus = async () => (await (await fetch(`http://127.0.0.1:${port}/api/providers/probe-schedule`)).json());
+  const initial = await readStatus();
+  assert.equal(JSON.stringify(initial).includes(config.providerProbeIdentityKey), false);
+  const seed = (legacy = false) => {
+    const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+    const at = Date.now();
+    meta.providerProbe.budget = [at];
+    meta.providerProbe.cells[JSON.stringify(['a', 'm', 'one'])] = { checkedAt: at, lastReliableAt: at, outcome: 'bad', evidence: 'reliable', streak: 3, held: true, lastRound: 3 };
+    if (legacy) { delete meta.providerProbe.identityDigest; meta.providerProbe.configMtime = fs.statSync(configFile).mtimeMs; }
+    fs.writeFileSync(metaFile, JSON.stringify(meta));
+    return meta;
+  };
+  await stop(running.child); running.child = null;
+  seed(); running = await startSwitcher(null, dir, { NODE_ENV: 'test' });
+  assert.equal((await readStatus()).cells[0].held, true);
+  assert.equal((await rawJson(port, '/api/security', { exposeCatalog: true })).status, 200);
+  await stop(running.child); running.child = null;
+  running = await startSwitcher(null, dir, { NODE_ENV: 'test' });
+  assert.equal((await readStatus()).cells[0].held, true, 'unrelated config save must not erase a valid verdict');
+  await stop(running.child); running.child = null;
+  const originalStat = fs.statSync(configFile);
+  fs.utimesSync(configFile, originalStat.atime, new Date(Math.floor(originalStat.mtimeMs / 1000) * 1000));
+  const oldStat = fs.statSync(configFile), changed = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+  changed.accounts[0].key = 'rotated-a';
+  fs.writeFileSync(configFile, JSON.stringify(changed));
+  fs.utimesSync(configFile, oldStat.atime, oldStat.mtime);
+  assert.equal(fs.statSync(configFile).mtimeMs, oldStat.mtimeMs, 'fixture retains the exact prior mtime');
+  running = await startSwitcher(null, dir, { NODE_ENV: 'test' });
+  assert.equal((await readStatus()).cells.length, 0, 'equal-mtime external credential edit loses the verdict');
+  assert.equal((await readStatus()).budgetRemaining, 0, 'old debit remains');
+  assert.equal(fs.readFileSync(metaFile, 'utf8').includes('rotated-a'), false);
+  await stop(running.child); running.child = null;
+  seed(true); running = await startSwitcher(null, dir, { NODE_ENV: 'test' });
+  assert.equal((await readStatus()).cells.length, 0, 'unverifiable legacy mtime-only verdict is discarded');
+  assert.equal((await readStatus()).budgetRemaining, 0, 'legacy debit survives migration');
+  const persisted = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+  assert.ok(!Object.hasOwn(persisted.providerProbe, 'configMtime'));
+  assert.equal(JSON.stringify(await readStatus()).includes(persisted.providerProbe.identityDigest), false, 'digest remains private to metadata');
+  await stop(running.child); running.child = null;
+  const externalStat = fs.statSync(configFile), routeEdit = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+  routeEdit.perModel.m.upstreams = ['two'];
+  fs.writeFileSync(configFile, JSON.stringify(routeEdit));
+  fs.utimesSync(configFile, externalStat.atime, externalStat.mtime);
+  running = await startSwitcher(null, dir, { NODE_ENV: 'test' });
+  assert.equal((await readStatus()).cells.length, 0, 'external route changes cannot inherit old verdicts');
+  assert.equal((await readStatus()).budgetRemaining, 0);
+});
+
+test('an account Header identity edit invalidates only its own verdict, keeping another owner budget and hold', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-probe-header-')), port = await unusedPort();
+  let running = await startSwitcher({ port, accounts: [{ id: 'a', name: 'A', key: 'secret-a', enabled: true, perModel: {} },
+    { id: 'b', name: 'B', key: 'secret-b', enabled: true, perModel: {} }], knownModels: ['m'], perModel: { m: { upstreams: ['one'] } },
+    providerProbeSchedule: { enabled: false, intervalMs: 300000, maxPerRound: 2, maxPer24h: 1, failureThreshold: 3 } }, dir, { NODE_ENV: 'test' });
+  t.after(async () => { if (running?.child) await stop(running.child); fs.rmSync(dir, { recursive: true, force: true }); });
+  await stop(running.child); running.child = null;
+  const file = path.join(dir, 'metadata.json'), metadata = JSON.parse(fs.readFileSync(file, 'utf8')), at = Date.now();
+  metadata.providerProbe.budget = [at];
+  for (const id of ['a', 'b']) metadata.providerProbe.cells[JSON.stringify([id, 'm', 'one'])] =
+    { checkedAt: at, lastReliableAt: at, outcome: 'bad', evidence: 'reliable', streak: 3, held: true, lastRound: 3 };
+  fs.writeFileSync(file, JSON.stringify(metadata));
+  running = await startSwitcher(null, dir, { NODE_ENV: 'test' });
+  const view = await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+  const saved = await rawJson(port, '/api/accounts', { accounts: view.accounts.map((a) => a.id === 'a' ? { ...a, headers: { 'X-Probe-Fence': 'new' } } : a),
+    mode: view.mode, active: view.active, concurrencyWaitMs: view.concurrencyWaitMs, accountPipeline: view.accountPipeline });
+  assert.equal(saved.status, 200, saved.text);
+  await stop(running.child); running.child = null;
+  running = await startSwitcher(null, dir, { NODE_ENV: 'test' });
+  const status = await (await fetch(`http://127.0.0.1:${port}/api/providers/probe-schedule`)).json();
+  assert.deepEqual(status.cells.map((c) => c.accountId), ['b']);
+  assert.equal(status.cells[0].held, true);
+  assert.equal(status.budgetRemaining, 0);
+});
+
+test('invalid private probe key fails startup without rewriting config, metadata or budget', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-probe-key-')), port = await unusedPort();
+  const running = await startSwitcher({ port, accounts: [], knownModels: [] }, dir, { NODE_ENV: 'test' });
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  await stop(running.child);
+  const file = path.join(dir, 'config.json'), metadata = path.join(dir, 'metadata.json');
+  const validConfig = fs.readFileSync(file, 'utf8');
+  const malformed = JSON.parse(validConfig); malformed.providerProbeIdentityKey = 'bad';
+  const configBytes = JSON.stringify(malformed), metaBytes = fs.readFileSync(metadata, 'utf8');
+  fs.writeFileSync(file, configBytes);
+  await assert.rejects(startSwitcher(null, dir, { NODE_ENV: 'test' }), /invalid provider probe identity key/);
+  assert.equal(fs.readFileSync(file, 'utf8'), configBytes);
+  assert.equal(fs.readFileSync(metadata, 'utf8'), metaBytes);
+  fs.writeFileSync(file, validConfig);
+  const badMeta = JSON.parse(metaBytes); badMeta.providerProbe.identityDigest = 'invalid-digest';
+  const badMetaBytes = JSON.stringify(badMeta); fs.writeFileSync(metadata, badMetaBytes);
+  await assert.rejects(startSwitcher(null, dir, { NODE_ENV: 'test' }), /invalid providerProbe metadata/);
+  assert.equal(fs.readFileSync(file, 'utf8'), validConfig);
+  assert.equal(fs.readFileSync(metadata, 'utf8'), badMetaBytes);
+});
+
+test('ten scheduled calls use at most two live native transports', async (t) => {
+  let active = 0, peak = 0, total = 0;
+  const upstream = http.createServer((req, res) => {
+    req.resume(); req.on('end', () => {
+      active++; peak = Math.max(peak, active); total++;
+      setTimeout(() => { active--; res.setHeader('Content-Type', 'application/json'); res.end('{}'); }, 70);
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'local', enabled: true, perModel: {} }],
+    knownModels: ['m'], perModel: { m: { upstreams: Array.from({ length: 10 }, (_, i) => `channel-${i}`) } },
+    providerProbeSchedule: { enabled: true, intervalMs: 300000, maxPerRound: 10, maxPer24h: 10, failureThreshold: 3 } }, null,
+  { NODE_ENV: 'test', CLINE_PASS_TEST_PROBE_INTERVAL_MS: '80' });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  await waitUntil(() => total === 10 && active === 0, 5000, 'ten bounded scheduled calls complete');
+  assert.equal(peak, 2, 'a batch of ten must never create a third real transport');
+  const status = await (await fetch(`http://127.0.0.1:${port}/api/providers/probe-schedule`)).json();
+  assert.equal(status.budgetRemaining, 0);
+});
+
+// Seed a full, valid 250-model x 20-provider evidence owner without calling the upstream.
+async function fullProbeCapacityFixture(t, { held = 0, maxPerRound = 1, maxPer24h = 2, block = false } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-probe-capacity-')), port = await unusedPort();
+  const models = Array.from({ length: 251 }, (_, i) => `m-${i}`);
+  const perModel = Object.fromEntries(models.map((model) => [model, { upstreams: Array.from({ length: 20 }, (_, i) => `p-${i}`) }]));
+  let resume = null, calls = [];
+  const upstream = http.createServer((req, res) => {
+    let raw = ''; req.on('data', (chunk) => { raw += chunk; }); req.on('end', async () => {
+      const body = JSON.parse(raw), provider = body.provider?.only?.[0] || body.providerOptions?.gateway?.only?.[0];
+      calls.push({ model: body.model, provider, account: req.headers.authorization });
+      if (block) await new Promise((resolve) => { resume = resolve; });
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }], provider }));
+    });
+  });
+  const upstreamPort = await listen(upstream);
+  const schedule = { enabled: false, intervalMs: 300000, maxPerRound, maxPer24h, failureThreshold: 3 };
+  let running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`,
+    accounts: [{ id: 'a', name: 'A', key: 'fixture-capacity-secret', enabled: true, maxRpm: 10, perModel: {} }],
+    knownModels: models, perModel, providerProbeSchedule: schedule }, dir, { NODE_ENV: 'test' });
+  t.after(async () => {
+    resume?.(); if (running?.child?.exitCode === null) await stop(running.child);
+    await close(upstream); if (fs.existsSync(dir)) fs.chmodSync(dir, 0o700); fs.rmSync(dir, { recursive: true, force: true });
+  });
+  await stop(running.child); running.child = null;
+  const file = path.join(dir, 'metadata.json'), state = JSON.parse(fs.readFileSync(file, 'utf8')), at = Date.now();
+  let index = 0;
+  for (const model of models.slice(0, -1)) for (let i = 0; i < 20; i++) {
+    const isHeld = index < held;
+    state.providerProbe.cells[JSON.stringify(['a', model, `p-${i}`])] = {
+      checkedAt: index === held ? at - 10000 : at, lastReliableAt: isHeld ? at : 0,
+      outcome: isHeld ? 'bad' : 'unknown', evidence: isHeld ? 'reliable' : 'unknown',
+      streak: isHeld ? 3 : 0, held: isHeld, lastRound: 0,
+    };
+    index++;
+  }
+  state.providerProbe.cursor = maxPerRound === 1 ? 312 : 250;
+  fs.writeFileSync(file, JSON.stringify(state));
+  const configFile = path.join(dir, 'config.json'), cfg = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+  cfg.providerProbeSchedule.enabled = true; fs.writeFileSync(configFile, JSON.stringify(cfg));
+  const boot = async () => { running = await startSwitcher(null, dir, { NODE_ENV: 'test', CLINE_PASS_TEST_PROBE_INTERVAL_MS: '200' }); return running; };
+  const shutdown = async () => { if (running?.child) await stop(running.child); running = null; };
+  return { dir, port, file, configFile, boot, shutdown, calls, unblock: () => resume?.() };
+}
+
+test('full non-held evidence evicts oldest and reserves the 5001st before its paid call', async (t) => {
+  const fixture = await fullProbeCapacityFixture(t, { maxPer24h: 1 });
+  await fixture.boot();
+  const target = JSON.stringify(['a', 'm-250', 'p-0']), victim = JSON.stringify(['a', 'm-0', 'p-0']);
+  const state = await waitUntil(() => {
+    const meta = JSON.parse(fs.readFileSync(fixture.file, 'utf8'));
+    return meta.providerProbe.cells[target]?.outcome === 'ok' && meta;
+  }, 6000, 'new 5001st reliable result persists');
+  assert.equal(fixture.calls.length, 1);
+  assert.equal(state.providerProbe.budget.length, 1);
+  assert.equal(Object.keys(state.providerProbe.cells).length, 5000);
+  assert.equal(Object.hasOwn(state.providerProbe.cells, victim), false, 'oldest non-held cell alone is evicted');
+  const status = await (await fetch(`http://127.0.0.1:${fixture.port}/api/providers/probe-schedule`)).json();
+  assert.equal(status.coverage.sampled, 1); assert.equal(status.coverage.capacitySkipped, 0);
+});
+
+test('all 5000 held skip unseen paid calls, retain held recovery and expose capacity after release', async (t) => {
+  const fixture = await fullProbeCapacityFixture(t, { held: 5000, maxPer24h: 2 });
+  await fixture.boot();
+  const status = async () => (await (await fetch(`http://127.0.0.1:${fixture.port}/api/providers/probe-schedule`)).json());
+  await waitUntil(async () => (await status()).coverage.capacitySkipped >= 1, 5000, 'unseen candidate lacks held-only slot');
+  const first = await status();
+  assert.equal(first.budgetReserved, 0); assert.equal(first.coverage.sampled, 0);
+  assert.equal(first.coverage.storageSaturated, true);
+  assert.equal(fixture.calls.length, 0);
+  const accounts = await (await fetch(`http://127.0.0.1:${fixture.port}/api/accounts`)).json();
+  assert.equal(accounts.accounts[0].rpm.used, 0, 'capacity skip never consumes account RPM');
+  await waitUntil(() => fixture.calls.some((c) => c.model === 'm-0'), 5000, 'existing held entry stays eligible for a paid recovery');
+  const recovered = await waitUntil(() => {
+    const state = JSON.parse(fs.readFileSync(fixture.file, 'utf8')).providerProbe;
+    return state.cells[JSON.stringify(['a', 'm-0', 'p-0'])]?.held === false && state;
+  }, 5000, 'held cell recovers on verified matching provider');
+  assert.equal(recovered.budget.length, 1);
+  assert.equal(Object.values(recovered.cells).filter((cell) => cell.held).length, 4999);
+  // An exact admin recovery frees another slot without touching the existing budget.
+  const admin = await rawJson(fixture.port, '/api/providers/probe-recover', { accountId: 'a', model: 'm-0', provider: 'p-1' });
+  assert.equal(admin.status, 200);
+  assert.equal(admin.json.cells.length, 4999);
+  assert.equal(admin.json.budgetReserved, 1);
+  await fixture.shutdown();
+  const meta = JSON.parse(fs.readFileSync(fixture.file, 'utf8'));
+  meta.providerProbe.cursor = 312;
+  fs.writeFileSync(fixture.file, JSON.stringify(meta));
+  await fixture.boot();
+  const resumed = await waitUntil(() => {
+    const state = JSON.parse(fs.readFileSync(fixture.file, 'utf8')).providerProbe;
+    return state.cells[JSON.stringify(['a', 'm-250', 'p-0'])]?.outcome === 'ok' && state;
+  }, 5000, 'released evidence slot allows a new combination');
+  assert.equal(resumed.budget.length, 2);
+  assert.equal(Object.keys(resumed.cells).length, 5000);
+  assert.equal((await status()).coverage.sampled, 1);
+  assert.equal((await status()).coverage.capacitySkipped, 0);
+});
+
+test('two scheduled workers cannot both spend the final non-held evidence slot', async (t) => {
+  const fixture = await fullProbeCapacityFixture(t, { held: 4999, maxPerRound: 2, maxPer24h: 2, block: true });
+  await fixture.boot();
+  const status = async () => (await (await fetch(`http://127.0.0.1:${fixture.port}/api/providers/probe-schedule`)).json());
+  await waitUntil(async () => fixture.calls.length === 1 && (await status()).coverage.capacitySkipped === 1, 5000, 'one worker reserves while other skips');
+  const pending = JSON.parse(fs.readFileSync(fixture.file, 'utf8')).providerProbe;
+  assert.equal(pending.budget.length, 1);
+  assert.equal(Object.keys(pending.cells).length, 5000);
+  assert.equal(pending.cells[JSON.stringify(['a', 'm-250', 'p-0'])]?.pending, true);
+  assert.equal(Object.values(pending.cells).filter((cell) => cell.held).length, 4999);
+  fixture.unblock();
+  await waitUntil(() => JSON.parse(fs.readFileSync(fixture.file, 'utf8')).providerProbe.cells[JSON.stringify(['a', 'm-250', 'p-0'])]?.outcome === 'ok', 5000, 'reserved result commits');
+  assert.equal(fixture.calls.length, 1);
+});
+
+test('full evidence pre-send atomic failure neither evicts nor debits nor sends', async (t) => {
+  const fixture = await fullProbeCapacityFixture(t, { maxPer24h: 1 });
+  const original = fs.readFileSync(fixture.file, 'utf8');
+  fs.chmodSync(fixture.dir, 0o500);
+  t.after(() => { if (fs.existsSync(fixture.dir)) fs.chmodSync(fixture.dir, 0o700); });
+  await fixture.boot();
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  assert.equal(fixture.calls.length, 0);
+  assert.equal(JSON.parse(fs.readFileSync(fixture.file, 'utf8')).providerProbe.budget.length, 0);
+  assert.equal(JSON.parse(fs.readFileSync(fixture.file, 'utf8')).providerProbe.cells[JSON.stringify(['a', 'm-0', 'p-0'])].held, false);
+  assert.equal(fs.readFileSync(fixture.file, 'utf8'), original, 'failed rename leaves original evidence and budget bytes');
+  fs.chmodSync(fixture.dir, 0o700);
+  await waitUntil(() => fixture.calls.length === 1, 5000, 'restored storage allows exactly one paid mock call');
+});
+
+test('a crash after durable probe debit restarts with unknown pending evidence', async (t) => {
+  const port = await unusedPort(), upstream = http.createServer((req) => { req.resume(); });
+  const upstreamPort = await listen(upstream), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-probe-crash-'));
+  let running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, knownModels: ['m'],
+    perModel: { m: { upstreams: ['one'] } }, accounts: [{ id: 'a', name: 'A', key: 'fixture-secret', enabled: true, perModel: {} }],
+    providerProbeSchedule: { enabled: true, intervalMs: 300000, maxPerRound: 1, maxPer24h: 1, failureThreshold: 3 } },
+  dir, { NODE_ENV: 'test', CLINE_PASS_TEST_PROBE_INTERVAL_MS: '80' });
+  t.after(async () => { if (running?.child?.exitCode === null) await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  const file = path.join(dir, 'metadata.json'), key = JSON.stringify(['a', 'm', 'one']);
+  await waitUntil(() => { const state = JSON.parse(fs.readFileSync(file, 'utf8')).providerProbe; return state.budget.length === 1 && state.cells[key]?.pending; }, 3000, 'durable pending and budget before stuck native call');
+  await new Promise((resolve) => { running.child.once('exit', resolve); running.child.kill('SIGKILL'); });
+  running.child = null;
+  const configFile = path.join(dir, 'config.json'), cfg = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+  cfg.providerProbeSchedule.enabled = false; fs.writeFileSync(configFile, JSON.stringify(cfg));
+  running = await startSwitcher(null, dir, { NODE_ENV: 'test' });
+  const state = JSON.parse(fs.readFileSync(file, 'utf8')).providerProbe;
+  assert.equal(state.budget.length, 1);
+  assert.equal(state.cells[key].outcome, 'unknown');
+  assert.equal(state.cells[key].evidence, 'unknown');
+  assert.equal(state.cells[key].held, false);
+  assert.equal(Object.hasOwn(state.cells[key], 'pending'), false);
+});
+
+test('a failed completion write keeps held evidence but retries after storage recovers without restart', async (t) => {
+  let releaseFirst, requests = 0;
+  const upstream = http.createServer((req, res) => {
+    req.resume(); req.on('end', async () => {
+      requests++;
+      if (requests === 1) await new Promise((resolve) => { releaseFirst = resolve; });
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }], provider: 'one' }));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-probe-complete-write-'));
+  const env = { NODE_ENV: 'test', CLINE_PASS_TEST_PROBE_INTERVAL_MS: '150' };
+  let running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`,
+    knownModels: ['m'], perModel: { m: { upstreams: ['one'] } },
+    accounts: [{ id: 'a', name: 'A', key: 'fixture', enabled: true, perModel: {} }],
+    providerProbeSchedule: { enabled: false, intervalMs: 300000, maxPerRound: 1, maxPer24h: 3, failureThreshold: 3 } }, dir, env);
+  t.after(async () => { releaseFirst?.(); fs.chmodSync(dir, 0o700); if (running?.child) await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  await stop(running.child); running.child = null;
+  const metadata = path.join(dir, 'metadata.json'), key = JSON.stringify(['a', 'm', 'one']);
+  const seed = JSON.parse(fs.readFileSync(metadata, 'utf8')), at = Date.now();
+  seed.providerProbe.cells[key] = { checkedAt: at, lastReliableAt: at, lastRound: 3, outcome: 'bad', evidence: 'reliable', streak: 3, held: true };
+  fs.writeFileSync(metadata, JSON.stringify(seed));
+  const configFile = path.join(dir, 'config.json'), saved = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+  saved.providerProbeSchedule.enabled = true; fs.writeFileSync(configFile, JSON.stringify(saved));
+  running = await startSwitcher(null, dir, env);
+  await waitUntil(() => requests === 1 && JSON.parse(fs.readFileSync(metadata, 'utf8')).providerProbe.cells[key]?.pending, 3000, 'first transport reserved pending held evidence');
+  fs.chmodSync(dir, 0o500);
+  releaseFirst();
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  const interrupted = JSON.parse(fs.readFileSync(metadata, 'utf8')).providerProbe;
+  assert.equal(interrupted.cells[key]?.pending, true, 'failed completion retains durable pending evidence');
+  assert.equal(interrupted.cells[key]?.held, true, 'failed completion must not silently release a held Provider');
+  assert.equal(interrupted.budget.length, 1);
+  fs.chmodSync(dir, 0o700);
+  await waitUntil(() => requests >= 2, 2500, 'the held candidate should resume after disk recovery');
+  await waitUntil(() => JSON.parse(fs.readFileSync(metadata, 'utf8')).providerProbe.cells[key]?.outcome === 'ok', 2500, 'recovered completion persists evidence');
+  assert.equal(JSON.parse(fs.readFileSync(metadata, 'utf8')).providerProbe.cells[key]?.held, false);
+});
+
+test('single-slot scheduled probes visit both accounts and both models rather than cancelling cursor rotations', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    let text = ''; req.on('data', (part) => { text += part; }); req.on('end', () => {
+      seen.push({ account: req.headers.authorization, model: JSON.parse(text).model });
+      res.setHeader('Content-Type', 'application/json'); res.end('{}');
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, knownModels: ['m1', 'm2'],
+    perModel: { m1: { upstreams: ['one'] }, m2: { upstreams: ['one'] } },
+    accounts: [{ id: 'a', name: 'A', key: 'account-a', enabled: true, perModel: {} },
+      { id: 'b', name: 'B', key: 'account-b', enabled: true, perModel: {} }],
+    providerProbeSchedule: { enabled: true, intervalMs: 300000, maxPerRound: 1, maxPer24h: 16, failureThreshold: 3 } }, null,
+  { NODE_ENV: 'test', CLINE_PASS_TEST_PROBE_INTERVAL_MS: '60' });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  await waitUntil(() => seen.length === 16, 5000, 'sixteen paid single-slot mock rounds');
+  assert.deepEqual(new Set(seen.map((c) => c.account)), new Set(['Bearer account-a', 'Bearer account-b']));
+  assert.deepEqual(new Set(seen.map((c) => c.model)), new Set(['m1', 'm2']));
+  assert.deepEqual(new Set(seen.map((c) => `${c.account}/${c.model}`)),
+    new Set(['Bearer account-a/m1', 'Bearer account-a/m2', 'Bearer account-b/m1', 'Bearer account-b/m2']));
+});
+
+test('one-in-five cold slot traverses five cold channels beside recently used hot channels', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    let text = ''; req.on('data', (part) => { text += part; }); req.on('end', () => {
+      const body = JSON.parse(text);
+      seen.push({ provider: body.provider?.only?.[0] || body.providerOptions?.gateway?.only?.[0], automated: body.messages?.[0]?.content === 'hi' });
+      res.setHeader('Content-Type', 'application/json');
+      if (body.messages?.[0]?.content === 'warm' && seen.at(-1).provider === 'hot-0') {
+        res.statusCode = 502; res.end(JSON.stringify({ error: { message: 'temporary provider error', provider: 'hot-0' } }));
+      } else res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }], provider: seen.at(-1).provider }));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, knownModels: ['m'],
+    perModel: { m: { upstreams: ['hot-0', 'hot-1', 'cold-0', 'cold-1', 'cold-2', 'cold-3', 'cold-4'] } },
+    accounts: [{ id: 'a', name: 'A', key: 'local', enabled: true, perModel: {} }],
+    providerProbeSchedule: { enabled: true, intervalMs: 300000, maxPerRound: 1, maxPer24h: 25, failureThreshold: 3 } }, null,
+  { NODE_ENV: 'test', CLINE_PASS_TEST_PROBE_INTERVAL_MS: '60' });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  assert.equal((await rawJson(port, '/v1/chat/completions', { model: 'm', messages: [{ role: 'user', content: 'warm' }], max_tokens: 16 })).status, 200);
+  await waitUntil(() => seen.filter((c) => c.automated).length === 25, 6000, 'five reserved cold opportunities');
+  const auto = seen.filter((c) => c.automated);
+  assert.deepEqual(new Set(auto.filter((c) => c.provider.startsWith('hot-')).map((c) => c.provider)),
+    new Set(['hot-0', 'hot-1']), 'both recently used channels retain hot-tier coverage');
+  assert.deepEqual(new Set(auto.filter((c) => c.provider.startsWith('cold-')).map((c) => c.provider)),
+    new Set(['cold-0', 'cold-1', 'cold-2', 'cold-3', 'cold-4']));
+});
+
+test('single-slot truncated 8040-combination snapshot rotates account and model within six debits', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    let raw = ''; req.on('data', (chunk) => { raw += chunk; }); req.on('end', () => {
+      const body = JSON.parse(raw);
+      seen.push({ account: req.headers.authorization, model: body.model });
+      res.setHeader('Content-Type', 'application/json'); res.end('{}');
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const models = Array.from({ length: 201 }, (_, i) => `m-${i}`);
+  const perModel = Object.fromEntries(models.map((model) => [model, { upstreams: Array.from({ length: 20 }, (_, i) => `p-${i}`) }]));
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, knownModels: models, perModel,
+    accounts: [{ id: 'a', name: 'A', key: 'a-secret', enabled: true, perModel: {} },
+      { id: 'b', name: 'B', key: 'b-secret', enabled: true, perModel: {} }],
+    providerProbeSchedule: { enabled: true, intervalMs: 300000, maxPerRound: 1, maxPer24h: 6, failureThreshold: 3 } }, null,
+  { NODE_ENV: 'test', CLINE_PASS_TEST_PROBE_INTERVAL_MS: '70' });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  await waitUntil(() => seen.length === 6, 5000, 'six single-slot 5000-cell bounded snapshots');
+  assert.deepEqual(new Set(seen.map((s) => s.account)), new Set(['Bearer a-secret', 'Bearer b-secret']));
+  assert.ok(new Set(seen.map((s) => s.model)).size >= 2, 'at least two distinct models enter the rotated window');
+  const status = await (await fetch(`http://127.0.0.1:${port}/api/providers/probe-schedule`)).json();
+  assert.equal(status.coverage.truncated, true);
+  assert.equal(status.budgetRemaining, 0);
+});
+
+test('candidate truncation rotates account and model starts before 5000 cells', async (t) => {
+  const seen = new Set(), seenModels = new Set(), upstream = http.createServer((req, res) => {
+    let raw = ''; req.on('data', (chunk) => { raw += chunk; }); req.on('end', () => {
+      seen.add(req.headers.authorization); seenModels.add(JSON.parse(raw).model);
+      res.setHeader('Content-Type', 'application/json'); res.end('{}');
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const models = Array.from({ length: 201 }, (_, i) => `m-${i}`);
+  const perModel = Object.fromEntries(models.map((model) => [model, { upstreams: Array.from({ length: 20 }, (_, i) => `p-${i}`) }]));
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, knownModels: models, perModel,
+    accounts: [{ id: 'a', name: 'A', key: 'a-secret', enabled: true, perModel: {} }, { id: 'b', name: 'B', key: 'b-secret', enabled: true, perModel: {} }],
+    providerProbeSchedule: { enabled: true, intervalMs: 300000, maxPerRound: 2, maxPer24h: 6, failureThreshold: 3 } }, null,
+  { NODE_ENV: 'test', CLINE_PASS_TEST_PROBE_INTERVAL_MS: '90' });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  await waitUntil(() => seen.size === 2 && seenModels.has('m-1'), 15000, 'account and model starts enter rotating 5000-cell snapshot');
+  assert.deepEqual(seen, new Set(['Bearer a-secret', 'Bearer b-secret']));
+  assert.ok(seenModels.has('m-0') && seenModels.has('m-1'), 'model start rotates before the 200-model snapshot');
+  const status = await (await fetch(`http://127.0.0.1:${port}/api/providers/probe-schedule`)).json();
+  assert.equal(status.coverage.truncated, true);
+});

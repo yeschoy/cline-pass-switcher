@@ -905,3 +905,68 @@ record(modelId, { pipeline: selected?.pipeline ?? null });
 Run `test/account-workflow.test.js`, `test/workflow-integration.test.js` and `test/workflow-ui.test.js` plus the existing routing/admin/UI suite when changing workflow contracts. Prove active-cache and client-owner boundaries, cap/RPM admission, equal-counter concurrent selections, zero-count binding hits, temporary overflow retaining bindings, replacement exclusions, same-account Provider retries, restart and new-account0 catch-up. Preserve legacy behavior when disabled. Preview must not prune metadata, create bindings, advance counters or invoke upstream. Reset must check revision/admin/CSRF, include disabled/standby owner members, and publish only after successful persistence.
 
 The optional `accountWorkflow.healthFilter` is off by default and its default editable `minimumHealth` is 0.2. Filter only rates strictly below the threshold; unknown account health enters this filter as 1.0 while the measured sample count stays zero/null, including when `unknownHealth` is `unknown-last` for the separate health-priority selector. Recheck a binding against the health gate on each new request before leasing it; invalidate an unhealthy binding and count its replacement as a real new selection. Preview and runtime use the same gate, and an empty filtered pool returns a specific error. A policy save affects later requests and does not revoke already-held leases. Cache account-health projections for workflow admission within a statistics generation and minute, clearing on statistics pruning/commit and account saves; do not cache occupancy, RPM or hard eligibility. Ranking, capacity/RPM reservation and counter increment remain synchronous in one Node event-loop turn. This guarantee is process-local, consistent with the single-process Docker/Compose entrypoint; multiple workers or instances sharing a data directory require a separate shared atomic owner.
+
+## Scheduled account-scoped Provider validation
+
+### 1. Scope / Trigger
+
+Use this scenario for the default-on, potentially billable scheduled checks of already-known channels for subscribed models. Chat account leasing and manual probes keep their existing owners. No real upstream calls or production rollout are authorized by local tests.
+
+### 2. Signatures
+
+```text
+config.json: providerProbeSchedule = { enabled: boolean, intervalMs: integer,
+  maxPerRound: integer, maxPer24h: integer, failureThreshold: integer }
+GET  /api/providers/probe-schedule -> { schedule, budgetRemaining, budgetReserved,
+  nextDueAt, running, persistenceWarning, coverage, cells }
+POST /api/providers/probe-schedule <- exact providerProbeSchedule object
+POST /api/providers/probe-recover <- exact { accountId, model, provider }
+```
+
+All are independently admin-authenticated; unsafe methods require existing CSRF/Origin/transport checks. `coverage` separates `eligible`, actual native `sampled`, `deferred`, `capacitySkipped`, `storageSaturated`, and snapshot truncation. A cell is an account-specific `(resolvedModel, provider)` observation, not global health, pin enforcement, or proof of a cache hit. Neither private MAC key nor identity digest is returned.
+
+### 3. Contracts
+
+`providerProbeSchedule` is enabled by default: 300000ms cadence, at most two native chat calls concurrently, two calls per round by default (configurable 1–10), and 100 pre-send debits per rolling 24h (admin-configurable bounded integers). Reuse quota scheduler's timer and per-account lease/RPM permit and account-bound native transport; no startup catch-up, no automatic catalog expansion. A synchronous same-directory metadata atomic write must succeed before sending each scheduled native request; on failure skip and release the uncommitted RPM permit. A debit is conservative even when transport later aborts, and this budget is per DATA_DIR/process, not a distributed lock or dollar cap. Shared DATA_DIR among simultaneous instances is unsupported. The 5000-cell evidence budget is independent of the rolling paid-call limit: full storage evicts only the oldest non-held/non-pending cell (prefer unknown/zero-streak), never a held verdict; all held/pending skips a new combination before lease/RPM/call/debit while existing held combinations may still be budgeted for recovery. A persisted `pending:true` cell reserves the evidence slot with its budget debit before sending and survives crashes as unknown (or retains an earlier held verdict); only completed reliable evidence changes holds. A failed completion write leaves its durable debit/pending marker and old hold unchanged, but clears in-process pending admission after the failed call so that a later round can retry once storage recovers without restarting. Management coverage counts committed native calls, separately counts `capacitySkipped`, and exposes `storageSaturated` without implying that selecting a candidate was a real call. A single batch runs at most two bounded workers (no second work queue). For a complete candidate snapshot, keep account/model/provider source order stable and advance the tier's pick ordinal; do not also rotate that list by the same ordinal (two accounts/two models would cancel and repeatedly select the first). When the 5000-cell or 200-model snapshot is truncated, rotate the account and model starts by each tier's opportunity ordinal, and select within that window by the quotient after the full account×model phase, not by that same rotation index. A single-slot reserved cold opportunity occurs once per five rounds and advances its own derived ordinal by one per cold opportunity, rather than skipping five cold candidates. Hot and cold ordinals are derived from the persisted round/cursor owner; no extra queue, per-triple cursor or second persisted store is created. Under a static finite eligible set with enough ongoing budget/admissions, each tier traverses all of its finite windows and pool entries; a limited daily budget does not promise near-term full coverage.
+
+`metadata.json.providerProbe.cells` contains only bounded `(accountId, resolvedModel, provider)` verdicts with `checkedAt`, `lastReliableAt`, separate-round `lastRound`, streak, held and `reliable`/`unknown` evidence. Unknown resampling updates checkedAt but never renews the last reliable evidence time; a held row becomes stale from the latter without automatically releasing its hold. Only HTTP success with actual Provider matching the target is reliable success; structured explicit provider-specific 4xx may be a reliable failure. Generic 429/5xx, even structured-but-account/auth/quota-labelled 4xx, account/proxy/network/local RPM, malformed/empty response, mismatched actual and absent pin evidence are unknown, and scheduled calls never mutate account/provider chat health, cooldown or statistics. Manual probe endpoints remain independent. Three separate reliable bad rounds hold only that account's route; one later reliable successful scheduled check or exact admin recovery removes the hold. The planner filters manual exclude and hard/cooldown first, then per-account holds **before** a session Provider hint. If all otherwise safe candidates are held, only the original first safe Provider receives at most one attempt; that request's bounded attempt trace uses `providerSelection: 'probe-exploration'` to explain the exception, with no account replacement after its failure. Disable stops new probes but retains holds; identity/route changes invalidate affected verdicts. Config file edits outside the API conservatively clear verdicts on restart while retaining the paid-call budget. Recovery and status endpoints require admin session and CSRF on writes.
+
+### 4. Validation & Error Matrix
+
+| Condition | Result |
+|---|---|
+| Missing legacy schedule/key/metadata | Migrate to default-enabled bounded schedule and empty evidence; old mtime-only cells lose their unprovable verdicts, but paid-call budget survives |
+| Malformed persisted JSON, explicit private key, digest, cell or budget | Fail startup without overwriting operator bytes; do not turn corruption into a fresh budget |
+| Invalid or incomplete admin schedule object | HTTP 400 before write; old complete account/config saves omitting the field preserve it |
+| Unknown/missing exact recovery cell or bad account/model/provider | 409 for missing cell; 400 for invalid triple; never clear manual exclusion/hard quarantine |
+| Budget exhausted, lease/RPM unavailable, or 5000 held/pending cells for a new triple | No automatic model call; capacity skip uses no budget/lease/RPM and is visible in authenticated coverage |
+| Evidence-slot/budget atomic write fails | No call, no in-memory reservation; keep prior bytes, release pending permit |
+| Post-call result write fails or process crashes | Keep conservative debit and pending/previous held evidence, never publish a false reliable result; retry later or conservatively normalize pending on restart |
+
+### 5. Good / Base / Bad Cases
+
+- **Good:** account A's channel fails reliably in three distinct scheduled rounds, only A avoids it; a later reliably matching actual Provider or exact administrator recovery clears that hold. A different account B stays eligible. A 5001st triple evicts one non-held slot before debit and stores its result.
+- **Base:** no known channel, no admissible account, unknown actual Provider, expired budget, or disabled schedule does not fabricate success/failure. When all otherwise safe channels are held, one normally ordered channel may receive exactly one chat attempt, with no account replacement or second held retry.
+- **Bad:** a 5001st triple spends budget without evidence space; a full all-held table evicts a held record; a session hint revives a held/excluded channel; a new account inherits an old owner's evidence; a 429/proxy/empty 16-token response becomes a trustworthy Provider failure.
+
+### 6. Tests Required
+
+Use temporary `DATA_DIR` and local mock upstreams in `test/integration.test.js`: no startup burst; 2-per-round/100-per-rolling-24h default and configured 10-per-round with only two concurrent native calls; pre-send atomic failure, restart, two workers competing for a final slot, 5000 non-held then 5001st, all-held skip and held recovery, failed completion write followed by in-process retry, MAC/migration/same-mtime identity edits, hot/cold single-slot fairness and >5000 candidate-window rotation, owner/route/SSE/RPM/shutdown boundaries. `test/account-draft.test.js` and `test/ui-contract.test.js` assert stale draft, bounded status and escaping. Run the full environment-scrubbed project gate. Native keyboard/focus/live-status/narrow-width behavior needs separate real-browser evidence, not a VM claim.
+
+### 7. Wrong vs Correct
+
+```js
+// Wrong: pay before checking whether the evidence store can retain this triple.
+reservePaidBudget(); await sendProbe();
+if (Object.keys(cells).length >= 5000) return; // result discarded
+
+// Correct: synchronously reserve a safe evidence slot and budget in one atomic
+// metadata replacement BEFORE handing the existing native transport a call.
+const slot = probeEvidenceSlot(key);
+if (slot.blocked) return reportCapacitySkip();
+const reservation = reserveScheduledProbe(key, round);
+if (!reservation.ok) return releasePermitWithoutCall();
+await sendAccountBoundProbe();
+```
+
+Never infer channel health from a successful HTTP status alone; match the reported actual Provider or retain `unknown`.

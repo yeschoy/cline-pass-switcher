@@ -1,0 +1,10 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend complete quality check"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Provider selection, account/RPM and management probe boundaries"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Budget/hold persistence and safe migration validation"}
+{"file":".trellis/spec/backend/client-key-guidelines.md","reason":"Owner separation and admin-only probe controls"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"No false health/account penalty from automatic checks"}
+{"file":".trellis/spec/frontend/index.md","reason":"Console quality gate"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Draft/stale response review"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Accessible statuses, recovery and browser evidence"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Check API/config/UI/persistence round trips"}
+{"file":".trellis/tasks/10-02-compare-go-upstream-monitoring/research/upstream-pinning-comparison.md","reason":"Review source rationale and non-transferable Go behaviors"}

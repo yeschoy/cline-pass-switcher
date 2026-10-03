@@ -421,6 +421,23 @@
     <div class="toolbar"><button type="button" onclick="changeAdminPassword()">修改管理员密码</button><button type="button" class="ghost" onclick="logoutAdmin()">退出登录</button><span id="adminStatus" role="status" aria-live="polite"></span></div>
   </div>
 
+  <section class="card" aria-labelledby="probeScheduleTitle">
+    <h2 id="probeScheduleTitle">定期校验已订阅模型的已知渠道</h2>
+    <p class="dim">默认开启，每 5 分钟尝试有界小批次（不是每个渠道每轮均被检查）。调用真实模型可能计费；24 小时请求数上限不是美元费用上限。关闭后停止新的后台调用，既有自动避开仍保留，须显式恢复或重新开启等待可信成功。</p>
+    <div class="toolbar">
+      <label><input id="probeEnabled" type="checkbox" onchange="markProbeDraft()"> 启用定期校验</label>
+      <label for="probeInterval">间隔（分钟）</label><input id="probeInterval" type="number" min="1" max="1440" step="1" style="width:75px" oninput="markProbeDraft()">
+      <label for="probeRound">每轮最多</label><input id="probeRound" type="number" min="1" max="10" step="1" style="width:65px" oninput="markProbeDraft()">
+      <label for="probeDay">滚动 24h 最多</label><input id="probeDay" type="number" min="1" max="1000" step="1" style="width:75px" oninput="markProbeDraft()">
+      <label for="probeThreshold">连续可信失败门槛</label><input id="probeThreshold" type="number" min="1" max="10" step="1" style="width:65px" oninput="markProbeDraft()">
+      <button type="button" onclick="saveProbeSchedule(this)">保存校验设置</button><button type="button" class="ghost" onclick="loadProbeSchedule()">↻ 刷新状态</button>
+    </div>
+    <p id="probeScheduleFeedback" role="status" aria-live="polite">尚未加载</p>
+    <p id="probeScheduleCoverage" class="dim"></p>
+    <label for="probeAccountScope">查看账号级可信证据</label><select id="probeAccountScope" onchange="renderProbeSchedule()"><option value="">请选择账号</option></select>
+    <div class="table-wrap" role="region" tabindex="0" aria-label="账号级定期渠道校验记录，可横向滚动"><table style="min-width:730px"><thead><tr><th>模型</th><th>渠道</th><th>证据 / 时间</th><th>连续失败</th><th>自动避开</th><th>操作</th></tr></thead><tbody id="probeEvidenceBody"><tr><td colspan="6">请先选择账号</td></tr></tbody></table></div>
+  </section>
+
   <div class="card">
     <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
       <h2 style="margin:0">订阅模型（cline-pass/*）</h2>
@@ -517,6 +534,7 @@ async function api(path, body, method, asText=false, options={}) {
 }
 
 function showLogin() {
+  probeReadGeneration++;
   invalidateWorkflowPreview();
   resetLogChain();
   closeClientKeySecret(true,false);
@@ -566,7 +584,7 @@ async function logoutAdmin() {
   try {
     const result = await api('/api/auth/logout', {});
     if (!result.ok) throw new Error('logout failed');
-    ADMIN_CSRF = null; closeClientKeySecret(true,false); resetDetailSelection(); DATA = null; ACCS = null; $('#currentAdminPassword').value = ''; $('#changedAdminPassword').value = '';
+    ADMIN_CSRF = null; probeReadGeneration++; probeScheduleSnapshot=null; closeClientKeySecret(true,false); resetDetailSelection(); DATA = null; ACCS = null; $('#currentAdminPassword').value = ''; $('#changedAdminPassword').value = '';
     location.reload();
   } catch { $('#adminStatus').textContent = '退出未确认，请重试'; }
 }
@@ -771,6 +789,10 @@ async function loadAll() {
   renderSecurity(sec);
   renderAccounts();
   $('#noKeyBanner').style.display = meta.configured ? 'none' : 'block';
+  const probeScope=$('#probeAccountScope'),savedScope=probeScope.value;
+  probeScope.innerHTML='<option value="">请选择账号</option>'+accs.accounts.map(a=>`<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`).join('');
+  probeScope.value=savedScope;
+  void loadProbeSchedule();
 }
 
 function clientKeyOptions(selected) {
@@ -906,6 +928,44 @@ function secMsg(msg, isErr) {
   el._t = setTimeout(() => { el.textContent = ''; }, 8000);
 }
 
+let probeScheduleSnapshot=null,probeDraftDirty=false,probeReadGeneration=0,probeDraftGeneration=0;
+function markProbeDraft(){probeDraftDirty=true;probeDraftGeneration++;}
+function probeScheduleFields(snapshot){
+  const cfg=snapshot.schedule;
+  $('#probeEnabled').checked=cfg.enabled;$('#probeInterval').value=String(cfg.intervalMs/60000);
+  $('#probeRound').value=String(cfg.maxPerRound);$('#probeDay').value=String(cfg.maxPer24h);
+  $('#probeThreshold').value=String(cfg.failureThreshold);
+}
+function renderProbeSchedule(){
+  const snapshot=probeScheduleSnapshot;if(!snapshot)return;
+  $('#probeScheduleCoverage').textContent=`滚动 24h 已预留 ${snapshot.budgetReserved} 次，剩余 ${snapshot.budgetRemaining} 次；上轮候选快照 ${snapshot.coverage.eligible}${snapshot.coverage.truncated?'（部分）':''} / 已调用 ${snapshot.coverage.sampled} / 无证据槽跳过 ${snapshot.coverage.capacitySkipped||0} / 待轮转 ${snapshot.coverage.deferred}；${snapshot.coverage.storageSaturated?'证据槽已满且无可淘汰记录，新组合不扣预算也不探测；':''}${snapshot.running?'正在检查':'当前空闲'}；${snapshot.nextDueAt?'下一轮预计 '+new Date(snapshot.nextDueAt).toLocaleString():'调度已关闭'}。仅具名渠道可信证据可触发避开，未知/过时不算成功或失败。${snapshot.persistenceWarning?' 配置与证据写盘未同步，下次重启会保守清除旧避开结论；请检查磁盘并刷新状态。':''}`;
+  const accountId=$('#probeAccountScope').value;
+  const items=accountId?snapshot.cells.filter(c=>c.accountId===accountId):[];
+  $('#probeEvidenceBody').innerHTML=items.map(c=>`<tr><td class="mono">${escapeHtml(c.model)}</td><td class="mono">${escapeHtml(c.provider)}</td><td>${c.pending?'本轮预留待完成（既有状态不变）':c.evidence==='reliable'?'可信':'未知'} · ${c.outcome==='ok'?'命中成功':c.outcome==='bad'?'明确拒绝':'未确定'} · ${escapeHtml(new Date(c.checkedAt).toLocaleString())}${c.held?' · 最近可信证据 '+escapeHtml(c.lastReliableAt?new Date(c.lastReliableAt).toLocaleString():'未知'):''}${c.stale?' · 账号不可用/证据过时':''}<br><span class="dim">${c.channelSource==='configured'?'人工渠道':'已发现渠道'} · pin 能力未独立校验</span></td><td>${Number(c.streak)}</td><td>${c.held?'已避开（仅此账号）':'未避开'}</td><td><button type="button" class="ghost" onclick="recoverProbeHold(${jsArg(c.accountId)},${jsArg(c.model)},${jsArg(c.provider)},this)">恢复自动证据</button></td></tr>`).join('')||`<tr><td colspan="6">${accountId?'暂无该账号的自动校验证据':'请先选择账号，不合并不同账号结论'}</td></tr>`;
+}
+async function loadProbeSchedule(){
+  if ($('#loginOverlay').style.display === 'flex') return;
+  const generation=++probeReadGeneration;
+  try{
+    const snapshot=await api('/api/providers/probe-schedule');
+    if(generation!==probeReadGeneration||$('#loginOverlay').style.display === 'flex')return;
+    if(!snapshot?.schedule)throw Error(snapshot?.error?.message||'无法加载校验状态');
+    probeScheduleSnapshot=snapshot;
+    if(!probeDraftDirty){probeScheduleFields(snapshot);probeDraftDirty=false;}
+    renderProbeSchedule();$('#probeScheduleFeedback').textContent='校验状态已更新'+(probeDraftDirty?'（未保存设置草稿保留）':'');
+  }catch(error){if(generation===probeReadGeneration)$('#probeScheduleFeedback').textContent='校验状态读取失败：'+(error.message||'未知错误')+'；保留当前草稿和最近状态';}
+}
+async function saveProbeSchedule(button){
+  const field=(id,min,max)=>{const raw=$('#'+id).value.trim(),n=Number(raw);if(!/^\d+$/.test(raw)||!Number.isSafeInteger(n)||n<min||n>max)throw Error(id+' 请输入 '+min+'–'+max+' 的整数');return n;};
+  let schedule;try{schedule={enabled:$('#probeEnabled').checked,intervalMs:field('probeInterval',1,1440)*60000,maxPerRound:field('probeRound',1,10),maxPer24h:field('probeDay',1,1000),failureThreshold:field('probeThreshold',1,10)};}catch(error){$('#probeScheduleFeedback').textContent=error.message;return;}
+  const generation=probeDraftGeneration;button.disabled=true;try{const response=await api('/api/providers/probe-schedule',schedule);if(!response.schedule)throw Error(response.error?.message||'保存失败');probeReadGeneration++;probeScheduleSnapshot=response;if(generation===probeDraftGeneration)probeDraftDirty=false;renderProbeSchedule();$('#probeScheduleFeedback').textContent='设置已保存'+(response.metadataWarning?'；证据修订同步失败，下次重启将保守丢弃旧结论':'')+(probeDraftDirty?'；新修改的草稿仍保留':'；关闭仅停止后续后台付费校验，已有避开状态保留');}catch(error){$('#probeScheduleFeedback').textContent='保存失败：'+(error.message||'未知错误')+'；草稿仍保留';}finally{button.disabled=false;}
+}
+async function recoverProbeHold(accountId,model,provider,button){
+  if(!confirm(`仅恢复账号 ${accountId}、模型 ${model}、渠道 ${provider} 的自动避开？人工排除/硬隔离不受影响。`))return;
+  button.disabled=true;
+  try{const response=await api('/api/providers/probe-recover',{accountId,model,provider});if(!response.schedule)throw Error(response.error?.message||'恢复失败');probeReadGeneration++;probeScheduleSnapshot=response;renderProbeSchedule();$('#probeScheduleFeedback').textContent='已恢复精确账号/模型/渠道的自动证据';}
+  catch(error){$('#probeScheduleFeedback').textContent='恢复失败：'+(error.message||'未知错误');button.disabled=false;}
+}
 async function probe(id, btn) {
   btn.disabled = true; btn.textContent = '探测中…'; status('正在探测 ' + id);
   const r = await api('/api/probe', { model: id, accountId: $('#routeScope').value || undefined });
@@ -1033,7 +1093,7 @@ function onTestModelChange() {
 // 逐次尝试明细：fireworks(✗429 781ms) → sail-research(✔ 2458ms)
 function traceHtml(trace) {
   if (!trace?.length) return '';
-  const parts = trace.map((t) => `<span class="tr ${t.status === 200 ? 'ok' : 'bad'}">${escapeHtml(t.upstream || 'auto')}(${t.status === 200 ? '✔' : '✗' + (Number(t.status) || '')} ${Number(t.ms) || 0}ms${t.note && t.status !== 200 && t.note !== 'ok' ? ' · ' + escapeHtml(String(t.note).slice(0, 60)) : ''})</span>`);
+  const parts = trace.map((t) => `<span class="tr ${t.status === 200 ? 'ok' : 'bad'}">${escapeHtml(t.upstream || 'auto')}${t.providerSelection==='probe-exploration'?' [自动避开后仅试一次]':''}(${t.status === 200 ? '✔' : '✗' + (Number(t.status) || '')} ${Number(t.ms) || 0}ms${t.note && t.status !== 200 && t.note !== 'ok' ? ' · ' + escapeHtml(String(t.note).slice(0, 60)) : ''})</span>`);
   return `<div class="trace">尝试序列：${parts.join(' → ')}</div>`;
 }
 
@@ -1880,7 +1940,7 @@ function armStatisticsTimer(visitId){clearTimeout(STATISTICS_TIMER);STATISTICS_T
 function stopStatisticsVisit(){STATISTICS_VISIT_ID++;STATISTICS_QUERY_ID++;clearTimeout(STATISTICS_TIMER);STATISTICS_TIMER=null;STATISTICS_REFRESH_CONTROLLER?.abort();STATISTICS_REFRESH_CONTROLLER=null;STATISTICS_REFRESH_PROMISE=null;const button=$('#statisticsRefresh');if(button){button.disabled=false;button.textContent='↻ 手动刷新额度与统计';}}
 async function startStatisticsVisit(){const visitId=++STATISTICS_VISIT_ID;armStatisticsTimer(visitId);await loadStatistics(visitId);if(visitId===STATISTICS_VISIT_ID&&!$('#statisticsPanel').hidden)return refreshStatisticsQuota(false,visitId);return null;}
 function restoreStatisticsVisit(){if(!$('#statisticsPanel').hidden&&STATISTICS_TIMER===null)return startStatisticsVisit();return null;}
-if(typeof window!=='undefined'){window.addEventListener('pagehide',()=>{closeClientKeySecret(true,false);stopStatisticsVisit();stopModelProviders();LOG_QUERY_ID++;resetLogChain();resetDetailSelection();});window.addEventListener('pageshow',()=>!$('#statisticsPanel').hidden?restoreStatisticsVisit():!$('#modelProvidersPanel').hidden?loadModelProviders():null);}
+if(typeof window!=='undefined'){window.addEventListener('pagehide',()=>{closeClientKeySecret(true,false);stopStatisticsVisit();stopModelProviders();LOG_QUERY_ID++;resetLogChain();resetDetailSelection();probeReadGeneration++;});window.addEventListener('pageshow',()=>!$('#statisticsPanel').hidden?restoreStatisticsVisit():!$('#modelProvidersPanel').hidden?loadModelProviders():null);}
 async function switchSection(section){
   const isConsole=section==='console',isStatistics=section==='statistics',type=section==='errors'?'errors':'requests';
   if(!isConsole)invalidateWorkflowPreview('已离开账号页；未完成的模拟或轨迹读取已取消，草稿保留。');

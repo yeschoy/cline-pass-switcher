@@ -181,7 +181,8 @@ location / {
 | `errorRules` | 唯一权威的有序错误规则数组；每条含稳定 `id`、`account`/`provider-model` 维度、动作、可选 Provider/model 范围，以及 status/body/Header AND 条件。`cooldown.reset` 使用显式格式与严格 `d/h/m/s` fallback/max；最多 100 条/64 KiB。动作与直接健康样本固定为 `ignore`/0、`degrade`/1、`cooldown`/1、`hard-quarantine`/1 个失败样本，后两者同时保持临时/持续处置 |
 | `retryRules` | 唯一权威的有序“停止重试”数组；每条含稳定 `id`、固定 `decision: "stop"`，以及同时存在的 `when.statuses` 与 `when.body_contains`。两类条件 AND、body 数组 ANY、大小写不敏感普通文本（不支持正则/Header）；首条命中即停止本请求剩余 Provider 与账号替换。缺失默认 `[]`；最多 100 条/64 KiB。普通日志只投影 `retryRuleId`/`retryDecision`/`retryMatchedBy` 枚举，不记录 needle 或匹配片段 |
 | `accountErrorRules` / `accountContentErrorRules` | 只读兼容镜像。旧配置启动时按“内容规则在前、状态规则在后”迁移；旧客户端不提交 `errorRules` 时只能原样回传镜像，试图修改会得到 409 |
-| `sessionProviderAffinityEnabled` | 默认 `true`，管理员可在账号管理页关闭并保存，旧客户端全量保存省略此字段时保留当前开关。只有同客户端密钥归属、同解析后模型、明确会话标识才优先上一次完整成功的**指定**具名渠道；仅调整当前账号已允许渠道的首试顺序，不更改账号/重试上限。成功后滑动保留 60 分钟、重启清空；失败/取消不建立新偏好。此指定渠道是 planned-only，不证明实际上游渠道或缓存命中。关闭开关立即恢复原有顺序并清空旧偏好；定期探测的账号级避开逻辑另行实施，不会因本开关启动探测 |
+| `sessionProviderAffinityEnabled` | 默认 `true`，管理员可在账号管理页关闭并保存，旧客户端全量保存省略此字段时保留当前开关。只有同客户端密钥归属、同解析后模型、明确会话标识才优先上一次完整成功的**指定**具名渠道；仅调整当前账号已允许渠道的首试顺序，不更改账号/重试上限。成功后滑动保留 60 分钟、重启清空；失败/取消不建立新偏好。此指定渠道是 planned-only，不证明实际上游渠道或缓存命中。关闭开关立即恢复原有顺序并清空旧偏好；定期校验的账号级避开过滤先于会话偏好。 |
+| `providerProbeSchedule` | 默认启用，每 300000 ms 一轮（可配置 60000–86400000），每轮默认最多 2 次（可配置 1–10），同时最多 2 次真实调用，全局滚动 24h 最多 100 次（1–1000），连续 3 轮可信失败自动避开（门槛 1–10）。只针对已订阅模型/已知且非人工排除/硬隔离渠道，最近真实使用优先并保留冷门轮转；额度是**真实模型请求数**不是美元费用上限，上游可能计费。探测不读取新模型目录；无合格账号/并发或 RPM 阻塞/预算写盘失败均不发送。`GET/POST /api/providers/probe-schedule` 管理持久配置与只读账号级状态；`POST /api/providers/probe-recover` 精确 `{accountId,model,provider}` 解除自动避开，不影响人工排除或硬隔离。关闭仅停止新后台调用，不清除已持久避开；遇仅因自动避开而全无渠道时，只冒险试原顺序一个安全候选一次。账本/可信证据存于 `metadata.json`，重启保留；最多 5000 个证据槽，仅淘汰最旧非避开记录；预扣预算与未知证据槽在同一原子写入中预留。若全槽均避开，新渠道不租用账号、不扣 RPM/预算、不调用上游，管理状态单独显示容量跳过；已有避开仍可预算内复探，恢复后释放容量。崩溃后未完成预留维持未知/既有避开，不伪报探测成功；状态中的渠道来源、账号级健康证据与 `pinCapability: unknown` 分开，实际渠道匹配仅说明本次命中、不证明网关始终遵守 `only`；私有随机校验 key 仅存于 `config.json`，`metadata.json` 只存身份摘要、不含账号凭据；API/日志不暴露 key 或摘要。旧 mtime 状态迁移、人工修改身份配置（即使保留 mtime）时保守清除旧证据但保留已预留预算；无关设置保存不清除证据。**默认启用涉及付费：上线前备份全部 DATA_DIR，先在隔离环境确认可停止和恢复，再另行获得部署授权。** |
 | `accountPipeline` | 可选叠加层：三个开关与 `order`，缓存池 min/max，以及显式/消息回退会话绑定 TTL 和 LRU 上限。`0 <= cachePoolLowQuotaSize <= cachePoolSize <= cachePoolMaxSize <= 100000`；默认 TTL 为 2h/15m、上限 50,000。旧配置缺 max 时自动取 min，不会升级后自动扩容 |
 | `proxyKey` | **仅** Legacy（固定 ID `legacy`）的持久化下游密钥；非空 `PROXY_KEY` 只在启动/重启覆盖其生效值。Legacy 为空保留旧版匿名模型访问 Legacy 账号池；管理接口仍要求独立管理员会话 |
 | `clientKeys` | 仅额外密钥的私有数组 `[{ id, name, key }]`，不重复存 Legacy；`id` 为稳定归属 ID，`key` 为明文私有凭据，不会出现在普通列表、公开 metadata 或日志中。最多 16 个，勿把真实或生成密钥放入示例/仓库；当前存储并不加密 |
@@ -194,6 +195,8 @@ location / {
 | `modelAliases` | 客户端别名到现有 `cline-pass/*` 模型的映射；路由按解析后的模型执行 |
 | `perModel` | 每模型路由：`{ upstreams, exclude, pinMode, sort, maxRetries, providerCooldownMs }`。`upstreams` 非空时是权威来源顺序，否则使用探测到的渠道顺序；`pinMode: "strict"` 首次固定来源顺序首个可用渠道，失败后从剩余渠道按 Provider-model 24h 成功率回退；`pinMode: "preferred"` 从首次起就用同一健康顺序。每次 named HTTP attempt 只注入一个 provider。`maxRetries` 是首试后的外层重试次数，`providerCooldownMs` 为 0～300000（0 关闭）并在首包前确定性失败后短暂跳过该 Provider。账号内同名配置整项覆盖全局配置，不逐字段合并 |
 | `apiKey` | 旧版单 key 字段，启动时自动迁移进 `accounts` |
+
+定期校验回退：管理员先通过控制台或 `POST /api/providers/probe-schedule` 提交完整配置并将 `enabled` 置为 `false`，确认只停止**新的**后台付费请求；旧自动避开保持生效，逐账号/模型/渠道显式恢复后才能解除。升级前备份完整 DATA_DIR（配置、元数据及认证数据），旧镜像与新格式不能假定可安全共享写入；回退旧版须停服务后在隔离目录恢复整份旧备份。运行中的请求取消/失败也可能已在发出前保守计入预算。定期校验、负对照及生产发布不应以本地 mock 通过作为真实上游验证授权。
 
 ---
 
