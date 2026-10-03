@@ -1,0 +1,8 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend full-scope quality gate"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Account/provider attempts, explicit identity and SSE replay checks"}
+{"file":".trellis/spec/backend/client-key-guidelines.md","reason":"No cross-owner affinity or account borrowing"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Retry/cancel and redacted error semantics"}
+{"file":".trellis/spec/frontend/index.md","reason":"Console quality checks"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Keyboard/focus/live-status review for opt-out toggle"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Cross-layer review discipline"}
+{"file":".trellis/tasks/10-02-compare-go-upstream-monitoring/research/upstream-pinning-comparison.md","reason":"Review planned versus actual attribution and Go pitfalls"}

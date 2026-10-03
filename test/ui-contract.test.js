@@ -177,7 +177,10 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   assert.match(collect, /accountPipeline:\{quotaPool:[^}]+healthSort:[^}]+sticky:[^}]+order:pipelineOrder\(\),\.\.\.pipelineNumberDraft\(\)/);
   for(const id of ['cachePoolSize','cachePoolMaxSize','cachePoolLowQuotaSize'])assert.match(html,new RegExp(`id="${id}" type="number" min="0" max="100000" step="1"`));
   for(const id of ['sessionBindingExplicitTtlMs','sessionBindingFallbackTtlMs'])assert.match(html,new RegExp(`id="${id}" type="number" min="60000" max="604800000" step="1"`));
-  assert.match(html,/id="sessionBindingMaxEntries" type="number" min="1" max="100000" step="1"/);assert.match(html,/最小总数 0 = 关闭/);assert.match(html,/max=min 可关闭自动扩容/);assert.match(html,/当前目标与会话绑定状态/);
+  assert.match(html,/id="sessionBindingMaxEntries" type="number" min="1" max="100000" step="1"/);
+  assert.match(html,/<label[^>]*for="sessionProviderAffinityEnabled"><input id="sessionProviderAffinityEnabled" type="checkbox" disabled aria-describedby="sessionProviderAffinityHelp" onchange="PROVIDER_TOGGLE_DIRTY=true;PROVIDER_TOGGLE_GENERATION\+\+">/);
+  assert.match(html,/id="sessionProviderAffinityHelp"[^>]*>默认开启/);
+  assert.match(html,/sessionProviderAffinityEnabled:\$\('#sessionProviderAffinityEnabled'\)\.checked/);assert.match(html,/最小总数 0 = 关闭/);assert.match(html,/max=min 可关闭自动扩容/);assert.match(html,/当前目标与会话绑定状态/);
   assert.match(html,/cachePoolRole==='active'/);assert.match(html,/缓存活跃/);assert.match(html,/缓存备用/);
   assert.match(html, /api\('\/api\/statistics'\)/);
   assert.match(html, /id="statisticsStatus"[^>]+aria-live="polite"/);
@@ -232,7 +235,7 @@ test('statistics quota controls expose labelled lifecycle, truthful units and ca
   assert.match(statistics,/typeof value==='number'&&Number\.isFinite\(value\)&&value>=0&&value<=100/);
   assert.match(statistics,/\(100-used\)\.toFixed\(1\)/);assert.match(statistics,/api\('\/api\/statistics\/quota-refresh',\{force\}/);
   assert.match(statistics,/new AbortController\(\)/);assert.match(statistics,/signal:controller\.signal/);assert.match(html,/async function api\(path, body, method, asText=false, options=\{\}\)/);
-  assert.match(html,/STATISTICS_REFRESH_MS = 5 \* 60 \* 1000/);assert.match(statistics,/window\.addEventListener\('pagehide',\(\)=>\{closeClientKeySecret\(true,false\);stopStatisticsVisit\(\);stopModelProviders\(\);LOG_QUERY_ID\+\+;resetLogChain\(\);resetDetailSelection\(\);\}\)/);assert.match(statistics,/window\.addEventListener\('pageshow',\(\)=>!\$\('#statisticsPanel'\)\.hidden\?restoreStatisticsVisit\(\):!\$\('#modelProvidersPanel'\)\.hidden\?loadModelProviders\(\):null\)/);
+  assert.match(html,/STATISTICS_REFRESH_MS = 5 \* 60 \* 1000/);assert.match(statistics,/window\.addEventListener\('pagehide',\(\)=>\{closeClientKeySecret\(true,false\);stopStatisticsVisit\(\);stopModelProviders\(\);LOG_QUERY_ID\+\+;resetLogChain\(\);resetDetailSelection\(\);probeReadGeneration\+\+;\}\)/);assert.match(statistics,/window\.addEventListener\('pageshow',\(\)=>!\$\('#statisticsPanel'\)\.hidden\?restoreStatisticsVisit\(\):!\$\('#modelProvidersPanel'\)\.hidden\?loadModelProviders\(\):null\)/);
   assert.match(statistics,/STATISTICS_TIMER===null\)return startStatisticsVisit\(\)/);assert.match(statistics,/STATISTICS_REFRESH_CONTROLLER\?\.abort\(\)/);assert.match(statistics,/visitId!==STATISTICS_VISIT_ID/);
   assert.match(statistics,/controller!==STATISTICS_REFRESH_CONTROLLER/);assert.match(statistics,/STATISTICS_REFRESH_PROMISE&&STATISTICS_REFRESH_VISIT===visitId/);
 });
@@ -346,4 +349,19 @@ test('account maxRpm control is a bounded labelled input and renders only safe n
   assert.doesNotMatch(render, /rpm\.timestamps|rpm\.head/, 'the frontend never renders window internals');
   const log = html.slice(html.indexOf('async function loadLogs'), html.indexOf('async function clearLogs'));
   assert.match(log, /\['concurrency','rpm','mixed'\]\.includes\(x\.blockedBy\)/, 'ordinary request rows project only the bounded blockedBy enum');
+});
+
+test('scheduled probe settings use labelled bounded native inputs and a scoped, escaped recovery table', () => {
+  for (const [id, min, max] of [['probeInterval',1,1440],['probeRound',1,10],['probeDay',1,1000],['probeThreshold',1,10]]) {
+    assert.match(html,new RegExp(`for="${id}"`));
+    assert.match(html,new RegExp(`id="${id}" type="number" min="${min}" max="${max}" step="1"`));
+  }
+  assert.match(html,/id="probeScheduleFeedback" role="status" aria-live="polite"/);
+  assert.match(html,/id="probeAccountScope" onchange="renderProbeSchedule\(\)"/);
+  assert.match(html,/role="region" tabindex="0" aria-label="账号级定期渠道校验记录/);
+  const renderer=html.slice(html.indexOf('function renderProbeSchedule'),html.indexOf('async function probe(id, btn)'));
+  assert.match(renderer,/snapshot\.cells\.filter\(c=>c\.accountId===accountId\)/);
+  assert.match(renderer,/escapeHtml\(c\.model\)/);assert.match(renderer,/escapeHtml\(c\.provider\)/);
+  assert.match(renderer,/jsArg\(c\.accountId\)/);assert.match(renderer,/probeDraftDirty/);
+  assert.match(html,/请求数上限不是美元费用上限/);
 });

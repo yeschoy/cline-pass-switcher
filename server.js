@@ -70,6 +70,8 @@ const DEFAULT_CONFIG = {
   poolFullWaitMs: null, // null inherits concurrencyWaitMs
   errorRules: [],          // canonical ordered account/provider-model failure rules
   retryRules: [],          // canonical ordered request-level retry-stop rules
+  sessionProviderAffinityEnabled: true, // explicit sessions: prefer last successful planned Provider
+  providerProbeSchedule: { enabled: true, intervalMs: 300000, maxPerRound: 2, maxPer24h: 100, failureThreshold: 3 },
   accountWorkflow: defaultAccountWorkflow(), // disabled preserves legacy routing
   quotaProtection: { monthlyThresholdUsd: 0.20 }, // community-reference $50 monthly cap
   accountErrorRules: {},   // legacy compatibility projection only
@@ -207,13 +209,24 @@ function flushSelectionCounters() {
   try { persistSelectionCounters(); }
   catch { selectionCounterPersistenceError = true; console.error('[workflow] selection counter persistence failed'); }
 }
-const saveConfig = () => atomicWriteJson(CONFIG_PATH, config);
+let probeConfigPersistenceWarning = false;
+const saveConfig = ({ preserveProbeCells = false } = {}) => { atomicWriteJson(CONFIG_PATH, config); markProbeConfigWrite({ preserveProbeCells }); };
 const saveMeta = () => {
   flushSelectionCounters();
   atomicWriteJson(META_PATH, META, { pretty: false });
+  probeConfigPersistenceWarning = false;
   // A successful write of the current META also commits any confirmed monthly bans.
   for (const [id, pending] of quotaProvisional) if (pending.persistRetryAt !== undefined) quotaProvisional.delete(id);
 };
+function markProbeConfigWrite({ preserveProbeCells = false } = {}) {
+  if (!META.providerProbe) return; // First startup migration has not initialized the new metadata owner yet.
+  const digest = probeIdentityDigest();
+  // Only callers that have pruned each changed account/route may retain unaffected verdicts.
+  if (!preserveProbeCells && META.providerProbe.identityDigest !== digest) META.providerProbe.cells = {};
+  META.providerProbe.identityDigest = digest;
+  try { saveMeta(); }
+  catch { probeConfigPersistenceWarning = true; console.error('[渠道探测] 配置已保存，但证据修订同步失败；重启会保守清除旧避开状态'); }
+}
 const ordinaryLogs = new JsonlLogGroup({
   dir: LOG_DIR,
   streams: { requests: { maxRecords: 50000 }, errors: { maxRecords: 10000 } },
@@ -458,7 +471,7 @@ const RETRY_MATCH_KINDS = new Set(['status', 'body']);
 // 有界策略证据投影：只描述计划来源/模式与本次选择依据，不包含候选清单或成功率数值。
 const PROVIDER_PLAN_SOURCES = new Set(['configured', 'discovered', 'auto']);
 const PROVIDER_MODES = new Set(['strict', 'preferred']);
-const PROVIDER_SELECTIONS = new Set(['strict-first', 'health', 'compat-auto']);
+const PROVIDER_SELECTIONS = new Set(['strict-first', 'health', 'compat-auto', 'session-preferred', 'probe-exploration']);
 const MAX_ERROR_RULE_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
 const ERROR_RULE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
@@ -1222,8 +1235,143 @@ function normalizeCachePoolTarget(pipeline = config.accountPipeline) {
   META.cachePoolTargetSize = target;
   return true;
 }
+const PROBE_DEFAULTS = { enabled: true, intervalMs: 300000, maxPerRound: 2, maxPer24h: 100, failureThreshold: 3 };
+function normalizeProbeSchedule(value) {
+  if (!isPlainObject(value) || Object.keys(value).sort().join(',') !== Object.keys(PROBE_DEFAULTS).sort().join(',') || typeof value.enabled !== 'boolean' ||
+      !Number.isInteger(value.intervalMs) || value.intervalMs < 60000 || value.intervalMs > 86400000 ||
+      !Number.isInteger(value.maxPerRound) || value.maxPerRound < 1 || value.maxPerRound > 10 ||
+      !Number.isInteger(value.maxPer24h) || value.maxPer24h < 1 || value.maxPer24h > 1000 ||
+      !Number.isInteger(value.failureThreshold) || value.failureThreshold < 1 || value.failureThreshold > 10) throw new Error('invalid providerProbeSchedule');
+  return { ...value };
+}
+const PROBE_WINDOW_MS = 86400000;
+const PROBE_MAX_CELLS = 5000;
+function probeCellKey(accountId, model, provider) { return JSON.stringify([accountId, model, provider]); }
+// A config-private key binds verdicts to canonical identity without putting credentials in metadata.
+function probeIdentityDigest() {
+  const sorted = (value) => Array.isArray(value) ? value.map(sorted) : value && typeof value === 'object'
+    ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, sorted(value[key])])) : value;
+  const identity = { upstreamBase: config.upstreamBase, knownModels: [...config.knownModels].sort(),
+    perModel: config.perModel, accounts: config.accounts.map((a) => ({ id: a.id, clientKeyId: a.clientKeyId,
+      key: a.key, proxyUrl: a.proxyUrl, headers: a.headers, enabled: a.enabled, perModel: a.perModel }))
+      .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0) };
+  return crypto.createHmac('sha256', Buffer.from(config.providerProbeIdentityKey, 'hex'))
+    .update('cline-pass/provider-probe/identity/v1\0').update(JSON.stringify(sorted(identity))).digest('hex');
+}
+function normalizeProviderProbeMetadata() {
+  const digest = probeIdentityDigest();
+  if (META.providerProbe === undefined) { META.providerProbe = { budget: [], cursor: 0, round: 0, cells: {}, identityDigest: digest }; return true; }
+  const p = META.providerProbe;
+  const legacy = isPlainObject(p) && Object.hasOwn(p, 'configMtime');
+  if (!isPlainObject(p) || Object.keys(p).sort().join(',') !== (legacy ? 'budget,cells,configMtime,cursor,round' : 'budget,cells,cursor,identityDigest,round') ||
+      !Array.isArray(p.budget) || p.budget.length > 1000 || p.budget.some((ts) => !Number.isSafeInteger(ts) || ts < 0) ||
+      !Number.isSafeInteger(p.cursor) || p.cursor < 0 || !Number.isSafeInteger(p.round) || p.round < 0 ||
+      (legacy ? typeof p.configMtime !== 'number' || !Number.isFinite(p.configMtime) || p.configMtime < 0
+        : typeof p.identityDigest !== 'string' || !/^[a-f0-9]{64}$/.test(p.identityDigest)) ||
+      !isPlainObject(p.cells) || Object.keys(p.cells).length > PROBE_MAX_CELLS) throw new Error('invalid providerProbe metadata');
+  let interrupted = false;
+  for (const [key, cell] of Object.entries(p.cells)) {
+    let tuple; try { tuple = JSON.parse(key); } catch { throw new Error('invalid providerProbe cell'); }
+    if (!Array.isArray(tuple) || tuple.length !== 3 || tuple.some((s) => typeof s !== 'string' || s.length > 300) ||
+        !isPlainObject(cell) || !['checkedAt,evidence,held,lastReliableAt,lastRound,outcome,streak',
+          'checkedAt,evidence,held,lastReliableAt,lastRound,outcome,pending,streak'].includes(Object.keys(cell).sort().join(',')) ||
+        (Object.hasOwn(cell, 'pending') && cell.pending !== true) ||
+        !Number.isSafeInteger(cell.checkedAt) || cell.checkedAt < 0 ||
+        !Number.isSafeInteger(cell.lastReliableAt) || cell.lastReliableAt < 0 || cell.lastReliableAt > cell.checkedAt ||
+        !Number.isSafeInteger(cell.lastRound) || cell.lastRound < 0 ||
+        !Number.isInteger(cell.streak) || cell.streak < 0 || cell.streak > 10 || typeof cell.held !== 'boolean' ||
+        !['reliable','unknown'].includes(cell.evidence) || !['ok','bad','unknown'].includes(cell.outcome)) throw new Error('invalid providerProbe cell');
+    // No in-flight native call survives restart. Retain the conservative debit and
+    // prior held evidence, but never manufacture a terminal success or failure.
+    if (cell.pending) { delete cell.pending; interrupted = true; }
+  }
+  // An old mtime-only record has no trustworthy identity proof, even if cp -p restored it.
+  if (legacy || p.identityDigest !== digest) {
+    p.cells = {}; delete p.configMtime; p.identityDigest = digest;
+    return true;
+  }
+  return interrupted;
+}
+function knownProbeProviders(account, model) {
+  const route = resolveModelConfig(account, model);
+  const configured = normalizeStringList(route.upstreams, 20);
+  return configured.length ? configured : normalizeStringList(META.models[model]?.upstreams, 100);
+}
+function probePruneCells() {
+  const state = META.providerProbe;
+  for (const key of Object.keys(state.cells)) {
+    const [id, model, provider] = JSON.parse(key);
+    const account = config.accounts.find((a) => a.id === id);
+    if (!account || !config.knownModels.includes(model) || !knownProbeProviders(account, model).includes(provider)) delete state.cells[key];
+  }
+}
+function probeBudgetRemaining(now = Date.now()) {
+  return Math.max(0, config.providerProbeSchedule.maxPer24h - META.providerProbe.budget.filter((ts) => ts > now - PROBE_WINDOW_MS).length);
+}
+function probeEvidenceSlot(key) {
+  const cells = META.providerProbe.cells;
+  if (Object.hasOwn(cells, key)) return cells[key].pending ? { blocked: 'pending' } : { evict: null };
+  const entries = Object.entries(cells);
+  if (entries.length < PROBE_MAX_CELLS) return { evict: null };
+  // Pending reservations and durable holds are never capacity victims. Prefer
+  // unknown/zero-streak samples, then oldest checkedAt and stable key order.
+  let victim = null;
+  for (const [candidateKey, cell] of entries) {
+    if (cell.held || cell.pending) continue;
+    const rank = cell.outcome === 'unknown' || cell.streak === 0 ? 0 : 1;
+    if (!victim || rank < victim.rank || (rank === victim.rank &&
+        (cell.checkedAt < victim.checkedAt || (cell.checkedAt === victim.checkedAt && candidateKey < victim.key))))
+      victim = { key: candidateKey, checkedAt: cell.checkedAt, rank };
+  }
+  return victim ? { evict: victim.key } : { blocked: 'capacity' };
+}
+function reserveScheduledProbe(key, round, now = Date.now()) {
+  const p = META.providerProbe, slot = probeEvidenceSlot(key);
+  if (slot.blocked) return { ok: false, blocked: slot.blocked };
+  const budget = p.budget.filter((ts) => ts > now - PROBE_WINDOW_MS);
+  if (budget.length >= config.providerProbeSchedule.maxPer24h) return { ok: false, blocked: 'budget' };
+  const cells = { ...p.cells };
+  if (slot.evict) delete cells[slot.evict];
+  const prior = cells[key];
+  const pending = prior ? { ...prior, pending: true } : {
+    checkedAt: now, lastReliableAt: 0, lastRound: 0, outcome: 'unknown', evidence: 'unknown',
+    streak: 0, held: false, pending: true,
+  };
+  cells[key] = pending;
+  // One atomic rename reserves the durable evidence slot AND the paid-call debit.
+  // Only publish both in memory after it succeeds; a crash retains unknown state.
+  const candidate = { ...p, budget: [...budget, now], cells };
+  atomicWriteJson(META_PATH, { ...META, providerProbe: candidate }, { pretty: false });
+  p.budget = candidate.budget; p.cells = cells;
+  return { ok: true, pending };
+}
+function probeStatus() {
+  const p = META.providerProbe;
+  return { schedule: config.providerProbeSchedule, budgetRemaining: probeBudgetRemaining(), budgetReserved: p.budget.length,
+    nextDueAt: config.providerProbeSchedule.enabled ? probeNextDueAt : null, running: probeRunning,
+    persistenceWarning: probeConfigPersistenceWarning,
+    coverage: { ...probeCoverage, storageSaturated: Object.keys(p.cells).length >= PROBE_MAX_CELLS &&
+      Object.values(p.cells).every((cell) => cell.held || cell.pending) },
+    cells: Object.entries(p.cells).slice(0, PROBE_MAX_CELLS).map(([key, cell]) => {
+      const [accountId, model, provider] = JSON.parse(key);
+      const account = config.accounts.find((a) => a.id === accountId);
+      const configured = account ? normalizeStringList(resolveModelConfig(account, model).upstreams, 20) : [];
+      return { accountId, model, provider, ...cell, evidenceKind: 'account-channel-health',
+        channelSource: configured.length ? 'configured' : 'discovered', pinCapability: 'unknown', pinCapabilityCheckedAt: null,
+        stale: Date.now() - (cell.held ? cell.lastReliableAt : cell.checkedAt) > PROBE_WINDOW_MS || !account || account.enabled === false };
+    }) };
+}
 function normalizeConfigAndMeta({ persist = false } = {}) {
   let dirty = false;
+  if (!Object.hasOwn(loadedConfig, 'providerProbeSchedule')) { config.providerProbeSchedule = { ...PROBE_DEFAULTS }; dirty = true; }
+  else config.providerProbeSchedule = normalizeProbeSchedule(config.providerProbeSchedule);
+  if (!Object.hasOwn(loadedConfig, 'providerProbeIdentityKey')) {
+    config.providerProbeIdentityKey = crypto.randomBytes(32).toString('hex'); dirty = true;
+  } else if (typeof config.providerProbeIdentityKey !== 'string' || !/^[a-f0-9]{64}$/.test(config.providerProbeIdentityKey)) {
+    throw new Error('invalid provider probe identity key');
+  }
+  if (!Object.hasOwn(loadedConfig, 'sessionProviderAffinityEnabled')) { config.sessionProviderAffinityEnabled = true; dirty = true; }
+  else if (typeof config.sessionProviderAffinityEnabled !== 'boolean') throw new Error('invalid sessionProviderAffinityEnabled');
   const workflow = normalizeAccountWorkflow(config.accountWorkflow);
   if (JSON.stringify(config.accountWorkflow) !== JSON.stringify(workflow)) { config.accountWorkflow = workflow; dirty = true; }
   const protection = normalizeQuotaProtection(config.quotaProtection);
@@ -1275,6 +1423,7 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   META.models ||= {}; META.history ||= []; META.accountStates ||= {};
   if (!META.routingSecret || typeof META.routingSecret !== 'string') { META.routingSecret = crypto.randomBytes(32).toString('hex'); dirty = true; }
   if (normalizeProviderHealthMetadata()) dirty = true;
+  if (normalizeProviderProbeMetadata()) dirty = true;
   if (normalizeAccountStates()) dirty = true;
   if (normalizeStatistics()) dirty = true;
   if (normalizeAccountQuotas()) dirty = true;
@@ -1336,6 +1485,9 @@ const sessionBindings = new Map();
 const sessionBindingCounters = { hits: 0, misses: 0, invalidated: 0, temporaryOverflows: 0, provisionalHits: 0 };
 let sessionBindingGeneration = 0n;
 const SESSION_BINDING_TTL_SCALE = process.env.NODE_ENV === 'test' ? Math.max(0.0001, Math.min(1, Number(process.env.CLINE_PASS_TEST_BINDING_TTL_SCALE) || 1)) : 1;
+const SESSION_PROVIDER_TTL_MS = 3_600_000;
+const SESSION_PROVIDER_MODELS_PER_IDENTITY = 16;
+let sessionProviderAffinityGeneration = 0;
 function notifyCapacityWaiters() { for (const resolve of [...waiters]) resolve(); }
 function incrementBindingCounter(key) { sessionBindingCounters[key] = Math.min(Number.MAX_SAFE_INTEGER, (sessionBindingCounters[key] || 0) + 1); }
 function sessionBindingSource(identity) { return identity?.confidence === 'explicit' ? 'explicit' : identity?.confidence === 'fallback' ? 'fallback' : 'none'; }
@@ -1357,14 +1509,14 @@ function deleteSessionBinding(fingerprint, entry, { count = true } = {}) {
 function pruneSessionBindings(now = Date.now(), { full = false } = {}) {
   let scanned = 0;
   for (const [fingerprint, entry] of sessionBindings) {
-    if (entry.expiresAt <= now) deleteSessionBinding(fingerprint, entry);
+    if (entry.expiresAt <= now) deleteSessionBinding(fingerprint, entry, { count: entry.kind !== 'provider' });
     if (!full && ++scanned >= 256) break;
   }
   const limit = config.accountPipeline?.sessionBindingMaxEntries || SESSION_BINDING_MAX_ENTRIES;
   while (sessionBindings.size > limit) {
     const oldest = sessionBindings.entries().next().value;
     if (!oldest) break;
-    deleteSessionBinding(oldest[0], oldest[1]);
+    deleteSessionBinding(oldest[0], oldest[1], { count: oldest[1].kind !== 'provider' });
   }
 }
 function touchSessionBinding(fingerprint, entry, now = Date.now()) {
@@ -1417,17 +1569,22 @@ function cleanupSessionBindingSelection(selected) {
   const entry = sessionBindings.get(token.fingerprint);
   if (entry?.state === 'provisional' && entry.generation === token.generation && entry.ownerRequestId === token.ownerRequestId) deleteSessionBinding(token.fingerprint, entry);
 }
-function invalidateSessionBindingsForAccount(accountId) {
+function invalidateSessionBindingsForAccount(accountId, { credentialsChanged = false } = {}) {
   let changed = false;
-  for (const [fingerprint, entry] of sessionBindings) if (entry.accountId === accountId) changed = deleteSessionBinding(fingerprint, entry) || changed;
+  for (const [fingerprint, entry] of sessionBindings) {
+    // Temporary account holds invalidate account affinity, not an independently
+    // eligible Provider hint that may be used on another owner's allowed account.
+    if (entry.accountId === accountId && (entry.kind !== 'provider' || credentialsChanged))
+      changed = deleteSessionBinding(fingerprint, entry, { count: entry.kind !== 'provider' }) || changed;
+  }
   if (changed) notifyCapacityWaiters();
 }
 function invalidateSessionBindingsForOwner(clientKeyId) {
-  for (const account of config.accounts) if (account.clientKeyId === clientKeyId) invalidateSessionBindingsForAccount(account.id);
+  for (const account of config.accounts) if (account.clientKeyId === clientKeyId) invalidateSessionBindingsForAccount(account.id, { credentialsChanged: true });
 }
 function invalidateSessionBindingsOutside(validIds) {
   let changed = false;
-  for (const [fingerprint, entry] of sessionBindings) if (!validIds.has(entry.accountId)) changed = deleteSessionBinding(fingerprint, entry) || changed;
+  for (const [fingerprint, entry] of sessionBindings) if (entry.kind !== 'provider' && !validIds.has(entry.accountId)) changed = deleteSessionBinding(fingerprint, entry) || changed;
   if (changed) notifyCapacityWaiters();
 }
 function reconcileSessionBindings() {
@@ -1439,7 +1596,46 @@ function reconcileSessionBindings() {
 }
 function sessionBindingSummary() {
   reconcileSessionBindings();
-  return { enabled: sessionBindingConfigured(), size: sessionBindings.size, maxEntries: config.accountPipeline?.sessionBindingMaxEntries || SESSION_BINDING_MAX_ENTRIES, counters: { ...sessionBindingCounters } };
+  const providerEntries = [...sessionBindings.values()].filter(entry => entry.kind === 'provider').length;
+  return { enabled: sessionBindingConfigured(), size: sessionBindings.size - providerEntries, providerEntries,
+    totalEntries: sessionBindings.size, maxEntries: config.accountPipeline?.sessionBindingMaxEntries || SESSION_BINDING_MAX_ENTRIES,
+    counters: { ...sessionBindingCounters } };
+}
+// Provider hints use at most 16 slots per fingerprint in the same bounded LRU.
+// This avoids scanning the entire (up to 100k-entry) account-binding owner on each success.
+// Slot keys cannot collide with 64-hex account fingerprints; neither raw identity nor model text is in a key.
+function providerHintKey(fingerprint, slot) { return `provider\0${fingerprint}\0${slot}`; }
+function providerHintSlots(fingerprint, now = Date.now()) {
+  const slots = [];
+  for (let slot = 0; slot < SESSION_PROVIDER_MODELS_PER_IDENTITY; slot++) {
+    const key = providerHintKey(fingerprint, slot), entry = sessionBindings.get(key);
+    if (entry?.expiresAt <= now) deleteSessionBinding(key, entry, { count: false });
+    slots.push({ key, entry: entry?.expiresAt > now ? entry : null });
+  }
+  return slots;
+}
+function sessionProviderHint(identity, modelId) {
+  if (!config.sessionProviderAffinityEnabled || identity.confidence !== 'explicit' || !identity.fingerprint) return null;
+  const match = providerHintSlots(identity.fingerprint).find(({ entry }) => entry?.modelId === modelId);
+  if (!match) return null;
+  // Reading a hint moves it in the shared LRU but does not slide its TTL.
+  sessionBindings.delete(match.key); sessionBindings.set(match.key, match.entry);
+  return match.entry.provider;
+}
+function rememberSessionProvider(identity, modelId, account, attempt, sequence, affinityGeneration) {
+  if (!config.sessionProviderAffinityEnabled || affinityGeneration !== sessionProviderAffinityGeneration ||
+      identity.confidence !== 'explicit' || !identity.fingerprint || !attempt?.upstream ||
+      !identity.credentialValid?.() || !providerAttemptGenerationIsCurrent(modelId, account, attempt) ||
+      !config.accounts.some(a => a.id === account.id && a.clientKeyId === identity.clientKeyId && a.key === account.key && a.proxyUrl === account.proxyUrl)) return;
+  const now = Date.now(), slots = providerHintSlots(identity.fingerprint, now);
+  const match = slots.find(({ entry }) => entry?.modelId === modelId);
+  if (match?.entry.sequence > sequence) return; // an older concurrent turn finished late
+  // An unused slot is preferred; otherwise evict the least recently successful model.
+  const target = match || slots.find(({ entry }) => !entry) || slots.reduce((oldest, slot) => slot.entry.expiresAt < oldest.entry.expiresAt ? slot : oldest);
+  sessionBindings.delete(target.key);
+  sessionBindings.set(target.key, { kind: 'provider', accountId: account.id, modelId, provider: attempt.upstream, sequence,
+    expiresAt: now + Math.max(1, Math.floor(SESSION_PROVIDER_TTL_MS * SESSION_BINDING_TTL_SCALE)) });
+  pruneSessionBindings(now);
 }
 function getAccountState(id) { return (META.accountStates ||= {})[id] || null; }
 function safeReason(s, extraSecrets = []) {
@@ -2488,7 +2684,7 @@ async function accountFetchJSON(url, opts = {}, timeoutMs = 60000, account = nul
   // 管理面 chat attempt 一旦预留 permit 就绝不能泄漏：已发出的请求由 clineRequest 在提交后保持不变，
   // 这里只兜底“尚未进入 transport 的异常”，release 幂等。
   try {
-    const result = await clineRequestJSON(url, { headers, body: opts.body || '', timeoutMs, account, attemptMeta: opts.attemptMeta || null, permit: opts.permit || null });
+    const result = await clineRequestJSON(url, { headers, body: opts.body || '', timeoutMs, signal: opts.signal, maxResponseBytes: opts.maxResponseBytes || Infinity, account, attemptMeta: opts.attemptMeta || null, permit: opts.permit || null, attemptOwner: opts.attemptOwner || null });
     let json = null; try { json = JSON.parse(result.text); } catch { json = { raw: result.text }; }
     return { status: result.status, json };
   } catch (error) {
@@ -2804,7 +3000,7 @@ async function fetchOfficialModels() {
   const added = valid.filter((id) => !config.knownModels.includes(id));
   if (added.length) {
     config.knownModels.push(...added);
-    saveConfig();
+    saveConfig({ preserveProbeCells: true });
   }
   META.officialModelsFetch = { ts: Date.now(), sources, found: valid.length, added, total: config.knownModels.length };
   saveMeta();
@@ -3824,10 +4020,188 @@ function createQuotaPageToken() {
   quotaPageBatches++; return token;
 }
 function releaseQuotaPageToken(token) { cancelQuotaPageToken(token); quotaPageBatches = Math.max(0, quotaPageBatches - 1); }
+let probeNextDueAt = 0, probeRunning = false;
+let probeCoverage = { eligible: 0, sampled: 0, capacitySkipped: 0, deferred: 0, lastRoundAt: null };
+const probeControllers = new Set();
+function abortScheduledProbes() { for (const controller of probeControllers) controller.abort(); }
+let probeRevision = 0;
+function probeInterval() {
+  const override = process.env.NODE_ENV === 'test' ? Number(process.env.CLINE_PASS_TEST_PROBE_INTERVAL_MS) : NaN;
+  return Number.isInteger(override) && override >= 50 && override <= 10000 ? override : config.providerProbeSchedule.intervalMs;
+}
+function probeCandidates(windowOrdinal = 0, now = Date.now()) {
+  const items = [], subscribed = config.knownModels, eligible = enabledAccounts();
+  const accountStart = windowOrdinal % Math.max(1, eligible.length);
+  const modelStart = Math.floor(windowOrdinal / Math.max(1, eligible.length)) % Math.max(1, subscribed.length);
+  for (let i = 0; i < eligible.length; i++) {
+    const account = eligible[(accountStart + i) % eligible.length];
+    for (let j = 0; j < Math.min(200, subscribed.length); j++) {
+      const model = subscribed[(modelStart + j) % subscribed.length];
+      const excluded = new Set(normalizeStringList(resolveModelConfig(account, model).exclude, 50));
+      // Read the planner's configured/discovered source and hard/manual eligibility without creating global health samples.
+      for (const provider of knownProbeProviders(account, model)) {
+        if (excluded.has(provider)) continue;
+        const state = normalizeProviderHealthState(META.models[model]?.upstreamStatus?.[provider]);
+        if (state.hardQuarantined || state.cooldownUntil > now) continue;
+        if (items.length >= PROBE_MAX_CELLS) return { items, truncated: true };
+        items.push({ account, model, provider });
+      }
+    }
+  }
+  return { items, truncated: subscribed.length > 200 };
+}
+function probeCandidateStillEligible({ account, model, provider }, now = Date.now()) {
+  if (!enabledAccounts().includes(account) || !config.knownModels.includes(model) ||
+      !knownProbeProviders(account, model).includes(provider) ||
+      normalizeStringList(resolveModelConfig(account, model).exclude, 50).includes(provider)) return false;
+  const state = normalizeProviderHealthState(META.models[model]?.upstreamStatus?.[provider]);
+  return !state.hardQuarantined && state.cooldownUntil <= now;
+}
+function hasExactProbeProviderEvidence(error, provider) {
+  if (!error || typeof error !== 'object') return false;
+  const stack = [[error, 0]];
+  while (stack.length) {
+    const [value, depth] = stack.pop();
+    if (!value || typeof value !== 'object' || depth > 4) continue;
+    for (const [key, child] of Object.entries(value)) {
+      if (/^(?:provider|providerName|provider_name|upstream|finalProvider)$/i.test(key) && typeof child === 'string' && child.toLowerCase() === provider.toLowerCase()) return true;
+      if (child && typeof child === 'object') stack.push([child, depth + 1]);
+    }
+  }
+  return false;
+}
+function classifyScheduledProbe(response, provider) {
+  const { status, json } = response;
+  const choices = json?.data?.choices || json?.choices;
+  if (status >= 200 && status < 300 && !upstreamErrorOf(json) && Array.isArray(choices) && choices.length &&
+      typeof choices[0]?.message?.content === 'string' && choices[0].message.content.trim()) {
+    const actual = parseRouting(json).finalProvider;
+    return actual && actual.toLowerCase() === provider.toLowerCase() ? { outcome: 'ok', evidence: 'reliable' } : { outcome: 'unknown', evidence: 'unknown' };
+  }
+  const error = upstreamErrorOf(json);
+  // Generic HTTP errors, account quota, malformed/empty content and ignored pins are not channel-level evidence.
+  const errorText = structuredErrorText(error);
+  const explicitChannelFault = /\b(?:provider|channel|upstream|route|routing|pin)\b[^\n]{0,200}\b(?:reject(?:ed)?|invalid|not[ _-]?found|unsupported|unavailable|limit(?:ed)?)\b|\b(?:reject(?:ed)?|invalid|not[ _-]?found|unsupported|unavailable|limit(?:ed)?)\b[^\n]{0,200}\b(?:provider|channel|upstream|route|routing|pin)\b|rate[ _-]?limit|too many requests/i.test(typeof error?.message === 'string' ? error.message : errorText);
+  if ([400, 404, 422, 429].includes(status) && hasExactProbeProviderEvidence(error, provider) && explicitChannelFault &&
+      !/(?:account|api[ _-]?key|credential|authoriz|authenticat|permission|billing|payment|subscription|quota|insufficient[ _-]?balance)/i.test(errorText))
+    return { outcome: 'bad', evidence: 'reliable' };
+  return { outcome: 'unknown', evidence: 'unknown' };
+}
+async function runScheduledProbe(item, round) {
+  const { account, model, provider } = item, key = probeCellKey(account.id, model, provider);
+  // A held-only table must not even take an account lease/RPM reservation for a
+  // new triple. Recheck synchronously at the persist-first boundary as well.
+  const initial = probeEvidenceSlot(key);
+  if (initial.blocked) return initial.blocked === 'capacity' ? 'capacity' : 'deferred';
+  const lease = tryLeaseResult(account, Date.now(), account.clientKeyId).lease;
+  if (!lease) return 'deferred';
+  const ctrl = new AbortController(), revision = probeRevision; probeControllers.add(ctrl);
+  let claim = null, reservation = null;
+  try {
+    if (shuttingDown || !config.providerProbeSchedule.enabled || !config.accounts.some((a) => a === account) ||
+        !probeCandidateStillEligible(item)) return 'deferred';
+    claim = claimManagementPermit(lease);
+    if (!claim.ok) return 'deferred';
+    const body = injectPrefs({ model, messages: [{ role: 'user', content: 'hi' }], max_tokens: 16 }, model, { upstream: provider });
+    try { reservation = reserveScheduledProbe(key, round); }
+    catch { console.error('[渠道探测] 预算/证据槽持久化失败，已停止发送'); return 'deferred'; }
+    if (!reservation.ok) return reservation.blocked === 'capacity' ? 'capacity' : 'deferred';
+    let verdict = { outcome: 'unknown', evidence: 'unknown' }, committed = false;
+    try {
+      const response = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, {
+        headers: chatHeaders(account.key), body: JSON.stringify(body), signal: ctrl.signal,
+        attemptMeta: { model, provider: [provider] }, permit: claim.permit, maxResponseBytes: 256 * 1024,
+        attemptOwner: { nextAttemptIndex: 0, onAttemptCommit() { committed = true; } },
+      }, 60000, account);
+      verdict = classifyScheduledProbe(response, provider);
+    } catch { /* Network/proxy/shutdown is unknown, never account or Provider health. */ }
+    const p = META.providerProbe, previous = p.cells[key];
+    // A route/identity edit or exact recovery may have removed the reservation.
+    // A stale result must not recreate it or overwrite a later probe's slot.
+    if (previous === reservation.pending) {
+      if (ctrl.signal.aborted || shuttingDown || revision !== probeRevision || !config.accounts.some((a) => a === account) ||
+          !probeCandidateStillEligible(item) || previous.lastRound >= round) verdict = { outcome: 'unknown', evidence: 'unknown' };
+      const checkedAt = Date.now();
+      const streak = verdict.outcome === 'ok' ? 0 : verdict.outcome === 'bad' ? Math.min(10, previous.streak + 1) : previous.streak;
+      const cell = { checkedAt, lastReliableAt: verdict.evidence === 'reliable' ? checkedAt : previous.lastReliableAt,
+        outcome: verdict.outcome, evidence: verdict.evidence, streak,
+        held: verdict.outcome === 'ok' ? false : (previous.held || streak >= config.providerProbeSchedule.failureThreshold), lastRound: round };
+      // Never publish a verdict before its atomic write. A failed completion
+      // leaves the conservative budget and durable pending byte record intact;
+      // in memory, clear only pending so this account/channel can retry after
+      // storage recovers without requiring an operator restart. Retain an old
+      // hold/streak, and let the next successful reservation replace the disk
+      // pending atomically (startup also clears interrupted pending markers).
+      try { atomicWriteJson(META_PATH, { ...META, providerProbe: { ...p, cells: { ...p.cells, [key]: cell } } }, { pretty: false }); p.cells[key] = cell; }
+      catch {
+        const interrupted = { ...previous }; delete interrupted.pending;
+        p.cells[key] = interrupted;
+        console.error('[渠道探测] 结果持久化失败，保留旧证据并允许后续复探');
+      }
+    }
+    return committed ? 'sampled' : 'deferred';
+  } finally {
+    claim?.permit?.release(); ctrl.abort(); probeControllers.delete(ctrl); lease.release();
+  }
+}
+async function runScheduledProbeRound() {
+  if (probeRunning || shuttingDown || !config.providerProbeSchedule.enabled) return;
+  probeRunning = true;
+  try {
+    const p = META.providerProbe, tick = p.cursor;
+    const cap = Math.min(config.providerProbeSchedule.maxPerRound, probeBudgetRemaining());
+    // The cold ordinal moves once per five single-slot rounds, not five positions at once.
+    // Neither tier's pick ordinal is the candidate-window rotation index.
+    const hotOrdinal = cap === 1 ? tick - Math.floor(tick / 5) : tick;
+    const coldOrdinal = cap === 1 ? Math.floor(tick / 5) : tick;
+    const coldSlot = cap === 1 && tick % 5 === 4;
+    const windowOrdinal = coldSlot ? coldOrdinal : hotOrdinal;
+    // A complete snapshot is kept in source order. Only truncated snapshots rotate.
+    let candidateWindow = probeCandidates();
+    const phaseCount = Math.max(1, enabledAccounts().length) * Math.max(1, config.knownModels.length);
+    const windowed = candidateWindow.truncated;
+    if (windowed) candidateWindow = probeCandidates(windowOrdinal);
+    const candidates = candidateWindow.items, truncated = windowed;
+    const recent = new Set(recentHistory.slice(0, 100).flatMap((h) => (Array.isArray(h.trace) ? h.trace.slice(0, 50) : []).map((a) => probeCellKey(a.accountId, h.model, a.upstream))));
+    const hot = candidates.filter((c) => recent.has(probeCellKey(c.account.id, c.model, c.provider)));
+    const cold = candidates.filter((c) => !recent.has(probeCellKey(c.account.id, c.model, c.provider)));
+    if (cap === 0) {
+      probeCoverage = { eligible: candidates.length, sampled: 0, capacitySkipped: 0, deferred: candidates.length, truncated, lastRoundAt: Date.now() };
+      return;
+    }
+    const round = ++p.round, chosen = [], taken = new Set();
+    const coldSlots = cold.length ? (cap === 1 ? (coldSlot ? 1 : 0) : 1) : 0;
+    const take = (pool, count, ordinal) => {
+      const offset = windowed ? Math.floor(ordinal / phaseCount) : ordinal;
+      for (let scanned = 0; chosen.length < cap && scanned < pool.length && count > 0; scanned++) {
+        const item = pool[(offset + scanned) % pool.length], key = probeCellKey(item.account.id, item.model, item.provider);
+        if (taken.has(key)) continue;
+        chosen.push(item); taken.add(key); count--;
+      }
+    };
+    take(cold, coldSlots, coldOrdinal);
+    take(hot, cap - chosen.length, hotOrdinal);
+    take(cold, cap - chosen.length, coldOrdinal);
+    p.cursor = (p.cursor + 1) % Number.MAX_SAFE_INTEGER;
+    probeCoverage = { eligible: candidates.length, sampled: 0, capacitySkipped: 0, deferred: candidates.length, truncated, lastRoundAt: Date.now() };
+    let index = 0;
+    await Promise.all(Array.from({ length: Math.min(2, chosen.length) }, async () => {
+      while (index < chosen.length && !shuttingDown && config.providerProbeSchedule.enabled) {
+        const item = chosen[index++];
+        const outcome = await runScheduledProbe(item, round);
+        if (outcome === 'sampled') probeCoverage.sampled++;
+        if (outcome === 'capacity') probeCoverage.capacitySkipped++;
+        probeCoverage.deferred = Math.max(0, candidates.length - probeCoverage.sampled);
+      }
+    }));
+  } finally { probeRunning = false; }
+}
 function scheduleQuotaRefresh() {
   const version = ++quotaScheduleVersion, epoch = quotaRoutingEpoch;
   clearTimeout(quotaTimer); quotaTimer = null;
-  if (shuttingDown || (!quotaRoutingEnabled() && !config.accounts.some((a) => quotaProtectionScheduled(a)))) return;
+  if (shuttingDown || (!quotaRoutingEnabled() && !config.accounts.some((a) => quotaProtectionScheduled(a)) && !config.providerProbeSchedule.enabled)) return;
+  if (!probeNextDueAt && config.providerProbeSchedule.enabled) probeNextDueAt = Date.now() + probeInterval() +
+    (process.env.NODE_ENV === 'test' ? 0 : parseInt(META.routingSecret.slice(0, 6), 16) % 30000);
   const arm = () => {
     if (version !== quotaScheduleVersion || epoch !== quotaRoutingEpoch) return;
     const run = async () => {
@@ -3848,12 +4222,18 @@ function scheduleQuotaRefresh() {
       const accounts = hrwRank(config.accounts.filter((account) => account.enabled !== false && account.key), 'quota-refresh');
       const dueAccounts = accounts.filter((account) => quotaProtectionDue(account) || (quotaRoutingEnabled() && quotaDemandOutcome(account) === null));
       const start = quotaCursor % Math.max(1, dueAccounts.length), due = [...dueAccounts.slice(start), ...dueAccounts.slice(0, start)].slice(0, 2);
-      quotaCursor++; await Promise.all(due.map((account) => requestQuota(account.id, quotaProtectionDue(account) ? { protection: true } : { routingEpoch: epoch })));
-      if (quotaRoutingEnabled() || config.accounts.some((account) => quotaProtectionScheduled(account))) arm();
+      quotaCursor++;
+      if (config.providerProbeSchedule.enabled && Date.now() >= probeNextDueAt) {
+        probeNextDueAt = Date.now() + probeInterval();
+        void runScheduledProbeRound().catch(() => { console.error('[渠道探测] 本轮失败，模型流量不受影响'); });
+      }
+      await Promise.all(due.map((account) => requestQuota(account.id, quotaProtectionDue(account) ? { protection: true } : { routingEpoch: epoch })));
+      if (quotaRoutingEnabled() || config.accounts.some((account) => quotaProtectionScheduled(account) || config.providerProbeSchedule.enabled)) arm();
     };
     const now = Date.now();
     const wake = quotaRoutingEnabled() ? (process.env.NODE_ENV === 'test' ? 10 : 1000 + (quotaCursor % 30) * 1000)
-      : Math.max(10, Math.min(2147483647, ...config.accounts.filter((account) => quotaProtectionScheduled(account)).map((account) => quotaProtectionWakeAt(account, now) - now)));
+      : Math.max(10, Math.min(2147483647, ...config.accounts.filter((account) => quotaProtectionScheduled(account)).map((account) => quotaProtectionWakeAt(account, now) - now),
+        config.providerProbeSchedule.enabled ? probeNextDueAt - now : 2147483647));
     quotaTimer = setTimeout(run, wake); quotaTimer.unref();
   };
   arm();
@@ -4056,7 +4436,7 @@ function injectPrefs(body, modelId, { upstream, sort = null }) {
 
 // 稳定候选快照：configured 非空时权威，否则 stable discovered；exclude/硬隔离/冷却在快照阶段过滤。
 // 实际逐次选择由 selectProviderAttempt() 完成——strict 首试按来源顺序，后续与 preferred 都按 Provider-model 24h 成功率。
-function buildProviderPlan(modelId, cfg = {}, account = null, now = Date.now()) {
+function buildProviderPlan(modelId, cfg = {}, account = null, now = Date.now(), preferredProvider = null) {
   const configuredOrder = normalizeStringList(cfg.upstreams, 20);
   const discoveredOrder = normalizeStringList(META.models[modelId]?.upstreams, 100);
   const exclude = new Set(normalizeStringList(cfg.exclude, 50));
@@ -4067,7 +4447,7 @@ function buildProviderPlan(modelId, cfg = {}, account = null, now = Date.now()) 
     maxAttempts: cfg.maxRetries === null || cfg.maxRetries === undefined ? Infinity : Math.max(1, Number(cfg.maxRetries) + 1),
     accountGeneration: account ? (providerCircuitAccountGenerations.get(account.id) || 0) : 0,
     routeGeneration: account ? (providerCircuitRouteGenerations.get(providerCircuitRouteKey(account.id, modelId)) || 0) : 0,
-    sourceOrder: [], sourceIndex: new Map(), available: [], rates: new Map(), plannedOrder: [], allExcluded: false, retryAfter: null,
+    sourceOrder: [], sourceIndex: new Map(), available: [], rates: new Map(), plannedOrder: [], allExcluded: false, autoHeldExploration: false, retryAfter: null, preferredProvider,
   };
   if (source === 'auto') { plan.maxAttempts = 1; return plan; }
   plan.sourceOrder = source === 'configured' ? configuredOrder : discoveredOrder;
@@ -4075,14 +4455,25 @@ function buildProviderPlan(modelId, cfg = {}, account = null, now = Date.now()) 
   const allowed = plan.sourceOrder.filter((provider) => !exclude.has(provider));
   plan.allExcluded = allowed.length === 0;
   plan.available = allowed.filter((provider) => { const state = providerHealthState(modelId, provider); return !state.hardQuarantined && state.cooldownUntil <= now; });
+  if (account && plan.available.length) {
+    const normal = plan.available.filter((provider) => !META.providerProbe.cells[probeCellKey(account.id, modelId, provider)]?.held);
+    if (normal.length) plan.available = normal;
+    else { plan.autoHeldExploration = true; plan.preferredProvider = null; plan.maxAttempts = 1; }
+  }
   if (!plan.allExcluded && !plan.available.length) {
     const future = allowed.map((provider) => providerHealthState(modelId, provider)).filter((state) => !state.hardQuarantined && state.cooldownUntil > now).map((state) => state.cooldownUntil);
     plan.retryAfter = future.length ? retryAfterSeconds(Math.min(...future) - now) : null;
   }
   for (const provider of plan.available) plan.rates.set(provider, successHealthProjection('provider-model', modelId, provider, now).successRate);
+  if (preferredProvider && plan.providerCooldownMs > 0 && account) {
+    const circuit = providerCircuitStates.get(providerCircuitKey(account.id, modelId, preferredProvider));
+    if (circuit?.halfOpen || circuit?.cooldownUntil > now) plan.preferredProvider = null;
+  }
   plan.plannedOrder = plan.mode === 'preferred'
     ? healthOrderedProviders(plan, plan.available)
     : plan.available.length ? [plan.available[0], ...healthOrderedProviders(plan, plan.available.slice(1))] : [];
+  if (plan.available.includes(plan.preferredProvider)) plan.plannedOrder = [plan.preferredProvider, ...plan.plannedOrder.filter(p => p !== plan.preferredProvider)];
+  if (plan.autoHeldExploration) { plan.plannedOrder = plan.plannedOrder.slice(0, 1); plan.available = plan.plannedOrder; }
   return plan;
 }
 // Provider-model 24h 直接成功率降序；null 最后，同率/都未知按来源顺序。
@@ -4110,15 +4501,16 @@ function selectProviderAttempt(modelId, plan, account, attempted, now = Date.now
   // strict 模式的首个 attempt 是 strict-first（本请求首个真实尝试，按来源顺序取首个可用 provider）；
   // strict 的后续重试与 preferred 的全部尝试都按 Provider-model 24h 成功率（health）。这是纯证据标注，不改变选择。
   const strictFirst = plan.mode === 'strict' && attempted.size === 0;
-  const ordered = strictFirst ? remaining : healthOrderedProviders(plan, remaining);
-  const selection = strictFirst ? 'strict-first' : 'health';
-  if (!(plan.providerCooldownMs > 0)) return { attempt: namedProviderAttempt(plan, ordered[0], { selection }), retryAfter: null };
+  const hinted = attempted.size === 0 && remaining.includes(plan.preferredProvider) ? plan.preferredProvider : null;
+  const ordered = hinted ? [hinted, ...healthOrderedProviders(plan, remaining.filter(p => p !== hinted))] : strictFirst ? remaining : healthOrderedProviders(plan, remaining);
+  const selectionFor = (provider) => plan.autoHeldExploration ? 'probe-exploration' : provider === hinted ? 'session-preferred' : strictFirst && !hinted ? 'strict-first' : 'health';
+  if (!(plan.providerCooldownMs > 0)) return { attempt: namedProviderAttempt(plan, ordered[0], { selection: selectionFor(ordered[0]) }), retryAfter: null };
   let blockedUntil = null;
   for (const provider of ordered) {
     const key = providerCircuitKey(account.id, modelId, provider), state = providerCircuitStates.get(key);
-    if (!state) return { attempt: namedProviderAttempt(plan, provider, { circuitKey: key, selection }), retryAfter: null };
+    if (!state) return { attempt: namedProviderAttempt(plan, provider, { circuitKey: key, selection: selectionFor(provider) }), retryAfter: null };
     if (state.cooldownUntil > now || state.halfOpen) { blockedUntil = Math.min(blockedUntil ?? Infinity, state.cooldownUntil > now ? state.cooldownUntil : now + 1000); continue; }
-    return { attempt: namedProviderAttempt(plan, provider, { circuitKey: key, circuitHalfOpen: true, selection }), retryAfter: null };
+    return { attempt: namedProviderAttempt(plan, provider, { circuitKey: key, circuitHalfOpen: true, selection: selectionFor(provider) }), retryAfter: null };
   }
   return { attempt: null, retryAfter: retryAfterSeconds(Math.max(1000, (blockedUntil ?? now + 1000) - now)) };
 }
@@ -4496,9 +4888,9 @@ function traceAttempt(attempt, result, account, ms, diagnostic) {
 
 // 两级重试：本函数固定一个账号，仅在该账号内按健康计划逐个尝试 provider。
 // 只有 account-scoped 错误命中 cooldown/hard-quarantine 时，外层 handleChat 才能终止本链并最多换号一次。
-async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream = false, attemptTimeoutMs = 120000, sensitiveValues = [], attemptOwner = null } = {}) {
+async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream = false, attemptTimeoutMs = 120000, sensitiveValues = [], attemptOwner = null, preferredProvider = null } = {}) {
   const t0 = Date.now();
-  const plan = buildProviderPlan(modelId, cfg, account), trace = [], attempted = new Set();
+  const plan = buildProviderPlan(modelId, cfg, account, t0, preferredProvider), trace = [], attempted = new Set();
   let retryStop = false, localRpm = false, localRpmRetryAt = null;
   const lease = attemptOwner?.lease || null;
   const quotaRole = lease?.quotaRole || null;
@@ -4647,7 +5039,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
         trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
         if (result.status !== 200 && !attempt.upstream) learnAvailableProviders(modelId, result.note);
         last = { ...result, accountAction: diagnostic.accountAction, quotaRemovalAction: diagnostic.quotaRemovalAction, classification: diagnostic.classification };
-        if (result.status === 200) break;
+        if (result.status === 200) { last.successfulAttempt = attempt; break; }
         if (diagnostic.retryDecision?.decision === 'stop') { retryStop = true; break; }
         if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine' || last.quotaRemovalAction) break;
       } catch (error) { permit?.release(); throw error; } finally { clearTimeout(timer); }
@@ -4712,6 +5104,8 @@ async function handleChat(req, res, clientKeyId) {
   const affinity = prepareChatAffinity(body, identity);
   body = affinity.body;
   const isStream = body.stream === true;
+  const providerSequence = nextSessionBindingGeneration();
+  const affinityGeneration = sessionProviderAffinityGeneration;
   const excluded = new Set();
   const accountPath = [];
   const attemptOwner = { nextAttemptIndex: 0, bindingSelection: null, lease: null, onAttemptCommit() { commitSessionBindingSelection(this.bindingSelection); } };
@@ -4731,6 +5125,7 @@ async function handleChat(req, res, clientKeyId) {
     bindingResult: selected?.bindingResult || 'not-applicable',
   });
   selected = await acquireAccountLease(identity, { excludeIds: excluded, ownerRequestId: requestId });
+  const preferredProvider = sessionProviderHint(identity, modelId);
   attemptOwner.bindingSelection = selected;
   if (!selected.lease) {
     if (selected.credentialRevoked) return unauthorized(res);
@@ -4762,7 +5157,7 @@ async function handleChat(req, res, clientKeyId) {
     cfg = resolveModelConfig(account, modelId);
     try {
       upstreamAffinitySent = true;
-      chain = await runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream: isStream, sensitiveValues, attemptOwner });
+      chain = await runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream: isStream, sensitiveValues, attemptOwner, preferredProvider });
       cleanupSessionBindingSelection(selected);
       targets = chain.plan?.plannedOrder || [];
       targetSource = chain.plan?.source || 'auto';
@@ -4775,7 +5170,7 @@ async function handleChat(req, res, clientKeyId) {
     }
     const action = chain.accountAction;
     if (action) accountActions.push({ account: account.name, action: action.action, statusCode: action.statusCode, ruleId: action.ruleId || null, scope: action.scope });
-    if ((action?.action === 'cooldown' || action?.action === 'hard-quarantine' || chain.quotaRemovalAction === 'waiting-refresh' || chain.quotaRemovalAction === 'protection-pending') && !chain.started && accountAttempt === 0 && !chain.retryStop) {
+    if (!chain.plan?.autoHeldExploration && (action?.action === 'cooldown' || action?.action === 'hard-quarantine' || chain.quotaRemovalAction === 'waiting-refresh' || chain.quotaRemovalAction === 'protection-pending') && !chain.started && accountAttempt === 0 && !chain.retryStop) {
       excluded.add(account.id);
       lease.release();
       chainLease = null;
@@ -4886,6 +5281,7 @@ async function handleChat(req, res, clientKeyId) {
       const normalizedStatus = requestResult === 'failed' ? (observed.error ? observed.normalizedStatus : 502) : requestResult === 'client_cancelled' ? 499 : 200;
       const safeStreamError = requestResult === 'failed' ? (streamError ? safeReason(streamError, sensitiveValues) : 'stream transport error') : null;
       const usage = requestResult === 'success' ? observed.usage : null;
+      if (requestResult === 'success') rememberSessionProvider(identity, modelId, acc, chain.streamAttempt, providerSequence, affinityGeneration);
       finalizeStatistics({ globalError: requestResult === 'failed', finalProvider: observed.provider, usage, clientDisconnect: clientCancelled, segments: statisticsSegments(chain.trace, acc.id, usage, clientCancelled) });
       recordChat({ requestId, requestedModel, resolvedModel: modelId, provider: observed.provider, canonical: observed.canonical, ms: Date.now() - chain.t0, stream: true, result: requestResult, error: safeStreamError, upstreamStatus: providerAttempt?.upstreamStatus ?? null, normalizedStatus, account: acc.name, accountId: acc.id, attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, accountPath, accountActions, ...affinityFacts(usage), strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, providerPlanSource: targetSource, providerMode: targetMode, appliedHeaderNames: Object.keys(acc.headers || {}), proxyError: !!acc.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues });
     };
@@ -4925,9 +5321,10 @@ async function handleChat(req, res, clientKeyId) {
     if (res.destroyed) return;
     return sendJSON(res, disconnected ? 499 : 502, { error: { message: disconnected ? 'client cancelled request' : 'no upstream response', type: disconnected ? 'client_cancelled' : 'upstream_error' } });
   }
-  if (status === 200 && /^cline-pass\//.test(modelId) && !config.knownModels.includes(modelId)) { config.knownModels.push(modelId); saveConfig(); }
+  if (status === 200 && /^cline-pass\//.test(modelId) && !config.knownModels.includes(modelId)) { config.knownModels.push(modelId); saveConfig({ preserveProbeCells: true }); }
   const safeOut = status === 200 ? out : { ...out, error: { ...(out.error || {}), message: safeReason(out?.error?.message || 'upstream error', sensitiveValues) } };
   const usage = status === 200 && !disconnected ? normalizeUsage(routing.usage) : null;
+  if (status === 200 && !disconnected) rememberSessionProvider(identity, modelId, acc, chain.successfulAttempt, providerSequence, affinityGeneration);
   finalizeStatistics({ globalError: status !== 200 && !disconnected, finalProvider: routing.finalProvider, usage, clientDisconnect: disconnected, segments: statisticsSegments(chain.trace, acc?.id, usage, disconnected) });
   recordChat({
     requestId, requestedModel, resolvedModel: modelId, provider: routing.finalProvider || null, canonical: routing.canonicalSlug || null, ms: Date.now() - chain.t0, stream: false, result: disconnected ? 'client_cancelled' : status === 200 ? 'success' : 'failed',
@@ -5133,6 +5530,7 @@ async function dispatch(req, res) {
           try { atomicWriteJson(CONFIG_PATH, { ...config, ...next }); }
           catch { return sendJSON(res, 500, { error: { message: 'logging setting could not be saved' } }); }
           config.detailedLogging = next.detailedLogging; config.errorDetailLogging = next.errorDetailLogging; config.rawBodyLogging = next.rawBodyLogging;
+          markProbeConfigWrite();
           return sendJSON(res, 200, { ok: true, detailedLogging: config.detailedLogging, errorDetailLogging: config.errorDetailLogging, rawBodyLogging: config.rawBodyLogging });
         }
       }
@@ -5262,7 +5660,7 @@ async function dispatch(req, res) {
         mode: config.accountMode, active: config.activeAccount, concurrencyWaitMs: config.concurrencyWaitMs, poolFullWaitMs: config.poolFullWaitMs,
         accountWorkflow: config.accountWorkflow, configurationRevision: configurationRevision(),
         selectionCounters: { persistent: true, persistenceError: selectionCounterPersistenceError, sequence: META.selectionCounters.sequence },
-        quotaProtection: config.quotaProtection, errorRules: config.errorRules, retryRules: config.retryRules, accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline,
+        quotaProtection: config.quotaProtection, errorRules: config.errorRules, retryRules: config.retryRules, accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline, sessionProviderAffinityEnabled: config.sessionProviderAffinityEnabled,
         cachePool: { minSize: configuredCachePoolSize(), maxSize: configuredCachePoolMaxSize(), lowSize: configuredCachePoolLowQuotaSize(), targetSize: configuredCachePoolTargetSize(), scope: 'per-client-key', actual: cachePoolActualByOwner(), binding: sessionBindingSummary() },
         stats: Object.fromEntries(config.accounts.map((a) => [a.name, { requests: META.statistics.lifetime.accounts[a.id]?.requests ?? 0 }])),
       });
@@ -5277,6 +5675,7 @@ async function dispatch(req, res) {
       const poolWait = body.poolFullWaitMs === undefined ? config.poolFullWaitMs : body.poolFullWaitMs;
       if (poolWait !== null && (!Number.isInteger(poolWait) || poolWait < 0 || poolWait > 30000)) return sendJSON(res, 400, { error: { message: 'poolFullWaitMs must be null or an integer from 0 to 30000' } });
       let requestedErrorRules = config.errorRules, requestedPipeline = config.accountPipeline, requestedRetryRules = config.retryRules, requestedProtection = config.quotaProtection, requestedWorkflow = config.accountWorkflow;
+      if (body.sessionProviderAffinityEnabled !== undefined && typeof body.sessionProviderAffinityEnabled !== 'boolean') return sendJSON(res, 400, { error: { message: 'sessionProviderAffinityEnabled must be boolean' } });
       try {
         if (body.accountWorkflow !== undefined) requestedWorkflow = normalizeAccountWorkflow(body.accountWorkflow);
         if (body.errorRules !== undefined) requestedErrorRules = normalizeErrorRules(body.errorRules, { strict: true });
@@ -5339,21 +5738,30 @@ async function dispatch(req, res) {
       const nextActive = requestedActive >= 0 ? requestedActive : Math.min(Math.max(0, Number(body.active) || 0), accs.length - 1);
       const next = { ...config, accounts: accs, accountMode: body.mode, activeAccount: nextActive,
         concurrencyWaitMs: wait, poolFullWaitMs: poolWait, errorRules: requestedErrorRules, retryRules: requestedRetryRules,
-        quotaProtection: requestedProtection, ...legacyRuleProjection(requestedErrorRules), accountPipeline: requestedPipeline, accountWorkflow: requestedWorkflow };
+        quotaProtection: requestedProtection, ...legacyRuleProjection(requestedErrorRules), accountPipeline: requestedPipeline, accountWorkflow: requestedWorkflow,
+        sessionProviderAffinityEnabled: body.sessionProviderAffinityEnabled ?? config.sessionProviderAffinityEnabled };
       // A failed config rename must not change live owner routing, invalidate bindings,
       // or clear existing RPM/quota state before the client sees a failed save.
       atomicWriteJson(CONFIG_PATH, next);
       const quotaRoutingWasEnabled = quotaRoutingEnabled();
-      Object.assign(config, next); clientCatalogs.clear();
+      if (next.sessionProviderAffinityEnabled !== config.sessionProviderAffinityEnabled) {
+        sessionProviderAffinityGeneration++;
+        for (const [key, entry] of sessionBindings) if (entry.kind === 'provider') deleteSessionBinding(key, entry, { count: false });
+      }
+      Object.assign(config, next); probeRevision++; abortScheduledProbes(); clientCatalogs.clear();
       workflowHealthCache.clear();
       normalizeCachePoolTarget(requestedPipeline);
       for (const [id, previous] of previousById) {
         const current = accs.find((a) => a.id === id);
-        if (!current) { invalidateQuotaAccount(id, { clearSnapshot: true, deleted: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); clearRpmState(id); }
-        else if (current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) { invalidateQuotaAccount(id, { clearSnapshot: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); const month = getAccountState(id)?.protectionMonthlyAt || 0; if (month) META.accountStates[id] = { protectionMonthlyAt: month }; else delete META.accountStates[id]; clearRpmState(id); }
-        else if (current.clientKeyId !== previous.clientKeyId) invalidateSessionBindingsForAccount(id);
+        if (!current || previous.key !== current.key || previous.proxyUrl !== current.proxyUrl || previous.clientKeyId !== current.clientKeyId || previous.enabled !== current.enabled || !isDeepStrictEqual(previous.headers, current.headers)) for (const key of Object.keys(META.providerProbe.cells)) if (JSON.parse(key)[0] === id) delete META.providerProbe.cells[key];
+        if (!current) { invalidateQuotaAccount(id, { clearSnapshot: true, deleted: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id, { credentialsChanged: true }); clearRpmState(id); }
+        else if (current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) { invalidateQuotaAccount(id, { clearSnapshot: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id, { credentialsChanged: true }); const month = getAccountState(id)?.protectionMonthlyAt || 0; if (month) META.accountStates[id] = { protectionMonthlyAt: month }; else delete META.accountStates[id]; clearRpmState(id); }
+        else if (current.clientKeyId !== previous.clientKeyId) invalidateSessionBindingsForAccount(id, { credentialsChanged: true });
         else if (previous.enabled !== false && current.enabled === false) { invalidateQuotaAccount(id); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); }
-        else for (const model of new Set([...Object.keys(previous.perModel || {}), ...Object.keys(current.perModel || {})])) if (JSON.stringify(previous.perModel?.[model]) !== JSON.stringify(current.perModel?.[model])) clearProviderCircuitForRoute(id, model);
+        else for (const model of new Set([...Object.keys(previous.perModel || {}), ...Object.keys(current.perModel || {})])) if (JSON.stringify(previous.perModel?.[model]) !== JSON.stringify(current.perModel?.[model])) {
+          clearProviderCircuitForRoute(id, model);
+          for (const key of Object.keys(META.providerProbe.cells)) { const [cellId, cellModel] = JSON.parse(key); if (cellId === id && cellModel === model) delete META.providerProbe.cells[key]; }
+        }
       }
       if (quotaRoutingWasEnabled !== quotaRoutingEnabled()) advanceQuotaRoutingEpoch();
       // Enabling role-aware routing must evaluate the latest already-persisted
@@ -5371,8 +5779,9 @@ async function dispatch(req, res) {
       for (const id of activeCounts.keys()) if (!seen.has(id)) activeCounts.delete(id);
       // maxRpm=0 即时关闭限制并清理无用状态；disable/re-enable 保留窗口内已提交事实。
       for (const id of [...rpmWindows.keys()]) if (!seen.has(id) || !rpmLimit(accs.find((a) => a.id === id))) clearRpmState(id);
-      pruneOrphanProviderStates();
+      pruneOrphanProviderStates(); probePruneCells();
       reconcileSessionBindings();
+      markProbeConfigWrite({ preserveProbeCells: true });
       saveMeta(); RR_COUNTER = 0; strategyCounters.clear(); pruneProxyAgents(); scheduleQuotaRefresh();
       return sendJSON(res, 200, { ok: true, accounts: accs.length, mode: config.accountMode, active: config.activeAccount, accountWorkflowEnabled: config.accountWorkflow.enabled, configurationRevision: configurationRevision() });
     }
@@ -5456,9 +5865,11 @@ async function dispatch(req, res) {
       if (body.exposeCatalog !== undefined) next.exposeCatalog = !!body.exposeCatalog;
       try { validateClientKeys(next, { persisted: true }); }
       catch (error) { return sendJSON(res, 400, { error: { message: error.message } }); }
+      const previousProxyKey = config.proxyKey;
       atomicWriteJson(CONFIG_PATH, next);
-      Object.assign(config, next);
+      Object.assign(config, next); markProbeConfigWrite();
       PROXY_KEY = config.proxyKey || ''; // startup environment override is not a running-process pin
+      if (next.proxyKey !== previousProxyKey) invalidateSessionBindingsForOwner('legacy');
       notifyCapacityWaiters();
       return sendJSON(res, 200, { ok: true, proxyKey: config.proxyKey, publicBaseUrl: config.publicBaseUrl, authRequired: !!PROXY_KEY, proxyBase: publicProxyBase(), exposeCatalog: !!config.exposeCatalog });
     }
@@ -5472,7 +5883,7 @@ async function dispatch(req, res) {
         const next = { ...config, clientKeys: [...config.clientKeys, row] };
         try { validateClientKeys(next, { persisted: true }); if (adminPasswordOK(row.key)) throw new Error('client key must differ from admin password'); }
         catch (error) { return sendJSON(res, 400, { error: { message: error.message } }); }
-        atomicWriteJson(CONFIG_PATH, next); config.clientKeys = next.clientKeys;
+        atomicWriteJson(CONFIG_PATH, next); config.clientKeys = next.clientKeys; markProbeConfigWrite();
         return sendJSON(res, 200, { id: row.id, name: row.name, key: row.key });
       }
       const id = parts[0], existing = config.clientKeys.find((row) => row.id === id);
@@ -5483,7 +5894,7 @@ async function dispatch(req, res) {
         const next = { ...config, clientKeys: config.clientKeys.map((row) => row.id === id ? { ...row, name: body.name } : row) };
         try { validateClientKeys(next, { persisted: true }); }
         catch (error) { return sendJSON(res, 400, { error: { message: error.message } }); }
-        atomicWriteJson(CONFIG_PATH, next); config.clientKeys = next.clientKeys;
+        atomicWriteJson(CONFIG_PATH, next); config.clientKeys = next.clientKeys; markProbeConfigWrite();
         return sendJSON(res, 200, { id, name: body.name });
       }
       if (req.method === 'POST' && parts.length === 2) {
@@ -5493,7 +5904,7 @@ async function dispatch(req, res) {
         const next = { ...config, clientKeys: config.clientKeys.map((row) => row.id === id ? { ...row, key } : row) };
         try { validateClientKeys(next, { persisted: true }); if (adminPasswordOK(key)) throw new Error('client key must differ from admin password'); }
         catch (error) { return sendJSON(res, 400, { error: { message: error.message } }); }
-        atomicWriteJson(CONFIG_PATH, next); config.clientKeys = next.clientKeys;
+        atomicWriteJson(CONFIG_PATH, next); config.clientKeys = next.clientKeys; markProbeConfigWrite();
         invalidateSessionBindingsForOwner(id); notifyCapacityWaiters();
         return sendJSON(res, 200, { id, key });
       }
@@ -5501,11 +5912,38 @@ async function dispatch(req, res) {
         if (config.accounts.some((account) => account.clientKeyId === id)) return sendJSON(res, 409, { error: { message: 'reassign owned accounts before revoking this key' } });
         const next = { ...config, clientKeys: config.clientKeys.filter((row) => row.id !== id) };
         validateClientKeys(next, { persisted: true });
-        atomicWriteJson(CONFIG_PATH, next); config.clientKeys = next.clientKeys;
+        atomicWriteJson(CONFIG_PATH, next); config.clientKeys = next.clientKeys; markProbeConfigWrite();
         clientCatalogs.delete(id); notifyCapacityWaiters();
         return sendJSON(res, 200, { ok: true });
       }
       return sendJSON(res, 404, { error: { message: 'no route' } });
+    }
+    if (req.method === 'GET' && p === '/api/providers/probe-schedule') return sendJSON(res, 200, probeStatus());
+    if (req.method === 'POST' && p === '/api/providers/probe-schedule') {
+      const input = await readJsonBody(req);
+      let schedule;
+      try { schedule = normalizeProbeSchedule(input); }
+      catch (error) { return sendJSON(res, 400, { error: { message: error.message } }); }
+      atomicWriteJson(CONFIG_PATH, { ...config, providerProbeSchedule: schedule });
+      config.providerProbeSchedule = schedule; markProbeConfigWrite();
+      let metadataWarning = false;
+      try { saveMeta(); } catch { metadataWarning = true; probeConfigPersistenceWarning = true; console.error('[渠道探测] 设置已保存，但证据修订同步失败；下次重启将保守丢弃旧结论'); }
+      if (!schedule.enabled) { probeNextDueAt = 0; abortScheduledProbes(); }
+      else probeNextDueAt = Date.now() + probeInterval();
+      scheduleQuotaRefresh();
+      return sendJSON(res, 200, { ...probeStatus(), metadataWarning });
+    }
+    if (req.method === 'POST' && p === '/api/providers/probe-recover') {
+      const input = await readJsonBody(req);
+      if (!isPlainObject(input) || Object.keys(input).sort().join(',') !== 'accountId,model,provider' ||
+          !config.accounts.some((a) => a.id === input.accountId) || !config.knownModels.includes(input.model) ||
+          typeof input.provider !== 'string' || !normalizeStringList([input.provider], 1).includes(input.provider)) return sendJSON(res, 400, { error: { message: 'expected exact accountId, model and provider' } });
+      const key = probeCellKey(input.accountId, input.model, input.provider);
+      if (!Object.hasOwn(META.providerProbe.cells, key)) return sendJSON(res, 409, { error: { message: 'no automatic probe evidence for that account/model/provider' } });
+      const cells = { ...META.providerProbe.cells }; delete cells[key];
+      atomicWriteJson(META_PATH, { ...META, providerProbe: { ...META.providerProbe, cells } }, { pretty: false });
+      META.providerProbe.cells = cells; probeRevision++; abortScheduledProbes();
+      return sendJSON(res, 200, probeStatus());
     }
     if (req.method === 'POST' && p === '/api/validate-upstreams') {
       const input = await readJsonBody(req);
@@ -5540,8 +5978,9 @@ async function dispatch(req, res) {
         if (scope !== 'account' || !model || model.length > 300 || /[\x00-\x1f\x7f]/.test(model)) return sendJSON(res, 400, { error: { message: 'valid account scope and model are required for inherit' } });
         delete target.perModel[model];
         clearProviderCircuitForRoute(target.id, model);
+        probeRevision++; abortScheduledProbes(); for (const key of Object.keys(META.providerProbe.cells)) { const [id, m] = JSON.parse(key); if (id === target.id && m === model) delete META.providerProbe.cells[key]; }
         pruneOrphanProviderStates();
-        saveConfig(); saveMeta();
+        saveConfig({ preserveProbeCells: true }); saveMeta();
         return sendJSON(res, 200, { ok: true, source: 'inherited' });
       }
       if (body.perModel === undefined) return sendJSON(res, 400, { error: { message: 'perModel is required' } });
@@ -5553,8 +5992,9 @@ async function dispatch(req, res) {
         if (scope === 'account') clearProviderCircuitForRoute(target.id, model);
         else for (const account of config.accounts) if (!Object.prototype.hasOwnProperty.call(account.perModel || {}, model)) clearProviderCircuitForRoute(account.id, model);
       }
+      probeRevision++; abortScheduledProbes(); for (const key of Object.keys(META.providerProbe.cells)) { const [id, m] = JSON.parse(key); if (Object.hasOwn(body.perModel, m) && (scope === 'global' ? !Object.hasOwn(config.accounts.find((a) => a.id === id)?.perModel || {}, m) : id === target.id)) delete META.providerProbe.cells[key]; }
       pruneOrphanProviderStates();
-      saveConfig(); saveMeta();
+      saveConfig({ preserveProbeCells: true }); saveMeta();
       return sendJSON(res, 200, { ok: true, scope });
     }
     if (req.method === 'GET' && (p === '/v1/models' || p === '/api/v1/models' || p === '/models')) {
@@ -5589,6 +6029,7 @@ function beforeDeadline(promise, deadline) {
 }
 function stopQuotaWork() {
   clearTimeout(quotaTimer); quotaTimer = null; quotaScheduleVersion++;
+  for (const controller of probeControllers) controller.abort();
   for (const job of [...quotaJobs.values()]) { detachQuotaJob(job); cancelQuotaJob(job); }
   pumpQuotaQueue();
 }
@@ -5609,6 +6050,7 @@ function shutdown(signal) {
     try { server.close(); } catch {}
     server.closeIdleConnections?.();
     const finalizersDone = activeResponses === 0 || await beforeDeadline(new Promise((resolve) => activeResponseWaiters.add(resolve)), deadline);
+    while (probeControllers.size && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
     if (!finalizersDone) {
       console.error(`[退出] ${signal} 等待活动请求超时，正在强制关闭连接`);
       flushSelectionCounters();

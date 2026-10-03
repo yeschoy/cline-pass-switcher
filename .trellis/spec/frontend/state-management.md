@@ -85,7 +85,7 @@ GET /api/accounts
                     quota: { quotaDisposition, quotaRetryAt, ... },
                     rpm: { limit, used, reserved, retryAt },
                     statistics: { recent24h, lifetimeRequests, lifetimeErrors } }],
-       mode, active, concurrencyWaitMs, poolFullWaitMs, errorRules,
+       mode, active, concurrencyWaitMs, poolFullWaitMs, sessionProviderAffinityEnabled, errorRules,
        accountErrorRules, accountContentErrorRules, accountPipeline,
        cachePool: { scope: 'per-client-key', minSize, maxSize, lowSize, targetSize,
                     actual: { high, low, unknown },
@@ -93,7 +93,7 @@ GET /api/accounts
        stats }
 
 POST /api/accounts
-  <- { accounts, mode, active, concurrencyWaitMs, poolFullWaitMs?, errorRules?,
+  <- { accounts, mode, active, concurrencyWaitMs, poolFullWaitMs?, sessionProviderAffinityEnabled?, errorRules?,
        accountErrorRules?, accountContentErrorRules?, accountPipeline? }
   -> { ok, accounts: <count>, mode, active }
 
@@ -225,6 +225,8 @@ Probe/validation/setup use the explicit route-scope account ID when present. One
   proxyUrl, headers, perModel
 }
 ```
+
+`#sessionProviderAffinityEnabled` is a labelled, default-on native checkbox hydrated from the authenticated `ACCS.sessionProviderAffinityEnabled` snapshot; it remains disabled until that read completes. Its local dirty/generation guards prevent stale reads from replacing an unsaved or newer toggle edit; a confirmed account save resets the dirty state only if no later toggle edit occurred. `collectAccounts()` includes its draft boolean with the full account snapshot, while old clients omitting the top-level field preserve the saved opt-out. It does not change the account-pipeline sticky flag or mutate a route until the existing explicit account save. `ACCS.cachePool.binding.size` remains the account-binding count, while `providerEntries` and `totalEntries` show the bounded Provider-hint allocation without disclosing identities.
 
 `id` preserves runtime-state identity. `clientKeyId` is a stable exclusive downstream owner ID, not the upstream `key`: `collectAccounts()` retains it for **all** `ACCS.accounts` including filtered/hidden rows, drawer edits, presets, raw scheduling and bulk concurrency. The new-row owner selector defaults to a valid key (Legacy when usable, otherwise the first additional ID); the drawer uses a labelled native owner select and changes the local complete account draft only. Old server-side full saves omitting owner preserve existing stable-ID assignments, but the console must explicitly submit each owner. `maxRpm` is the canonical per-account rolling-RPM limit (integer 0-100000, `0` = unlimited). `collectAccounts()` emits `maxRpm: Number(a.maxRpm) || 0`, and an older client that omits the field is preserved server-side by stable `id`; the browser must never drop or default it to `0` for an existing account. `perModel` preserves all account-specific model routes even though the account table does not edit those routes inline. Omitting `perModel` would normalize it to `{}` and erase that account's overrides. The same payload also carries the top-level scheduling draft: `errorRules` plus `retryRules` from their generation-owning drafts and the canonical `accountPipeline`; `collectAccounts()` validates both rule drafts before returning, so an invalid visual/no longer current retry rule blocks the destructive full save instead of silently dropping it.
 
@@ -541,3 +543,7 @@ if (visitId === STATISTICS_VISIT_ID &&
 `WORKFLOW_DRAFT` is independent from the last loaded server config; cache/TTL/wait controls edit the existing pipeline draft, not duplicate state. Capture its revision and preserve dirty drafts across reads; a newer server revision sets a conflict instead of silently rebasing a save. Full account save includes the workflow and its expected revision while preserving account IDs, ownership and hidden settings. Mid-save edits remain dirty. Old backend responses without the contract keep compatibility mode.
 
 Read-only workflow account projections come from the saved snapshot, not mutable account rows. Reset confirmation therefore describes actual saved owner membership including standby/disabled members. Reset updates count projections without discarding unrelated edits. Successful mutation followed by failed refresh must explicitly say the write succeeded. Preview/trace responses have their own abort/generation owner, invalidated by edits, navigation and login; never reuse statistics generations. “Discard draft” restores loaded state, not historical server rollback.
+
+## Scheduled Provider checks UI
+
+The console's independent `probeScheduleSnapshot` accepts authenticated `GET /api/providers/probe-schedule` status without rebuilding `DATA`/`ACCS` account drafts. Numeric limits and enable toggle remain local until explicit `POST`; a stale read or failed write must not replace an edited draft. Display the rolling call-count budget as a possible-billing warning, not a USD limit or a guarantee that every channel is checked every 5 minutes. Authenticated coverage distinguishes actual native calls (`sampled`), capacity skips without RPM/debit/call (`capacitySkipped`) and a full table with no safe non-held/non-pending eviction victim (`storageSaturated`). A pending cell means a pre-send unknown evidence reservation, never a new success/failure; previous held evidence remains held while its recovery probe runs. If 5000 cells remain held, warn that unseen channels cannot be probed until an exact recovery or trustworthy held recovery frees capacity. Select a **single account** before rendering model/channel verdict rows; do not project one account's holds as global health. Escape server-controlled model/provider/account names in table rows and use a native labelled, focusable horizontal region. The exact admin `POST /api/providers/probe-recover` only removes that account/model/provider's automatic evidence and does not imply manual exclusion or hard quarantine has been lifted. VM/static tests do not prove actual keyboard/browser/screen-reader behavior.

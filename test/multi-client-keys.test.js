@@ -925,3 +925,83 @@ test('empty Legacy cannot gain an anonymous environment account alongside additi
   assert.equal(accepted.exitCode, null, 'a nonempty startup override makes the injected Legacy account authenticated');
   await stop(accepted);
 });
+
+test('identical explicit Provider sessions are isolated by client-key owner', async (t) => {
+  const team = 'team-owner-provider-secret-123';
+  const route = { upstreams: ['first', 'second'], exclude: [], pinMode: 'strict', maxRetries: 1, providerCooldownMs: 0 };
+  await scenario(t, { clientKeys: [{ id: 'team', name: 'Team', key: team }], accountMode: 'single', activeAccount: 0,
+    accounts: [{ id: 'one', name: 'Legacy', key: 'upstream-one', clientKeyId: 'legacy', perModel: {} },
+      { id: 'two', name: 'Team', key: 'upstream-two', clientKeyId: 'team', perModel: {} }],
+    knownModels: [model], perModel: { [model]: route } }, async ({ port, upstream, manage }) => {
+    const sameSession = { 'Session-Id': 'shared-private-session' };
+    const request = (key, marker) => api(port, '/v1/chat/completions', { method: 'POST', key,
+      headers: sameSession, body: { model, messages: [{ role: 'user', content: marker }] } });
+    assert.equal((await request(legacy, 'retry-first')).status, 200);
+    assert.deepEqual(upstream.seen.filter(row => row.url.endsWith('/chat/completions')).map(row => row.provider), ['first', 'second']);
+    upstream.seen.length = 0;
+    assert.equal((await request(team, 'normal')).status, 200);
+    assert.deepEqual(upstream.seen.filter(row => row.url.endsWith('/chat/completions')).map(row => [row.auth, row.provider]), [['Bearer upstream-two', 'first']], 'foreign session must not change the Team plan');
+    upstream.seen.length = 0;
+    assert.equal((await request(legacy, 'normal')).status, 200);
+    assert.deepEqual(upstream.seen.filter(row => row.url.endsWith('/chat/completions')).map(row => [row.auth, row.provider]), [['Bearer upstream-one', 'second']]);
+    const view = await manage('/api/accounts');
+    assert.ok(view.json.cachePool.binding.providerEntries >= 2);
+    assert.ok(view.json.cachePool.binding.totalEntries <= view.json.cachePool.binding.maxEntries);
+    assert.doesNotMatch(JSON.stringify(view.json), /shared-private-session/);
+  });
+});
+
+test('client-key rotation clears Provider hints and old in-flight turns cannot reintroduce them', async (t) => {
+  const team = 'team-provider-rotation-secret-123', route = { upstreams: ['first', 'second'], exclude: [], pinMode: 'strict', maxRetries: 1, providerCooldownMs: 0 };
+  await scenario(t, { clientKeys: [{ id: 'team', name: 'Team', key: team }], accountMode: 'single',
+    accounts: [{ id: 'one', name: 'Legacy', key: 'upstream-one', clientKeyId: 'legacy' },
+      { id: 'two', name: 'Team', key: 'upstream-two', clientKeyId: 'team' }], knownModels: [model], perModel: { [model]: route } }, async ({ port, upstream, manage }) => {
+    const session = { 'Session-Id': 'rotation-session' };
+    const request = (key, marker) => api(port, '/v1/chat/completions', { method: 'POST', key,
+      headers: session, body: { model, messages: [{ role: 'user', content: marker }] } });
+    assert.equal((await request(team, 'retry-first')).status, 200);
+    assert.deepEqual(upstream.seen.filter(row => row.provider).map(row => row.provider), ['first', 'second']);
+    upstream.seen.length = 0;
+    const pending = request(team, 'hold');
+    await waitFor(() => upstream.pending.length === 1, 'old owner request held');
+    const rotated = await manage('/api/security/client-keys/team/rotate', 'POST', {});
+    assert.equal(rotated.status, 200);
+    upstream.release(); assert.equal((await pending).status, 200);
+    upstream.seen.length = 0;
+    assert.equal((await request(rotated.json.key, 'normal')).status, 200);
+    assert.deepEqual(upstream.seen.filter(row => row.provider).map(row => row.provider), ['first'], 'old credential cannot publish a late hint after rotation');
+  });
+});
+
+test('Provider hints retain only the latest 16 models per explicit identity', async (t) => {
+  const models = Array.from({ length: 17 }, (_, index) => `local-provider-${index}`);
+  const route = { upstreams: ['first', 'second'], exclude: [], pinMode: 'strict', maxRetries: 1, providerCooldownMs: 0 };
+  await scenario(t, { knownModels: models, perModel: Object.fromEntries(models.map(id => [id, route])) }, async ({ port, upstream, manage }) => {
+    const request = (modelId, marker = 'retry-first') => api(port, '/v1/chat/completions', { method: 'POST', key: legacy,
+      headers: { 'Session-Id': 'sixteen-models' }, body: { model: modelId, messages: [{ role: 'user', content: marker }] } });
+    for (const id of models) assert.equal((await request(id)).status, 200);
+    const binding = (await manage('/api/accounts')).json.cachePool.binding;
+    assert.equal(binding.providerEntries, 16);
+    upstream.seen.length = 0;
+    assert.equal((await request(models[0], 'normal')).status, 200);
+    assert.deepEqual(upstream.seen.filter(row => row.provider).map(row => row.provider), ['first'], 'oldest model is evicted, not another owner/account binding');
+    upstream.seen.length = 0;
+    assert.equal((await request(models[16], 'normal')).status, 200);
+    assert.deepEqual(upstream.seen.filter(row => row.provider).map(row => row.provider), ['second']);
+  });
+});
+
+test('Legacy client-key change clears planned Provider hints', async (t) => {
+  const route = { upstreams: ['first', 'second'], exclude: [], pinMode: 'strict', maxRetries: 1, providerCooldownMs: 0 };
+  await scenario(t, { knownModels: [model], perModel: { [model]: route } }, async ({ port, upstream, manage }) => {
+    const session = { 'Session-Id': 'legacy-rotation-session' };
+    const request = (key, marker) => api(port, '/v1/chat/completions', { method: 'POST', key,
+      headers: session, body: { model, messages: [{ role: 'user', content: marker }] } });
+    assert.equal((await request(legacy, 'retry-first')).status, 200);
+    upstream.seen.length = 0;
+    const changed = await manage('/api/security', 'POST', { proxyKey: 'new-legacy-provider-key-123' });
+    assert.equal(changed.status, 200);
+    assert.equal((await request('new-legacy-provider-key-123', 'normal')).status, 200);
+    assert.deepEqual(upstream.seen.filter(row => row.provider).map(row => row.provider), ['first']);
+  });
+});

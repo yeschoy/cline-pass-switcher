@@ -627,7 +627,7 @@ test('successful raw save hydrates persisted values and clears obsolete draft fe
   await h.run('saveAccounts()');
   assert.equal(h.context.sent.filter(call=>call.body).length,1);
   assert.equal(h.context.sent[0].path,'/api/accounts');
-  assert.equal(h.context.sent.filter(call=>!call.body).length,7);
+  assert.equal(h.context.sent.filter(call=>!call.body).length,8); // seven existing snapshots plus independent probe-status read
   assert.deepEqual(h.snapshot().accounts,before.accounts.map(({activeCount,cachePoolRole,...a})=>a));
   assert.equal(h.snapshot().active,1); assert.equal(h.snapshot().accounts[1].maxConcurrent,42);
   assert.equal(h.el('#accMode').value,draft.accountMode);
@@ -869,4 +869,76 @@ test('low quota slots share the live pipeline draft, raw editor and server runti
   await h.run('loadAll()');
   assert.equal(h.el('#cachePoolLowQuotaSize').value,1);
   assert.match(h.el('#cachePoolRuntime').textContent,/低额度槽 1.*分别应用于各密钥池.*实际高 1 \/ 低 1 \/ 未知 1（各池合计）/);
+});
+
+test('Provider affinity rollback toggle hydrates server state and preserves complete account drafts', async () => {
+  const h=harness(), writes=[];
+  h.context.responses={'/api/models':{},'/api/accounts':{...fixture(),sessionProviderAffinityEnabled:false},'/api/security':{proxyKey:'legacy-secret'},'/api/security/client-keys':{keys:[{id:'legacy',name:'Legacy'}]},'/api/meta':{configured:true},'/api/model-aliases':{aliases:{}},'/api/statistics':{models:[]}};
+  h.run('render=()=>{}; api=async path=>responses[path]');
+  // The production markup starts disabled; the VM element factory has no HTML parser.
+  h.el('#sessionProviderAffinityEnabled').disabled=true;
+  assert.equal(h.el('#sessionProviderAffinityEnabled').disabled,true);
+  await h.run('loadAll()');
+  assert.equal(h.el('#sessionProviderAffinityEnabled').disabled,false);
+  assert.equal(h.el('#sessionProviderAffinityEnabled').checked,false);
+  h.el('#sessionProviderAffinityEnabled').checked=true;
+  h.run('PROVIDER_TOGGLE_DIRTY=true;PROVIDER_TOGGLE_GENERATION++');
+  await h.run('loadAll()');
+  assert.equal(h.el('#sessionProviderAffinityEnabled').checked,true, 'an old authenticated refresh cannot overwrite an unsaved toggle');
+  h.run("ACCS.accounts[1].note='retained unsaved note'");
+  assert.equal(h.run('collectAccounts().sessionProviderAffinityEnabled'),true);
+  assert.equal(h.run('collectAccounts().accounts[1].note'),'retained unsaved note');
+  h.context.writes=writes;
+  h.run('api=async(path,body)=>{writes.push({path,body});return {ok:false,error:{message:"rejected"}};}');
+  await h.run('saveAccounts()');
+  assert.equal(writes[0].path,'/api/accounts');
+  assert.equal(writes[0].body.sessionProviderAffinityEnabled,true);
+  assert.equal(writes[0].body.accounts[1].note,'retained unsaved note');
+  assert.equal(h.el('#sessionProviderAffinityEnabled').checked,true, 'failed save leaves explicit unsaved draft for retry');
+  assert.equal(h.snapshot().sessionProviderAffinityEnabled,false, 'server snapshot remains authoritative until successful reload');
+  h.context.oldPreset=h.run('collectAccounts()');
+  h.el('#sessionProviderAffinityEnabled').checked=false;
+  await h.run('saveAccounts(oldPreset)');
+  assert.equal(writes[1].body.sessionProviderAffinityEnabled,false, 'a stale preset preview must not restore an older toggle draft');
+});
+
+test('scheduled probe console keeps dirty limits, escapes account-scoped evidence and rejects invalid saves', async () => {
+  const h=harness(), sent=[];
+  h.context.sent=sent;
+  h.context.probeFixture={schedule:{enabled:true,intervalMs:300000,maxPerRound:2,maxPer24h:100,failureThreshold:3},budgetRemaining:96,budgetReserved:4,nextDueAt:Date.now()+300000,running:false,coverage:{eligible:2,sampled:0,capacitySkipped:1,storageSaturated:true,deferred:2},cells:[{accountId:'id0',model:'model <script>',provider:'<img src=x>',checkedAt:Date.now(),outcome:'unknown',evidence:'unknown',streak:0,held:false,pending:true},{accountId:'id1',model:'other',provider:'ignored',checkedAt:Date.now(),outcome:'bad',evidence:'reliable',streak:3,held:true}]};
+  h.run("api=async(path,body)=>{sent.push({path,body});return body?{...probeFixture,schedule:body}:probeFixture;}");
+  h.el('#probeAccountScope').value='id0';
+  await h.run('loadProbeSchedule()');
+  assert.match(h.el('#probeEvidenceBody').innerHTML,/model &lt;script&gt;/);
+  assert.match(h.el('#probeEvidenceBody').innerHTML,/本轮预留待完成/);
+  assert.match(h.el('#probeScheduleCoverage').textContent,/无证据槽跳过 1/);
+  assert.match(h.el('#probeScheduleCoverage').textContent,/证据槽已满/);
+  assert.doesNotMatch(h.el('#probeEvidenceBody').innerHTML,/<script>|<img|ignored/);
+  h.el('#probeDay').value='bad';h.run('markProbeDraft()');
+  await h.run('loadProbeSchedule(true)');
+  assert.equal(h.el('#probeDay').value,'bad','refresh must not overwrite unsaved input');
+  const button={disabled:false};h.context.button=button;
+  await h.run('saveProbeSchedule(button)');
+  assert.equal(sent.filter(call=>call.body).length,0,'invalid numeric draft must not send a management write');
+  h.el('#probeDay').value='1';await h.run('saveProbeSchedule(button)');
+  assert.equal(sent.filter(call=>call.body).length,1);
+  assert.equal(sent.at(-1).body.maxPer24h,1);
+  assert.equal(button.disabled,false);
+});
+
+test('probe recovery fences an earlier pending status read without replacing an unsaved schedule draft', async () => {
+  const h=harness(), now=Date.now();
+  const schedule={enabled:true,intervalMs:300000,maxPerRound:2,maxPer24h:100,failureThreshold:3};
+  const cell={accountId:'id0',model:'model',provider:'one',checkedAt:now,evidence:'reliable',outcome:'bad',streak:3,held:true};
+  h.context.probeOriginal={schedule,budgetReserved:3,budgetRemaining:97,coverage:{eligible:1,sampled:1,deferred:0},cells:[cell]};
+  h.context.probeRecovered={...h.context.probeOriginal,cells:[]};
+  let resolveOld;h.context.pendingRead=new Promise(resolve=>{resolveOld=resolve;});
+  h.run("api=async(path,body)=>body?probeRecovered:pendingRead");
+  h.el('#probeAccountScope').value='id0';h.el('#probeDay').value='23';h.run('markProbeDraft()');
+  const pending=h.run('loadProbeSchedule()');
+  await h.run("recoverProbeHold('id0','model','one',{disabled:false})");
+  resolveOld(h.context.probeOriginal);await pending;
+  assert.equal(h.el('#probeDay').value,'23');
+  assert.doesNotMatch(h.el('#probeEvidenceBody').innerHTML,/已避开（仅此账号）/);
+  assert.match(h.el('#probeScheduleFeedback').textContent,/已恢复/);
 });

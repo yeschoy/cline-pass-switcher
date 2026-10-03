@@ -35,7 +35,7 @@ waitForLease(accounts, waitMs)
 claimManagementPermit(lease)              // lease.takeRpmPermit(), or a no-op permit without a lease
 resolveModelAlias(requestedModel)
 resolveModelConfig(account, resolvedModel)
-buildProviderPlan(modelId, cfg, account, now)
+buildProviderPlan(modelId, cfg, account, now, preferredProvider = null)
 healthOrderedProviders(plan, providers)
 selectProviderAttempt(modelId, plan, account, attempted, now)
 injectPrefs(body, modelId, attempt)
@@ -46,7 +46,7 @@ proxyAgentFor(proxyUrl, { ephemeral = false })
 pruneProxyAgents()
 readFirstSseEvent(stream, maxBytes = 64 * 1024)
 runChatChain(req, body, modelId, cfg, account, forwardedHeaders,
-  { stream = false, attemptTimeoutMs = 120000, sensitiveValues = [], attemptOwner = null })
+  { stream = false, attemptTimeoutMs = 120000, sensitiveValues = [], attemptOwner = null, preferredProvider = null })
 clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000,
   account = null, proxyUrl = "", ephemeralProxy = false })
 // response: { status, headers, body, setIdleTimeout(ms), attemptToken, detailAttempt }
@@ -187,6 +187,20 @@ A successful model probe builds its known provider set from the observed `finalP
 - Configured `upstreams` are the authoritative candidate source and source order. A non-empty configured list always overrides the stable discovered `META.models[modelId].upstreams` order; discovered order is used only when nothing is configured; a source that is completely empty is `auto`.
 - `buildProviderPlan()` builds one stable per-request candidate snapshot: static `exclude`, durable `hardQuarantined`, and `cooldownUntil > now` are filtered before selection, in that order. `plan.rates` snapshots the Provider-model 24-hour direct success rate and `plan.plannedOrder` is a bounded diagnostic order, not a promise about gateway behavior. An expired cooldown returns to eligibility, and a positive per-account circuit still admits at most one concurrent half-open owner.
 - `strict` selects source order on the first real attempt (`providerSelection: "strict-first"`), then excludes every provider already attempted in this request and orders the remainder by Provider-model 24-hour direct success rate descending. `preferred` uses that same health order from the first attempt onward (`providerSelection: "health"`). Unknown rates (`null`) sort after known rates; ties and all-unknown keep source-index order. `selectProviderAttempt()` recomputes the remaining candidate set before every attempt.
+- With `sessionProviderAffinityEnabled` (default `true`), only explicit HMAC session identities in the same client-key owner and resolved model may prefer the last **attempted** named Provider on their next request (`providerSelection: "session-preferred"`). The single process-local `sessionBindings` LRU holds hints independently of optional account bindings: 60-minute successful-use sliding TTL, at most 16 fixed slots/model hints per identity (bounded lookup/settlement without scanning all bindings), shared `sessionBindingMaxEntries` total cap, restart clears hints. A missing/fallback identity, auto attempt, cancelled/failed SSE, or local rejection never establishes a hint. The terminal successful HTTP attempt does even when actual Provider is unknown or different: the hint is planned-only and does not prove actual routing or cache hits. Older concurrent successful turns cannot overwrite a newer success while its hint remains live. Selection only promotes a hint within the current account's complete route and eligible Provider set (exclusions, durable cooldown/quarantine and per-account circuit/half-open admission still apply); account replacement rechecks its own route. Successful completion on another eligible account can refresh the hint. Rotating a downstream client credential (including Legacy) clears that owner's hints; an old in-flight turn cannot republish after rotation. An administrator can disable the flag through `POST /api/accounts`; old full saves omitting it preserve the current setting. Disabled-to-enabled transitions clear prior hints and prevent in-flight turns from reintroducing them.
+
+#### Scenario: explicit-session Provider preference
+
+1. **Scope / trigger.** This is an ordering hint inside an already leased account's named Provider attempts, not an account selector, a pin-enforcement measurement, or a health sample. The account-specific complete route and eligibility filters take precedence. The browser draft contract is in `../frontend/state-management.md`.
+2. **Signatures.** `GET /api/accounts` projects `sessionProviderAffinityEnabled: boolean` and `cachePool.binding.{size,providerEntries,totalEntries,maxEntries}`. `POST /api/accounts` accepts optional `sessionProviderAffinityEnabled: boolean` alongside the existing full account payload. `buildProviderPlan(modelId, cfg, account, now, preferredProvider)` and `selectProviderAttempt(modelId, plan, account, attempted, now)` consume the hint; `rememberSessionProvider(identity, modelId, account, attempt, sequence, affinityGeneration)` updates it only at terminal success. There is no persisted hint schema or new environment key.
+3. **Contracts.** Missing persisted flag migrates to `true`; an older management save omitting it retains the previous value. A named terminal success renews the process-local 3,600,000 ms expiry; reads do not renew it. The hint key is owner-scoped HMAC identity plus resolved model, stored in at most 16 fixed slots per identity under the shared bounded `sessionBindings` LRU. Restart drops hints. The selection trace can report `session-preferred` but cannot report raw identity, fingerprint, an actual Provider match, or a cache hit on that basis. Disable/re-enable and downstream credential rotation invalidate old hints/in-flight publications.
+4. **Validation & error matrix.** Boolean `true`/`false` → accepted after all normal account-payload validation; omitted in old save → preserve; string/number/null → HTTP 400 before config mutation; malformed/unreadable persisted JSON → startup failure without overwriting bytes. Fallback or missing identity, `auto`, expired/evicted hint, ineligible Provider, or disabled flag → original ordering, not an error. Excluded/quarantined/cooling/held Provider → never promoted. Failed or cancelled chat/SSE → no new hint.
+5. **Good/base/bad cases.** Good: explicit owner/session/model A fails then B succeeds; the next request prefers eligible B, including on a different permitted account. Base: no explicit identity or no eligible B retains strict/preferred ordering and the existing `maxRetries` cap. Bad: a different owner, complete account `perModel` override, manual exclusion, half-open contention, or stale credential may not borrow/recreate B. Reported actual Provider C after successful attempted B does not turn B into an observed actual/cached hit.
+6. **Tests required.** `test/integration.test.js` asserts the attempt sequence, account override/replacement, strict/preferred, TTL/restart, SSE final failure/cancel, and planned-versus-actual separation; `test/multi-client-keys.test.js` asserts owner/key rotation, late completion, and 16-slot bound; `test/account-draft.test.js` and `test/ui-contract.test.js` assert native draft/save, stale read and safe projection. Run the full project gate. For the toggle's focus/keyboard/responsive behavior, collect separate real-browser evidence; VM assertions do not substitute for it.
+7. **Wrong vs correct.** Wrong: promote a saved slug before resolving the selected account's complete route, or record it when the first SSE data arrives. Correct: resolve/lease account → filter current eligible candidates → promote the saved slug only if present → record its attempted slug only on successful terminal settlement. This prevents manual exclusions and cancelled streams from becoming false affinity.
+
+#### Remaining attempt-planning rules
+
 - `maxRetries` caps real outer attempts: `maxRetries: null` allows every built attempt, an integer `n` permits the first attempt plus at most `n` more (`plan.maxAttempts = n + 1`), and `attempted` exclusion prevents any candidate from being retried twice in one request.
 - Exclusions are applied before health routing. A known source that becomes empty after exclusion returns a safe `503` no-provider error and never falls back to `auto`. If candidates exist but every one is durably cooling or hard-quarantined, routing fails safely with bounded retry information instead of bypassing state. Only a completely empty candidate source allows exactly one unattributed `auto` attempt (`plan.maxAttempts = 1`, `providerSelection: "compat-auto"`).
 - Every named attempt injects exactly one provider through `providerOptions.gateway.only` (planner), `provider.only` (direct), or the same singleton in both shapes for an unknown pipeline. `injectPrefs()` deletes any incoming `provider.order`/`gateway.order` and never emits one. `sort` is applied only inside the already-selected Provider (`gateway.sort`/`provider.sort`), never as a cross-provider order.
@@ -891,3 +905,68 @@ record(modelId, { pipeline: selected?.pipeline ?? null });
 Run `test/account-workflow.test.js`, `test/workflow-integration.test.js` and `test/workflow-ui.test.js` plus the existing routing/admin/UI suite when changing workflow contracts. Prove active-cache and client-owner boundaries, cap/RPM admission, equal-counter concurrent selections, zero-count binding hits, temporary overflow retaining bindings, replacement exclusions, same-account Provider retries, restart and new-account0 catch-up. Preserve legacy behavior when disabled. Preview must not prune metadata, create bindings, advance counters or invoke upstream. Reset must check revision/admin/CSRF, include disabled/standby owner members, and publish only after successful persistence.
 
 The optional `accountWorkflow.healthFilter` is off by default and its default editable `minimumHealth` is 0.2. Filter only rates strictly below the threshold; unknown account health enters this filter as 1.0 while the measured sample count stays zero/null, including when `unknownHealth` is `unknown-last` for the separate health-priority selector. Recheck a binding against the health gate on each new request before leasing it; invalidate an unhealthy binding and count its replacement as a real new selection. Preview and runtime use the same gate, and an empty filtered pool returns a specific error. A policy save affects later requests and does not revoke already-held leases. Cache account-health projections for workflow admission within a statistics generation and minute, clearing on statistics pruning/commit and account saves; do not cache occupancy, RPM or hard eligibility. Ranking, capacity/RPM reservation and counter increment remain synchronous in one Node event-loop turn. This guarantee is process-local, consistent with the single-process Docker/Compose entrypoint; multiple workers or instances sharing a data directory require a separate shared atomic owner.
+
+## Scheduled account-scoped Provider validation
+
+### 1. Scope / Trigger
+
+Use this scenario for the default-on, potentially billable scheduled checks of already-known channels for subscribed models. Chat account leasing and manual probes keep their existing owners. No real upstream calls or production rollout are authorized by local tests.
+
+### 2. Signatures
+
+```text
+config.json: providerProbeSchedule = { enabled: boolean, intervalMs: integer,
+  maxPerRound: integer, maxPer24h: integer, failureThreshold: integer }
+GET  /api/providers/probe-schedule -> { schedule, budgetRemaining, budgetReserved,
+  nextDueAt, running, persistenceWarning, coverage, cells }
+POST /api/providers/probe-schedule <- exact providerProbeSchedule object
+POST /api/providers/probe-recover <- exact { accountId, model, provider }
+```
+
+All are independently admin-authenticated; unsafe methods require existing CSRF/Origin/transport checks. `coverage` separates `eligible`, actual native `sampled`, `deferred`, `capacitySkipped`, `storageSaturated`, and snapshot truncation. A cell is an account-specific `(resolvedModel, provider)` observation, not global health, pin enforcement, or proof of a cache hit. Neither private MAC key nor identity digest is returned.
+
+### 3. Contracts
+
+`providerProbeSchedule` is enabled by default: 300000ms cadence, at most two native chat calls concurrently, two calls per round by default (configurable 1–10), and 100 pre-send debits per rolling 24h (admin-configurable bounded integers). Reuse quota scheduler's timer and per-account lease/RPM permit and account-bound native transport; no startup catch-up, no automatic catalog expansion. A synchronous same-directory metadata atomic write must succeed before sending each scheduled native request; on failure skip and release the uncommitted RPM permit. A debit is conservative even when transport later aborts, and this budget is per DATA_DIR/process, not a distributed lock or dollar cap. Shared DATA_DIR among simultaneous instances is unsupported. The 5000-cell evidence budget is independent of the rolling paid-call limit: full storage evicts only the oldest non-held/non-pending cell (prefer unknown/zero-streak), never a held verdict; all held/pending skips a new combination before lease/RPM/call/debit while existing held combinations may still be budgeted for recovery. A persisted `pending:true` cell reserves the evidence slot with its budget debit before sending and survives crashes as unknown (or retains an earlier held verdict); only completed reliable evidence changes holds. A failed completion write leaves its durable debit/pending marker and old hold unchanged, but clears in-process pending admission after the failed call so that a later round can retry once storage recovers without restarting. Management coverage counts committed native calls, separately counts `capacitySkipped`, and exposes `storageSaturated` without implying that selecting a candidate was a real call. A single batch runs at most two bounded workers (no second work queue). For a complete candidate snapshot, keep account/model/provider source order stable and advance the tier's pick ordinal; do not also rotate that list by the same ordinal (two accounts/two models would cancel and repeatedly select the first). When the 5000-cell or 200-model snapshot is truncated, rotate the account and model starts by each tier's opportunity ordinal, and select within that window by the quotient after the full account×model phase, not by that same rotation index. A single-slot reserved cold opportunity occurs once per five rounds and advances its own derived ordinal by one per cold opportunity, rather than skipping five cold candidates. Hot and cold ordinals are derived from the persisted round/cursor owner; no extra queue, per-triple cursor or second persisted store is created. Under a static finite eligible set with enough ongoing budget/admissions, each tier traverses all of its finite windows and pool entries; a limited daily budget does not promise near-term full coverage.
+
+`metadata.json.providerProbe.cells` contains only bounded `(accountId, resolvedModel, provider)` verdicts with `checkedAt`, `lastReliableAt`, separate-round `lastRound`, streak, held and `reliable`/`unknown` evidence. Unknown resampling updates checkedAt but never renews the last reliable evidence time; a held row becomes stale from the latter without automatically releasing its hold. Only HTTP success with actual Provider matching the target is reliable success; structured explicit provider-specific 4xx may be a reliable failure. Generic 429/5xx, even structured-but-account/auth/quota-labelled 4xx, account/proxy/network/local RPM, malformed/empty response, mismatched actual and absent pin evidence are unknown, and scheduled calls never mutate account/provider chat health, cooldown or statistics. Manual probe endpoints remain independent. Three separate reliable bad rounds hold only that account's route; one later reliable successful scheduled check or exact admin recovery removes the hold. The planner filters manual exclude and hard/cooldown first, then per-account holds **before** a session Provider hint. If all otherwise safe candidates are held, only the original first safe Provider receives at most one attempt; that request's bounded attempt trace uses `providerSelection: 'probe-exploration'` to explain the exception, with no account replacement after its failure. Disable stops new probes but retains holds; identity/route changes invalidate affected verdicts. Config file edits outside the API conservatively clear verdicts on restart while retaining the paid-call budget. Recovery and status endpoints require admin session and CSRF on writes.
+
+### 4. Validation & Error Matrix
+
+| Condition | Result |
+|---|---|
+| Missing legacy schedule/key/metadata | Migrate to default-enabled bounded schedule and empty evidence; old mtime-only cells lose their unprovable verdicts, but paid-call budget survives |
+| Malformed persisted JSON, explicit private key, digest, cell or budget | Fail startup without overwriting operator bytes; do not turn corruption into a fresh budget |
+| Invalid or incomplete admin schedule object | HTTP 400 before write; old complete account/config saves omitting the field preserve it |
+| Unknown/missing exact recovery cell or bad account/model/provider | 409 for missing cell; 400 for invalid triple; never clear manual exclusion/hard quarantine |
+| Budget exhausted, lease/RPM unavailable, or 5000 held/pending cells for a new triple | No automatic model call; capacity skip uses no budget/lease/RPM and is visible in authenticated coverage |
+| Evidence-slot/budget atomic write fails | No call, no in-memory reservation; keep prior bytes, release pending permit |
+| Post-call result write fails or process crashes | Keep conservative debit and pending/previous held evidence, never publish a false reliable result; retry later or conservatively normalize pending on restart |
+
+### 5. Good / Base / Bad Cases
+
+- **Good:** account A's channel fails reliably in three distinct scheduled rounds, only A avoids it; a later reliably matching actual Provider or exact administrator recovery clears that hold. A different account B stays eligible. A 5001st triple evicts one non-held slot before debit and stores its result.
+- **Base:** no known channel, no admissible account, unknown actual Provider, expired budget, or disabled schedule does not fabricate success/failure. When all otherwise safe channels are held, one normally ordered channel may receive exactly one chat attempt, with no account replacement or second held retry.
+- **Bad:** a 5001st triple spends budget without evidence space; a full all-held table evicts a held record; a session hint revives a held/excluded channel; a new account inherits an old owner's evidence; a 429/proxy/empty 16-token response becomes a trustworthy Provider failure.
+
+### 6. Tests Required
+
+Use temporary `DATA_DIR` and local mock upstreams in `test/integration.test.js`: no startup burst; 2-per-round/100-per-rolling-24h default and configured 10-per-round with only two concurrent native calls; pre-send atomic failure, restart, two workers competing for a final slot, 5000 non-held then 5001st, all-held skip and held recovery, failed completion write followed by in-process retry, MAC/migration/same-mtime identity edits, hot/cold single-slot fairness and >5000 candidate-window rotation, owner/route/SSE/RPM/shutdown boundaries. `test/account-draft.test.js` and `test/ui-contract.test.js` assert stale draft, bounded status and escaping. Run the full environment-scrubbed project gate. Native keyboard/focus/live-status/narrow-width behavior needs separate real-browser evidence, not a VM claim.
+
+### 7. Wrong vs Correct
+
+```js
+// Wrong: pay before checking whether the evidence store can retain this triple.
+reservePaidBudget(); await sendProbe();
+if (Object.keys(cells).length >= 5000) return; // result discarded
+
+// Correct: synchronously reserve a safe evidence slot and budget in one atomic
+// metadata replacement BEFORE handing the existing native transport a call.
+const slot = probeEvidenceSlot(key);
+if (slot.blocked) return reportCapacitySkip();
+const reservation = reserveScheduledProbe(key, round);
+if (!reservation.ok) return releasePermitWithoutCall();
+await sendAccountBoundProbe();
+```
+
+Never infer channel health from a successful HTTP status alone; match the reported actual Provider or retain `unknown`.
