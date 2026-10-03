@@ -177,7 +177,10 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   assert.match(collect, /accountPipeline:\{quotaPool:[^}]+healthSort:[^}]+sticky:[^}]+order:pipelineOrder\(\),\.\.\.pipelineNumberDraft\(\)/);
   for(const id of ['cachePoolSize','cachePoolMaxSize','cachePoolLowQuotaSize'])assert.match(html,new RegExp(`id="${id}" type="number" min="0" max="100000" step="1"`));
   for(const id of ['sessionBindingExplicitTtlMs','sessionBindingFallbackTtlMs'])assert.match(html,new RegExp(`id="${id}" type="number" min="60000" max="604800000" step="1"`));
-  assert.match(html,/id="sessionBindingMaxEntries" type="number" min="1" max="100000" step="1"/);assert.match(html,/最小总数 0 = 关闭/);assert.match(html,/max=min 可关闭自动扩容/);assert.match(html,/当前目标与会话绑定状态/);
+  assert.match(html,/id="sessionBindingMaxEntries" type="number" min="1" max="100000" step="1"/);
+  assert.match(html,/<label[^>]*for="sessionProviderAffinityEnabled"><input id="sessionProviderAffinityEnabled" type="checkbox" disabled aria-describedby="sessionProviderAffinityHelp" onchange="PROVIDER_TOGGLE_DIRTY=true;PROVIDER_TOGGLE_GENERATION\+\+">/);
+  assert.match(html,/id="sessionProviderAffinityHelp"[^>]*>默认开启/);
+  assert.match(html,/sessionProviderAffinityEnabled:\$\('#sessionProviderAffinityEnabled'\)\.checked/);assert.match(html,/最小总数 0 = 关闭/);assert.match(html,/max=min 可关闭自动扩容/);assert.match(html,/当前目标与会话绑定状态/);
   assert.match(html,/cachePoolRole==='active'/);assert.match(html,/缓存活跃/);assert.match(html,/缓存备用/);
   assert.match(html, /api\('\/api\/statistics'\)/);
   assert.match(html, /id="statisticsStatus"[^>]+aria-live="polite"/);

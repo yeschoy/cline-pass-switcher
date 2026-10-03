@@ -181,6 +181,7 @@ location / {
 | `errorRules` | 唯一权威的有序错误规则数组；每条含稳定 `id`、`account`/`provider-model` 维度、动作、可选 Provider/model 范围，以及 status/body/Header AND 条件。`cooldown.reset` 使用显式格式与严格 `d/h/m/s` fallback/max；最多 100 条/64 KiB。动作与直接健康样本固定为 `ignore`/0、`degrade`/1、`cooldown`/1、`hard-quarantine`/1 个失败样本，后两者同时保持临时/持续处置 |
 | `retryRules` | 唯一权威的有序“停止重试”数组；每条含稳定 `id`、固定 `decision: "stop"`，以及同时存在的 `when.statuses` 与 `when.body_contains`。两类条件 AND、body 数组 ANY、大小写不敏感普通文本（不支持正则/Header）；首条命中即停止本请求剩余 Provider 与账号替换。缺失默认 `[]`；最多 100 条/64 KiB。普通日志只投影 `retryRuleId`/`retryDecision`/`retryMatchedBy` 枚举，不记录 needle 或匹配片段 |
 | `accountErrorRules` / `accountContentErrorRules` | 只读兼容镜像。旧配置启动时按“内容规则在前、状态规则在后”迁移；旧客户端不提交 `errorRules` 时只能原样回传镜像，试图修改会得到 409 |
+| `sessionProviderAffinityEnabled` | 默认 `true`，管理员可在账号管理页关闭并保存，旧客户端全量保存省略此字段时保留当前开关。只有同客户端密钥归属、同解析后模型、明确会话标识才优先上一次完整成功的**指定**具名渠道；仅调整当前账号已允许渠道的首试顺序，不更改账号/重试上限。成功后滑动保留 60 分钟、重启清空；失败/取消不建立新偏好。此指定渠道是 planned-only，不证明实际上游渠道或缓存命中。关闭开关立即恢复原有顺序并清空旧偏好；定期探测的账号级避开逻辑另行实施，不会因本开关启动探测 |
 | `accountPipeline` | 可选叠加层：三个开关与 `order`，缓存池 min/max，以及显式/消息回退会话绑定 TTL 和 LRU 上限。`0 <= cachePoolLowQuotaSize <= cachePoolSize <= cachePoolMaxSize <= 100000`；默认 TTL 为 2h/15m、上限 50,000。旧配置缺 max 时自动取 min，不会升级后自动扩容 |
 | `proxyKey` | **仅** Legacy（固定 ID `legacy`）的持久化下游密钥；非空 `PROXY_KEY` 只在启动/重启覆盖其生效值。Legacy 为空保留旧版匿名模型访问 Legacy 账号池；管理接口仍要求独立管理员会话 |
 | `clientKeys` | 仅额外密钥的私有数组 `[{ id, name, key }]`，不重复存 Legacy；`id` 为稳定归属 ID，`key` 为明文私有凭据，不会出现在普通列表、公开 metadata 或日志中。最多 16 个，勿把真实或生成密钥放入示例/仓库；当前存储并不加密 |
@@ -292,7 +293,7 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 
 账号代理支持 `http://`、`https://`、`socks5://`、`socks5h://` 和可选 URL 用户名/密码，只应用于该账号的 Cline 请求；代理失败进入网络/代理错误记录，并且不会回退直连。账号 Header 在客户端协议白名单之后合并，随后由系统强制覆盖 `Content-Type` 和账号 `Authorization`。Authorization、Cookie、逐跳 Header、会话/线程/设备身份及凭据类 Header 均禁止配置。
 
-普通请求日志会保存亲和键类型/置信度、caller/派生上游 key 的安全来源枚举、`provider.order` 是否覆盖 sticky、以及依据最终明确 usage 得出的缓存三态（命中/明确未命中/未知）；Provider cooldown/half-open 动作只作为 bounded attempt 枚举。Provider 选择策略同样只投影有界枚举：`providerPlanSource` 为 `configured`/`discovered`/`auto`（候选来源），`providerMode` 为 `strict`/`preferred`，每次真实 attempt 的 `providerSelection` 为 `strict-first`/`health`/`compat-auto`（`compat-auto` 只属于完全无具名候选的那一次不归因请求）；候选成功率数值、候选表与真实网关顺序不会被记录。请求级重试证据只投影 `retryRuleId`/`retryDecision`（`stop`/`continue`）/`retryMatchedBy`（`status`/`body`），不记录 needle 或匹配片段。它不保存实际 prompt/session/thread key、派生 key、HMAC 指纹、账号 Key、代理 URL/认证值、Header 值、备注、消息正文或敏感上游正文。旧日志缺少字段时显示未知，绝不迁移或猜测。
+普通请求日志会保存亲和键类型/置信度、caller/派生上游 key 的安全来源枚举、`provider.order` 是否覆盖 sticky、以及依据最终明确 usage 得出的缓存三态（命中/明确未命中/未知）；Provider cooldown/half-open 动作只作为 bounded attempt 枚举。Provider 选择策略同样只投影有界枚举：`providerPlanSource` 为 `configured`/`discovered`/`auto`（候选来源），`providerMode` 为 `strict`/`preferred`，每次真实 attempt 的 `providerSelection` 为 `strict-first`/`health`/`compat-auto`/`session-preferred`（只表示计划渠道偏好，不表示实际命中）（`compat-auto` 只属于完全无具名候选的那一次不归因请求）；候选成功率数值、候选表与真实网关顺序不会被记录。请求级重试证据只投影 `retryRuleId`/`retryDecision`（`stop`/`continue`）/`retryMatchedBy`（`status`/`body`），不记录 needle 或匹配片段。它不保存实际 prompt/session/thread key、派生 key、HMAC 指纹、账号 Key、代理 URL/认证值、Header 值、备注、消息正文或敏感上游正文。旧日志缺少字段时显示未知，绝不迁移或猜测。
 
 ### 错误详情（默认开启）与完整详细日志（默认关闭）
 

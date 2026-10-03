@@ -1,0 +1,10 @@
+{"file":".trellis/spec/backend/index.md","reason":"Entry point for chat routing and state owners"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Account-first leases, Provider planning, affinity, SSE and diagnostics contract"}
+{"file":".trellis/spec/backend/client-key-guidelines.md","reason":"Owner-scoped identity and account isolation"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Config migration and omitted-field preservation if rollback flag is persisted"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Retry, cancellation and safe diagnostic boundaries"}
+{"file":".trellis/spec/frontend/index.md","reason":"Existing console toggle conventions"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"Preserve model/admin drafts and old-client snapshots"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Native toggle accessibility and browser verification"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Trace full chat and browser/API contract"}
+{"file":".trellis/tasks/10-02-compare-go-upstream-monitoring/research/upstream-pinning-comparison.md","reason":"Go behavior and pitfalls; planned versus actual Provider"}

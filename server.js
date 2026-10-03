@@ -70,6 +70,7 @@ const DEFAULT_CONFIG = {
   poolFullWaitMs: null, // null inherits concurrencyWaitMs
   errorRules: [],          // canonical ordered account/provider-model failure rules
   retryRules: [],          // canonical ordered request-level retry-stop rules
+  sessionProviderAffinityEnabled: true, // explicit sessions: prefer last successful planned Provider
   accountWorkflow: defaultAccountWorkflow(), // disabled preserves legacy routing
   quotaProtection: { monthlyThresholdUsd: 0.20 }, // community-reference $50 monthly cap
   accountErrorRules: {},   // legacy compatibility projection only
@@ -458,7 +459,7 @@ const RETRY_MATCH_KINDS = new Set(['status', 'body']);
 // 有界策略证据投影：只描述计划来源/模式与本次选择依据，不包含候选清单或成功率数值。
 const PROVIDER_PLAN_SOURCES = new Set(['configured', 'discovered', 'auto']);
 const PROVIDER_MODES = new Set(['strict', 'preferred']);
-const PROVIDER_SELECTIONS = new Set(['strict-first', 'health', 'compat-auto']);
+const PROVIDER_SELECTIONS = new Set(['strict-first', 'health', 'compat-auto', 'session-preferred']);
 const MAX_ERROR_RULE_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
 const ERROR_RULE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
@@ -1224,6 +1225,8 @@ function normalizeCachePoolTarget(pipeline = config.accountPipeline) {
 }
 function normalizeConfigAndMeta({ persist = false } = {}) {
   let dirty = false;
+  if (!Object.hasOwn(loadedConfig, 'sessionProviderAffinityEnabled')) { config.sessionProviderAffinityEnabled = true; dirty = true; }
+  else if (typeof config.sessionProviderAffinityEnabled !== 'boolean') throw new Error('invalid sessionProviderAffinityEnabled');
   const workflow = normalizeAccountWorkflow(config.accountWorkflow);
   if (JSON.stringify(config.accountWorkflow) !== JSON.stringify(workflow)) { config.accountWorkflow = workflow; dirty = true; }
   const protection = normalizeQuotaProtection(config.quotaProtection);
@@ -1336,6 +1339,9 @@ const sessionBindings = new Map();
 const sessionBindingCounters = { hits: 0, misses: 0, invalidated: 0, temporaryOverflows: 0, provisionalHits: 0 };
 let sessionBindingGeneration = 0n;
 const SESSION_BINDING_TTL_SCALE = process.env.NODE_ENV === 'test' ? Math.max(0.0001, Math.min(1, Number(process.env.CLINE_PASS_TEST_BINDING_TTL_SCALE) || 1)) : 1;
+const SESSION_PROVIDER_TTL_MS = 3_600_000;
+const SESSION_PROVIDER_MODELS_PER_IDENTITY = 16;
+let sessionProviderAffinityGeneration = 0;
 function notifyCapacityWaiters() { for (const resolve of [...waiters]) resolve(); }
 function incrementBindingCounter(key) { sessionBindingCounters[key] = Math.min(Number.MAX_SAFE_INTEGER, (sessionBindingCounters[key] || 0) + 1); }
 function sessionBindingSource(identity) { return identity?.confidence === 'explicit' ? 'explicit' : identity?.confidence === 'fallback' ? 'fallback' : 'none'; }
@@ -1357,14 +1363,14 @@ function deleteSessionBinding(fingerprint, entry, { count = true } = {}) {
 function pruneSessionBindings(now = Date.now(), { full = false } = {}) {
   let scanned = 0;
   for (const [fingerprint, entry] of sessionBindings) {
-    if (entry.expiresAt <= now) deleteSessionBinding(fingerprint, entry);
+    if (entry.expiresAt <= now) deleteSessionBinding(fingerprint, entry, { count: entry.kind !== 'provider' });
     if (!full && ++scanned >= 256) break;
   }
   const limit = config.accountPipeline?.sessionBindingMaxEntries || SESSION_BINDING_MAX_ENTRIES;
   while (sessionBindings.size > limit) {
     const oldest = sessionBindings.entries().next().value;
     if (!oldest) break;
-    deleteSessionBinding(oldest[0], oldest[1]);
+    deleteSessionBinding(oldest[0], oldest[1], { count: oldest[1].kind !== 'provider' });
   }
 }
 function touchSessionBinding(fingerprint, entry, now = Date.now()) {
@@ -1417,17 +1423,22 @@ function cleanupSessionBindingSelection(selected) {
   const entry = sessionBindings.get(token.fingerprint);
   if (entry?.state === 'provisional' && entry.generation === token.generation && entry.ownerRequestId === token.ownerRequestId) deleteSessionBinding(token.fingerprint, entry);
 }
-function invalidateSessionBindingsForAccount(accountId) {
+function invalidateSessionBindingsForAccount(accountId, { credentialsChanged = false } = {}) {
   let changed = false;
-  for (const [fingerprint, entry] of sessionBindings) if (entry.accountId === accountId) changed = deleteSessionBinding(fingerprint, entry) || changed;
+  for (const [fingerprint, entry] of sessionBindings) {
+    // Temporary account holds invalidate account affinity, not an independently
+    // eligible Provider hint that may be used on another owner's allowed account.
+    if (entry.accountId === accountId && (entry.kind !== 'provider' || credentialsChanged))
+      changed = deleteSessionBinding(fingerprint, entry, { count: entry.kind !== 'provider' }) || changed;
+  }
   if (changed) notifyCapacityWaiters();
 }
 function invalidateSessionBindingsForOwner(clientKeyId) {
-  for (const account of config.accounts) if (account.clientKeyId === clientKeyId) invalidateSessionBindingsForAccount(account.id);
+  for (const account of config.accounts) if (account.clientKeyId === clientKeyId) invalidateSessionBindingsForAccount(account.id, { credentialsChanged: true });
 }
 function invalidateSessionBindingsOutside(validIds) {
   let changed = false;
-  for (const [fingerprint, entry] of sessionBindings) if (!validIds.has(entry.accountId)) changed = deleteSessionBinding(fingerprint, entry) || changed;
+  for (const [fingerprint, entry] of sessionBindings) if (entry.kind !== 'provider' && !validIds.has(entry.accountId)) changed = deleteSessionBinding(fingerprint, entry) || changed;
   if (changed) notifyCapacityWaiters();
 }
 function reconcileSessionBindings() {
@@ -1439,7 +1450,46 @@ function reconcileSessionBindings() {
 }
 function sessionBindingSummary() {
   reconcileSessionBindings();
-  return { enabled: sessionBindingConfigured(), size: sessionBindings.size, maxEntries: config.accountPipeline?.sessionBindingMaxEntries || SESSION_BINDING_MAX_ENTRIES, counters: { ...sessionBindingCounters } };
+  const providerEntries = [...sessionBindings.values()].filter(entry => entry.kind === 'provider').length;
+  return { enabled: sessionBindingConfigured(), size: sessionBindings.size - providerEntries, providerEntries,
+    totalEntries: sessionBindings.size, maxEntries: config.accountPipeline?.sessionBindingMaxEntries || SESSION_BINDING_MAX_ENTRIES,
+    counters: { ...sessionBindingCounters } };
+}
+// Provider hints use at most 16 slots per fingerprint in the same bounded LRU.
+// This avoids scanning the entire (up to 100k-entry) account-binding owner on each success.
+// Slot keys cannot collide with 64-hex account fingerprints; neither raw identity nor model text is in a key.
+function providerHintKey(fingerprint, slot) { return `provider\0${fingerprint}\0${slot}`; }
+function providerHintSlots(fingerprint, now = Date.now()) {
+  const slots = [];
+  for (let slot = 0; slot < SESSION_PROVIDER_MODELS_PER_IDENTITY; slot++) {
+    const key = providerHintKey(fingerprint, slot), entry = sessionBindings.get(key);
+    if (entry?.expiresAt <= now) deleteSessionBinding(key, entry, { count: false });
+    slots.push({ key, entry: entry?.expiresAt > now ? entry : null });
+  }
+  return slots;
+}
+function sessionProviderHint(identity, modelId) {
+  if (!config.sessionProviderAffinityEnabled || identity.confidence !== 'explicit' || !identity.fingerprint) return null;
+  const match = providerHintSlots(identity.fingerprint).find(({ entry }) => entry?.modelId === modelId);
+  if (!match) return null;
+  // Reading a hint moves it in the shared LRU but does not slide its TTL.
+  sessionBindings.delete(match.key); sessionBindings.set(match.key, match.entry);
+  return match.entry.provider;
+}
+function rememberSessionProvider(identity, modelId, account, attempt, sequence, affinityGeneration) {
+  if (!config.sessionProviderAffinityEnabled || affinityGeneration !== sessionProviderAffinityGeneration ||
+      identity.confidence !== 'explicit' || !identity.fingerprint || !attempt?.upstream ||
+      !identity.credentialValid?.() || !providerAttemptGenerationIsCurrent(modelId, account, attempt) ||
+      !config.accounts.some(a => a.id === account.id && a.clientKeyId === identity.clientKeyId && a.key === account.key && a.proxyUrl === account.proxyUrl)) return;
+  const now = Date.now(), slots = providerHintSlots(identity.fingerprint, now);
+  const match = slots.find(({ entry }) => entry?.modelId === modelId);
+  if (match?.entry.sequence > sequence) return; // an older concurrent turn finished late
+  // An unused slot is preferred; otherwise evict the least recently successful model.
+  const target = match || slots.find(({ entry }) => !entry) || slots.reduce((oldest, slot) => slot.entry.expiresAt < oldest.entry.expiresAt ? slot : oldest);
+  sessionBindings.delete(target.key);
+  sessionBindings.set(target.key, { kind: 'provider', accountId: account.id, modelId, provider: attempt.upstream, sequence,
+    expiresAt: now + Math.max(1, Math.floor(SESSION_PROVIDER_TTL_MS * SESSION_BINDING_TTL_SCALE)) });
+  pruneSessionBindings(now);
 }
 function getAccountState(id) { return (META.accountStates ||= {})[id] || null; }
 function safeReason(s, extraSecrets = []) {
@@ -4056,7 +4106,7 @@ function injectPrefs(body, modelId, { upstream, sort = null }) {
 
 // 稳定候选快照：configured 非空时权威，否则 stable discovered；exclude/硬隔离/冷却在快照阶段过滤。
 // 实际逐次选择由 selectProviderAttempt() 完成——strict 首试按来源顺序，后续与 preferred 都按 Provider-model 24h 成功率。
-function buildProviderPlan(modelId, cfg = {}, account = null, now = Date.now()) {
+function buildProviderPlan(modelId, cfg = {}, account = null, now = Date.now(), preferredProvider = null) {
   const configuredOrder = normalizeStringList(cfg.upstreams, 20);
   const discoveredOrder = normalizeStringList(META.models[modelId]?.upstreams, 100);
   const exclude = new Set(normalizeStringList(cfg.exclude, 50));
@@ -4067,7 +4117,7 @@ function buildProviderPlan(modelId, cfg = {}, account = null, now = Date.now()) 
     maxAttempts: cfg.maxRetries === null || cfg.maxRetries === undefined ? Infinity : Math.max(1, Number(cfg.maxRetries) + 1),
     accountGeneration: account ? (providerCircuitAccountGenerations.get(account.id) || 0) : 0,
     routeGeneration: account ? (providerCircuitRouteGenerations.get(providerCircuitRouteKey(account.id, modelId)) || 0) : 0,
-    sourceOrder: [], sourceIndex: new Map(), available: [], rates: new Map(), plannedOrder: [], allExcluded: false, retryAfter: null,
+    sourceOrder: [], sourceIndex: new Map(), available: [], rates: new Map(), plannedOrder: [], allExcluded: false, retryAfter: null, preferredProvider,
   };
   if (source === 'auto') { plan.maxAttempts = 1; return plan; }
   plan.sourceOrder = source === 'configured' ? configuredOrder : discoveredOrder;
@@ -4080,9 +4130,14 @@ function buildProviderPlan(modelId, cfg = {}, account = null, now = Date.now()) 
     plan.retryAfter = future.length ? retryAfterSeconds(Math.min(...future) - now) : null;
   }
   for (const provider of plan.available) plan.rates.set(provider, successHealthProjection('provider-model', modelId, provider, now).successRate);
+  if (preferredProvider && plan.providerCooldownMs > 0 && account) {
+    const circuit = providerCircuitStates.get(providerCircuitKey(account.id, modelId, preferredProvider));
+    if (circuit?.halfOpen || circuit?.cooldownUntil > now) plan.preferredProvider = null;
+  }
   plan.plannedOrder = plan.mode === 'preferred'
     ? healthOrderedProviders(plan, plan.available)
     : plan.available.length ? [plan.available[0], ...healthOrderedProviders(plan, plan.available.slice(1))] : [];
+  if (plan.available.includes(plan.preferredProvider)) plan.plannedOrder = [plan.preferredProvider, ...plan.plannedOrder.filter(p => p !== plan.preferredProvider)];
   return plan;
 }
 // Provider-model 24h 直接成功率降序；null 最后，同率/都未知按来源顺序。
@@ -4110,15 +4165,16 @@ function selectProviderAttempt(modelId, plan, account, attempted, now = Date.now
   // strict 模式的首个 attempt 是 strict-first（本请求首个真实尝试，按来源顺序取首个可用 provider）；
   // strict 的后续重试与 preferred 的全部尝试都按 Provider-model 24h 成功率（health）。这是纯证据标注，不改变选择。
   const strictFirst = plan.mode === 'strict' && attempted.size === 0;
-  const ordered = strictFirst ? remaining : healthOrderedProviders(plan, remaining);
-  const selection = strictFirst ? 'strict-first' : 'health';
-  if (!(plan.providerCooldownMs > 0)) return { attempt: namedProviderAttempt(plan, ordered[0], { selection }), retryAfter: null };
+  const hinted = attempted.size === 0 && remaining.includes(plan.preferredProvider) ? plan.preferredProvider : null;
+  const ordered = hinted ? [hinted, ...healthOrderedProviders(plan, remaining.filter(p => p !== hinted))] : strictFirst ? remaining : healthOrderedProviders(plan, remaining);
+  const selectionFor = (provider) => provider === hinted ? 'session-preferred' : strictFirst && !hinted ? 'strict-first' : 'health';
+  if (!(plan.providerCooldownMs > 0)) return { attempt: namedProviderAttempt(plan, ordered[0], { selection: selectionFor(ordered[0]) }), retryAfter: null };
   let blockedUntil = null;
   for (const provider of ordered) {
     const key = providerCircuitKey(account.id, modelId, provider), state = providerCircuitStates.get(key);
-    if (!state) return { attempt: namedProviderAttempt(plan, provider, { circuitKey: key, selection }), retryAfter: null };
+    if (!state) return { attempt: namedProviderAttempt(plan, provider, { circuitKey: key, selection: selectionFor(provider) }), retryAfter: null };
     if (state.cooldownUntil > now || state.halfOpen) { blockedUntil = Math.min(blockedUntil ?? Infinity, state.cooldownUntil > now ? state.cooldownUntil : now + 1000); continue; }
-    return { attempt: namedProviderAttempt(plan, provider, { circuitKey: key, circuitHalfOpen: true, selection }), retryAfter: null };
+    return { attempt: namedProviderAttempt(plan, provider, { circuitKey: key, circuitHalfOpen: true, selection: selectionFor(provider) }), retryAfter: null };
   }
   return { attempt: null, retryAfter: retryAfterSeconds(Math.max(1000, (blockedUntil ?? now + 1000) - now)) };
 }
@@ -4496,9 +4552,9 @@ function traceAttempt(attempt, result, account, ms, diagnostic) {
 
 // 两级重试：本函数固定一个账号，仅在该账号内按健康计划逐个尝试 provider。
 // 只有 account-scoped 错误命中 cooldown/hard-quarantine 时，外层 handleChat 才能终止本链并最多换号一次。
-async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream = false, attemptTimeoutMs = 120000, sensitiveValues = [], attemptOwner = null } = {}) {
+async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream = false, attemptTimeoutMs = 120000, sensitiveValues = [], attemptOwner = null, preferredProvider = null } = {}) {
   const t0 = Date.now();
-  const plan = buildProviderPlan(modelId, cfg, account), trace = [], attempted = new Set();
+  const plan = buildProviderPlan(modelId, cfg, account, t0, preferredProvider), trace = [], attempted = new Set();
   let retryStop = false, localRpm = false, localRpmRetryAt = null;
   const lease = attemptOwner?.lease || null;
   const quotaRole = lease?.quotaRole || null;
@@ -4647,7 +4703,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
         trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
         if (result.status !== 200 && !attempt.upstream) learnAvailableProviders(modelId, result.note);
         last = { ...result, accountAction: diagnostic.accountAction, quotaRemovalAction: diagnostic.quotaRemovalAction, classification: diagnostic.classification };
-        if (result.status === 200) break;
+        if (result.status === 200) { last.successfulAttempt = attempt; break; }
         if (diagnostic.retryDecision?.decision === 'stop') { retryStop = true; break; }
         if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine' || last.quotaRemovalAction) break;
       } catch (error) { permit?.release(); throw error; } finally { clearTimeout(timer); }
@@ -4712,6 +4768,8 @@ async function handleChat(req, res, clientKeyId) {
   const affinity = prepareChatAffinity(body, identity);
   body = affinity.body;
   const isStream = body.stream === true;
+  const providerSequence = nextSessionBindingGeneration();
+  const affinityGeneration = sessionProviderAffinityGeneration;
   const excluded = new Set();
   const accountPath = [];
   const attemptOwner = { nextAttemptIndex: 0, bindingSelection: null, lease: null, onAttemptCommit() { commitSessionBindingSelection(this.bindingSelection); } };
@@ -4731,6 +4789,7 @@ async function handleChat(req, res, clientKeyId) {
     bindingResult: selected?.bindingResult || 'not-applicable',
   });
   selected = await acquireAccountLease(identity, { excludeIds: excluded, ownerRequestId: requestId });
+  const preferredProvider = sessionProviderHint(identity, modelId);
   attemptOwner.bindingSelection = selected;
   if (!selected.lease) {
     if (selected.credentialRevoked) return unauthorized(res);
@@ -4762,7 +4821,7 @@ async function handleChat(req, res, clientKeyId) {
     cfg = resolveModelConfig(account, modelId);
     try {
       upstreamAffinitySent = true;
-      chain = await runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream: isStream, sensitiveValues, attemptOwner });
+      chain = await runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream: isStream, sensitiveValues, attemptOwner, preferredProvider });
       cleanupSessionBindingSelection(selected);
       targets = chain.plan?.plannedOrder || [];
       targetSource = chain.plan?.source || 'auto';
@@ -4886,6 +4945,7 @@ async function handleChat(req, res, clientKeyId) {
       const normalizedStatus = requestResult === 'failed' ? (observed.error ? observed.normalizedStatus : 502) : requestResult === 'client_cancelled' ? 499 : 200;
       const safeStreamError = requestResult === 'failed' ? (streamError ? safeReason(streamError, sensitiveValues) : 'stream transport error') : null;
       const usage = requestResult === 'success' ? observed.usage : null;
+      if (requestResult === 'success') rememberSessionProvider(identity, modelId, acc, chain.streamAttempt, providerSequence, affinityGeneration);
       finalizeStatistics({ globalError: requestResult === 'failed', finalProvider: observed.provider, usage, clientDisconnect: clientCancelled, segments: statisticsSegments(chain.trace, acc.id, usage, clientCancelled) });
       recordChat({ requestId, requestedModel, resolvedModel: modelId, provider: observed.provider, canonical: observed.canonical, ms: Date.now() - chain.t0, stream: true, result: requestResult, error: safeStreamError, upstreamStatus: providerAttempt?.upstreamStatus ?? null, normalizedStatus, account: acc.name, accountId: acc.id, attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, accountPath, accountActions, ...affinityFacts(usage), strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, providerPlanSource: targetSource, providerMode: targetMode, appliedHeaderNames: Object.keys(acc.headers || {}), proxyError: !!acc.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues });
     };
@@ -4928,6 +4988,7 @@ async function handleChat(req, res, clientKeyId) {
   if (status === 200 && /^cline-pass\//.test(modelId) && !config.knownModels.includes(modelId)) { config.knownModels.push(modelId); saveConfig(); }
   const safeOut = status === 200 ? out : { ...out, error: { ...(out.error || {}), message: safeReason(out?.error?.message || 'upstream error', sensitiveValues) } };
   const usage = status === 200 && !disconnected ? normalizeUsage(routing.usage) : null;
+  if (status === 200 && !disconnected) rememberSessionProvider(identity, modelId, acc, chain.successfulAttempt, providerSequence, affinityGeneration);
   finalizeStatistics({ globalError: status !== 200 && !disconnected, finalProvider: routing.finalProvider, usage, clientDisconnect: disconnected, segments: statisticsSegments(chain.trace, acc?.id, usage, disconnected) });
   recordChat({
     requestId, requestedModel, resolvedModel: modelId, provider: routing.finalProvider || null, canonical: routing.canonicalSlug || null, ms: Date.now() - chain.t0, stream: false, result: disconnected ? 'client_cancelled' : status === 200 ? 'success' : 'failed',
@@ -5262,7 +5323,7 @@ async function dispatch(req, res) {
         mode: config.accountMode, active: config.activeAccount, concurrencyWaitMs: config.concurrencyWaitMs, poolFullWaitMs: config.poolFullWaitMs,
         accountWorkflow: config.accountWorkflow, configurationRevision: configurationRevision(),
         selectionCounters: { persistent: true, persistenceError: selectionCounterPersistenceError, sequence: META.selectionCounters.sequence },
-        quotaProtection: config.quotaProtection, errorRules: config.errorRules, retryRules: config.retryRules, accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline,
+        quotaProtection: config.quotaProtection, errorRules: config.errorRules, retryRules: config.retryRules, accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline, sessionProviderAffinityEnabled: config.sessionProviderAffinityEnabled,
         cachePool: { minSize: configuredCachePoolSize(), maxSize: configuredCachePoolMaxSize(), lowSize: configuredCachePoolLowQuotaSize(), targetSize: configuredCachePoolTargetSize(), scope: 'per-client-key', actual: cachePoolActualByOwner(), binding: sessionBindingSummary() },
         stats: Object.fromEntries(config.accounts.map((a) => [a.name, { requests: META.statistics.lifetime.accounts[a.id]?.requests ?? 0 }])),
       });
@@ -5277,6 +5338,7 @@ async function dispatch(req, res) {
       const poolWait = body.poolFullWaitMs === undefined ? config.poolFullWaitMs : body.poolFullWaitMs;
       if (poolWait !== null && (!Number.isInteger(poolWait) || poolWait < 0 || poolWait > 30000)) return sendJSON(res, 400, { error: { message: 'poolFullWaitMs must be null or an integer from 0 to 30000' } });
       let requestedErrorRules = config.errorRules, requestedPipeline = config.accountPipeline, requestedRetryRules = config.retryRules, requestedProtection = config.quotaProtection, requestedWorkflow = config.accountWorkflow;
+      if (body.sessionProviderAffinityEnabled !== undefined && typeof body.sessionProviderAffinityEnabled !== 'boolean') return sendJSON(res, 400, { error: { message: 'sessionProviderAffinityEnabled must be boolean' } });
       try {
         if (body.accountWorkflow !== undefined) requestedWorkflow = normalizeAccountWorkflow(body.accountWorkflow);
         if (body.errorRules !== undefined) requestedErrorRules = normalizeErrorRules(body.errorRules, { strict: true });
@@ -5339,19 +5401,24 @@ async function dispatch(req, res) {
       const nextActive = requestedActive >= 0 ? requestedActive : Math.min(Math.max(0, Number(body.active) || 0), accs.length - 1);
       const next = { ...config, accounts: accs, accountMode: body.mode, activeAccount: nextActive,
         concurrencyWaitMs: wait, poolFullWaitMs: poolWait, errorRules: requestedErrorRules, retryRules: requestedRetryRules,
-        quotaProtection: requestedProtection, ...legacyRuleProjection(requestedErrorRules), accountPipeline: requestedPipeline, accountWorkflow: requestedWorkflow };
+        quotaProtection: requestedProtection, ...legacyRuleProjection(requestedErrorRules), accountPipeline: requestedPipeline, accountWorkflow: requestedWorkflow,
+        sessionProviderAffinityEnabled: body.sessionProviderAffinityEnabled ?? config.sessionProviderAffinityEnabled };
       // A failed config rename must not change live owner routing, invalidate bindings,
       // or clear existing RPM/quota state before the client sees a failed save.
       atomicWriteJson(CONFIG_PATH, next);
       const quotaRoutingWasEnabled = quotaRoutingEnabled();
+      if (next.sessionProviderAffinityEnabled !== config.sessionProviderAffinityEnabled) {
+        sessionProviderAffinityGeneration++;
+        for (const [key, entry] of sessionBindings) if (entry.kind === 'provider') deleteSessionBinding(key, entry, { count: false });
+      }
       Object.assign(config, next); clientCatalogs.clear();
       workflowHealthCache.clear();
       normalizeCachePoolTarget(requestedPipeline);
       for (const [id, previous] of previousById) {
         const current = accs.find((a) => a.id === id);
-        if (!current) { invalidateQuotaAccount(id, { clearSnapshot: true, deleted: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); clearRpmState(id); }
-        else if (current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) { invalidateQuotaAccount(id, { clearSnapshot: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); const month = getAccountState(id)?.protectionMonthlyAt || 0; if (month) META.accountStates[id] = { protectionMonthlyAt: month }; else delete META.accountStates[id]; clearRpmState(id); }
-        else if (current.clientKeyId !== previous.clientKeyId) invalidateSessionBindingsForAccount(id);
+        if (!current) { invalidateQuotaAccount(id, { clearSnapshot: true, deleted: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id, { credentialsChanged: true }); clearRpmState(id); }
+        else if (current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) { invalidateQuotaAccount(id, { clearSnapshot: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id, { credentialsChanged: true }); const month = getAccountState(id)?.protectionMonthlyAt || 0; if (month) META.accountStates[id] = { protectionMonthlyAt: month }; else delete META.accountStates[id]; clearRpmState(id); }
+        else if (current.clientKeyId !== previous.clientKeyId) invalidateSessionBindingsForAccount(id, { credentialsChanged: true });
         else if (previous.enabled !== false && current.enabled === false) { invalidateQuotaAccount(id); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); }
         else for (const model of new Set([...Object.keys(previous.perModel || {}), ...Object.keys(current.perModel || {})])) if (JSON.stringify(previous.perModel?.[model]) !== JSON.stringify(current.perModel?.[model])) clearProviderCircuitForRoute(id, model);
       }
@@ -5456,9 +5523,11 @@ async function dispatch(req, res) {
       if (body.exposeCatalog !== undefined) next.exposeCatalog = !!body.exposeCatalog;
       try { validateClientKeys(next, { persisted: true }); }
       catch (error) { return sendJSON(res, 400, { error: { message: error.message } }); }
+      const previousProxyKey = config.proxyKey;
       atomicWriteJson(CONFIG_PATH, next);
       Object.assign(config, next);
       PROXY_KEY = config.proxyKey || ''; // startup environment override is not a running-process pin
+      if (next.proxyKey !== previousProxyKey) invalidateSessionBindingsForOwner('legacy');
       notifyCapacityWaiters();
       return sendJSON(res, 200, { ok: true, proxyKey: config.proxyKey, publicBaseUrl: config.publicBaseUrl, authRequired: !!PROXY_KEY, proxyBase: publicProxyBase(), exposeCatalog: !!config.exposeCatalog });
     }

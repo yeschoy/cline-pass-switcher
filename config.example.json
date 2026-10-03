@@ -31,6 +31,7 @@
   "activeAccount": 0,
   "concurrencyWaitMs": 2000,
   "poolFullWaitMs": null,
+  "sessionProviderAffinityEnabled": true,
   "errorRules": [
     {
       "id": "account-rate-limit",

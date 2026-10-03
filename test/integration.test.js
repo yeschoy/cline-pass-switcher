@@ -4726,3 +4726,214 @@ test('raw error-only keeps failed retry Headers and bodies but omits successful 
   const list = await api('/api/logs/details'); assert.equal(list.items.filter((item) => item.requestId === id).length, 1);
   assert.doesNotMatch(JSON.stringify(list), /headers|fixture request body/i);
 });
+
+test('explicit session Provider preference respects terminal outcome, route, account, cap and rollback', async (t) => {
+  const seen = [], held = [];
+  const upstream = http.createServer((req, res) => {
+    if (!req.url.endsWith('/chat/completions')) { res.writeHead(404); res.end('{}'); return; }
+    let text = ''; req.on('data', chunk => text += chunk); req.on('end', () => {
+      const body = JSON.parse(text), provider = body.provider?.only?.[0] || body.providerOptions?.gateway?.only?.[0] || null;
+      const marker = body.messages?.[0]?.content || '';
+      seen.push({ provider, auth: req.headers.authorization, model: body.model, marker });
+      if (marker === 'older' && provider === 'a') { held.push(() => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ choices: [{ message: { content: 'old' } }] })); }); return; }
+      if (marker === 'stream-fail' || marker === 'stream-cancel') {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write('data: {"choices":[{"delta":{"content":"started"}}]}\n\n');
+        if (marker === 'stream-fail') res.end('data: {"error":{"message":"late failure","status":502}}\n\ndata: [DONE]\n\n');
+        else held.push(() => res.end('data: [DONE]\n\n'));
+        return;
+      }
+      if ((marker === 'seed' || marker === 'route-fail') && provider === 'a') { res.writeHead(502, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"a failed"}}'); return; }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      // Deliberately mismatch the planned Provider: no actual-hit may be inferred.
+      res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }], provider: marker === 'seed' ? 'remote-other' : undefined }));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const route = (upstreams, extra = {}) => ({ upstreams, exclude: [], pinMode: 'strict', sort: null, maxRetries: null, providerCooldownMs: 0, ...extra });
+  const accounts = [{ id: 'one', name: 'One', key: 'one-secret', enabled: true, perModel: {} }, { id: 'two', name: 'Two', key: 'two-secret', enabled: true, perModel: { m: route(['a']) } }];
+  let running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', activeAccount: 0, accounts,
+    knownModels: ['m', 'other'], perModel: { m: route(['a', 'b']), other: route(['a', 'b']) }, errorRules: [] });
+  t.after(async () => { held.splice(0).forEach(fn => fn()); if (running?.child) await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const send = (session, marker = 'normal', model = 'm', stream = false) => rawJson(port, '/v1/chat/completions', { model, messages: [{ role: 'user', content: marker }], stream }, session ? { 'Session-Id': session } : {});
+  const log = response => waitUntil(async () => (await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${response.headers['x-cline-request-id']}`)).json()).items[0]);
+  const snapshot = () => fetch(`http://127.0.0.1:${port}/api/accounts`).then(r => r.json());
+  const save = async (change, flag) => {
+    const view = await snapshot(), next = { accounts: view.accounts, mode: view.mode, active: view.active, concurrencyWaitMs: view.concurrencyWaitMs, poolFullWaitMs: view.poolFullWaitMs, errorRules: view.errorRules, retryRules: view.retryRules, accountPipeline: view.accountPipeline, accountWorkflow: view.accountWorkflow, quotaProtection: view.quotaProtection };
+    change?.(next); if (flag !== undefined) next.sessionProviderAffinityEnabled = flag;
+    const result = await rawJson(port, '/api/accounts', next); assert.equal(result.status, 200, result.text);
+  };
+  assert.equal((await snapshot()).sessionProviderAffinityEnabled, true);
+  const seeded = await send('private-session', 'seed'); assert.equal(seeded.status, 200);
+  assert.equal((await log(seeded)).actualProvider, 'remote-other', 'a mismatched actual Provider remains independent of the remembered B target');
+  const preferred = await send('private-session'); assert.deepEqual(seen.slice(-1).map(row => row.provider), ['b']);
+  assert.equal((await log(preferred)).attempts[0].providerSelection, 'session-preferred');
+  assert.deepEqual((await log(preferred)).targetProviders[0], 'b');
+  assert.equal((await log(preferred)).actualProvider, null, 'no routing metadata must remain unknown');
+  assert.equal((await log(preferred)).cacheHit, null, 'no usage evidence must not claim a cache hit');
+  await save(next => { next.accounts[0].perModel.m = route(['a', 'b'], { maxRetries: 0 }); });
+  seen.length = 0;
+  assert.equal((await send('private-session')).status, 200);
+  assert.deepEqual(seen.splice(0).map(row => row.provider), ['b'], 'a preferred first attempt does not enlarge maxRetries: 0');
+  await save(next => { next.accounts[0].perModel = {}; });
+  for (const session of ['other-session', null]) { const response = await send(session); assert.equal(response.status, 200); assert.equal(seen.at(-1).provider, 'a', 'unrelated explicit or fallback identity must not share preference'); }
+  assert.equal((await send('private-session', 'normal', 'other')).status, 200); assert.equal(seen.at(-1).provider, 'a', 'model namespace is separate');
+  assert.equal((await send('private-session', 'stream-fail', 'm', true)).status, 200);
+  assert.equal((await send('private-session')).status, 200); assert.equal(seen.at(-1).provider, 'b', 'failed stream cannot overwrite prior preference');
+  const failedStream = await send('fresh-stream', 'stream-fail', 'm', true);
+  assert.equal((await log(failedStream)).result, 'failed');
+  assert.equal((await send('fresh-stream')).status, 200); assert.equal(seen.at(-1).provider, 'a', 'failed stream cannot establish preference');
+  const cancelled = new AbortController();
+  const pendingStream = fetch(`http://127.0.0.1:${port}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Session-Id': 'cancelled-stream' }, body: JSON.stringify({ model: 'm', messages: [{ role: 'user', content: 'stream-cancel' }], stream: true }), signal: cancelled.signal });
+  const accepted = await pendingStream; assert.equal(accepted.status, 200); await accepted.body.getReader().read(); cancelled.abort();
+  await waitUntil(async () => { const page = await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?limit=30`)).json(); return page.items.some(row => row.result === 'client_cancelled' && row.attempts?.[0]?.provider === 'a'); });
+  assert.equal((await send('cancelled-stream')).status, 200); assert.equal(seen.at(-1).provider, 'a');
+  held.splice(0).forEach(fn => fn()); // release the cancelled mock stream before concurrency checks
+  // The first account's allowed hint remains usable on a different account, but
+  // a complete per-account route override is authoritative.
+  await save(next => { next.active = 1; });
+  assert.equal((await send('private-session', 'route-fail')).status, 502); assert.equal(seen.at(-1).provider, 'a');
+  await save(next => { next.accounts[1].perModel.m = route(['a', 'b']); });
+  assert.equal((await send('private-session')).status, 200); assert.equal(seen.at(-1).provider, 'b');
+  await save(next => { next.accounts[1].perModel.m = route(['a', 'b'], { exclude: ['b'] }); });
+  assert.equal((await send('private-session')).status, 200); assert.equal(seen.at(-1).provider, 'a');
+  await save(next => { next.active = 0; }, false);
+  assert.equal((await snapshot()).sessionProviderAffinityEnabled, false);
+  await save(); assert.equal((await snapshot()).sessionProviderAffinityEnabled, false, 'old full-save omission preserves opt-out');
+  assert.equal((await send('private-session')).status, 200); assert.equal(seen.at(-1).provider, 'a');
+  const invalid = { ...(await snapshot()), sessionProviderAffinityEnabled: 'false' };
+  const bytes = fs.readFileSync(path.join(running.dir, 'config.json'));
+  assert.equal((await rawJson(port, '/api/accounts', { accounts: invalid.accounts, mode: invalid.mode, active: invalid.active, sessionProviderAffinityEnabled: 'false' })).status, 400);
+  assert.deepEqual(fs.readFileSync(path.join(running.dir, 'config.json')), bytes);
+  await save(null, true);
+  assert.equal((await send('private-session')).status, 200); assert.equal(seen.at(-1).provider, 'a', 'disabling cleared old hints');
+  const staleConfig = send('config-stale', 'older'); await waitUntil(() => held.length > 0);
+  await save(next => { next.accounts[0].perModel.m = route(['a', 'b']); });
+  held.shift()(); assert.equal((await staleConfig).status, 200);
+  assert.equal((await send('config-stale')).status, 200); assert.equal(seen.at(-1).provider, 'a', 'stale route completion cannot write preference');
+  const staleToggle = send('toggle-stale', 'older'); await waitUntil(() => held.length > 0);
+  await save(null, false); await save(null, true);
+  held.shift()(); assert.equal((await staleToggle).status, 200);
+  assert.equal((await send('toggle-stale')).status, 200); assert.equal(seen.at(-1).provider, 'a', 'late completion across rollback generations cannot revive a cleared hint');
+  const older = send('late-session', 'older'); await waitUntil(() => held.length > 0);
+  // A newer request succeeds with B while the old A request remains in flight.
+  assert.equal((await send('late-session', 'seed')).status, 200);
+  held.shift()(); assert.equal((await older).status, 200);
+  assert.equal((await send('late-session')).status, 200); assert.equal(seen.at(-1).provider, 'b');
+  const binding = (await snapshot()).cachePool.binding;
+  assert.ok(binding.totalEntries <= binding.maxEntries);
+  assert.ok(binding.providerEntries >= 1);
+  const serialized = fs.readFileSync(path.join(running.dir, 'config.json'), 'utf8') + fs.readFileSync(path.join(running.dir, 'metadata.json'), 'utf8') + JSON.stringify((await log(preferred)));
+  assert.doesNotMatch(serialized, /private-session|late-session|cancelled-stream|provider\\u0000/);
+  const dir = running.dir; await stop(running.child); running.child = null; running = await startSwitcher(null, dir);
+  assert.equal((await snapshot()).sessionProviderAffinityEnabled, true);
+  assert.equal((await send('late-session')).status, 200); assert.equal(seen.at(-1).provider, 'a', 'restart drops process-local hints');
+});
+
+test('Provider preference successful SSE, sliding TTL and LRU cap', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    let text = ''; req.on('data', chunk => text += chunk); req.on('end', () => {
+      const body = JSON.parse(text), provider = body.provider?.only?.[0] || body.providerOptions?.gateway?.only?.[0];
+      seen.push(provider);
+      if (provider === 'a' && body.messages?.[0]?.content === 'seed') { res.writeHead(502, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"failed"}}'); return; }
+      if (body.stream) { res.writeHead(200, { 'Content-Type': 'text/event-stream' }); res.end('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'); return; }
+      res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"choices":[{"message":{"content":"ok"}}]}');
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-provider-ttl-'));
+  const route = { upstreams: ['a', 'b'], exclude: [], pinMode: 'strict', maxRetries: 1, providerCooldownMs: 0 };
+  fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({ routingSecret: 'local-provider-ttl', models: { m: { upstreamStatus: {} } } }));
+  const pipeline = { quotaPool: false, healthSort: false, sticky: false, order: PIPELINE_STEP_ORDER, cachePoolSize: 0, cachePoolMaxSize: 0, sessionBindingMaxEntries: 1 };
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', accounts: [{ id: 'one', name: 'One', key: 'fake-key', enabled: true, perModel: {} }], knownModels: ['m'], perModel: { m: route }, accountPipeline: pipeline }, dir, { NODE_ENV: 'test', CLINE_PASS_TEST_BINDING_TTL_SCALE: '0.0001' });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  const call = (session, marker = 'normal', stream = false) => rawJson(port, '/v1/chat/completions', { model: 'm', messages: [{ role: 'user', content: marker }], stream }, { 'Session-Id': session });
+  assert.equal((await call('sse', 'seed', true)).status, 200);
+  assert.deepEqual(seen.splice(0), ['a', 'b']);
+  assert.equal((await call('sse')).status, 200); assert.deepEqual(seen.splice(0), ['b'], 'clean SSE termination establishes a planned hint');
+  await new Promise(resolve => setTimeout(resolve, 180));
+  assert.equal((await call('sse')).status, 200); assert.deepEqual(seen.splice(0), ['b'], 'successful use slides the TTL');
+  await new Promise(resolve => setTimeout(resolve, 410));
+  assert.equal((await call('sse')).status, 200); assert.deepEqual(seen.splice(0), ['a'], '60m scaled expiry restores strict source ordering');
+  await call('one', 'seed'); seen.length = 0;
+  await call('two', 'seed'); seen.length = 0;
+  await call('one'); assert.deepEqual(seen.splice(0), ['a'], 'a new session evicts the oldest hint at the shared cap');
+  const view = await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+  assert.equal(view.cachePool.binding.totalEntries, 1);
+  assert.equal(view.cachePool.binding.providerEntries, 1);
+  assert.equal(view.cachePool.binding.size, 0, 'Provider-only affinity does not fabricate account binding occupancy');
+});
+
+test('a cooling hinted Provider loses priority without falsely marking the alternate as session preferred', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    let raw = ''; req.on('data', chunk => raw += chunk); req.on('end', () => {
+      const body = JSON.parse(raw), provider = body.provider?.only?.[0] || body.providerOptions?.gateway?.only?.[0];
+      seen.push(provider);
+      const marker = body.messages?.[0]?.content;
+      if ((provider === 'a' && marker === 'seed') || (provider === 'b' && marker === 'fail-b')) {
+        res.writeHead(502, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"provider unavailable"}}'); return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"choices":[{"message":{"content":"ok"}}]}');
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const route = { upstreams: ['a', 'b'], exclude: [], pinMode: 'preferred', maxRetries: 1, providerCooldownMs: 700 };
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', accounts: [{ id: 'one', name: 'One', key: 'fake', enabled: true, perModel: {} }], knownModels: ['m'], perModel: { m: route } });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const send = (session, marker) => rawJson(port, '/v1/chat/completions', { model: 'm', messages: [{ role: 'user', content: marker }] }, { 'Session-Id': session });
+  const log = response => waitUntil(async () => (await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestId=${response.headers['x-cline-request-id']}`)).json()).items[0]);
+  assert.equal((await send('remember-b', 'seed')).status, 200); assert.deepEqual(seen.splice(0), ['a', 'b']);
+  await new Promise(resolve => setTimeout(resolve, 750)); // A is eligible again
+  assert.equal((await send('other-session', 'fail-b')).status, 200); assert.deepEqual(seen.splice(0), ['b', 'a']);
+  const cooling = await send('remember-b', 'normal');
+  assert.equal(cooling.status, 200); assert.deepEqual(seen.splice(0), ['a']);
+  assert.equal((await log(cooling)).attempts[0].providerSelection, 'health', 'cooling B was not selected; no false preference evidence');
+  assert.equal((await log(cooling)).targetProviders[0], 'a', 'planned target also drops a temporarily held hint');
+});
+
+test('malformed persisted Provider preference rejects startup without rewriting operator bytes', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-provider-invalid-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'config.json');
+  fs.writeFileSync(file, JSON.stringify({ sessionProviderAffinityEnabled: 'false', accounts: [] }));
+  const before = fs.readFileSync(file);
+  const child = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: { ...process.env, DATA_DIR: dir, BIND_HOST: '127.0.0.1', CLINE_PASS_KEY: '', PROXY_KEY: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const exited = await new Promise(resolve => child.once('exit', resolve));
+  assert.notEqual(exited, 0);
+  assert.deepEqual(fs.readFileSync(file), before);
+});
+
+test('pre-stream account replacement revalidates remembered Provider against the replacement route', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    let raw = ''; req.on('data', chunk => raw += chunk); req.on('end', () => {
+      const body = JSON.parse(raw), provider = body.provider?.only?.[0] || body.providerOptions?.gateway?.only?.[0];
+      seen.push([req.headers.authorization, provider]);
+      const marker = body.messages?.[0]?.content;
+      if (marker === 'seed' && provider === 'a') { res.writeHead(502, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"a failed"}}'); return; }
+      if (marker === 'replace' && req.headers.authorization === 'Bearer first-secret') { res.writeHead(403, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"account unauthorized"}}'); return; }
+      res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"choices":[{"message":{"content":"ok"}}]}');
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort();
+  const route = upstreams => ({ upstreams, exclude: [], pinMode: 'strict', maxRetries: null, providerCooldownMs: 0 });
+  const accounts = [{ id: 'first', name: 'First', key: 'first-secret', priority: 1, enabled: true, perModel: {} },
+    { id: 'second', name: 'Second', key: 'second-secret', priority: 10, enabled: true, perModel: { m: route(['a']) } }];
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'priority-failover', accounts,
+    knownModels: ['m'], perModel: { m: route(['a', 'b']) }, errorRules: [{ id: 'replace', scope: 'account', action: 'cooldown', when: { statuses: [403] }, reset: { fallback: '1m0s', max: '1m0s' } }] });
+  t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const call = (session, marker) => rawJson(port, '/v1/chat/completions', { model: 'm', messages: [{ role: 'user', content: marker }] }, { 'Session-Id': session });
+  assert.equal((await call('restricted', 'seed')).status, 200); seen.length = 0;
+  assert.equal((await call('allowed', 'seed')).status, 200); seen.length = 0;
+  assert.equal((await call('restricted', 'replace')).status, 200);
+  assert.deepEqual(seen, [['Bearer first-secret', 'b'], ['Bearer second-secret', 'a']], 'the replacement must not borrow B outside its complete route');
+  const view = await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json();
+  view.accounts[1].perModel.m = route(['a', 'b']);
+  const saved = await rawJson(port, '/api/accounts', { accounts: view.accounts, mode: view.mode, active: view.active, concurrencyWaitMs: view.concurrencyWaitMs,
+    errorRules: view.errorRules, retryRules: view.retryRules, accountPipeline: view.accountPipeline, accountWorkflow: view.accountWorkflow });
+  assert.equal(saved.status, 200, saved.text);
+  seen.length = 0;
+  assert.equal((await call('allowed', 'normal')).status, 200);
+  assert.deepEqual(seen, [['Bearer second-secret', 'b']], 'the new account may reuse a still-allowed hint');
+});

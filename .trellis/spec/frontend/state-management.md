@@ -85,7 +85,7 @@ GET /api/accounts
                     quota: { quotaDisposition, quotaRetryAt, ... },
                     rpm: { limit, used, reserved, retryAt },
                     statistics: { recent24h, lifetimeRequests, lifetimeErrors } }],
-       mode, active, concurrencyWaitMs, poolFullWaitMs, errorRules,
+       mode, active, concurrencyWaitMs, poolFullWaitMs, sessionProviderAffinityEnabled, errorRules,
        accountErrorRules, accountContentErrorRules, accountPipeline,
        cachePool: { scope: 'per-client-key', minSize, maxSize, lowSize, targetSize,
                     actual: { high, low, unknown },
@@ -93,7 +93,7 @@ GET /api/accounts
        stats }
 
 POST /api/accounts
-  <- { accounts, mode, active, concurrencyWaitMs, poolFullWaitMs?, errorRules?,
+  <- { accounts, mode, active, concurrencyWaitMs, poolFullWaitMs?, sessionProviderAffinityEnabled?, errorRules?,
        accountErrorRules?, accountContentErrorRules?, accountPipeline? }
   -> { ok, accounts: <count>, mode, active }
 
@@ -225,6 +225,8 @@ Probe/validation/setup use the explicit route-scope account ID when present. One
   proxyUrl, headers, perModel
 }
 ```
+
+`#sessionProviderAffinityEnabled` is a labelled, default-on native checkbox hydrated from the authenticated `ACCS.sessionProviderAffinityEnabled` snapshot; it remains disabled until that read completes. Its local dirty/generation guards prevent stale reads from replacing an unsaved or newer toggle edit; a confirmed account save resets the dirty state only if no later toggle edit occurred. `collectAccounts()` includes its draft boolean with the full account snapshot, while old clients omitting the top-level field preserve the saved opt-out. It does not change the account-pipeline sticky flag or mutate a route until the existing explicit account save. `ACCS.cachePool.binding.size` remains the account-binding count, while `providerEntries` and `totalEntries` show the bounded Provider-hint allocation without disclosing identities.
 
 `id` preserves runtime-state identity. `clientKeyId` is a stable exclusive downstream owner ID, not the upstream `key`: `collectAccounts()` retains it for **all** `ACCS.accounts` including filtered/hidden rows, drawer edits, presets, raw scheduling and bulk concurrency. The new-row owner selector defaults to a valid key (Legacy when usable, otherwise the first additional ID); the drawer uses a labelled native owner select and changes the local complete account draft only. Old server-side full saves omitting owner preserve existing stable-ID assignments, but the console must explicitly submit each owner. `maxRpm` is the canonical per-account rolling-RPM limit (integer 0-100000, `0` = unlimited). `collectAccounts()` emits `maxRpm: Number(a.maxRpm) || 0`, and an older client that omits the field is preserved server-side by stable `id`; the browser must never drop or default it to `0` for an existing account. `perModel` preserves all account-specific model routes even though the account table does not edit those routes inline. Omitting `perModel` would normalize it to `{}` and erase that account's overrides. The same payload also carries the top-level scheduling draft: `errorRules` plus `retryRules` from their generation-owning drafts and the canonical `accountPipeline`; `collectAccounts()` validates both rule drafts before returning, so an invalid visual/no longer current retry rule blocks the destructive full save instead of silently dropping it.
 

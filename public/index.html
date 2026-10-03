@@ -298,6 +298,7 @@
       <label class="dim" style="font-size:12px" for="sessionBindingExplicitTtlMs">显式会话 TTL(ms) <input id="sessionBindingExplicitTtlMs" type="number" min="60000" max="604800000" step="1" value="7200000" aria-describedby="cachePoolHelp" style="width:120px"></label>
       <label class="dim" style="font-size:12px" for="sessionBindingFallbackTtlMs">消息回退 TTL(ms) <input id="sessionBindingFallbackTtlMs" type="number" min="60000" max="604800000" step="1" value="900000" aria-describedby="cachePoolHelp" style="width:120px"></label>
       <label class="dim" style="font-size:12px" for="sessionBindingMaxEntries">会话绑定上限 <input id="sessionBindingMaxEntries" type="number" min="1" max="100000" step="1" value="50000" aria-describedby="cachePoolHelp" style="width:100px"></label>
+      <label class="dim" for="sessionProviderAffinityEnabled"><input id="sessionProviderAffinityEnabled" type="checkbox" disabled aria-describedby="sessionProviderAffinityHelp" onchange="PROVIDER_TOGGLE_DIRTY=true;PROVIDER_TOGGLE_GENERATION++"> 显式会话优先上次成功计划渠道</label>
       <select id="preset"><option value="">策略预设…</option><option value="cache">缓存命中优先</option><option value="stable">会话稳定</option><option value="throughput">最大吞吐</option><option value="even">均匀分摊</option><option value="quota">按额度分摊</option><option value="failover">主备容灾</option><option value="safe">保守防封</option></select>
       <button id="accountPresetPreview" class="ghost" onclick="previewPreset()">预览应用</button>
       <input id="accSearch" placeholder="搜索名称或备注" oninput="clearBulkSelection()" style="background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px">
@@ -307,6 +308,7 @@
       <span class="dim" style="font-size:12px" id="accMsg" aria-live="polite"></span>
     </div>
     <p class="dim" style="font-size:12px">仅真实上游 429 且明确账号额度不足、刷新后月参考余额严格低于阈值才手动解封式隔离；以社区参考月上限 $50 估算，非真实账单。5 小时/每周耗尽由新鲜完整额度快照确认恢复。解封前请确认额度；解封后可能再次失败。</p>
+    <p id="sessionProviderAffinityHelp" class="dim">默认开启；仅明确会话 ID、同客户端密钥归属和模型生效。完整成功后优先本次指定渠道（非实际命中或缓存命中证明），有效期 60 分钟，重启清空；不能越过当前账号路由、排除或冷却。取消勾选并保存账号配置即可回退。</p>
     <p id="cachePoolHelp" class="dim" style="font-size:12px;margin-bottom:6px">缓存池最小总数 0 = 关闭，低额度槽 0 = 保持旧调度；多客户端密钥时同一目标数分别用于各归属池，实际高/低/未知为各池合计，不是每 Key 独立配额。旧策略仅在 sticky 模式或启用会话粘性步骤时生效；启用下方工作流也会启用活动缓存。正数低额度槽优先消耗已用 80%–&lt;95% 的账号，已用 &lt;80% 作高额度兜底，≥95% 不入池，未知最后补位；旧策略仅在同角色内应用健康/会话排序；工作流重新选号按节点规则处理整个允许的活动集合，不隐含健康层或角色优先。低额度账号级降级会等待真实额度刷新，耗尽状态按窗口重置重评；人工恢复只清规则状态。只有全部活跃账号有限并发满载且 RPM 未耗尽，等待超时后才 grow-one 高额度目标；压力下降不缩容。max=min 可关闭自动扩容。</p>
     <p id="cachePoolRuntime" class="dim" aria-live="polite" style="font-size:12px;margin-bottom:10px">当前目标与会话绑定状态加载中…</p>
     <div class="toolbar">
@@ -493,6 +495,7 @@
 <div id="upstreamSetupModal" class="modal"><div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="upstreamSetupTitle"><h2 id="upstreamSetupTitle">上游一键配置预览</h2><label for="upstreamSetupStrategy" class="dim">策略</label><select id="upstreamSetupStrategy" onchange="renderUpstreamSetupProposal()"><option value="cache">缓存优先（strict）</option><option value="available">可用性优先（preferred）</option><option value="automatic">自动 sticky</option></select><pre id="upstreamSetupDiff" style="white-space:pre-wrap;margin:14px 0"></pre><div id="upstreamSetupStatus" aria-live="polite" class="dim" style="margin-bottom:12px"></div><button type="button" onclick="testUpstreamSetup()">测试建议</button> <button type="button" onclick="applyUpstreamSetup()">确认保存</button> <button type="button" class="ghost" onclick="closeUpstreamSetup()">取消</button></div></div>
 <script>
 let DATA = null;
+let PROVIDER_TOGGLE_GENERATION=0, PROVIDER_TOGGLE_DIRTY=false;
 try { localStorage.removeItem('cps_key'); } catch {}
 let ADMIN_CSRF = null;
 let ADMIN_PENDING = false;
@@ -732,6 +735,7 @@ function renderCatalog() {
 
 async function loadAll() {
   const workflowLoadGeneration=WORKFLOW_GENERATION,workflowWasDirty=WORKFLOW_SUPPORTED&&workflowDirty();
+  const providerToggleLoadGeneration=PROVIDER_TOGGLE_GENERATION;
   const accountId = $('#routeScope')?.value || '';
   const [models, accs, sec, meta, aliases, statistics, keyList] = await Promise.all([api('/api/models' + (accountId ? '?accountId=' + encodeURIComponent(accountId) : '')), api('/api/accounts'), api('/api/security'), api('/api/meta'), api('/api/model-aliases'), api('/api/statistics'), api('/api/security/client-keys')]);
   const modelStatistics=new Map((statistics?.models||[]).map(item=>[item.id,item]));
@@ -744,9 +748,12 @@ async function loadAll() {
   const pipeline=ACCS.accountPipeline||{},cacheMin=pipeline.cachePoolSize??0;
   $('#cachePoolSize').value=cacheMin;$('#cachePoolMaxSize').value=pipeline.cachePoolMaxSize??cacheMin;$('#cachePoolLowQuotaSize').value=pipeline.cachePoolLowQuotaSize??0;
   $('#sessionBindingExplicitTtlMs').value=pipeline.sessionBindingExplicitTtlMs??7200000;$('#sessionBindingFallbackTtlMs').value=pipeline.sessionBindingFallbackTtlMs??900000;$('#sessionBindingMaxEntries').value=pipeline.sessionBindingMaxEntries??50000;
+  if(providerToggleLoadGeneration===PROVIDER_TOGGLE_GENERATION&&!PROVIDER_TOGGLE_DIRTY)
+    $('#sessionProviderAffinityEnabled').checked=ACCS.sessionProviderAffinityEnabled!==false;
+  $('#sessionProviderAffinityEnabled').disabled=false;
   const runtime=ACCS.cachePool||{},binding=runtime.binding||{};
   const actual=runtime.actual||{};
-  $('#cachePoolRuntime').textContent=`当前目标 ${runtime.targetSize??cacheMin}（最小 ${runtime.minSize??cacheMin} / 上限 ${runtime.maxSize??pipeline.cachePoolMaxSize??cacheMin} / 低额度槽 ${runtime.lowSize??pipeline.cachePoolLowQuotaSize??0}）${runtime.scope==='per-client-key'?'，分别应用于各密钥池':''}；实际高 ${actual.high??0} / 低 ${actual.low??0} / 未知 ${actual.unknown??0}${runtime.scope==='per-client-key'?'（各池合计）':''}；会话绑定 ${binding.enabled?'已启用':'未启用'}，当前 ${binding.size??0} / ${binding.maxEntries??pipeline.sessionBindingMaxEntries??50000} 条`;
+  $('#cachePoolRuntime').textContent=`当前目标 ${runtime.targetSize??cacheMin}（最小 ${runtime.minSize??cacheMin} / 上限 ${runtime.maxSize??pipeline.cachePoolMaxSize??cacheMin} / 低额度槽 ${runtime.lowSize??pipeline.cachePoolLowQuotaSize??0}）${runtime.scope==='per-client-key'?'，分别应用于各密钥池':''}；实际高 ${actual.high??0} / 低 ${actual.low??0} / 未知 ${actual.unknown??0}${runtime.scope==='per-client-key'?'（各池合计）':''}；会话绑定 ${binding.enabled?'已启用':'未启用'}，当前 ${binding.size??0} / ${binding.maxEntries??pipeline.sessionBindingMaxEntries??50000} 条；渠道偏好 ${binding.providerEntries??0}，总数 ${binding.totalEntries??binding.size??0} / ${binding.maxEntries??pipeline.sessionBindingMaxEntries??50000} 条`;
   hydrateErrorRuleDraft(ACCS.errorRules || []);
   hydrateRetryRuleDraft(ACCS.retryRules || []);
   setPipelineOrder(ACCS.accountPipeline?.order || PIPELINE_DEFAULT_ORDER);
@@ -1680,7 +1687,7 @@ function applyRawScheduling() {
   $('#rawSchedulingFeedback').textContent = '草稿已更新，尚未生效；请保存账号配置';
 }
 function monthlyQuotaDraft(){const text=$('#monthlyQuotaThreshold').value.trim(),amount=Number(text);if(!/^\d+(?:\.\d{1,2})?$/.test(text)||amount<0.01||amount>50)throw Error('月参考余额阈值必须是 $0.01–$50.00，最多两位小数');return {monthlyThresholdUsd:amount};}
-function collectAccounts(){validateErrorRuleDraft(ERROR_RULE_DRAFT);validateRetryRuleDraft(RETRY_RULE_DRAFT);const rules=cloneRuleDraft(),retryRules=cloneRetryRuleDraft(),poolFullWaitMs=poolFullWaitDraft();if($('#accMode').value==='load-health'&&$('#pipelineSticky').checked)throw Error('负载与健康模式不能开启会话粘性');return {...(WORKFLOW_SUPPORTED?{accountWorkflow:collectAccountWorkflow(),expectedConfigurationRevision:WORKFLOW_CONFIGURATION_REVISION}:{}),quotaProtection:monthlyQuotaDraft(),accounts:ACCS.accounts.map(a=>({id:a.id,name:a.name,note:a.note||'',key:a.key||'',enabled:a.enabled!==false,maxConcurrent:Number(a.maxConcurrent)||0,maxRpm:Number(a.maxRpm)||0,weight:Number(a.weight)||1,priority:Number(a.priority)||100,proxyUrl:a.proxyUrl||'',headers:a.headers||{},perModel:a.perModel||{},clientKeyId:a.clientKeyId??'legacy'})),mode:$('#accMode').value,active:ACCS.active||0,poolFullWaitMs,errorRules:rules,retryRules,accountPipeline:{quotaPool:$('#pipelineQuotaPool').checked,healthSort:$('#pipelineHealthSort').checked,sticky:$('#pipelineSticky').checked,order:pipelineOrder(),...pipelineNumberDraft()}};}
+function collectAccounts(){validateErrorRuleDraft(ERROR_RULE_DRAFT);validateRetryRuleDraft(RETRY_RULE_DRAFT);const rules=cloneRuleDraft(),retryRules=cloneRetryRuleDraft(),poolFullWaitMs=poolFullWaitDraft();if($('#accMode').value==='load-health'&&$('#pipelineSticky').checked)throw Error('负载与健康模式不能开启会话粘性');return {...(WORKFLOW_SUPPORTED?{accountWorkflow:collectAccountWorkflow(),expectedConfigurationRevision:WORKFLOW_CONFIGURATION_REVISION}:{}),sessionProviderAffinityEnabled:$('#sessionProviderAffinityEnabled').checked,quotaProtection:monthlyQuotaDraft(),accounts:ACCS.accounts.map(a=>({id:a.id,name:a.name,note:a.note||'',key:a.key||'',enabled:a.enabled!==false,maxConcurrent:Number(a.maxConcurrent)||0,maxRpm:Number(a.maxRpm)||0,weight:Number(a.weight)||1,priority:Number(a.priority)||100,proxyUrl:a.proxyUrl||'',headers:a.headers||{},perModel:a.perModel||{},clientKeyId:a.clientKeyId??'legacy'})),mode:$('#accMode').value,active:ACCS.active||0,poolFullWaitMs,errorRules:rules,retryRules,accountPipeline:{quotaPool:$('#pipelineQuotaPool').checked,healthSort:$('#pipelineHealthSort').checked,sticky:$('#pipelineSticky').checked,order:pipelineOrder(),...pipelineNumberDraft()}};}
 async function saveAccounts(payload=null){
   if(!payload){try{payload=collectAccounts();}catch(error){return accMsg(error.message,true);}}
   try{
@@ -1688,13 +1695,16 @@ async function saveAccounts(payload=null){
     if(WORKFLOW_SUPPORTED){payload.accountWorkflow=payload.accountWorkflow===undefined?collectAccountWorkflow():normalizedWorkflowDraft(payload.accountWorkflow);payload.expectedConfigurationRevision=WORKFLOW_CONFIGURATION_REVISION;}
   }catch(error){return accMsg(error.message,true);}
   if(payload.errorRules===undefined)payload.errorRules=cloneRuleDraft();
+  // A preset preview may outlive a later toggle edit; the live native control owns this draft.
+  payload.sessionProviderAffinityEnabled=$('#sessionProviderAffinityEnabled').checked;
   if(!payload.accounts.some(account=>account.key))return accMsg('至少需要一个 key 非空的账号',true);
-  const generation=WORKFLOW_GENERATION,contextAtSend=workflowContextSignature();
+  const generation=WORKFLOW_GENERATION,contextAtSend=workflowContextSignature(),providerToggleAtSend=PROVIDER_TOGGLE_GENERATION;
   let saved=false;
   try{
     const result=await api('/api/accounts',payload);
     if(!result.ok)return accMsg(result.error?.message||'保存失败',true);
     saved=true;
+    if(providerToggleAtSend===PROVIDER_TOGGLE_GENERATION){PROVIDER_TOGGLE_DIRTY=false;PROVIDER_TOGGLE_GENERATION++;}
     if(WORKFLOW_SUPPORTED&&payload.accountWorkflow){
       WORKFLOW_BASE=JSON.parse(JSON.stringify(payload.accountWorkflow));WORKFLOW_BASE_CONTEXT=contextAtSend;WORKFLOW_SERVER_ENABLED=payload.accountWorkflow.enabled;WORKFLOW_CONFLICT=false;
       if(/^[a-f0-9]{64}$/.test(result.configurationRevision||''))WORKFLOW_CONFIGURATION_REVISION=result.configurationRevision;

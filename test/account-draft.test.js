@@ -870,3 +870,34 @@ test('low quota slots share the live pipeline draft, raw editor and server runti
   assert.equal(h.el('#cachePoolLowQuotaSize').value,1);
   assert.match(h.el('#cachePoolRuntime').textContent,/低额度槽 1.*分别应用于各密钥池.*实际高 1 \/ 低 1 \/ 未知 1（各池合计）/);
 });
+
+test('Provider affinity rollback toggle hydrates server state and preserves complete account drafts', async () => {
+  const h=harness(), writes=[];
+  h.context.responses={'/api/models':{},'/api/accounts':{...fixture(),sessionProviderAffinityEnabled:false},'/api/security':{proxyKey:'legacy-secret'},'/api/security/client-keys':{keys:[{id:'legacy',name:'Legacy'}]},'/api/meta':{configured:true},'/api/model-aliases':{aliases:{}},'/api/statistics':{models:[]}};
+  h.run('render=()=>{}; api=async path=>responses[path]');
+  // The production markup starts disabled; the VM element factory has no HTML parser.
+  h.el('#sessionProviderAffinityEnabled').disabled=true;
+  assert.equal(h.el('#sessionProviderAffinityEnabled').disabled,true);
+  await h.run('loadAll()');
+  assert.equal(h.el('#sessionProviderAffinityEnabled').disabled,false);
+  assert.equal(h.el('#sessionProviderAffinityEnabled').checked,false);
+  h.el('#sessionProviderAffinityEnabled').checked=true;
+  h.run('PROVIDER_TOGGLE_DIRTY=true;PROVIDER_TOGGLE_GENERATION++');
+  await h.run('loadAll()');
+  assert.equal(h.el('#sessionProviderAffinityEnabled').checked,true, 'an old authenticated refresh cannot overwrite an unsaved toggle');
+  h.run("ACCS.accounts[1].note='retained unsaved note'");
+  assert.equal(h.run('collectAccounts().sessionProviderAffinityEnabled'),true);
+  assert.equal(h.run('collectAccounts().accounts[1].note'),'retained unsaved note');
+  h.context.writes=writes;
+  h.run('api=async(path,body)=>{writes.push({path,body});return {ok:false,error:{message:"rejected"}};}');
+  await h.run('saveAccounts()');
+  assert.equal(writes[0].path,'/api/accounts');
+  assert.equal(writes[0].body.sessionProviderAffinityEnabled,true);
+  assert.equal(writes[0].body.accounts[1].note,'retained unsaved note');
+  assert.equal(h.el('#sessionProviderAffinityEnabled').checked,true, 'failed save leaves explicit unsaved draft for retry');
+  assert.equal(h.snapshot().sessionProviderAffinityEnabled,false, 'server snapshot remains authoritative until successful reload');
+  h.context.oldPreset=h.run('collectAccounts()');
+  h.el('#sessionProviderAffinityEnabled').checked=false;
+  await h.run('saveAccounts(oldPreset)');
+  assert.equal(writes[1].body.sessionProviderAffinityEnabled,false, 'a stale preset preview must not restore an older toggle draft');
+});
