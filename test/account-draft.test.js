@@ -902,6 +902,17 @@ test('Provider affinity rollback toggle hydrates server state and preserves comp
   assert.equal(writes[1].body.sessionProviderAffinityEnabled,false, 'a stale preset preview must not restore an older toggle draft');
 });
 
+test('manual probe reports account-scoped pin negative-control evidence without turning a pipeline hint into proof', async () => {
+  for (const [capability, expected] of [['supported','假渠道被路由拒绝'], ['ignored','only 未严格执行'], ['unknown','钉选能力未知']]) {
+    const h=harness(), button={disabled:false};h.context.button=button;
+    h.context.capability=capability;
+    h.run("api=async()=>({ok:true,upstreams:['alpha'],lastProvider:'alpha',pinCapability:capability});loadAll=async()=>{};");
+    await h.run("probe('cline-pass/model',button)");
+    assert.match(h.el('#status').textContent,new RegExp(expected));
+    assert.equal(button.disabled,false);
+  }
+});
+
 test('scheduled probe console keeps dirty limits, escapes account-scoped evidence and rejects invalid saves', async () => {
   const h=harness(), sent=[];
   h.context.sent=sent;

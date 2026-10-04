@@ -296,9 +296,9 @@ test('account routing, header boundary, failover, state and streaming', async (t
           res.writeHead(401, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ error: { message: 'unauthorized account', status: 401 } }));
         }
-        if (only === '__probe__') {
+        if (/^cps-pin-test-[a-f0-9]{16}$/.test(only || '')) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ error: { message: 'Available providers are: alpha, beta.', type: 'invalid_request_error' } }));
+          return res.end(JSON.stringify({ error: { message: `provider ${only} rejected; Available providers are: alpha, beta.`, type: 'invalid_request_error' } }));
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ choices: [{ message: { content: 'OK', provider_metadata: { gateway: { routing: { finalProvider: only || 'alpha', canonicalSlug: 'mock/planner' } } } } }] }));
@@ -2516,7 +2516,7 @@ test('detailed logging settings, route matrix, actual-call groups and credential
       res.setHeader('X-Earlier-Echo', 'response-header-password'); res.setHeader('Location', 'https://example.org/?api_key=response-header-password');
       if (req.method === 'GET') return res.end(JSON.stringify({ data: [{ id: 'cline-pass/model' }] }));
       const only = body.provider?.only?.[0] || body.providerOptions?.gateway?.only?.[0];
-      if (only === '__probe__') { res.statusCode = 400; return res.end(JSON.stringify({ error: 'Available providers are: one, two, three, four, five, six.' })); }
+      if (/^cps-pin-test-[a-f0-9]{16}$/.test(only || '')) { res.statusCode = 400; return res.end(JSON.stringify({ error: `provider ${only} rejected; Available providers are: one, two, three, four, five, six.` })); }
       if (only === 'first') { res.statusCode = 500; return res.end(JSON.stringify({ error: { message: 'retry mock failure', status: 500 } })); }
       const content = body.model === 'probe' ? 'OK' : 'retained output <script>alert(1)</script> incoming-cookie-secret upstream-cookie-secret response-header-password ' + (body.echo || '') + req.headers.authorization.replace(/^Bearer /, '');
       const out = { choices: [{ message: { content, ...(body.model === 'probe' ? { provider_metadata: { gateway: { routing: { finalProvider: 'one', fallbacksAvailable: ['one', 'two', 'three', 'four', 'five', 'six'] } } } } : {}) } }] };
@@ -4938,6 +4938,84 @@ test('pre-stream account replacement revalidates remembered Provider against the
   assert.deepEqual(seen, [['Bearer second-secret', 'b']], 'the new account may reuse a still-allowed hint');
 });
 
+test('manual pin negative control separates routed rejection, ignored only and unknown without extra scheduled calls', async (t) => {
+  const seen = [];
+  const mock = http.createServer((req, res) => {
+    let raw = ''; req.on('data', part => raw += part); req.on('end', () => {
+      const body = JSON.parse(raw), model = body.model;
+      const planner = model.startsWith('planner-');
+      const only = planner ? body.providerOptions?.gateway?.only?.[0] : body.provider?.only?.[0];
+      seen.push({ model, only, auth: req.headers.authorization, body });
+      res.setHeader('Content-Type', 'application/json');
+      const success = (actual = 'alpha', content = 'OK') => {
+        const message = { content, ...(planner ? { provider_metadata: { gateway: { routing: { finalProvider: actual } } } } : {}) };
+        res.end(JSON.stringify({ choices: [{ message }], ...(planner ? {} : actual ? { provider: actual } : {}) }));
+      };
+      if (!only) return success(model === 'auto-only' ? null : 'alpha');
+      if (!/^cps-pin-test-[a-f0-9]{16}$/.test(only)) { res.statusCode = 400; return res.end(JSON.stringify({ error: { message: 'invalid test slug' } })); }
+      if (model.endsWith('-supported')) {
+        if (model === 'planner-supported' && req.headers.authorization === 'Bearer fixture-b') return success('alpha');
+        res.statusCode = planner ? 400 : 404;
+        return res.end(JSON.stringify({ error: { message: `provider ${only} rejected; Available providers are: alpha, beta.`, metadata: { available_providers: ['alpha', 'beta'] } } }));
+      }
+      if (model.endsWith('-ignored')) return success('alpha');
+      if (model === 'planner-generic') { res.statusCode = 400; return res.end(JSON.stringify({ error: { message: 'invalid request shape; Available providers are: alpha, beta.' } })); }
+      if (model === 'planner-auth') { res.statusCode = 401; return res.end(JSON.stringify({ error: { message: `account authorization failed for ${only}; Available providers are: alpha, beta.` } })); }
+      if (model === 'planner-rate') { res.statusCode = 429; return res.end(JSON.stringify({ error: { message: 'gateway rate limited' } })); }
+      if (model === 'planner-server') { res.statusCode = 503; return res.end(JSON.stringify({ error: { message: `provider ${only} rejected; Available providers are: alpha, beta.` } })); }
+      if (model === 'planner-empty') return success('alpha', '');
+      if (model === 'planner-envelope') return res.end(JSON.stringify({ error: { status: 400, message: `provider ${only} rejected; Available providers are: alpha, beta.` } }));
+      if (model === 'planner-network') return req.socket.destroy();
+      if (model === 'direct-no-actual') return success(null);
+      res.end(JSON.stringify({ error: { message: 'unexpected fixture case' } }));
+    });
+  });
+  const upstreamPort = await listen(mock), port = await unusedPort();
+  const models = ['planner-supported', 'direct-supported', 'planner-ignored', 'direct-ignored',
+    'planner-generic', 'planner-auth', 'planner-rate', 'planner-server', 'planner-empty',
+    'planner-envelope', 'planner-network', 'direct-no-actual', 'auto-only', 'planner-rpm'];
+  const accounts = [
+    { id: 'a', name: 'A', key: 'fixture-a', enabled: true, perModel: {} },
+    { id: 'b', name: 'B', key: 'fixture-b', enabled: true, perModel: {} },
+    { id: 'rpm', name: 'RPM', key: 'fixture-rpm', enabled: true, maxRpm: 1, perModel: {} },
+  ];
+  const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts,
+    knownModels: models, perModel: {}, providerProbeSchedule: { enabled: false, intervalMs: 300000, maxPerRound: 2, maxPer24h: 100, failureThreshold: 3 } });
+  t.after(async () => { await stop(running.child); await close(mock); fs.rmSync(running.dir, { recursive: true, force: true }); });
+  const probe = (model, accountId = 'a') => rawJson(port, '/api/probe', { model, accountId });
+  for (const [model, expected] of [['planner-supported','supported'], ['direct-supported','supported'],
+    ['planner-ignored','ignored'], ['direct-ignored','ignored'], ['planner-generic','unknown'],
+    ['planner-auth','unknown'], ['planner-rate','unknown'], ['planner-server','unknown'],
+    ['planner-empty','unknown'], ['planner-envelope','unknown'], ['planner-network','unknown'],
+    ['direct-no-actual','unknown']]) {
+    const before = seen.length, result = await probe(model, model === 'direct-ignored' ? 'b' : 'a');
+    assert.equal(result.status, 200, `${model}: ${result.text}`);
+    assert.equal(result.json.pinCapability, expected, model);
+    assert.equal(result.json.pinnable, true, 'legacy field still reports a recognized pipeline, not verified pinning');
+    assert.equal(seen.length - before, 2, 'manual probe reuses the one existing harvest call');
+    assert.match(seen.at(-1).only, /^cps-pin-test-[a-f0-9]{16}$/);
+    assert.equal(seen.at(-1).auth, `Bearer fixture-${model === 'direct-ignored' ? 'b' : 'a'}`);
+    assert.equal(result.json.upstreams.includes(seen.at(-1).only), false, 'the impossible slug is never discovered');
+  }
+  const sameModelOtherAccount = await probe('planner-supported', 'b');
+  assert.equal(sameModelOtherAccount.status, 200); assert.equal(sameModelOtherAccount.json.pinCapability, 'ignored', 'the same model may ignore only for another account');
+  assert.equal(seen.at(-1).auth, 'Bearer fixture-b');
+  const noPipelineBefore = seen.length, noPipeline = await probe('auto-only');
+  assert.equal(noPipeline.status, 200); assert.equal(noPipeline.json.pinCapability, 'unknown');
+  assert.equal(noPipeline.json.pinnable, false); assert.equal(seen.length - noPipelineBefore, 1);
+  const deniedBefore = seen.length;
+  assert.equal((await rawJson(port, '/api/probe', { model: 'planner-supported' }, {}, { skipAdmin: true })).status, 401);
+  assert.equal(seen.length, deniedBefore, 'a client credential cannot invoke the manual negative control');
+  const rpmBefore = seen.length, rpm = await probe('planner-rpm', 'rpm');
+  assert.equal(rpm.status, 200); assert.equal(rpm.json.pinCapability, 'unknown');
+  assert.equal(seen.length - rpmBefore, 1, 'a local RPM block cannot send the negative control');
+  const metadata = JSON.parse(fs.readFileSync(path.join(running.dir, 'metadata.json'), 'utf8'));
+  assert.deepEqual(metadata.providerProbe.budget, [], 'manual calibration never spends automatic budget');
+  assert.equal(metadata.models['planner-supported'].pinCapability, undefined, 'an account verdict cannot become global model metadata');
+  assert.equal(JSON.stringify(metadata).includes('cps-pin-test-'), false, 'ephemeral control slug is not persisted');
+  assert.equal((await bareFetch(`http://127.0.0.1:${port}/api/models`)).status, 401, 'manual result remains under administrator auth');
+});
+
 test('scheduled Provider probes debit persisted budget before a mocked call and never start immediately', async (t) => {
   const seen = [];
   const upstream = http.createServer((req, res) => {
@@ -5059,10 +5137,11 @@ test('scheduled probes share manual account RPM and never debit when local admis
     });
   });
   const upstreamPort=await listen(upstream),port=await unusedPort();
-  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts:[{id:'a',name:'A',key:'local',enabled:true,maxRpm:1,perModel:{}}],knownModels:['m'],perModel:{m:{upstreams:['one']}},providerProbeSchedule:{enabled:true,intervalMs:300000,maxPerRound:2,maxPer24h:100,failureThreshold:3}},null,{NODE_ENV:'test',CLINE_PASS_TEST_PROBE_INTERVAL_MS:'80'});
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accounts:[{id:'a',name:'A',key:'local',enabled:true,maxRpm:1,perModel:{}}],knownModels:['m'],perModel:{m:{upstreams:['one']}},providerProbeSchedule:{enabled:false,intervalMs:300000,maxPerRound:2,maxPer24h:100,failureThreshold:3}},null,{NODE_ENV:'test',CLINE_PASS_TEST_PROBE_INTERVAL_MS:'80'});
   t.after(async()=>{await stop(running.child);await close(upstream);fs.rmSync(running.dir,{recursive:true,force:true});});
   const manual=await rawJson(port,'/api/test',{model:'m',accountId:'a',upstreams:['one']});
   assert.equal(manual.status,200);
+  assert.equal((await rawJson(port,'/api/providers/probe-schedule',{enabled:true,intervalMs:300000,maxPerRound:2,maxPer24h:100,failureThreshold:3})).status,200);
   await new Promise(resolve=>setTimeout(resolve,260));
   assert.equal(requests.length,1,'automated check cannot bypass the manual call RPM window');
   const status=await(await fetch(`http://127.0.0.1:${port}/api/providers/probe-schedule`)).json();

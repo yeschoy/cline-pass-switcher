@@ -139,7 +139,7 @@ POST /api/config
 
 POST /api/probe
   <- { model, accountId? }
-  -> probe result + selected accountId
+  -> probe result + selected accountId + request-local pinCapability: 'supported' | 'ignored' | 'unknown' (successful probes)
 
 POST /api/validate-upstreams
   <- { model, accountId? }
@@ -210,7 +210,7 @@ The route scope selector is explicit:
 
 Editing any inherited field creates an account-owned route. `copyGlobalCfg()` explicitly loads the global view and saves its complete route into the selected account. `inheritCfg()` deletes the account's own `perModel[model]`; it does not copy global fields into the account. `providerCooldownMs` is an integer 0-300000; 0 preserves legacy provider attempts.
 
-Probe/validation/setup use the explicit route-scope account ID when present. One setup operation keeps probe, harvest and validation on that account, builds three local proposals (cache-first strict, availability-first preferred, automatic sticky), and opens a preview. Cancel writes nothing; test sends only the proposal to `/api/test`; confirm alone calls the existing complete-route save and reloads accepted state. Changing route scope while the preview is open makes it stale and blocks test/save.
+Probe/validation/setup use the explicit route-scope account ID when present. One setup operation keeps probe, harvest and validation on that account, builds three local proposals (cache-first strict, availability-first preferred, automatic sticky), and opens a preview. Cancel writes nothing; test sends only the proposal to `/api/test`; confirm alone calls the existing complete-route save and reloads accepted state. Changing route scope while the preview is open makes it stale and blocks test/save. The manual probe's `pinCapability` is a transient account/model observation shown through the existing text-only live status: a clearly rejected impossible `only` is supported, a completed response from another named actual Provider is ignored, and missing/ambiguous evidence is unknown. It never becomes global `DATA` or a persisted model capability. Legacy `meta.pinnable` only indicates recognized pipeline syntax, so the model badge must not claim proven pin enforcement for another account.
 
 `pinMode: "preferred"` remains a round-trip configuration value, but both modes now mean switcher-owned outer attempts with one provider per HTTP request. The browser must not describe `preferred` as gateway-side `order`. `meta.upstreamStatus[provider]` is a server projection of model/provider health (`status`, success/failure timestamps, failure count/class, `cooldownUntil`, and bounded note). It is display-only: frontend sorting must never override configured provider priority or claim to be the routing authority.
 

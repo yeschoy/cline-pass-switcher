@@ -351,6 +351,18 @@ test('account maxRpm control is a bounded labelled input and renders only safe n
   assert.match(log, /\['concurrency','rpm','mixed'\]\.includes\(x\.blockedBy\)/, 'ordinary request rows project only the bounded blockedBy enum');
 });
 
+test('manual pin negative control labels a recognized pipeline without promising enforcement', () => {
+  assert.match(html,/id="status" role="status" aria-live="polite"/);
+  assert.match(html,/若网关忽略钉选，它可能生成内容并计费/);
+  assert.doesNotMatch(html,/零 token 消耗的假上游请求|两类管道都能精确钉住上游/);
+  const renderer=html.slice(html.indexOf('function render()'),html.indexOf('function renderAccounts'));
+  assert.match(renderer,/已识别管道/);
+  assert.match(renderer,/钉选需按账号校验/);
+  assert.doesNotMatch(renderer,/可精确钉住/);
+  const probe=html.slice(html.indexOf('async function probe(id, btn)'),html.indexOf('async function probeAll()'));
+  assert.match(probe,/负对照/);assert.match(probe,/only 未严格执行/);
+});
+
 test('scheduled probe settings use labelled bounded native inputs and a scoped, escaped recovery table', () => {
   for (const [id, min, max] of [['probeInterval',1,1440],['probeRound',1,10],['probeDay',1,1000],['probeThreshold',1,10]]) {
     assert.match(html,new RegExp(`for="${id}"`));

@@ -2746,8 +2746,8 @@ async function orEndpoints(slug) {
 // 两条管道（实测）：
 // - planner：响应带 provider_metadata.gateway.routing（canonicalSlug/finalProvider/fallbacksAvailable），
 //   请求体 provider.* 被网关丢弃。
-// - direct：响应顶层带 provider（显示名）与 model（真实 OpenRouter ID），provider.only 会透传到
-//   OpenRouter，可精确钉住。
+// - direct：响应顶层带 provider（显示名）与 model（真实 OpenRouter ID），provider.only 可发往
+//   OpenRouter；是否对当前账号/模型严格生效仍需手动负对照及实际 Provider 证据。
 function slugify(s) { return String(s).toLowerCase().replace(/\s+/g, '-'); }
 
 function parseRouting(json) {
@@ -2767,7 +2767,7 @@ function parseRouting(json) {
   };
 }
 
-// 故意携带不存在的 only，让网关在路由层报错并列出可用上游（不产生 token 消耗）。
+// 管理员手动负对照：只有网关确实拒绝假渠道时才不会生成内容；忽略 only 仍可能计费。
 // - 直连管道（OpenRouter）：provider.only → 404 错误 JSON 里的 metadata.available_providers
 // - 规划器管道（Vercel AI Gateway）：providerOptions.gateway.only → 400 错误文本里的 "Available providers are: ..."
 const PROVIDER_SLUG = /^[a-z0-9][a-z0-9-]{0,199}$/;
@@ -2795,13 +2795,38 @@ function providersFromError(value, depth = 0) {
 function claimManagementPermit(lease) { return lease ? lease.takeRpmPermit() : { ok: true, permit: null }; }
 async function harvestAvailableProviders(modelId, pipeline, acc, lease = null) {
   const claim = claimManagementPermit(lease);
-  if (!claim.ok) return null;
+  if (!claim.ok) return { providers: null, pinCapability: 'unknown' };
+  // A valid but unconfigured slug tests whether this account/model's `only` is
+  // enforced. A syntactically invalid slug would make input rejection look like routing.
+  const control = `cps-pin-test-${crypto.randomBytes(8).toString('hex')}`;
+  if (knownProbeProviders(acc, modelId).includes(control)) {
+    claim.permit?.release();
+    return { providers: null, pinCapability: 'unknown' };
+  }
   const base = { model: modelId, messages: [{ role: 'user', content: 'hi' }], max_tokens: 16 };
   const body = pipeline === 'planner'
-    ? { ...base, providerOptions: { gateway: { only: ['__probe__'] } } }
-    : { ...base, provider: { only: ['__probe__'] } };
-  const { json } = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, { headers: chatHeaders(acc.key), body: JSON.stringify(body), attemptMeta: { model: modelId, provider: ['__probe__'] }, permit: claim.permit }, 60000, acc);
-  return providersFromError(upstreamErrorOf(json));
+    ? { ...base, providerOptions: { gateway: { only: [control] } } }
+    : { ...base, provider: { only: [control] } };
+  let response;
+  try {
+    response = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, {
+      headers: chatHeaders(acc.key), body: JSON.stringify(body), attemptMeta: { model: modelId, provider: [control] },
+      permit: claim.permit, maxResponseBytes: 64 * 1024,
+    }, 60000, acc);
+  } catch { return { providers: null, pinCapability: 'unknown' }; }
+  const { status, json } = response, error = upstreamErrorOf(json);
+  const listed = providersFromError(error)?.filter((slug) => slug !== control);
+  const providers = listed?.length ? listed : null;
+  const text = structuredErrorText(error);
+  const rejected = [400, 404].includes(status) && providers?.length && text.toLowerCase().includes(control) &&
+    /\b(?:provider|channel|upstream|route|routing|pin|only)\b/i.test(text) &&
+    /\b(?:reject(?:ed)?|invalid|unknown|not[ _-]?found|unavailable|unsupported)\b/i.test(text) &&
+    !/(?:account|api[ _-]?key|credential|authoriz|authenticat|permission|billing|payment|subscription|quota|model[ _-]?not[ _-]?found)/i.test(text);
+  const choices = json?.data?.choices || json?.choices;
+  const complete = status === 200 && !error && Array.isArray(choices) && choices.length &&
+    typeof choices[0]?.message?.content === 'string' && choices[0].message.content.trim();
+  const actual = complete ? parseRouting(json).finalProvider : null;
+  return { providers, pinCapability: rejected ? 'supported' : actual && actual !== control ? 'ignored' : 'unknown' };
 }
 function parseTier0(plan) {
   const m = /([\w-]+) won tier 0 over ([^."]+)/.exec(plan || '');
@@ -2822,8 +2847,11 @@ async function probeModel(modelId, acc, lease = null) {
     return { ok: false, error: safeReason(typeof json.error === 'string' ? json.error : JSON.stringify(json.error)) };
   }
   const r = parseRouting(json);
-  let harvest = null;
-  if (r.pipeline) harvest = await harvestAvailableProviders(modelId, r.pipeline, acc, lease);
+  let harvest = null, pinCapability = 'unknown';
+  if (r.pipeline) {
+    const control = await harvestAvailableProviders(modelId, r.pipeline, acc, lease);
+    harvest = control.providers; pinCapability = control.pinCapability;
+  }
   let endpoints = [];
   let orSlug = null;
   if (r.pipeline !== 'planner' && r.canonicalSlug) {
@@ -2845,7 +2873,7 @@ async function probeModel(modelId, acc, lease = null) {
     ...prev,
     ok: true,
     pipeline: r.pipeline,
-    pinnable: !!r.pipeline,
+    pinnable: !!r.pipeline, // legacy: recognized pipeline shape, not proven account/model pin enforcement
     availableProviders: harvest || prev.availableProviders || [],
     canonicalSlug: r.canonicalSlug,
     openrouterSlug: orSlug,
@@ -2858,7 +2886,7 @@ async function probeModel(modelId, acc, lease = null) {
     probedAt: Date.now(),
   };
   saveMeta();
-  return { ok: true, ms, ...META.models[modelId] };
+  return { ok: true, ms, ...META.models[modelId], pinCapability };
 }
 
 // 上游渠道可用性分类：渠道被单独钉住时的真实状态

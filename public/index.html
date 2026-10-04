@@ -177,7 +177,7 @@
   </div>
 
   <h1>Cline Pass 上游控制台</h1>
-  <div class="sub">本地代理 + 观测面板 —— 枚举订阅模型背后的上游，多上游按优先级自动故障转移，支持精确钉住 / 优先回退 / 排除上游 / 成本·首字·吞吐排序</div>
+  <div class="sub">本地代理 + 观测面板 —— 枚举订阅模型背后的上游，多上游按优先级自动故障转移，提供单渠道钉选尝试与账号级负对照 / 优先回退 / 排除上游 / 成本·首字·吞吐排序</div>
 
   <nav class="section-nav" aria-label="顶层板块">
     <button id="navConsole" class="ghost" type="button" aria-pressed="true" aria-controls="consolePanel" onclick="switchSection('console')">控制台</button>
@@ -263,14 +263,13 @@
 
   <div class="banner">
     <b>实测结论（决定了本工具的工作方式）：</b><br>
-    ① <b>上游可枚举、可观测</b>：订阅模型响应元数据里带背后真正的模型 ID、可用上游列表与本次实际命中的上游；
-    「探测」按钮还会用一次零 token 消耗的假上游请求让网关报出精确的可用上游清单（直连→OpenRouter，规划器→Vercel AI Gateway）。<br>
-    ② <b>两类管道都能精确钉住上游</b>（已实测 <code class="mono">finalProvider</code> 随之改变）：
-    直连管道（OpenRouter）用顶层 <code class="mono">provider.only</code>；
-    规划器管道（Vercel AI Gateway）必须用 <code class="mono">providerOptions.gateway.only</code>——
-    switcher 的每次 HTTP attempt 只注入一个 provider，避免网关内部不可观测的多渠道 <code class="mono">order</code> 回退。
-    两类管道还都支持 <code class="mono">sort</code>（最低成本 / 最快首字 / 最高吞吐）。<br>
-    ③ <b>目录模型 :free 变体</b>：属于直连管道，可精确钉住。<br>
+    ① <b>上游可枚举、可观测</b>：部分订阅模型的响应元数据会提供真实模型、可用上游及本次实际命中的上游；
+    手动「探测」还会向当前账号发送一次语法合法的假渠道请求，尝试发现渠道并做负对照；若网关忽略钉选，它可能生成内容并计费。<br>
+    ② <b>不同管道使用不同的单渠道参数</b>：直连管道（OpenRouter）用顶层 <code class="mono">provider.only</code>；
+    规划器管道（Vercel AI Gateway）用 <code class="mono">providerOptions.gateway.only</code>。switcher 每次具名 HTTP attempt 只注入一个 provider，
+    但网关是否严格执行须按账号/模型查看负对照结果与实际 Provider；管道识别或计划渠道本身不是命中证明。
+    <code class="mono">sort</code> 只在已选 Provider 内排序。<br>
+    ③ <b>目录模型 :free 变体</b>：属于直连管道，是否遵守 <code class="mono">only</code> 仍需验证。<br>
     ④ <b>多上游优先级 + 健康故障转移</b>：strict 首次固定使用来源顺序首个可用渠道，失败后从剩余渠道中按 Provider-model 24h 成功率回退；preferred 从首次起就用同一健康顺序。每次 HTTP attempt 只发送单 provider 请求，全部冷却时仅放行最早恢复者；SSE 开始后只更新未来健康状态、绝不重放。
   </div>
 
@@ -278,7 +277,7 @@
     <span class="chip" id="proxyBase" title="点击复制：把任意 OpenAI 兼容客户端的 Base URL 指向这里"></span>
     <button class="ghost" onclick="loadAll()">↻ 刷新</button>
     <button class="ghost" onclick="probeAll()" id="probeAllBtn">批量探测订阅模型</button>
-    <span class="dim" style="font-size:12px" id="status"></span>
+    <span class="dim" style="font-size:12px" id="status" role="status" aria-live="polite"></span>
   </div>
 
   <div class="card">
@@ -691,7 +690,7 @@ function render() {
     const last = m?.lastProvider ? `<span class="badge">${escapeHtml(m.lastProvider)}</span>` : '<span class="dim">未探测</span>';
     const canon = m?.canonicalSlug ? `<span class="mono dim">${escapeHtml(m.canonicalSlug)}</span>` : '<span class="dim">—</span>';
     const tier0 = m?.tier0?.length ? `<div class="dim" style="font-size:11px">tier-0: ${m.tier0.map(escapeHtml).join(', ')}</div>` : '';
-    const pipe = m?.pinnable ? `<span class="badge green">可精确钉住·${m.pipeline === 'planner' ? 'Vercel' : 'OpenRouter'}</span>` : '<span class="badge orange">请先探测</span>';
+    const pipe = m?.pinnable ? `<span class="badge green">已识别管道·${m.pipeline === 'planner' ? 'Vercel' : 'OpenRouter'}（钉选需按账号校验）</span>` : '<span class="badge orange">请先探测</span>';
     const mode = s.config.pinMode || 'strict';
     const sort = s.config.sort || '';
     return `<tr${LAST_ADDED.includes(s.id) ? ' class="row-new"' : ''} data-id="${escapeHtml(s.id)}">
@@ -745,7 +744,7 @@ function renderCatalog() {
   $('#catBody').innerHTML = list.map((id) => {
     const m = DATA.subscription.find((s) => s.id === id)?.meta;
     const pinnable = id.includes(':free');
-    return `<tr><td class="mono">${escapeHtml(id)}</td><td>${pinnable ? '<span class="badge green">:free 可精确钉住</span>' : '<span class="badge orange">规划器管理</span>'}</td>
+    return `<tr><td class="mono">${escapeHtml(id)}</td><td>${pinnable ? '<span class="badge green">:free 直连（钉选需验证）</span>' : '<span class="badge orange">规划器管理</span>'}</td>
     <td>${m?.lastProvider ? '<span class="badge">' + escapeHtml(m.lastProvider) + '</span>' : ''}</td>
     <td><button class="ghost" onclick="probe(${jsArg(id)}, this)">探测</button></td></tr>`;
   }).join('') || '<tr><td class="empty">无匹配</td></tr>';
@@ -970,7 +969,8 @@ async function probe(id, btn) {
   btn.disabled = true; btn.textContent = '探测中…'; status('正在探测 ' + id);
   const r = await api('/api/probe', { model: id, accountId: $('#routeScope').value || undefined });
   btn.disabled = false; btn.textContent = '探测';
-  status(r.ok ? `${id} 探测完成：上游 ${r.upstreams?.length ?? 0} 个，命中 ${r.lastProvider}` : `探测失败：${r.error}`);
+  const capability = { supported: '假渠道被路由拒绝（only 被识别；真实命中仍需核对）', ignored: '假渠道仍返回其他渠道（only 未严格执行）', unknown: '钉选能力未知' }[r.pinCapability] || '钉选能力未知';
+  status(r.ok ? `${id} 探测完成：上游 ${r.upstreams?.length ?? 0} 个，命中 ${r.lastProvider}；负对照：${capability}` : `探测失败：${r.error}`);
   await loadAll();
 }
 
