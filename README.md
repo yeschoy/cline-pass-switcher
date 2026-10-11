@@ -161,10 +161,12 @@ location / {
 | `CLINE_PASS_SSE_FIRST_EVENT_MS`（首响应/首个 data 硬期限） | 120000 | 100～120000 |
 | `CLINE_PASS_SSE_STREAM_IDLE_MS`（起流后 Cline socket idle） | 360000 | 200～600000 |
 | `CLINE_PASS_SSE_HEARTBEAT_MS`（下游静默注释；0 关闭） | 25000 | 0～60000 |
+| `CLINE_PASS_NON_STREAM_ATTEMPT_MS`（非流式单次 Provider 尝试的总期限，含等待完整生成） | 300000 | 100～900000 |
+| `CLINE_PASS_NON_STREAM_TIMEOUT_RETRY`（非流式超时后是否换 Provider 重试；1 开启） | 0 | 0～1 |
 | `CLINE_PASS_DIRECT_MAX_SOCKETS` / `CLINE_PASS_DIRECT_MAX_FREE_SOCKETS` | 512 / 32 | 1～1024 / 1～64 |
 | `CLINE_PASS_PROXY_MAX_SOCKETS` / `CLINE_PASS_PROXY_MAX_FREE_SOCKETS` | 32 / 2 | 1～128 / 1～16 |
 
-`CLINE_PASS_DIRECT_MAX_SOCKETS=0` 或越界值会回退到512，绝不表示无限制。取得账号租约、等待Agent socket、真正到达上游是不同阶段：租约数受活动账号 `maxConcurrent` 总量约束，若已租约数超过直连socket名额，余量在Node Agent队列中等待；代理账号另受每个代理Agent默认32 socket限制。首个 `data:` 的120秒硬期限含排队/连接/响应时间，起流后还有360秒上游socket idle限制。空闲上限不会超过同池活跃上限；最多缓存 128 个已保存代理 URL，超过后使用请求级一次性 agent，draft 代理测试同样一次性销毁。`NODE_ENV=test` 下可用对应 `CLINE_PASS_TEST_*` 毫秒变量覆盖上表四项时间设置，遵守相同范围；非测试环境忽略测试变量。
+`CLINE_PASS_DIRECT_MAX_SOCKETS=0` 或越界值会回退到512，绝不表示无限制。取得账号租约、等待Agent socket、真正到达上游是不同阶段：租约数受活动账号 `maxConcurrent` 总量约束，若已租约数超过直连socket名额，余量在Node Agent队列中等待；代理账号另受每个代理Agent默认32 socket限制。首个 `data:` 的120秒硬期限含排队/连接/响应时间，起流后还有360秒上游socket idle限制。非流式请求要等 Cline 完整生成后才返回响应头，长推理任务可能超过两分钟，因此单独使用默认300秒的期限；默认超时后不再换 Provider，避免客户端最坏等待「Provider 数 × 期限」，需要旧行为时设 `CLINE_PASS_NON_STREAM_TIMEOUT_RETRY=1`。空闲上限不会超过同池活跃上限；最多缓存 128 个已保存代理 URL，超过后使用请求级一次性 agent，draft 代理测试同样一次性销毁。`NODE_ENV=test` 下可用对应 `CLINE_PASS_TEST_*` 毫秒变量覆盖上表五项时间设置，遵守相同范围；非测试环境忽略测试变量。
 
 ---
 

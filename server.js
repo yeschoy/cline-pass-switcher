@@ -3627,6 +3627,9 @@ const INBOUND_KEEP_ALIVE_MS = runtimeDuration('INBOUND_KEEP_ALIVE_MS', 95_000, 1
 const SSE_FIRST_EVENT_MS = runtimeDuration('SSE_FIRST_EVENT_MS', 120_000, 100, 120_000);
 const SSE_STREAM_IDLE_MS = runtimeDuration('SSE_STREAM_IDLE_MS', 360_000, 200, 600_000);
 const SSE_HEARTBEAT_MS = runtimeDuration('SSE_HEARTBEAT_MS', 25_000, 0, 60_000);
+// Non-stream Cline responses arrive only after full generation, so long reasoning needs more than the SSE first-event bound.
+const NON_STREAM_ATTEMPT_MS = runtimeDuration('NON_STREAM_ATTEMPT_MS', 300_000, 100, 900_000);
+const NON_STREAM_TIMEOUT_RETRY = boundedEnv('CLINE_PASS_NON_STREAM_TIMEOUT_RETRY', 0, 0, 1) === 1;
 const directSockets = boundedEnv('CLINE_PASS_DIRECT_MAX_SOCKETS', 512, 1, 1024);
 const proxySockets = boundedEnv('CLINE_PASS_PROXY_MAX_SOCKETS', 32, 1, 128);
 const directAgentOptions = { keepAlive: true, maxSockets: directSockets, maxFreeSockets: Math.min(directSockets, boundedEnv('CLINE_PASS_DIRECT_MAX_FREE_SOCKETS', 32, 1, 64)), scheduling: 'lifo', timeout: 60_000 };
@@ -4821,11 +4824,11 @@ function persistProviderAction(modelId, provider, action) {
 function responseHeadersFor(account, forwardedHeaders) {
   return { ...forwardedHeaders, ...(account?.headers || {}), 'Content-Type': 'application/json', Authorization: `Bearer ${account.key}` };
 }
-async function attemptOnce(modelId, body, attempt, account, forwardedHeaders, signal, attemptOwner, permit = null) {
+async function attemptOnce(modelId, body, attempt, account, forwardedHeaders, signal, attemptOwner, permit = null, timeoutMs = NON_STREAM_ATTEMPT_MS) {
   const send = injectPrefs(body, modelId, attempt), requestBody = JSON.stringify(send);
   try {
     const res = await clineRequestJSON(`${config.upstreamBase}/chat/completions`, {
-      headers: responseHeadersFor(account, forwardedHeaders), body: requestBody, signal, account, attemptOwner, permit,
+      headers: responseHeadersFor(account, forwardedHeaders), body: requestBody, signal, timeoutMs, account, attemptOwner, permit,
       attemptMeta: { model: modelId, provider: attempt.upstream ? [attempt.upstream] : [] },
     });
     const responseContentType = normalizeResponseContentType(res.headers);
@@ -4916,7 +4919,7 @@ function traceAttempt(attempt, result, account, ms, diagnostic) {
 
 // 两级重试：本函数固定一个账号，仅在该账号内按健康计划逐个尝试 provider。
 // 只有 account-scoped 错误命中 cooldown/hard-quarantine 时，外层 handleChat 才能终止本链并最多换号一次。
-async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream = false, attemptTimeoutMs = 120000, sensitiveValues = [], attemptOwner = null, preferredProvider = null } = {}) {
+async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream = false, attemptTimeoutMs = NON_STREAM_ATTEMPT_MS, sensitiveValues = [], attemptOwner = null, preferredProvider = null } = {}) {
   const t0 = Date.now();
   const plan = buildProviderPlan(modelId, cfg, account, t0, preferredProvider), trace = [], attempted = new Set();
   let retryStop = false, localRpm = false, localRpmRetryAt = null;
@@ -5059,7 +5062,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
           trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
           return { status: 200, streamUp: up, streamHead: firstChunk, streamAttempt: attempt, streamAttemptToken: up.attemptToken, streamDetailAttempt: up.detailAttempt, acc: account, trace, t0, plan, started: true, cleanupClientClose, retryStop: false, routingFailure: false };
         }
-        const result = await attemptOnce(modelId, body, attempt, account, forwardedHeaders, ctrl.signal, attemptOwner, permit);
+        const result = await attemptOnce(modelId, body, attempt, account, forwardedHeaders, ctrl.signal, attemptOwner, permit, attemptTimeoutMs);
         if (timedOut && result.status !== 200) { result.terminalOrigin = 'timeout'; result.netError = 'upstream timeout'; result.out = { error: { message: 'upstream fetch failed: upstream timeout', type: 'upstream_error' } }; }
         const ms = Date.now() - t1;
         result.note = result.netError || (result.status !== 200 ? errText(result.out?.error?.message) : 'ok');
@@ -5070,6 +5073,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
         if (result.status === 200) { last.successfulAttempt = attempt; break; }
         if (diagnostic.retryDecision?.decision === 'stop') { retryStop = true; break; }
         if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine' || last.quotaRemovalAction) break;
+        if (result.terminalOrigin === 'timeout' && !NON_STREAM_TIMEOUT_RETRY) break;
       } catch (error) { permit?.release(); throw error; } finally { clearTimeout(timer); }
     }
   } finally {

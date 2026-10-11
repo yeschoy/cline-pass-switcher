@@ -4495,6 +4495,52 @@ test('comment-only SSE head over 64 KiB closes an unfinished upstream before the
   assert.equal(accounts[0].activeCount, 0);
 });
 
+test('non-stream attempt timeout is configurable and timeout fallback is opt-in', async (t) => {
+  const hits = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = []; req.on('data', (chunk) => chunks.push(chunk)); req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString());
+      const provider = body.providerOptions?.gateway?.only?.[0] || null;
+      hits.push({ model: body.model, provider });
+      const delay = provider === 'slow' ? 2000 : body.model === 'patient' ? 400 : 0;
+      setTimeout(() => {
+        if (res.destroyed) return;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: `ok-${provider || 'auto'}` } }] }));
+      }, delay);
+    });
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(async () => { upstream.closeAllConnections?.(); await close(upstream); });
+  const config = { upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts: [{ id: 'a', name: 'A', key: 'test', enabled: true, maxConcurrent: 2 }], knownModels: ['m', 'patient'], perModel: { m: { upstreams: ['slow', 'fast'], pinMode: 'strict', maxRetries: 2 } } };
+  const run = async (env) => {
+    const port = await unusedPort();
+    const running = await startSwitcher({ ...config, port }, null, { NODE_ENV: 'test', CLINE_PASS_TEST_NON_STREAM_ATTEMPT_MS: '700', ...env });
+    t.after(async () => { await stop(running.child); fs.rmSync(running.dir, { recursive: true, force: true }); });
+    return port;
+  };
+
+  const noRetryPort = await run({});
+  hits.length = 0;
+  const started = Date.now();
+  const timedOut = await rawJson(noRetryPort, '/v1/chat/completions', { model: 'm', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(timedOut.status, 502);
+  assert.match(timedOut.text, /upstream timeout/);
+  assert.deepEqual(hits.map((hit) => hit.provider), ['slow'], 'default must not fall back after a non-stream timeout');
+  assert.ok(Date.now() - started < 1800, 'configured 700ms bound applies instead of the 120s default');
+
+  hits.length = 0;
+  const patient = await rawJson(noRetryPort, '/v1/chat/completions', { model: 'patient', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(patient.status, 200, 'a response inside the configured bound succeeds');
+
+  const retryPort = await run({ CLINE_PASS_NON_STREAM_TIMEOUT_RETRY: '1' });
+  hits.length = 0;
+  const recovered = await rawJson(retryPort, '/v1/chat/completions', { model: 'm', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(recovered.status, 200);
+  assert.match(recovered.text, /ok-fast/);
+  assert.deepEqual(hits.map((hit) => hit.provider), ['slow', 'fast']);
+});
+
 test('SSE prelude, first-data deadline, heartbeat, upstream idle and finalizers are independent', async (t) => {
   const hits = [];
   const upstream = http.createServer((req, res) => {
