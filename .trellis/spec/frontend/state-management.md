@@ -34,6 +34,7 @@ changeRouteScope()
 copyGlobalCfg(modelId)
 inheritCfg(modelId)
 recoverAccount(accountId)
+resetAccountHealth(accountId, name)
 openAccountDrawer(index, returnButton)
 closeAccountDrawer(force)
 saveDrawer()
@@ -156,6 +157,10 @@ POST /api/accounts/quota-recover
 POST /api/accounts/recover
   <- { id }
   -> { ok: true }
+
+POST /api/accounts/reset-health
+  <- { id } // exact saved account ID; always offered in the account row after a confirm
+  -> { ok: true } // health samples, rule cooldown/quarantine and provider circuits cleared
 
 POST /api/accounts/proxy-test
   <- { accountId, proxyUrl? }
