@@ -153,7 +153,8 @@ The cursor encodes `ts`, `requestId`, `attemptIndex`, segment name, and line num
 | A cache-pool request is projected | persist bounded `cachePoolSize`/`cachePoolMaxSize`/`cachePoolLowQuotaSize`/`cachePoolTargetSize` integers, actual high/low/unknown counts only after a lease, `selectedQuotaRole` only for a positive low target, `cachePoolTier=active` (or null) and `cachePoolFallback=false`; never a member list or binding entry |
 | Capacity is rejected before any pool lease | `cachePoolActual=null` and `selectedQuotaRole=null`, never an invented `{ high: 0, low: 0, unknown: 0 }`; retain safe `blockedBy`/`retryAfter` |
 | Low-role account/degrade removes an account | real attempt/error row may contain `quotaRemovalAction: 'waiting-refresh'`; no raw percentage/reset/reason text from quota response |
-| Ambiguous HTML 429 without a matching rule | persist `errorScope=unknown`, bounded evidence and default ignore, with no account action/body or implicit cooldown |
+| Cline edge HTML 429 (no structured error) | persist `errorScope=gateway`, `scopeEvidence=gateway_html_throttle`, `ruleId=null`, `healthAction=none`, with no account action/body or cooldown even when an account 429 rule exists |
+| Other ambiguous 429 without a matching rule | persist `errorScope=unknown`, bounded evidence and default ignore, with no account action/body or implicit cooldown |
 | Pipeline diagnostics contain a non-owned/raw value | omit it; persist only the bounded enum/boolean projection |
 | `providerPlanSource`/`providerMode`/`providerSelection`/`retryDecision` is not a documented enum | omit the field (`null`/`continue`) instead of persisting the raw value |
 | A retry needle, matched body fragment, raw rule condition, candidate rate map, or success-rate number would be projected | never persist it; keep only validated `retryRuleId` plus `retryMatchedBy` condition kinds |
