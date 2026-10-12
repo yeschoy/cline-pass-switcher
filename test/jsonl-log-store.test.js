@@ -113,6 +113,25 @@ test('combined byte cap removes oldest records across both streams by reading on
   assert.ok(fs.readdirSync(dir).filter((file) => file.endsWith('.jsonl')).every((file) => fs.statSync(path.join(dir, file)).size <= 420));
 });
 
+test('recovery rewrites dirty segments from disk with full payloads and deduplicated', async (t) => {
+  const dir = tmp('cps-jsonl-recovery-rewrite-'); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const now = Date.now();
+  const row = (i, extra = {}) => JSON.stringify({ ts: now + i, requestId: `r${i}`, pipelineSteps: [{ step: i, pad: 'p'.repeat(50) }], ...extra });
+  const anonymous = JSON.stringify({ ts: now + 9, note: 'no-request-id' });
+  fs.writeFileSync(path.join(dir, 'requests-a.jsonl'), `${row(1)}\n${row(2)}\n${anonymous}\n`, { mode: 0o600 });
+  fs.writeFileSync(path.join(dir, 'requests-b.jsonl'), `${row(2, { strategy: 'dup' })}\n${row(3)}\n${anonymous}\n{"incomplete":`, { mode: 0o600 });
+  fs.writeFileSync(path.join(dir, 'requests-c.jsonl'), `${row(4)}\n`, { mode: 0o600 });
+  const group = new JsonlLogGroup(options(dir)); t.after(() => close(group)); await group.ready;
+  const items = (await group.query('requests', { limit: 10 })).items;
+  assert.deepEqual(items.map((item) => item.requestId ?? item.note).sort(), ['no-request-id', 'r1', 'r2', 'r3', 'r4']);
+  assert.equal(items.find((item) => item.requestId === 'r2').strategy, 'dup', 'later duplicate wins');
+  assert.ok(items.filter((item) => item.requestId).every((item) => item.pipelineSteps[0].pad.length === 50), 'rewritten rows keep nested payloads');
+  const names = fs.readdirSync(dir).filter((name) => name.endsWith('.jsonl'));
+  assert.ok(names.includes('requests-c.jsonl'), 'clean segments are kept in place');
+  assert.ok(!names.includes('requests-a.jsonl') && !names.includes('requests-b.jsonl'), 'dirty segments are replaced');
+  assert.ok(names.every((name) => !fs.readFileSync(path.join(dir, name), 'utf8').includes('"incomplete":')));
+});
+
 test('recovery catalog overflow preserves disk data and exposes safe unavailability', async (t) => {
   const dir = tmp('cps-jsonl-recovery-cap-'); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   for (let i = 0; i < 2; i++) fs.writeFileSync(path.join(dir, `requests-${i}.jsonl`), `${JSON.stringify({ ts: Date.now() + i, requestId: `r${i}` })}\n`, { mode: 0o600 });
