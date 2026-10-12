@@ -42,10 +42,10 @@ test('unknown routing health100 does not invent observed statistics', () => {
 });
 
 test('routing health ignores rates backed by too few samples', () => {
-  assert.equal(MIN_ROUTING_HEALTH_SAMPLES, 5);
+  assert.equal(MIN_ROUTING_HEALTH_SAMPLES, 20);
   assert.equal(routingHealthRate({ successRate: 0, samples: 1 }), null);
-  assert.equal(routingHealthRate({ successRate: .25, samples: 4 }), null);
-  assert.equal(routingHealthRate({ successRate: .2, samples: 5 }), .2);
+  assert.equal(routingHealthRate({ successRate: .25, samples: 19 }), null);
+  assert.equal(routingHealthRate({ successRate: .2, samples: 20 }), .2);
   assert.equal(routingHealthRate({ successRate: null, samples: null }), null);
   assert.equal(routingHealthRate(undefined), null);
   assert.equal(effectiveRoutingHealth(routingHealthRate({ successRate: 0, samples: 1 }), 'optimistic'), 1);

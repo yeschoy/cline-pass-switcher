@@ -109,14 +109,14 @@ test('minimum health includes the boundary and migrates an unhealthy binding as 
     configure: c => ({ ...c, perModel: { [model]: { upstreams: ['first'], pinMode: 'strict', maxRetries: 0 } },
       errorRules: [{ id: 'health-degrade', scope: 'account', action: 'degrade', when: { statuses: [500] } }] }),
     onChat(entry, res, { seen }) {
-      if (entry.account !== 'a0' || seen.length === 1) return success(res);
+      if (entry.account !== 'a0' || seen.filter(row => row.account === 'a0').length <= 4) return success(res);
       res.writeHead(500, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"synthetic degradation"}}');
     } });
-  assert.equal((await f.chat('health-bound')).success, true);
-  for (let i = 0; i < 4; i++) assert.equal((await f.chat('health-bound')).status, 500);
+  for (let i = 0; i < 4; i++) assert.equal((await f.chat('health-bound')).success, true);
+  for (let i = 0; i < 16; i++) assert.equal((await f.chat('health-bound')).status, 500);
   let view = (await f.admin('/api/accounts')).body;
   assert.equal(view.accounts[0].health.successRate, .2);
-  assert.equal(view.accounts[0].health.samples, 5);
+  assert.equal(view.accounts[0].health.samples, 20);
   assert.equal(view.accounts[1].health.successRate, null);
   assert.equal(view.accounts[1].health.samples, 0);
   assert.equal((await f.admin('/api/accounts', accountSave(view, { accountWorkflow: { ...view.accountWorkflow, healthFilter: true, minimumHealth: .2 } }))).status, 200);
@@ -124,7 +124,7 @@ test('minimum health includes the boundary and migrates an unhealthy binding as 
   assert.equal((await f.chat('health-bound')).status, 500, 'exactly20% remains eligible as a binding hit');
   assert.equal(f.total(), before);
   view = (await f.admin('/api/accounts')).body;
-  assert.equal(view.accounts[0].health.successRate, 1 / 6);
+  assert.equal(view.accounts[0].health.successRate, 4 / 21);
   const preview = await f.admin('/api/account-workflow/preview', { accountWorkflow: view.accountWorkflow, clientKeyId: 'legacy', boundAccountId: 'a0' });
   assert.equal(preview.body.decision.kind, 'new-selection');
   assert.equal(preview.body.decision.accountId, 'a1');
@@ -155,9 +155,13 @@ test('minimum health rejects all sampled-below-threshold accounts without fallba
   assert.equal(view.accounts[0].effectiveRoutingHealth, 1, 'a single failure is too few samples to route on');
   const sparse = await f.admin('/api/account-workflow/preview', { accountWorkflow: { ...view.accountWorkflow, healthFilter: true, minimumHealth: .2 }, clientKeyId: 'legacy' });
   assert.notEqual(sparse.body.decision.kind, 'filtered');
-  for (let i = 0; i < 4; i++) assert.equal((await f.chat('sample-low')).status, 500);
+  for (let i = 0; i < 18; i++) assert.equal((await f.chat('sample-low')).status, 500);
   view = (await f.admin('/api/accounts')).body;
-  assert.equal(view.accounts[0].health.samples, 5);
+  assert.equal(view.accounts[0].health.samples, 19);
+  assert.equal(view.accounts[0].effectiveRoutingHealth, 1, '19 samples are still below the routing floor');
+  assert.equal((await f.chat('sample-low')).status, 500);
+  view = (await f.admin('/api/accounts')).body;
+  assert.equal(view.accounts[0].health.samples, 20);
   assert.equal(view.accounts[0].effectiveRoutingHealth, 0);
   assert.equal((await f.admin('/api/accounts', accountSave(view, { accountWorkflow: { ...view.accountWorkflow, healthFilter: true, minimumHealth: .2 } }))).status, 200);
   const before = f.total(), calls = f.seen.length;
@@ -168,6 +172,16 @@ test('minimum health rejects all sampled-below-threshold accounts without fallba
   assert.match(blocked.text, /minimum health 20%/);
   assert.equal(f.total(), before);
   assert.equal(f.seen.length, calls);
+
+  assert.equal((await f.admin('/api/accounts/reset-health', { id: 'missing' })).status, 400);
+  assert.equal((await f.admin('/api/accounts/reset-health', { id: 'a0', extra: true })).status, 400);
+  assert.equal((await f.admin('/api/accounts/reset-health', { id: 'a0' })).status, 200);
+  view = (await f.admin('/api/accounts')).body;
+  assert.equal(view.accounts[0].health.samples, 0);
+  assert.equal(view.accounts[0].effectiveRoutingHealth, 1);
+  assert.ok(view.accounts[0].statistics.recent24h.requests >= 20, 'request statistics survive a health reset');
+  const restored = await f.admin('/api/account-workflow/preview', { accountWorkflow: view.accountWorkflow, clientKeyId: 'legacy' });
+  assert.notEqual(restored.body.decision.kind, 'filtered');
 });
 
 test('workflow concurrent admissions obey caps and count only actual overflow selections', async t => {
@@ -284,6 +298,10 @@ test('workflow replacement increments another account but Provider retry does no
   const f = await fixture(t, { configure: c => ({ ...c, accountWorkflow: { ...c.accountWorkflow, healthFilter: true, minimumHealth: .2 }, errorRules: [{ id: 'fixture429', scope: 'account', action: 'cooldown', when: { statuses: [429] }, reset: { fallback: '10s', max: '10s' } }] }), onChat(_entry, res, { seen }) { if (seen.length === 1) { res.writeHead(429, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"shared fixture rejection"}}'); } else success(res); } });
   assert.equal((await f.chat('replacement')).success, true);
   assert.equal(f.seen.length, 2); assert.notEqual(f.seen[0].account, f.seen[1].account); assert.equal(f.total(), 2);
+  const cooled = f.seen[0].account;
+  assert.equal((await f.admin('/api/accounts')).body.accounts.find(a => a.id === cooled).health.cooling, true);
+  assert.equal((await f.admin('/api/accounts/reset-health', { id: cooled })).status, 200);
+  assert.equal((await f.admin('/api/accounts')).body.accounts.find(a => a.id === cooled).health.cooling, false, 'reset restores scheduling');
 
   const g = await fixture(t, { configure: c => ({ ...c, perModel: { [model]: { upstreams: ['first', 'second'], pinMode: 'strict', maxRetries: 1 } } }), onChat(entry, res) { if (entry.provider === 'first') { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"temporary provider failure"}}'); } else success(res); } });
   assert.equal((await g.chat('provider-retry')).success, true);

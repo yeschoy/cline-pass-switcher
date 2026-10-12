@@ -5886,6 +5886,18 @@ async function dispatch(req, res) {
       clearRuleAccountState(id); reconcileSessionBindings(); saveMeta();
       return sendJSON(res, 200, { ok: true });
     }
+    if (req.method === 'POST' && p === '/api/accounts/reset-health') {
+      const body = await readJsonBody(req);
+      if (!isPlainObject(body) || Object.keys(body).length !== 1 || typeof body.id !== 'string' || !config.accounts.some((a) => a.id === body.id)) return sendJSON(res, 400, { error: { message: 'expected exact existing account id' } });
+      const id = body.id;
+      // Request/error counters stay; only the samples that drive routing health are dropped.
+      for (const bucket of META.statistics.minuteBuckets) { delete bucket.health[id]; if (bucket.accountHealth) delete bucket.accountHealth[id]; }
+      workflowHealthCache.delete(id);
+      // Quota protection and monthly bans reflect real quota and keep their own recovery paths.
+      clearRuleAccountState(id); clearProviderCircuitForAccount(id);
+      reconcileSessionBindings(); notifyCapacityWaiters(); saveMeta();
+      return sendJSON(res, 200, { ok: true });
+    }
     if (req.method === 'POST' && p === '/api/providers/recover') {
       const body = await readJsonBody(req);
       if (!isPlainObject(body) || Object.keys(body).length !== 2 || typeof body.model !== 'string' || typeof body.provider !== 'string') return sendJSON(res, 400, { error: { message: 'expected exact model and provider' } });
