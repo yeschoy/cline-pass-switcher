@@ -304,6 +304,7 @@
       <label for="newAccountOwner" class="dim">新账号归属 <select id="newAccountOwner" aria-label="新账号归属客户端密钥"><option value="legacy">Legacy</option></select></label>
       <button class="ghost" onclick="addAccountRow()">＋ 添加账号</button>
       <button onclick="saveAccounts()">保存账号配置</button>
+      <button class="ghost" onclick="reloadConfigFile()" title="服务器上手动修改 config.json 后，无需重启即可生效">从配置文件热加载</button>
       <span class="dim" style="font-size:12px" id="accMsg" aria-live="polite"></span>
     </div>
     <p class="dim" style="font-size:12px">仅真实上游 429 且明确账号额度不足、刷新后月参考余额严格低于阈值才手动解封式隔离；以社区参考月上限 $50 估算，非真实账单。5 小时/每周耗尽由新鲜完整额度快照确认恢复。解封前请确认额度；解封后可能再次失败。</p>
@@ -1775,6 +1776,7 @@ async function saveAccounts(payload=null){
   }catch(error){accMsg(saved?'保存已生效，但读取最新状态失败；请保留草稿并手动刷新，不要重复提交。':error.message,true);}
 }
 
+async function reloadConfigFile(){if(!confirm('从服务器上的 config.json 重新加载账号、调度、规则和模型路由？不重启、不中断在途请求；页面上未保存的修改会被丢弃。端口、客户端密钥、日志开关等字段若被修改会拒绝加载。'))return;const r=await api('/api/config/reload',{});if(!r.ok)return accMsg(r.error?.message||'热加载失败',true);accMsg(r.changed?.length?`已热加载：${r.changed.join(', ')}`:'配置文件与当前配置一致，无变化');await loadAll();}
 async function recoverAccount(id){const r=await api('/api/accounts/recover',{id});if(r.ok){accMsg('账号已恢复');await loadAll();}}
 async function resetAccountHealth(id,name){if(!confirm(`重置账号「${name}」？将清空其 24 小时健康样本，并清除规则冷却、硬隔离和 Provider 熔断；请求/错误统计、额度保护和月额度封禁不受影响。`))return;const r=await api('/api/accounts/reset-health',{id});if(!r.ok)return accMsg(r.error?.message||'重置失败',true);accMsg('账号健康度与调度状态已重置');await loadAll();}
 async function recoverMonthlyQuota(id){if(!confirm('确定解除月额度封禁？该账号可能再次额度不足并产生失败请求。请先核对额度。'))return;const r=await api('/api/accounts/quota-recover',{id});if(!r.ok)return accMsg(r.error?.message||'解除失败',true);accMsg('月额度封禁已解除，请注意后续失败');await loadAll();}

@@ -172,6 +172,8 @@ location / {
 
 ## 配置参考（config.json）
 
+控制台保存即时生效，无需重启。手动编辑 `data/config.json` 后，点「从配置文件热加载」或执行 `docker kill -s HUP cline-pass-console` 即可生效，不中断在途请求；不要用 `docker restart`。端口、客户端密钥、日志开关等字段被修改时热加载会整体拒绝，需重启或在对应设置页修改。
+
 | 字段 | 说明 |
 |---|---|
 | `accounts` | 账号池：`[{ id, clientKeyId, name, note, key, enabled, maxConcurrent, maxRpm, weight, priority, proxyUrl, headers, perModel }]`；`clientKeyId` 是下游密钥的稳定归属 ID，`key` 是**上游**凭据；每个账号只归属一个客户端密钥。备注不进入上游/普通日志，`maxConcurrent: 0` 表示不限 |

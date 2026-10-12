@@ -94,6 +94,7 @@ POST /api/providers/recover       // exact { model, provider }
 POST /api/accounts/proxy-test
 GET  /api/models?accountId=<account id>
 POST /api/config
+POST /api/config/reload         // exact {}: re-read config.json without restart; 400 keeps live config
 POST /api/probe                 // { model, accountId? }
 POST /api/validate-upstreams   // { model, accountId? }
 POST /api/test                  // temporary complete route overrides; no persistence
@@ -102,6 +103,16 @@ POST /api/model-aliases
 GET/DELETE /api/logs/requests
 GET/DELETE /api/logs/errors
 ```
+
+#### Config hot reload and shutdown
+
+Operators who edit `data/config.json` by hand apply it with `POST /api/config/reload` (UI button "从配置文件热加载") or `docker kill -s HUP cline-pass-console`, never `docker restart`. Both call `reloadConfigFromDisk()`:
+
+- Hot fields: `accounts`, `accountMode`, `activeAccount`, `concurrencyWaitMs`, `poolFullWaitMs`, `errorRules` (legacy projections re-derived), `retryRules`, `quotaProtection`, `accountPipeline`, `accountWorkflow`, `sessionProviderAffinityEnabled`, `perModel`, `modelAliases`, `knownModels`, `exposeCatalog`. An absent field keeps its live value; startup migrations never run on reload.
+- Validation is the same strict path as `POST /api/accounts` (`accountInputError` with new ids allowed, `normalizeAccountList`, strict rule/pipeline normalizers, alias/route validators). Any failure throws before mutation; HTTP returns 400 and SIGHUP logs `[配置] SIGHUP 热加载失败`.
+- Restart-only fields (`port`, `apiKey`, `proxyKey`, `clientKeys`, `publicBaseUrl`, `upstreamBase`, probe identity/schedule, logging switches) that differ from live values refuse the whole reload; their env-pinned copies (`PORT`, `PROXY_KEY`, `PUBLIC_BASE_URL`) are ignored instead. An injected `CLINE_PASS_KEY` account is re-added if the file lacks it.
+- A changed candidate is written back atomically (generated account ids persist; env-pinned fields keep file bytes), then `applyAccountConfig()` publishes it with the identical per-account/per-route invalidation used by UI saves. In-flight responses keep their already-selected account.
+- `SHUTDOWN_TIMEOUT_MS` defaults to 25s in production (`CLINE_PASS_SHUTDOWN_MS`, 1s–120s) and compose `stop_grace_period: 30s` must stay above it, so SIGTERM drains streams and logs before any SIGKILL.
 
 Legacy `proxyKey` (effective `PROXY_KEY` at startup) and up to 16 additional client keys authenticate `/v1/models`, `/api/v1/models`, `/models`, `/v1/responses`, and all three chat-completions aliases via Bearer or the legacy `X-Admin-Key` client header. Authentication resolves a stable `clientKeyId` before leasing; only an empty Legacy key retains anonymous Legacy-owned model traffic, never management or access to additional keys' pools. See [client-key-guidelines.md](./client-key-guidelines.md) for complete routing, API and migration contracts. `GET /api/meta` remains public. Every other `/api/*` route requires the independent admin Cookie session, except the explicit `/api/auth/{state,session,login,bootstrap,password,logout}` exchange. A client key, Authorization header, or legacy `X-Admin-Key` never authenticates management. Management responses have no CORS wildcard and are `no-store`; unsafe methods require session CSRF header, same-origin checks and JSON for auth exchanges. Direct cleartext management HTTP is permitted only on loopback with a loopback Host; TLS termination requires configured HTTPS `publicBaseUrl`, an exact Host/Origin, `X-Forwarded-Proto: https`, a private/loopback socket peer, and a valid `X-Cline-Pass-Proxy-Token` equal to the independently provisioned 64-lowercase-hex `CLINE_PASS_ADMIN_PROXY_TOKEN`. The TLS proxy replaces both Headers (never forwards client-supplied attestations); a private-network model client cannot assert TLS merely by spoofing a forwarding Header. The application port must not be publicly exposed. Bootstrap requires a separate one-time code and immediate password change; pending sessions cannot use management routes. The route-auth matrix is executable in `test/admin-auth.test.js`.
 

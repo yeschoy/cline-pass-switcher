@@ -162,6 +162,10 @@ POST /api/accounts/reset-health
   <- { id } // exact saved account ID; always offered in the account row after a confirm
   -> { ok: true } // health samples, rule cooldown/quarantine and provider circuits cleared
 
+POST /api/config/reload
+  <- {} // "从配置文件热加载" button after a confirm; unsaved drafts are discarded by loadAll()
+  -> { ok: true, changed: string[], configurationRevision } | 400 { error } // 400 keeps live config
+
 POST /api/accounts/proxy-test
   <- { accountId, proxyUrl? }
   -> { ok, proxyType?, ms?, status?, reason? }

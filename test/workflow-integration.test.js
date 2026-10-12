@@ -308,6 +308,51 @@ test('workflow replacement increments another account but Provider retry does no
   assert.equal(g.seen.length, 2); assert.equal(g.seen[0].account, g.seen[1].account); assert.equal(g.total(), 1);
 });
 
+test('config.json hot reload applies account edits without restart, keeps in-flight streams, and refuses restart-only or invalid edits', async t => {
+  let hold = false;
+  const f = await fixture(t, { onChat(_entry, res, { held }) { if (hold) { res.writeHead(200, { 'Content-Type': 'text/event-stream' }); held.add(res); } else success(res); } });
+  const file = path.join(f.dir, 'config.json'), read = () => JSON.parse(fs.readFileSync(file, 'utf8'));
+  const write = (edit) => { const cfg = read(); edit(cfg); fs.writeFileSync(file, JSON.stringify(cfg)); };
+  const ids = async () => (await f.admin('/api/accounts')).body.accounts.map(a => a.id).sort();
+  hold = true; const inflight = f.chat('reload-inflight');
+  for (let i = 0; i < 100 && !f.held.size; i++) await sleep(10);
+  assert.equal(f.held.size, 1); hold = false;
+  const pid = f.child.pid;
+
+  write(cfg => { cfg.accounts = cfg.accounts.filter(a => a.id !== 'a2'); cfg.accounts[1].enabled = false; cfg.accounts.push({ name: 'Fresh', key: 'fixture-a9', clientKeyId: 'legacy', enabled: true, perModel: {} }); });
+  const reloaded = await f.admin('/api/config/reload', {});
+  assert.equal(reloaded.status, 200, JSON.stringify(reloaded.body)); assert.deepEqual(reloaded.body.changed, ['accounts']);
+  const fresh = read().accounts.find(a => a.name === 'Fresh');
+  assert.match(fresh.id, /^[A-Za-z0-9_-]+$/, 'generated id is persisted so the next reload keeps it');
+  assert.deepEqual(await ids(), ['a0', 'a1', fresh.id].sort());
+  assert.equal((await f.admin('/api/accounts')).body.accounts.find(a => a.id === 'a1').enabled, false);
+  for (const res of f.held) res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: 'OK' }, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`);
+  assert.equal((await inflight).success, true, 'stream that started before reload completes');
+  assert.equal((await f.admin('/api/config/reload', {})).body.changed.length, 0, 'unchanged file is a no-op');
+
+  const before = fs.readFileSync(file, 'utf8');
+  write(cfg => { cfg.detailedLogging = true; cfg.accounts = cfg.accounts.slice(0, 1); });
+  const refused = await f.admin('/api/config/reload', {});
+  assert.equal(refused.status, 400); assert.match(refused.body.error.message, /detailedLogging/);
+  write(cfg => { cfg.detailedLogging = false; cfg.port += 1; });
+  assert.equal((await f.admin('/api/config/reload', {})).body.changed.join(), 'accounts', 'env-pinned PORT edit is ignored, not refused');
+  fs.writeFileSync(file, before); assert.equal((await f.admin('/api/config/reload', {})).status, 200);
+  assert.equal((await ids()).length, 3, 'refused reload keeps live config');
+  fs.writeFileSync(file, '{"accounts": [');
+  assert.equal((await f.admin('/api/config/reload', {})).status, 400);
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(before), accounts: [{ id: 'a0', key: 'fixture-a0', maxConcurrent: -1 }] }));
+  assert.equal((await f.admin('/api/config/reload', {})).status, 400);
+  assert.equal((await f.admin('/api/config/reload', { extra: 1 })).status, 400);
+
+  fs.writeFileSync(file, before); write(cfg => { cfg.accounts[1].enabled = true; });
+  f.child.kill('SIGHUP');
+  let enabled = false;
+  for (let i = 0; i < 100 && !enabled; i++) { await sleep(20); enabled = (await f.admin('/api/accounts')).body.accounts.find(a => a.id === 'a1').enabled; }
+  assert.equal(enabled, true, 'SIGHUP reloads the file');
+  assert.equal(f.child.pid, pid); assert.equal(f.child.exitCode, null, 'no restart happened');
+  assert.equal((await f.chat('after-reload')).success, true);
+});
+
 test('gateway HTML 429 backs off and retries the same route without cooling or degrading anything', async t => {
   let throttled = 1;
   const gatewayReject = res => { res.writeHead(429, { 'Content-Type': 'text/html' }); res.end('<html><title>429</title>429 Too Many Requests</html>'); };

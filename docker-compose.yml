@@ -3,6 +3,8 @@ services:
     build: .
     container_name: cline-pass-console
     restart: unless-stopped
+    # Longer than the app's 25s drain so in-flight streams finish before SIGKILL.
+    stop_grace_period: 30s
     environment:
       - DATA_DIR=/data
       - CLINE_PASS_DIRECT_MAX_SOCKETS=${CLINE_PASS_DIRECT_MAX_SOCKETS:-512}

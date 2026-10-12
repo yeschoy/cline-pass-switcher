@@ -36,7 +36,7 @@ async function call(p, url, { method = 'GET', body, cookie, csrf, headers = {} }
 }
 const adminRoutes = [
   ['GET','/api/models'], ['GET','/api/accounts'], ['POST','/api/accounts'], ['GET','/api/security'], ['POST','/api/security'],
-  ['GET','/api/config'], ['POST','/api/config'], ['GET','/api/history'], ['GET','/api/statistics'], ['POST','/api/statistics/quota-refresh'],
+  ['GET','/api/config'], ['POST','/api/config'], ['POST','/api/config/reload'], ['GET','/api/history'], ['GET','/api/statistics'], ['POST','/api/statistics/quota-refresh'],
   ['POST','/api/probe'], ['POST','/api/test'], ['POST','/api/validate-upstreams'], ['POST','/api/fetch-official-models'],
   ['GET','/api/model-aliases'], ['POST','/api/model-aliases'], ['POST','/api/accounts/recover'], ['POST','/api/accounts/reset-health'], ['POST','/api/accounts/quota-recover'], ['POST','/api/providers/recover'],
   ['POST','/api/accounts/test'], ['POST','/api/accounts/proxy-test'], ['GET','/api/logs/settings'], ['POST','/api/logs/settings'],

@@ -2705,6 +2705,159 @@ async function adminAuthRoute(req, res, p) {
   adminCookie(res, req, '', true);
   return sendJSON(res, 200, { ok: true });
 }
+function accountInputError(accounts, { allowNewIds = false } = {}) {
+  const existingIds = new Set(config.accounts.map((a) => a.id));
+  for (const [i, a] of accounts.entries()) {
+    if (!a || typeof a !== 'object' || Array.isArray(a)) return `invalid account at index ${i}`;
+    if (a.id !== undefined && (!/^[A-Za-z0-9_-]{1,100}$/.test(String(a.id)) || (!allowNewIds && !existingIds.has(String(a.id))))) return `invalid or immutable account id at index ${i}`;
+    if (a.name !== undefined && (typeof a.name !== 'string' || a.name.length > 50 || /[\x00-\x1f\x7f]/.test(a.name))) return `invalid account name at index ${i}`;
+    if (a.note !== undefined && !validateNote(a.note)) return `invalid note at index ${i}`;
+    if (a.key !== undefined && (typeof a.key !== 'string' || a.key.length > 4096 || /[\r\n\x00]/.test(a.key))) return `invalid account key at index ${i}`;
+    const max = Number(a.maxConcurrent ?? 0);
+    if (!Number.isInteger(max) || max < 0 || max > 100000) return `invalid maxConcurrent at index ${i}`;
+    // maxRpm 是 canonical 严格整数 0..100000；省略该字段（旧客户端）在 normalizeAccount 中按 stable id 保留。
+    if (a.maxRpm !== undefined && (!Number.isInteger(a.maxRpm) || a.maxRpm < 0 || a.maxRpm > 100000)) return `invalid maxRpm at index ${i}`;
+    for (const field of ['weight', 'priority']) if (a[field] !== undefined && (!Number.isInteger(Number(a[field])) || Number(a[field]) < 1 || Number(a[field]) > 100)) return `invalid ${field} at index ${i}`;
+    try { normalizeProxyUrl(a.proxyUrl, { strict: true }); validateAndNormalizeHeaders(a.headers, { strict: true }); }
+    catch (e) { return `account ${i}: ${e.message}`; }
+    const owner = a.clientKeyId === undefined ? config.accounts.find((old) => old.id === String(a.id))?.clientKeyId || defaultClientKeyId() : a.clientKeyId;
+    if (typeof owner !== 'string' || !clientKeyInventory().some((item) => item.id === owner)) return `invalid clientKeyId at index ${i}`;
+    const routeError = validatePerModelInput(a.perModel || {});
+    if (routeError) return `account ${i}: ${routeError}`;
+  }
+  return null;
+}
+function normalizeAccountList(accounts, active) {
+  const previousById = new Map(config.accounts.map((a) => [a.id, a]));
+  const previousByName = new Map(config.accounts.map((a) => [a.name, a]));
+  // Name-based ID reuse is a legacy compatibility fallback, not evidence of
+  // stable-ID ownership. An omitted owner inherits only from an explicit ID.
+  const normalized = accounts.map((a, i) => normalizeAccount(a.clientKeyId === undefined && !previousById.has(String(a.id)) ? { ...a, clientKeyId: defaultClientKeyId() } : a, i, previousById, previousByName));
+  const requestedActiveId = normalized[Number(active)]?.id;
+  const accs = normalized.filter((a) => a.key);
+  validateClientKeys({ ...config, accounts: accs }, { persisted: true });
+  if (!accs.length) throw new Error('至少需要一个有效账号（key 非空）');
+  const seen = new Set();
+  for (const a of accs) { if (seen.has(a.id)) throw new Error('duplicate account id'); seen.add(a.id); }
+  const requestedActive = requestedActiveId ? accs.findIndex((a) => a.id === requestedActiveId) : -1;
+  return { accs, active: requestedActive >= 0 ? requestedActive : Math.min(Math.max(0, Number(active) || 0), accs.length - 1) };
+}
+// Publishes an already-persisted candidate and invalidates exactly the runtime state its diff affects.
+function applyAccountConfig(next) {
+  const previousById = new Map(config.accounts.map((a) => [a.id, a]));
+  const previousPerModel = config.perModel || {};
+  const accs = next.accounts, seen = new Set(accs.map((a) => a.id));
+  const quotaRoutingWasEnabled = quotaRoutingEnabled();
+  if (next.sessionProviderAffinityEnabled !== config.sessionProviderAffinityEnabled) {
+    sessionProviderAffinityGeneration++;
+    for (const [key, entry] of sessionBindings) if (entry.kind === 'provider') deleteSessionBinding(key, entry, { count: false });
+  }
+  Object.assign(config, next); probeRevision++; abortScheduledProbes(); clientCatalogs.clear();
+  workflowHealthCache.clear();
+  normalizeCachePoolTarget(next.accountPipeline);
+  for (const model of new Set([...Object.keys(previousPerModel), ...Object.keys(config.perModel || {})])) if (!isDeepStrictEqual(previousPerModel[model], config.perModel?.[model])) {
+    for (const account of accs) if (!Object.hasOwn(account.perModel || {}, model)) clearProviderCircuitForRoute(account.id, model);
+    for (const key of Object.keys(META.providerProbe.cells)) { const [cellId, cellModel] = JSON.parse(key); if (cellModel === model && !Object.hasOwn(accs.find((a) => a.id === cellId)?.perModel || {}, model)) delete META.providerProbe.cells[key]; }
+  }
+  for (const [id, previous] of previousById) {
+    const current = accs.find((a) => a.id === id);
+    if (!current || previous.key !== current.key || previous.proxyUrl !== current.proxyUrl || previous.clientKeyId !== current.clientKeyId || previous.enabled !== current.enabled || !isDeepStrictEqual(previous.headers, current.headers)) for (const key of Object.keys(META.providerProbe.cells)) if (JSON.parse(key)[0] === id) delete META.providerProbe.cells[key];
+    if (!current) { invalidateQuotaAccount(id, { clearSnapshot: true, deleted: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id, { credentialsChanged: true }); clearRpmState(id); }
+    else if (current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) { invalidateQuotaAccount(id, { clearSnapshot: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id, { credentialsChanged: true }); const month = getAccountState(id)?.protectionMonthlyAt || 0; if (month) META.accountStates[id] = { protectionMonthlyAt: month }; else delete META.accountStates[id]; clearRpmState(id); }
+    else if (current.clientKeyId !== previous.clientKeyId) invalidateSessionBindingsForAccount(id, { credentialsChanged: true });
+    else if (previous.enabled !== false && current.enabled === false) { invalidateQuotaAccount(id); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); }
+    else for (const model of new Set([...Object.keys(previous.perModel || {}), ...Object.keys(current.perModel || {})])) if (JSON.stringify(previous.perModel?.[model]) !== JSON.stringify(current.perModel?.[model])) {
+      clearProviderCircuitForRoute(id, model);
+      for (const key of Object.keys(META.providerProbe.cells)) { const [cellId, cellModel] = JSON.parse(key); if (cellId === id && cellModel === model) delete META.providerProbe.cells[key]; }
+    }
+  }
+  if (quotaRoutingWasEnabled !== quotaRoutingEnabled()) advanceQuotaRoutingEpoch();
+  // Enabling role-aware routing must evaluate the latest already-persisted
+  // successful snapshot immediately, not wait behind its five-minute cache.
+  if (cachePoolEnabled() && configuredCachePoolLowQuotaSize() > 0) for (const account of accs) {
+    const quota = META.accountQuotas?.[account.id];
+    if (quota?.snapshot && quota.lastSuccessAt === quota.snapshot.fetchedAt) reconcileQuotaDisposition(account.id, quota.snapshot);
+  }
+  for (const id of Object.keys(META.accountStates || {})) if (!seen.has(id)) delete META.accountStates[id];
+  META.selectionCounters = normalizeSelectionCounters(META.selectionCounters, seen); selectionCountersDirty = true;
+  for (const id of Object.keys(META.statistics.lifetime.accounts)) if (!seen.has(id)) delete META.statistics.lifetime.accounts[id];
+  for (const bucket of META.statistics.minuteBuckets) for (const id of new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health),...Object.keys(bucket.accountHealth)])) if (!seen.has(id)) { delete bucket.accounts[id]; delete bucket.health[id]; delete bucket.accountHealth[id]; }
+  for (const id of Object.keys(META.statistics.recentCoverage.accountIncompleteAt)) if (!seen.has(id)) delete META.statistics.recentCoverage.accountIncompleteAt[id];
+  for (const id of Object.keys(META.statistics.recentCoverage.accountHealthIncompleteAt)) if (!seen.has(id)) delete META.statistics.recentCoverage.accountHealthIncompleteAt[id];
+  for (const id of activeCounts.keys()) if (!seen.has(id)) activeCounts.delete(id);
+  // maxRpm=0 即时关闭限制并清理无用状态；disable/re-enable 保留窗口内已提交事实。
+  for (const id of [...rpmWindows.keys()]) if (!seen.has(id) || !rpmLimit(accs.find((a) => a.id === id))) clearRpmState(id);
+  pruneOrphanProviderStates(); probePruneCells();
+  reconcileSessionBindings();
+  markProbeConfigWrite({ preserveProbeCells: true });
+  saveMeta(); RR_COUNTER = 0; strategyCounters.clear(); pruneProxyAgents(); scheduleQuotaRefresh();
+  notifyCapacityWaiters();
+}
+// Credentials, listener and logging settings have their own lifecycles; reload refuses rather than half-applying them.
+const RESTART_ONLY_CONFIG_FIELDS = ['port', 'apiKey', 'proxyKey', 'clientKeys', 'publicBaseUrl', 'upstreamBase', 'providerProbeIdentityKey', 'providerProbeSchedule', 'detailedLogging', 'errorDetailLogging', 'rawBodyLogging', 'errorDetailMigrationVersion'];
+const ENV_PINNED_CONFIG_FIELDS = { proxyKey: 'PROXY_KEY', publicBaseUrl: 'PUBLIC_BASE_URL', port: 'PORT' };
+const envPinned = (field) => !!String(process.env[ENV_PINNED_CONFIG_FIELDS[field]] || '').trim();
+function reloadConfigFromDisk() {
+  const raw = loadJson(CONFIG_PATH, undefined);
+  if (!isPlainObject(raw)) throw new Error('config.json must be a JSON object');
+  const restartOnly = RESTART_ONLY_CONFIG_FIELDS.filter((f) => Object.hasOwn(raw, f) && !envPinned(f) && !isDeepStrictEqual(raw[f], config[f]));
+  if (restartOnly.length) throw new Error(`changed fields need a restart or their own settings page: ${restartOnly.join(', ')}`);
+  // An absent field keeps its live value; reload never runs startup migrations.
+  const pick = (field) => Object.hasOwn(raw, field) ? raw[field] : config[field];
+  if (!Array.isArray(pick('accounts'))) throw new Error('accounts must be an array');
+  const accountError = accountInputError(pick('accounts'), { allowNewIds: true });
+  if (accountError) throw new Error(accountError);
+  let { accs, active } = normalizeAccountList(pick('accounts'), pick('activeAccount'));
+  const injectedKey = String(process.env.CLINE_PASS_KEY || '').trim();
+  if (injectedKey && !accs.some((a) => a.key === injectedKey)) { accs = [normalizeAccount({ id: envAccountId(injectedKey), name: 'env-account', key: injectedKey, enabled: true }, 0), ...accs]; active++; }
+  const mode = pick('accountMode');
+  if (!ACCOUNT_MODES.has(mode)) throw new Error('invalid accountMode');
+  const wait = pick('concurrencyWaitMs'), poolWait = pick('poolFullWaitMs');
+  if (!Number.isInteger(wait) || wait < 0 || wait > 30000) throw new Error('concurrencyWaitMs must be an integer from 0 to 30000');
+  if (poolWait !== null && (!Number.isInteger(poolWait) || poolWait < 0 || poolWait > 30000)) throw new Error('poolFullWaitMs must be null or an integer from 0 to 30000');
+  const affinity = pick('sessionProviderAffinityEnabled'), exposeCatalog = pick('exposeCatalog');
+  if (typeof affinity !== 'boolean') throw new Error('sessionProviderAffinityEnabled must be boolean');
+  if (exposeCatalog !== undefined && typeof exposeCatalog !== 'boolean') throw new Error('exposeCatalog must be boolean');
+  const knownModels = pick('knownModels');
+  if (!Array.isArray(knownModels) || knownModels.length > 1000 || knownModels.some((m) => typeof m !== 'string' || !m.trim() || m.length > 300 || /[\x00-\x1f\x7f]/.test(m))) throw new Error('knownModels must be an array of model ids');
+  const routeError = validatePerModelInput(pick('perModel') || {});
+  if (routeError) throw new Error(`perModel: ${routeError}`);
+  const aliasError = validateModelAliases(pick('modelAliases') || {});
+  if (aliasError) throw new Error(`modelAliases: ${aliasError}`);
+  const errorRules = normalizeErrorRules(pick('errorRules'), { strict: true });
+  const pipeline = normalizeAccountPipeline(pick('accountPipeline'), {
+    strict: true,
+    fallbackOrder: config.accountPipeline.order,
+    fallbackCachePoolSize: configuredCachePoolSize(),
+    fallbackCachePoolMaxSize: configuredCachePoolMaxSize(),
+    fallbackCachePoolLowQuotaSize: config.accountPipeline.cachePoolLowQuotaSize,
+    fallbackSessionBindingExplicitTtlMs: config.accountPipeline.sessionBindingExplicitTtlMs,
+    fallbackSessionBindingFallbackTtlMs: config.accountPipeline.sessionBindingFallbackTtlMs,
+    fallbackSessionBindingMaxEntries: config.accountPipeline.sessionBindingMaxEntries,
+  });
+  const workflow = normalizeAccountWorkflow(pick('accountWorkflow'));
+  if (workflow.enabled && pipeline.cachePoolSize < 1) throw new Error('enabled accountWorkflow requires a positive cachePoolSize');
+  if (mode === 'load-health' && pipeline.sticky) throw new Error('load-health cannot enable sticky');
+  const next = { ...config, accounts: accs, accountMode: mode, activeAccount: active, concurrencyWaitMs: wait, poolFullWaitMs: poolWait,
+    errorRules, ...legacyRuleProjection(errorRules), retryRules: normalizeRetryRules(pick('retryRules'), { strict: true }),
+    quotaProtection: normalizeQuotaProtection(pick('quotaProtection'), { strict: true }), accountPipeline: pipeline, accountWorkflow: workflow,
+    sessionProviderAffinityEnabled: affinity, exposeCatalog, knownModels: knownModels.map((m) => m.trim()),
+    perModel: normalizePerModelMap(pick('perModel') || {}), modelAliases: normalizeModelAliases(pick('modelAliases') || {}) };
+  const changed = Object.keys(next).filter((k) => !isDeepStrictEqual(next[k], config[k]));
+  if (!changed.length) return { changed };
+  // Keep operator-owned bytes for env-overridden fields instead of baking the override into the file.
+  const persisted = { ...next };
+  for (const field of Object.keys(ENV_PINNED_CONFIG_FIELDS)) if (envPinned(field)) { if (Object.hasOwn(raw, field)) persisted[field] = raw[field]; else delete persisted[field]; }
+  atomicWriteJson(CONFIG_PATH, persisted);
+  applyAccountConfig(next);
+  return { changed };
+}
+function reloadConfigOnSignal() {
+  try {
+    const { changed } = reloadConfigFromDisk();
+    console.log(`[配置] SIGHUP 热加载完成：${changed.length ? changed.join(', ') : '无变化'}`);
+  } catch (error) { console.error(`[配置] SIGHUP 热加载失败，继续使用原配置：${safeReason(error.message)}`); }
+}
 function publicProxyBase() {
   return config.publicBaseUrl
     ? `${config.publicBaseUrl.replace(/\/+$/, '')}/v1`
@@ -5816,39 +5969,11 @@ async function dispatch(req, res) {
       if (requestedWorkflow.enabled && requestedPipeline.cachePoolSize < 1) return sendJSON(res, 400, { error: { message: 'enabled accountWorkflow requires a positive cachePoolSize' } });
       if (body.mode === 'load-health' && requestedPipeline.sticky) return sendJSON(res, 400, { error: { message: 'load-health cannot enable sticky' } });
       if (!Number.isInteger(Number(body.active ?? 0)) || Number(body.active ?? 0) < 0 || Number(body.active ?? 0) >= body.accounts.length) return sendJSON(res, 400, { error: { message: 'active account index is out of range' } });
-      const existingIds = new Set(config.accounts.map((a) => a.id));
-      for (const [i, a] of body.accounts.entries()) {
-        if (!a || typeof a !== 'object' || Array.isArray(a)) return sendJSON(res, 400, { error: { message: `invalid account at index ${i}` } });
-        if (a.id !== undefined && (!/^[A-Za-z0-9_-]{1,100}$/.test(String(a.id)) || !existingIds.has(String(a.id)))) return sendJSON(res, 400, { error: { message: `invalid or immutable account id at index ${i}` } });
-        if (a.name !== undefined && (typeof a.name !== 'string' || a.name.length > 50 || /[\x00-\x1f\x7f]/.test(a.name))) return sendJSON(res, 400, { error: { message: `invalid account name at index ${i}` } });
-        if (a.note !== undefined && !validateNote(a.note)) return sendJSON(res, 400, { error: { message: `invalid note at index ${i}` } });
-        if (a.key !== undefined && (typeof a.key !== 'string' || a.key.length > 4096 || /[\r\n\x00]/.test(a.key))) return sendJSON(res, 400, { error: { message: `invalid account key at index ${i}` } });
-        const max = Number(a.maxConcurrent ?? 0);
-        if (!Number.isInteger(max) || max < 0 || max > 100000) return sendJSON(res, 400, { error: { message: `invalid maxConcurrent at index ${i}` } });
-        // maxRpm 是 canonical 严格整数 0..100000；省略该字段（旧客户端）在 normalizeAccount 中按 stable id 保留。
-        if (a.maxRpm !== undefined && (!Number.isInteger(a.maxRpm) || a.maxRpm < 0 || a.maxRpm > 100000)) return sendJSON(res, 400, { error: { message: `invalid maxRpm at index ${i}` } });
-        for (const field of ['weight', 'priority']) if (a[field] !== undefined && (!Number.isInteger(Number(a[field])) || Number(a[field]) < 1 || Number(a[field]) > 100)) return sendJSON(res, 400, { error: { message: `invalid ${field} at index ${i}` } });
-        try { normalizeProxyUrl(a.proxyUrl, { strict: true }); validateAndNormalizeHeaders(a.headers, { strict: true }); }
-        catch (e) { return sendJSON(res, 400, { error: { message: `account ${i}: ${e.message}` } }); }
-        const owner = a.clientKeyId === undefined ? config.accounts.find((old) => old.id === String(a.id))?.clientKeyId || defaultClientKeyId() : a.clientKeyId;
-        if (typeof owner !== 'string' || !clientKeyInventory().some((item) => item.id === owner)) return sendJSON(res, 400, { error: { message: `invalid clientKeyId at index ${i}` } });
-        const routeError = validatePerModelInput(a.perModel || {});
-        if (routeError) return sendJSON(res, 400, { error: { message: `account ${i}: ${routeError}` } });
-      }
-      const previousById = new Map(config.accounts.map((a) => [a.id, a]));
-      const previousByName = new Map(config.accounts.map((a) => [a.name, a]));
-      const seen = new Set();
-      // Name-based ID reuse is a legacy compatibility fallback, not evidence of
-      // stable-ID ownership. An omitted owner inherits only from an explicit ID.
-      const normalizedAccounts = body.accounts.map((a, i) => normalizeAccount(a.clientKeyId === undefined && !previousById.has(String(a.id)) ? { ...a, clientKeyId: defaultClientKeyId() } : a, i, previousById, previousByName));
-      const requestedActiveId = normalizedAccounts[Number(body.active)]?.id;
-      const accs = normalizedAccounts.filter((a) => a.key);
-      try { validateClientKeys({ ...config, accounts: accs }, { persisted: true }); }
+      const accountError = accountInputError(body.accounts);
+      if (accountError) return sendJSON(res, 400, { error: { message: accountError } });
+      let accs, nextActive;
+      try { ({ accs, active: nextActive } = normalizeAccountList(body.accounts, body.active)); }
       catch (error) { return sendJSON(res, 400, { error: { message: error.message } }); }
-      if (!accs.length) return sendJSON(res, 400, { error: { message: '至少需要一个有效账号（key 非空）' } });
-      for (const a of accs) { if (seen.has(a.id)) return sendJSON(res, 400, { error: { message: 'duplicate account id' } }); seen.add(a.id); }
-      const requestedActive = requestedActiveId ? accs.findIndex((a) => a.id === requestedActiveId) : -1;
-      const nextActive = requestedActive >= 0 ? requestedActive : Math.min(Math.max(0, Number(body.active) || 0), accs.length - 1);
       const next = { ...config, accounts: accs, accountMode: body.mode, activeAccount: nextActive,
         concurrencyWaitMs: wait, poolFullWaitMs: poolWait, errorRules: requestedErrorRules, retryRules: requestedRetryRules,
         quotaProtection: requestedProtection, ...legacyRuleProjection(requestedErrorRules), accountPipeline: requestedPipeline, accountWorkflow: requestedWorkflow,
@@ -5856,46 +5981,7 @@ async function dispatch(req, res) {
       // A failed config rename must not change live owner routing, invalidate bindings,
       // or clear existing RPM/quota state before the client sees a failed save.
       atomicWriteJson(CONFIG_PATH, next);
-      const quotaRoutingWasEnabled = quotaRoutingEnabled();
-      if (next.sessionProviderAffinityEnabled !== config.sessionProviderAffinityEnabled) {
-        sessionProviderAffinityGeneration++;
-        for (const [key, entry] of sessionBindings) if (entry.kind === 'provider') deleteSessionBinding(key, entry, { count: false });
-      }
-      Object.assign(config, next); probeRevision++; abortScheduledProbes(); clientCatalogs.clear();
-      workflowHealthCache.clear();
-      normalizeCachePoolTarget(requestedPipeline);
-      for (const [id, previous] of previousById) {
-        const current = accs.find((a) => a.id === id);
-        if (!current || previous.key !== current.key || previous.proxyUrl !== current.proxyUrl || previous.clientKeyId !== current.clientKeyId || previous.enabled !== current.enabled || !isDeepStrictEqual(previous.headers, current.headers)) for (const key of Object.keys(META.providerProbe.cells)) if (JSON.parse(key)[0] === id) delete META.providerProbe.cells[key];
-        if (!current) { invalidateQuotaAccount(id, { clearSnapshot: true, deleted: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id, { credentialsChanged: true }); clearRpmState(id); }
-        else if (current.key !== previous.key || current.proxyUrl !== previous.proxyUrl) { invalidateQuotaAccount(id, { clearSnapshot: true }); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id, { credentialsChanged: true }); const month = getAccountState(id)?.protectionMonthlyAt || 0; if (month) META.accountStates[id] = { protectionMonthlyAt: month }; else delete META.accountStates[id]; clearRpmState(id); }
-        else if (current.clientKeyId !== previous.clientKeyId) invalidateSessionBindingsForAccount(id, { credentialsChanged: true });
-        else if (previous.enabled !== false && current.enabled === false) { invalidateQuotaAccount(id); clearProviderCircuitForAccount(id); invalidateSessionBindingsForAccount(id); }
-        else for (const model of new Set([...Object.keys(previous.perModel || {}), ...Object.keys(current.perModel || {})])) if (JSON.stringify(previous.perModel?.[model]) !== JSON.stringify(current.perModel?.[model])) {
-          clearProviderCircuitForRoute(id, model);
-          for (const key of Object.keys(META.providerProbe.cells)) { const [cellId, cellModel] = JSON.parse(key); if (cellId === id && cellModel === model) delete META.providerProbe.cells[key]; }
-        }
-      }
-      if (quotaRoutingWasEnabled !== quotaRoutingEnabled()) advanceQuotaRoutingEpoch();
-      // Enabling role-aware routing must evaluate the latest already-persisted
-      // successful snapshot immediately, not wait behind its five-minute cache.
-      if (cachePoolEnabled() && configuredCachePoolLowQuotaSize() > 0) for (const account of accs) {
-        const quota = META.accountQuotas?.[account.id];
-        if (quota?.snapshot && quota.lastSuccessAt === quota.snapshot.fetchedAt) reconcileQuotaDisposition(account.id, quota.snapshot);
-      }
-      for (const id of Object.keys(META.accountStates || {})) if (!seen.has(id)) delete META.accountStates[id];
-      META.selectionCounters = normalizeSelectionCounters(META.selectionCounters, seen); selectionCountersDirty = true;
-      for (const id of Object.keys(META.statistics.lifetime.accounts)) if (!seen.has(id)) delete META.statistics.lifetime.accounts[id];
-      for (const bucket of META.statistics.minuteBuckets) for (const id of new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health),...Object.keys(bucket.accountHealth)])) if (!seen.has(id)) { delete bucket.accounts[id]; delete bucket.health[id]; delete bucket.accountHealth[id]; }
-      for (const id of Object.keys(META.statistics.recentCoverage.accountIncompleteAt)) if (!seen.has(id)) delete META.statistics.recentCoverage.accountIncompleteAt[id];
-      for (const id of Object.keys(META.statistics.recentCoverage.accountHealthIncompleteAt)) if (!seen.has(id)) delete META.statistics.recentCoverage.accountHealthIncompleteAt[id];
-      for (const id of activeCounts.keys()) if (!seen.has(id)) activeCounts.delete(id);
-      // maxRpm=0 即时关闭限制并清理无用状态；disable/re-enable 保留窗口内已提交事实。
-      for (const id of [...rpmWindows.keys()]) if (!seen.has(id) || !rpmLimit(accs.find((a) => a.id === id))) clearRpmState(id);
-      pruneOrphanProviderStates(); probePruneCells();
-      reconcileSessionBindings();
-      markProbeConfigWrite({ preserveProbeCells: true });
-      saveMeta(); RR_COUNTER = 0; strategyCounters.clear(); pruneProxyAgents(); scheduleQuotaRefresh();
+      applyAccountConfig(next);
       return sendJSON(res, 200, { ok: true, accounts: accs.length, mode: config.accountMode, active: config.activeAccount, accountWorkflowEnabled: config.accountWorkflow.enabled, configurationRevision: configurationRevision() });
     }
     if (req.method === 'POST' && p === '/api/accounts/quota-recover') {
@@ -6091,6 +6177,14 @@ async function dispatch(req, res) {
     }
     if (req.method === 'GET' && p === '/api/history') return sendJSON(res, 200, { history: recentHistory });
     if (req.method === 'GET' && p === '/api/config') return sendJSON(res, 200, { port: config.port, perModel: config.perModel, knownModels: config.knownModels });
+    if (req.method === 'POST' && p === '/api/config/reload') {
+      const body = await readJsonBody(req);
+      if (!isPlainObject(body) || Object.keys(body).length) return sendJSON(res, 400, { error: { message: 'expected empty body' } });
+      try {
+        const { changed } = reloadConfigFromDisk();
+        return sendJSON(res, 200, { ok: true, changed, configurationRevision: configurationRevision() });
+      } catch (error) { return sendJSON(res, 400, { error: { message: safeReason(error.message) } }); }
+    }
     if (req.method === 'POST' && p === '/api/config') {
       const body = await readJsonBody(req);
       if (!body || typeof body !== 'object' || Array.isArray(body) || (body.scope !== undefined && !['global', 'account'].includes(body.scope))) return sendJSON(res, 400, { error: { message: 'invalid config scope' } });
@@ -6141,9 +6235,10 @@ const headerSafe = (s) => String(s ?? '').replace(/[^\x20-\x7E]/g, '').trim().sl
 
 const inboundSockets = new Set();
 server.on('connection', (socket) => { inboundSockets.add(socket); socket.once('close', () => inboundSockets.delete(socket)); });
+// Must stay below the container stop grace period, or the runtime SIGKILLs before logs drain.
 const SHUTDOWN_TIMEOUT_MS = process.env.NODE_ENV === 'test'
   ? Math.min(30_000, Math.max(100, Number(process.env.CLINE_PASS_SHUTDOWN_MS) || 10_000))
-  : 10_000;
+  : Math.min(120_000, Math.max(1_000, Number(process.env.CLINE_PASS_SHUTDOWN_MS) || 25_000));
 let shutdownPromise = null;
 function beforeDeadline(promise, deadline) {
   const remaining = Math.max(0, deadline - Date.now());
@@ -6194,6 +6289,7 @@ function shutdown(signal) {
 }
 process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
 process.once('SIGINT', () => { void shutdown('SIGINT'); });
+process.on('SIGHUP', () => { if (!shuttingDown) reloadConfigOnSignal(); });
 
 server.on('error', (e) => {
   if (shuttingDown) return;
