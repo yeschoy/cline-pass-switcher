@@ -281,13 +281,46 @@ test('workflow busy bound account temporarily overflows and counts only the new 
 });
 
 test('workflow replacement increments another account but Provider retry does not', async t => {
-  const f = await fixture(t, { configure: c => ({ ...c, accountWorkflow: { ...c.accountWorkflow, healthFilter: true, minimumHealth: .2 }, errorRules: [{ id: 'fixture429', scope: 'account', action: 'cooldown', when: { statuses: [429] }, reset: { fallback: '10s', max: '10s' } }] }), onChat(_entry, res, { seen }) { if (seen.length === 1) { res.writeHead(429, { 'Content-Type': 'text/html' }); res.end('shared fixture rejection'); } else success(res); } });
+  const f = await fixture(t, { configure: c => ({ ...c, accountWorkflow: { ...c.accountWorkflow, healthFilter: true, minimumHealth: .2 }, errorRules: [{ id: 'fixture429', scope: 'account', action: 'cooldown', when: { statuses: [429] }, reset: { fallback: '10s', max: '10s' } }] }), onChat(_entry, res, { seen }) { if (seen.length === 1) { res.writeHead(429, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"shared fixture rejection"}}'); } else success(res); } });
   assert.equal((await f.chat('replacement')).success, true);
   assert.equal(f.seen.length, 2); assert.notEqual(f.seen[0].account, f.seen[1].account); assert.equal(f.total(), 2);
 
   const g = await fixture(t, { configure: c => ({ ...c, perModel: { [model]: { upstreams: ['first', 'second'], pinMode: 'strict', maxRetries: 1 } } }), onChat(entry, res) { if (entry.provider === 'first') { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"temporary provider failure"}}'); } else success(res); } });
   assert.equal((await g.chat('provider-retry')).success, true);
   assert.equal(g.seen.length, 2); assert.equal(g.seen[0].account, g.seen[1].account); assert.equal(g.total(), 1);
+});
+
+test('gateway HTML 429 backs off and retries the same route without cooling or degrading anything', async t => {
+  let throttled = 1;
+  const gatewayReject = res => { res.writeHead(429, { 'Content-Type': 'text/html' }); res.end('<html><title>429</title>429 Too Many Requests</html>'); };
+  const f = await fixture(t, { configure: c => ({ ...c, accountWorkflow: { ...c.accountWorkflow, healthFilter: true, minimumHealth: .2 },
+    perModel: { [model]: { upstreams: ['first', 'second'], pinMode: 'strict', maxRetries: 1, providerCooldownMs: 60000 } },
+    errorRules: [{ id: 'general-429', scope: 'account', action: 'cooldown', when: { statuses: [429] }, reset: { fallback: '10s', max: '10s' } }] }),
+    onChat(_entry, res) { if (throttled-- > 0) gatewayReject(res); else success(res); } });
+  const started = Date.now();
+  const recovered = await f.chat('gateway');
+  assert.equal(recovered.success, true);
+  assert.ok(Date.now() - started >= 900, 'retry waits for the gateway backoff');
+  assert.equal(f.seen.length, 2);
+  assert.equal(f.seen[0].account, f.seen[1].account, 'no account rotation');
+  assert.deepEqual(f.seen.map(entry => entry.provider), ['first', 'first'], 'no provider rotation');
+  let view = (await f.admin('/api/accounts')).body;
+  assert.ok(view.accounts.every(account => !account.health.cooling && account.health.degrades === 0));
+  const row = (await f.admin('/api/logs/requests?limit=10')).body.items.find(item => item.requestId === recovered.requestId);
+  assert.equal(row.attempts[0].errorScope, 'gateway');
+  assert.equal(row.attempts[0].scopeEvidence, 'gateway_html_throttle');
+  assert.equal(row.attempts[0].ruleId, null);
+
+  throttled = Infinity;
+  const calls = f.seen.length;
+  const response = await fetch(`http://127.0.0.1:${f.port}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer fixture-client' }, body: JSON.stringify({ model, session_id: 'gateway', stream: true, messages: [{ role: 'user', content: 'Synthetic workflow request' }] }) });
+  await response.text();
+  assert.equal(response.status, 429);
+  assert.ok(Number(response.headers.get('retry-after')) >= 1);
+  assert.equal(f.seen.length - calls, 2, 'one backoff retry, then the 429 is returned');
+  assert.ok(f.seen.slice(calls).every(entry => entry.provider === 'first' && entry.account === f.seen[calls].account));
+  view = (await f.admin('/api/accounts')).body;
+  assert.ok(view.accounts.every(account => !account.health.cooling && account.health.degrades === 0));
 });
 
 test('workflow counters survive restart and stable-ID account edits', async t => {

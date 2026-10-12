@@ -4708,6 +4708,27 @@ function quotaShowsExhausted(account, now = Date.now()) {
   const quota = quotaProjection(account.id, now);
   return quota.status === 'fresh' && Object.values(quota.limits || {}).some((limit) => Number(limit?.percentUsed) >= 100);
 }
+// The Cline edge answers bursts from one egress IP with a bare HTML 429 before any provider sees
+// the request, so it says nothing about the account or the provider and rotating either cannot help.
+const GATEWAY_BACKOFF_BASE_MS = 1000, GATEWAY_BACKOFF_MAX_MS = 8000, GATEWAY_BACKOFF_JITTER_MS = 250, GATEWAY_THROTTLE_RETRIES = 1;
+const gatewayThrottles = new Map();
+function isGatewayThrottle(result) {
+  return Number(result?.upstreamStatus) === 429 && result?.terminalOrigin === 'upstream_http' && result?.responseContentType === 'text/html' && !result?.structuredError;
+}
+const gatewayEgressKey = (account) => account?.proxyUrl || '';
+function noteGatewayThrottle(account, now = Date.now()) {
+  const key = gatewayEgressKey(account), previous = gatewayThrottles.get(key);
+  // Concurrent rejections inside one window share it; only a rejection after the window escalates.
+  const streak = !previous || now - previous.until > 30000 ? 0 : now < previous.until ? previous.streak : Math.min(previous.streak + 1, 3);
+  const until = Math.max(previous?.until || 0, now + Math.min(GATEWAY_BACKOFF_MAX_MS, GATEWAY_BACKOFF_BASE_MS * 2 ** streak));
+  gatewayThrottles.set(key, { until, streak });
+  return until - now;
+}
+function clearGatewayThrottle(account) { gatewayThrottles.delete(gatewayEgressKey(account)); }
+function gatewayWaitMs(account, now = Date.now()) {
+  const state = gatewayThrottles.get(gatewayEgressKey(account));
+  return state && state.until > now ? state.until - now + Math.floor(Math.random() * GATEWAY_BACKOFF_JITTER_MS) : 0;
+}
 function classifyAttemptFailure(result, attempt, account, now = Date.now()) {
   const status = Number(result?.normalizedStatus || result?.status || 0);
   const origin = result?.terminalOrigin || '';
@@ -4717,6 +4738,7 @@ function classifyAttemptFailure(result, attempt, account, now = Date.now()) {
     const retryAfterMs = parseRetryAfter(result?.retryAfter, now);
     if (quotaShowsExhausted(account, now)) return { scope: 'account', evidence: 'fresh_account_quota', failureClass: 'rate_limit', retryAfterMs };
     if (hasExplicitAccountQuotaEvidence(error)) return { scope: 'account', evidence: 'structured_account_quota', failureClass: 'rate_limit', retryAfterMs };
+    if (isGatewayThrottle(result)) return { scope: 'gateway', evidence: 'gateway_html_throttle', failureClass: 'rate_limit', retryAfterMs };
     if (result?.routing?.finalProvider) return { scope: 'provider', evidence: 'routing_final_provider', failureClass: 'rate_limit', retryAfterMs };
     if (hasExplicitProviderEvidence(error, attempt?.upstream)) return { scope: 'provider', evidence: 'structured_provider', failureClass: 'rate_limit', retryAfterMs };
     return { scope: 'unknown', evidence: 'ambiguous_rate_limit', failureClass: 'rate_limit', retryAfterMs };
@@ -4870,6 +4892,7 @@ function settleAttempt(modelId, attempt, result, account, { clientDisconnected =
   }
   if (result.status === 200) {
     settleDetail(false, result.detailCaptureState || 'success');
+    clearGatewayThrottle(account);
     const healthAction = updateSuccess && currentGeneration ? updateProviderHealth(modelId, attempt.upstream, { success: true }) : 'none';
     const providerCircuitAction = updateSuccess && currentGeneration ? settleProviderCircuit(modelId, cfg, account, attempt, result) : null;
     return { classification: null, policy: null, accountAction: null, healthAction, providerCircuitAction, retryDecision: null };
@@ -4878,6 +4901,13 @@ function settleAttempt(modelId, attempt, result, account, { clientDisconnected =
   const classification = classifyAttemptFailure(result, attempt, account);
   result.classification = classification;
   result.ordinaryReason = ordinaryFailureReason(result, sensitiveValues);
+  if (classification.scope === 'gateway') {
+    const backoffMs = noteGatewayThrottle(account);
+    result.retryAfter = String(Math.ceil(backoffMs / 1000));
+    if (attempt.circuitHalfOpen) { const state = providerCircuitStates.get(attempt.circuitKey); if (state) state.halfOpen = false; }
+    return { classification, policy: { ruleId: null, scope: null, action: 'ignore', statusCode: Number(result.normalizedStatus || result.status), matchedBy: ['default'] },
+      accountAction: null, quotaRemovalAction: null, healthAction: 'none', providerCircuitAction: null, retryDecision: null, gatewayThrottle: true };
+  }
   const policy = matchErrorRule({ result, classification, modelId, provider: attempt.upstream, sensitiveValues });
   const accountAction = policy.scope === 'account' && ['cooldown','hard-quarantine'].includes(policy.action) ? policy : null;
   const quotaSignal = currentGeneration && result.upstreamStatus === 429 && result.terminalOrigin === 'upstream_http' &&
@@ -4947,9 +4977,22 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
   const onClientClose = () => { clientClosed = true; if (activeReq) activeReq.abort?.(); };
   clientSocket?.on('close', onClientClose);
   const cleanupClientClose = () => clientSocket?.off('close', onClientClose);
+  let gatewayRetries = 0;
+  const gatewayStep = (diagnostic, attempt) => {
+    if (!diagnostic.gatewayThrottle) return null;
+    if (gatewayRetries >= GATEWAY_THROTTLE_RETRIES || clientClosed) return 'stop';
+    gatewayRetries++;
+    attempted.delete(attempt.upstream || 'auto');
+    return 'retry';
+  };
   try {
     for (let index = 0; index < maxAttempts; index++) {
       if (clientClosed) break;
+      const gatewayWait = gatewayWaitMs(account);
+      if (gatewayWait > 0) {
+        await new Promise((resolve) => setTimeout(resolve, gatewayWait));
+        if (clientClosed) break;
+      }
       const selection = nextAttempt();
       const attempt = selection.attempt;
       if (!attempt) {
@@ -5043,6 +5086,9 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
             trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
             if (!attempt.upstream) learnAvailableProviders(modelId, result.note);
             last = { ...result, accountAction: diagnostic.accountAction, quotaRemovalAction: diagnostic.quotaRemovalAction, classification: diagnostic.classification };
+            const gateway = gatewayStep(diagnostic, attempt);
+            if (gateway === 'stop') break;
+            if (gateway === 'retry') { index--; continue; }
             if (diagnostic.retryDecision?.decision === 'stop') { retryStop = true; break; }
             if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine' || last.quotaRemovalAction) break;
             continue;
@@ -5074,6 +5120,9 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
         if (result.status !== 200 && !attempt.upstream) learnAvailableProviders(modelId, result.note);
         last = { ...result, accountAction: diagnostic.accountAction, quotaRemovalAction: diagnostic.quotaRemovalAction, classification: diagnostic.classification };
         if (result.status === 200) { last.successfulAttempt = attempt; break; }
+        const gateway = gatewayStep(diagnostic, attempt);
+        if (gateway === 'stop') break;
+        if (gateway === 'retry') { index--; continue; }
         if (diagnostic.retryDecision?.decision === 'stop') { retryStop = true; break; }
         if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine' || last.quotaRemovalAction) break;
         if (result.terminalOrigin === 'timeout' && !NON_STREAM_TIMEOUT_RETRY) break;
