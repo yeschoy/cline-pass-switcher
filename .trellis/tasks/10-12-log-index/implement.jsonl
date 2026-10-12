@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend entry checklist and quality gate"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Ordinary JSONL log storage, retention and query contract being changed"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Atomic write and 0600 file conventions reused for sidecar index files"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "lib/ module ownership and test layout"}
