@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
-import { JsonlLogGroup } from './lib/jsonl-log-store.js';
+import { JsonlLogGroup, ORDINARY_LOG_FILTERS } from './lib/jsonl-log-store.js';
 import { DetailRoot, DetailRedactor, detailContext, detailRoute, observeStream, MAX_BODY_BYTES, MAX_RAW_BODY_BYTES, MAX_PAYLOAD_BYTES, MAX_SANITIZED_PAYLOAD_BYTES, captureBudget } from './lib/detailed-log-capture.js';
 import { projectRawHeaders } from './lib/raw-detail-headers.js';
 import { DetailedLogStore, parseDetailQuery, MAX_AGE_MS, RAW_MAX_AGE_MS, MAX_TOTAL_BYTES } from './lib/detailed-log-store.js';
@@ -229,7 +229,10 @@ function markProbeConfigWrite({ preserveProbeCells = false } = {}) {
 }
 const ordinaryLogs = new JsonlLogGroup({
   dir: LOG_DIR,
-  streams: { requests: { maxRecords: 50000 }, errors: { maxRecords: 10000 } },
+  streams: {
+    requests: { maxRecords: 50000, filters: ORDINARY_LOG_FILTERS.requests },
+    errors: { maxRecords: 10000, filters: ORDINARY_LOG_FILTERS.errors },
+  },
   maxTotalBytes: 100 * 1024 * 1024,
 });
 const requestLogs = ordinaryLogs.stream('requests');
@@ -5586,9 +5589,7 @@ async function dispatch(req, res) {
     if ((req.method === 'GET' || req.method === 'DELETE') && (p === '/api/logs/requests' || p === '/api/logs/errors')) {
       const store = p.endsWith('/errors') ? errorLogs : requestLogs;
       if (req.method === 'DELETE') { await store.clear(); return sendJSON(res, 200, { ok: true }); }
-      const allowed = p.endsWith('/errors')
-        ? ['from','to','requestId','model','requestedModel','resolvedModel','account','accountId','accountName','status','upstreamStatus','category','provider','targetProvider','accountAction','ruleId','ruleScope','ruleAction','errorScope','scopeEvidence','failureClass','healthAction','responseContentType']
-        : ['from','to','requestId','model','requestedModel','resolvedModel','account','accountId','accountName','strategy','status','result','upstreamStatus','stream','provider','actualProvider','targetProviders','overflow','switched','accountAction','errorCategory'];
+      const allowed = p.endsWith('/errors') ? ORDINARY_LOG_FILTERS.errors : ORDINARY_LOG_FILTERS.requests;
       const rawLimit = url.searchParams.get('limit') || '50', cursor = url.searchParams.get('cursor') || '';
       const allowedParams = new Set([...allowed, 'limit', 'cursor']);
       for (const key of url.searchParams.keys()) if (!allowedParams.has(key)) return sendJSON(res, 400, { error: { message: `unknown log filter: ${key}` } });
