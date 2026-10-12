@@ -201,7 +201,7 @@ test('legacy migration, exclusive same-session routing, v3 final usage and sanit
   await start();
   const restartedOwners = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8')).accounts;
   assert.deepEqual(restartedOwners.map(({ id, clientKeyId }) => [id, clientKeyId]), [['old-a', 'legacy'], ['old-b', teamId]]);
-  assert.equal((await request(port, '/api/statistics', { cookie: login.cookie })).status, 401, 'old admin session cannot survive restart');
+  assert.equal((await request(port, '/api/statistics', { cookie: login.cookie })).status, 200, 'unexpired admin session survives restart');
   const relogin = await request(port, '/api/auth/login', { method: 'POST', body: { password: adminPassword } });
   assert.equal(relogin.status, 200, 'the independent admin password survives restart');
   assert.equal((await request(port, '/v1/models', { key: legacyKey })).status, 200);

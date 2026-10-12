@@ -2546,8 +2546,37 @@ function unauthorized(res) {
 }
 const ADMIN_COOKIE = 'cps_admin';
 const testAdminTTL = process.env.NODE_ENV === 'test' ? Number(process.env.CLINE_PASS_TEST_ADMIN_TTL_MS) : NaN;
-const ADMIN_TTL_MS = Number.isSafeInteger(testAdminTTL) && testAdminTTL >= 50 && testAdminTTL <= 60_000 ? testAdminTTL : 8 * 60 * 60 * 1000;
+const ADMIN_TTL_MS = Number.isSafeInteger(testAdminTTL) && testAdminTTL >= 50 && testAdminTTL <= 60_000 ? testAdminTTL : 24 * 60 * 60 * 1000;
+const ADMIN_SESSIONS_PATH = path.join(DATA_DIR, 'admin-sessions.json');
+const MAX_ADMIN_SESSIONS = 128;
+// Keyed by sha256(cookie token): the file never holds a usable cookie.
 const adminSessions = new Map();
+const adminTokenHash = (token) => crypto.createHash('sha256').update(token).digest('hex');
+// Derived from the cookie under a separate label, so neither memory nor disk keeps a CSRF value.
+const adminCsrfFor = (token) => crypto.createHash('sha256').update(`cps-admin-csrf:${token}`).digest('hex');
+// Sessions die with the password they were issued under, even if admin-auth.json is replaced offline.
+const adminPasswordRevision = () => adminState ? crypto.createHash('sha256').update(adminState.hash).digest('hex') : null;
+function persistAdminSessions() {
+  const now = Date.now();
+  const sessions = [...adminSessions].filter(([, s]) => s.expires > now).map(([tokenHash, s]) => ({ tokenHash, pending: s.pending, expires: s.expires }));
+  try { atomicWriteJson(ADMIN_SESSIONS_PATH, { version: 1, passwordRevision: adminPasswordRevision(), sessions }, { pretty: false }); }
+  catch (error) { console.error(`[认证] 登录会话持久化失败：${safeReason(error.message)}`); }
+}
+function loadAdminSessions() {
+  let saved;
+  try {
+    const stat = fs.lstatSync(ADMIN_SESSIONS_PATH);
+    if (!stat.isFile() || (stat.mode & 0o077)) return;
+    saved = JSON.parse(fs.readFileSync(ADMIN_SESSIONS_PATH, 'utf8'));
+  } catch { return; }
+  if (!isPlainObject(saved) || saved.version !== 1 || !Array.isArray(saved.sessions) || !adminState || saved.passwordRevision !== adminPasswordRevision()) return;
+  const now = Date.now();
+  for (const s of saved.sessions.slice(-MAX_ADMIN_SESSIONS)) {
+    if (!isPlainObject(s) || !/^[a-f0-9]{64}$/.test(s.tokenHash) || typeof s.pending !== 'boolean' ||
+        !Number.isSafeInteger(s.expires) || s.expires <= now || s.expires > now + ADMIN_TTL_MS) continue;
+    adminSessions.set(s.tokenHash, { pending: s.pending, expires: s.expires });
+  }
+}
 const adminFailures = new Map();
 function adminVerifier(password) {
   const salt = crypto.randomBytes(32).toString('hex');
@@ -2563,6 +2592,7 @@ if (!adminState && process.env.CLINE_PASS_ADMIN_BOOTSTRAP === '1') {
   adminState = { version: 1, initialized: false, ...adminVerifier(initial) };
   atomicWriteJson(ADMIN_PATH, adminState);
 }
+loadAdminSessions();
 function adminPasswordOK(password) {
   if (!adminState || typeof password !== 'string' || password.length > 1024) return false;
   const hash = crypto.scryptSync(password, Buffer.from(adminState.salt, 'hex'), 64);
@@ -2583,9 +2613,9 @@ function adminSession(req) {
   if (values.length !== 1) return null;
   const token = values[0].slice(ADMIN_COOKIE.length + 1);
   if (!/^[a-f0-9]{64}$/.test(token)) return null;
-  const session = adminSessions.get(token);
-  if (session && session.expires <= Date.now()) { adminSessions.delete(token); return null; }
-  return session ? { token, ...session } : null;
+  const tokenHash = adminTokenHash(token), session = adminSessions.get(tokenHash);
+  if (session && session.expires <= Date.now()) { adminSessions.delete(tokenHash); persistAdminSessions(); return null; }
+  return session ? { tokenHash, csrf: adminCsrfFor(token), ...session } : null;
 }
 function adminOriginOK(req) {
   if (req.headers['sec-fetch-site'] === 'cross-site' || req.headers['sec-fetch-site'] === 'same-site') return false;
@@ -2617,10 +2647,11 @@ function adminCookie(res, req, token = '', clear = false) {
 }
 function issueAdminSession(req, res, pending = false) {
   for (const [key, value] of adminSessions) if (value.expires <= Date.now()) adminSessions.delete(key);
-  if (adminSessions.size >= 128) adminSessions.delete(adminSessions.keys().next().value);
+  if (adminSessions.size >= MAX_ADMIN_SESSIONS) adminSessions.delete(adminSessions.keys().next().value);
   const token = crypto.randomBytes(32).toString('hex');
-  const csrf = crypto.randomBytes(32).toString('hex');
-  adminSessions.set(token, { csrf, pending, expires: Date.now() + ADMIN_TTL_MS });
+  const csrf = adminCsrfFor(token);
+  adminSessions.set(adminTokenHash(token), { pending, expires: Date.now() + ADMIN_TTL_MS });
+  persistAdminSessions();
   adminCookie(res, req, token);
   return sendJSON(res, 200, { ok: true, pending, csrf });
 }
@@ -2662,7 +2693,7 @@ async function adminAuthRoute(req, res, p) {
   const body = await readJsonBody(req, 4096);
   if (p === '/api/auth/logout') {
     if (!isPlainObject(body) || Object.keys(body).length) return sendJSON(res, 400, { error: { message: 'invalid body' } });
-    adminSessions.delete(session.token); adminCookie(res, req, '', true);
+    adminSessions.delete(session.tokenHash); persistAdminSessions(); adminCookie(res, req, '', true);
     return sendJSON(res, 200, { ok: true });
   }
   if (session.pending !== !adminState?.initialized || !isPlainObject(body) || Object.keys(body).sort().join(',') !== (session.pending ? 'newPassword' : 'currentPassword,newPassword') ||
@@ -2670,7 +2701,7 @@ async function adminAuthRoute(req, res, p) {
       clientKeyInventory(config, PROXY_KEY).some((item) => item.key === body.newPassword) || adminPasswordOK(body.newPassword) ||
       (!session.pending && !adminPasswordOK(body.currentPassword))) return sendJSON(res, 400, { error: { message: 'invalid password change' } });
   const candidate = { version: 1, initialized: true, ...adminVerifier(body.newPassword) };
-  atomicWriteJson(ADMIN_PATH, candidate); adminState = candidate; adminSessions.clear();
+  atomicWriteJson(ADMIN_PATH, candidate); adminState = candidate; adminSessions.clear(); persistAdminSessions();
   adminCookie(res, req, '', true);
   return sendJSON(res, 200, { ok: true });
 }

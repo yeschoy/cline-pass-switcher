@@ -205,7 +205,42 @@ test('expired pending bootstrap cannot change password and can begin initializat
   } finally { if (child && child.exitCode === null) await stop(child); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('admin session expires independently of client key and restarting clears all sessions', async () => {
+test('admin session survives restart as a token digest and is revoked by logout, password change or replaced admin state', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-admin-')); const p = await port(); let child;
+  const salt = crypto.randomBytes(32).toString('hex');
+  const hash = crypto.scryptSync(newPassword, Buffer.from(salt, 'hex'), 64).toString('hex');
+  const adminPath = path.join(dir, 'admin-auth.json'), sessionsPath = path.join(dir, 'admin-sessions.json');
+  fs.writeFileSync(adminPath, JSON.stringify({ version: 1, initialized: true, salt, hash }), { mode: 0o600 });
+  try {
+    child = await run(dir, p);
+    const login = await call(p, '/api/auth/login', { method: 'POST', body: { password: newPassword } });
+    const kept = await call(p, '/api/auth/login', { method: 'POST', body: { password: newPassword } });
+    assert.match(login.headers.get('set-cookie'), /Max-Age=86400/);
+    assert.equal(fs.statSync(sessionsPath).mode & 0o777, 0o600);
+    const token = login.cookie.split('=')[1], saved = fs.readFileSync(sessionsPath, 'utf8');
+    assert.equal(saved.includes(token), false); assert.equal(saved.includes(login.json.csrf), false);
+    assert.equal(saved.includes(crypto.createHash('sha256').update(token).digest('hex')), true);
+    await stop(child); child = await run(dir, p);
+    const restored = await call(p, '/api/auth/session', { cookie: login.cookie });
+    assert.equal(restored.status, 200); assert.equal(restored.json.csrf, login.json.csrf);
+    assert.equal((await call(p, '/api/accounts', { cookie: login.cookie })).status, 200);
+    assert.equal((await call(p, '/api/auth/logout', { method: 'POST', cookie: login.cookie, csrf: login.json.csrf, body: {} })).status, 200);
+    await stop(child); child = await run(dir, p);
+    assert.equal((await call(p, '/api/accounts', { cookie: login.cookie })).status, 401);
+    assert.equal((await call(p, '/api/accounts', { cookie: kept.cookie })).status, 200);
+    await stop(child);
+    const otherSalt = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(adminPath, JSON.stringify({ version: 1, initialized: true, salt: otherSalt, hash: crypto.scryptSync('replaced-admin-password-1', Buffer.from(otherSalt, 'hex'), 64).toString('hex') }), { mode: 0o600 });
+    child = await run(dir, p);
+    assert.equal((await call(p, '/api/accounts', { cookie: kept.cookie })).status, 401);
+    const fresh = await call(p, '/api/auth/login', { method: 'POST', body: { password: 'replaced-admin-password-1' } });
+    assert.equal((await call(p, '/api/auth/password', { method: 'POST', cookie: fresh.cookie, csrf: fresh.json.csrf, body: { currentPassword: 'replaced-admin-password-1', newPassword: 'replaced-admin-password-2' } })).status, 200);
+    await stop(child); child = await run(dir, p);
+    assert.equal((await call(p, '/api/accounts', { cookie: fresh.cookie })).status, 401);
+  } finally { if (child && child.exitCode === null) await stop(child); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('admin session expires independently of client key and stays expired after restart', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-admin-')); const p = await port(); let child;
   const salt = crypto.randomBytes(32).toString('hex');
   const hash = crypto.scryptSync(newPassword, Buffer.from(salt, 'hex'), 64).toString('hex');
