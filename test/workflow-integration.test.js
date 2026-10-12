@@ -150,8 +150,15 @@ test('minimum health rejects all sampled-below-threshold accounts without fallba
     errorRules: [{ id: 'health-degrade', scope: 'account', action: 'degrade', when: { statuses: [500] } }] }),
     onChat(_entry, res) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"synthetic degradation"}}'); } });
   assert.equal((await f.chat('sample-low')).status, 500);
-  const view = (await f.admin('/api/accounts')).body;
+  let view = (await f.admin('/api/accounts')).body;
   assert.equal(view.accounts[0].health.successRate, 0);
+  assert.equal(view.accounts[0].effectiveRoutingHealth, 1, 'a single failure is too few samples to route on');
+  const sparse = await f.admin('/api/account-workflow/preview', { accountWorkflow: { ...view.accountWorkflow, healthFilter: true, minimumHealth: .2 }, clientKeyId: 'legacy' });
+  assert.notEqual(sparse.body.decision.kind, 'filtered');
+  for (let i = 0; i < 4; i++) assert.equal((await f.chat('sample-low')).status, 500);
+  view = (await f.admin('/api/accounts')).body;
+  assert.equal(view.accounts[0].health.samples, 5);
+  assert.equal(view.accounts[0].effectiveRoutingHealth, 0);
   assert.equal((await f.admin('/api/accounts', accountSave(view, { accountWorkflow: { ...view.accountWorkflow, healthFilter: true, minimumHealth: .2 } }))).status, 200);
   const before = f.total(), calls = f.seen.length;
   const preview = await f.admin('/api/account-workflow/preview', { accountWorkflow: { ...view.accountWorkflow, healthFilter: true, minimumHealth: .2 }, clientKeyId: 'legacy', boundAccountId: 'a0' });

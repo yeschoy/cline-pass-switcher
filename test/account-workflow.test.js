@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   defaultAccountWorkflow, normalizeAccountWorkflow, normalizeSelectionCounters,
-  effectiveRoutingHealth, rankWorkflowCandidates,
+  effectiveRoutingHealth, rankWorkflowCandidates, routingHealthRate, MIN_ROUTING_HEALTH_SAMPLES,
 } from '../lib/account-workflow.js';
 
 test('workflow defaults preserve legacy routing and expose optimistic account health', () => {
@@ -39,6 +39,16 @@ test('unknown routing health100 does not invent observed statistics', () => {
   assert.equal(effectiveRoutingHealth(candidate.healthRate, 'unknown-last'), null);
   assert.equal(effectiveRoutingHealth(.37, 'optimistic'), .37);
   assert.deepEqual(candidate, { id: 'new', healthRate: null, successes: 0, samples: 0 });
+});
+
+test('routing health ignores rates backed by too few samples', () => {
+  assert.equal(MIN_ROUTING_HEALTH_SAMPLES, 5);
+  assert.equal(routingHealthRate({ successRate: 0, samples: 1 }), null);
+  assert.equal(routingHealthRate({ successRate: .25, samples: 4 }), null);
+  assert.equal(routingHealthRate({ successRate: .2, samples: 5 }), .2);
+  assert.equal(routingHealthRate({ successRate: null, samples: null }), null);
+  assert.equal(routingHealthRate(undefined), null);
+  assert.equal(effectiveRoutingHealth(routingHealthRate({ successRate: 0, samples: 1 }), 'optimistic'), 1);
 });
 
 test('quota workflow node accepts explicit active-pool roles and rejects hidden reserve routing', () => {

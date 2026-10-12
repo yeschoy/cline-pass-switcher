@@ -19,7 +19,7 @@ import { JsonlLogGroup, ORDINARY_LOG_FILTERS } from './lib/jsonl-log-store.js';
 import { DetailRoot, DetailRedactor, detailContext, detailRoute, observeStream, MAX_BODY_BYTES, MAX_RAW_BODY_BYTES, MAX_PAYLOAD_BYTES, MAX_SANITIZED_PAYLOAD_BYTES, captureBudget } from './lib/detailed-log-capture.js';
 import { projectRawHeaders } from './lib/raw-detail-headers.js';
 import { DetailedLogStore, parseDetailQuery, MAX_AGE_MS, RAW_MAX_AGE_MS, MAX_TOTAL_BYTES } from './lib/detailed-log-store.js';
-import { WORKFLOW_SELECTORS, defaultAccountWorkflow, normalizeAccountWorkflow, normalizeSelectionCounters, effectiveRoutingHealth, rankWorkflowCandidates } from './lib/account-workflow.js';
+import { WORKFLOW_SELECTORS, defaultAccountWorkflow, normalizeAccountWorkflow, normalizeSelectionCounters, effectiveRoutingHealth, rankWorkflowCandidates, routingHealthRate } from './lib/account-workflow.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || __dirname;
@@ -2301,7 +2301,7 @@ function workflowAccountHealth(id, now = Date.now()) {
   return health;
 }
 function workflowHealthEligible(candidate, policy) {
-  return !policy.healthFilter || effectiveRoutingHealth(candidate.health.successRate, 'optimistic') >= policy.minimumHealth;
+  return !policy.healthFilter || effectiveRoutingHealth(routingHealthRate(candidate.health), 'optimistic') >= policy.minimumHealth;
 }
 function workflowSelectionContext(identity, { excludeIds = new Set(), preview = false, snapshot = workflowSnapshot(identity) } = {}) {
   const list = enabledAccounts({ excludeIds, clientKeyId: identity.clientKeyId ?? null, pruneCooldowns: !preview });
@@ -2328,7 +2328,7 @@ function workflowFilteredCandidates(context, excludeId = null) {
 }
 function workflowRank(candidates, policy) {
   const byId = new Map(candidates.map(candidate => [candidate.account.id, candidate]));
-  return rankWorkflowCandidates(candidates.map(candidate => ({ id: candidate.account.id, healthRate: candidate.health.successRate })), {
+  return rankWorkflowCandidates(candidates.map(candidate => ({ id: candidate.account.id, healthRate: routingHealthRate(candidate.health) })), {
     selector: policy.selector, counts: META.selectionCounters.accounts, activeCounts,
     cursor: META.selectionCounters.sequence, unknownHealth: policy.unknownHealth,
   }).map(row => byId.get(row.id));
@@ -5686,7 +5686,7 @@ async function dispatch(req, res) {
         accounts: config.accounts.map((a) => {
           const recent = projectAggregate(aggregateRange(a.id).aggregate), lifetime = META.statistics.lifetime.accounts[a.id], health = healthProjection(a);
           return { ...a, state: getAccountState(a.id), activeCount: activeCounts.get(a.id) || 0, rpm: rpmProjection(a), health,
-            selectionCount: selectionCounterFor(a.id).count, effectiveRoutingHealth: effectiveRoutingHealth(health.successRate, config.accountWorkflow.unknownHealth),
+            selectionCount: selectionCounterFor(a.id).count, effectiveRoutingHealth: effectiveRoutingHealth(routingHealthRate(health), config.accountWorkflow.unknownHealth),
             quota: quotaProjection(a.id), cachePoolRole: cacheRoles.get(a.id) ?? null, cachePoolQuotaRole: configuredCachePoolLowQuotaSize() > 0 && cacheRoles.get(a.id) === 'active' ? ({ hot: 'high', warm: 'low', unknown: 'unknown' }[quotaProjection(a.id).pool] || null) : null,
             statistics: { recent24h: recent, lifetimeRequests: lifetime ? lifetime.requests : 0, lifetimeErrors: lifetime ? lifetime.errors : 0 } };
         }),
