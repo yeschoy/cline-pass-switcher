@@ -1862,7 +1862,7 @@ function mpMoney(v,prices,modelId,successful,compact=false,complete=true){
   const count=entries.reduce((n,[,x])=>n+BigInt(x.pricedRequests),0n);
   if(count>BigInt(Number.MAX_SAFE_INTEGER))return compact?'不可计算':'不可计算（覆盖计数溢出）';
   const eligible=Number(count);
-  if(!eligible){const price=Object.values(prices||{}).find(snapshot=>Object.hasOwn(snapshot?.models||{},modelId))?.models[modelId];return compact?'不可计算':price?.tier==='context-band'?'不可计算（上下文档位与缓存写计数未知）':price?.rates?.some(row=>row.length===4&&row[3]!==null)?'不可计算（缓存写计数未知）':'不可计算（无完整 usage / 无支持价格）';}
+  if(!eligible){const price=Object.values(prices||{}).find(snapshot=>Object.hasOwn(snapshot?.models||{},modelId))?.models[modelId];const detail=price?.tier==='context-band'?'不可计算（上下文档位与缓存写计数未知）':price?.rates?.some(row=>row.length===4&&row[3]!==null)?'不可计算（缓存写计数未知）':'不可计算（无完整 usage / 无支持价格）';if(compact&&!(Number.isSafeInteger(successful)&&successful>0))return '—';return compact?'不可计算':detail;}
   const low=entries.reduce((n,[,x])=>n+(Number.isSafeInteger(x.lowPicoUsd)?BigInt(x.lowPicoUsd):0n),0n),high=entries.reduce((n,[,x])=>n+(Number.isSafeInteger(x.highPicoUsd)?BigInt(x.highPicoUsd):0n),0n);
   if(entries.some(([,x])=>x.lowPicoUsd===null||x.highPicoUsd===null))return compact?'不可计算':'不可计算（金钱计数溢出）';
   const format=pico=>`$${(pico/1000000n/1000000n).toString()}.${(pico%1000000000000n).toString().padStart(12,'0')}`;
@@ -1880,8 +1880,13 @@ function mpSampleRate(success){
   return samples===0?'无数据 · 0 样本':Number.isSafeInteger(samples)&&samples>0?`${mpRatio(success.successRate)} · ${mpNumber(samples)} 样本`:'无数据 · 样本未知';
 }
 function mpKnown(value,count){return Number.isSafeInteger(count)&&count>0?mpNumber(value):'无数据';}
+function mpDash(){return '<span class="dim">—</span>';}
+function mpCompactMoney(v,prices,modelId,successful,complete){const text=mpMoney(v,prices,modelId,successful,true,complete);return text==='—'?mpDash():escapeHtml(text);}
 function mpUsageCells(x){
-  return `<td>${mpKnown(x?.inputTokens,x?.inputKnownRequests)} / ${mpKnown(x?.outputTokens,x?.outputKnownRequests)}</td><td>${mpKnown(x?.cachedTokens,x?.cacheKnownRequests)} · ${mpRatio(x?.cacheTokenRatio)}</td>`;
+  const known=(value,count)=>Number.isSafeInteger(count)&&count>0?mpNumber(value):null;
+  const pair=(left,right,sep)=>left===null&&right===null?mpDash():`${left??mpDash()} ${sep} ${right??mpDash()}`;
+  const ratio=typeof x?.cacheTokenRatio==='number'&&Number.isFinite(x.cacheTokenRatio)&&x.cacheTokenRatio>=0&&x.cacheTokenRatio<=1?mpRatio(x.cacheTokenRatio):null;
+  return `<td>${pair(known(x?.inputTokens,x?.inputKnownRequests),known(x?.outputTokens,x?.outputKnownRequests),'/')}</td><td>${pair(known(x?.cachedTokens,x?.cacheKnownRequests),ratio,'·')}</td>`;
 }
 function mpRowDetails(success,usage,coverage,valuation,successCoverage,prices,modelId,channel=false){
   const x=usage||{},known=(value,count)=>`${mpKnown(value,count)}（${mpNumber(count)} 已知）`;
@@ -1907,11 +1912,11 @@ function renderModelProviders(){
     const p=model.providerStatistics||{},children=p.providers||[];
     if(MODEL_PROVIDER_VIEW==='model'){
       if(filter&&!String(model.id).toLowerCase().includes(filter))continue;
-      models.push(`<tr><th scope="row">${escapeHtml(model.id)}</th><td>${mpSampleRate(p.finalRequests)}</td>${mpUsageCells(model.recent24h)}<td>${escapeHtml(mpMoney(p.valuation,prices,model.id,p.finalRequests?.successes,true,p.finalCoverage?.complete===true&&model.coverage?.complete===true))}</td><td>${mpRowDetails(p.finalRequests,model.recent24h,model.coverage,p.valuation,mpCoverage(p.finalCoverage),prices,model.id)}</td></tr>`);
+      models.push(`<tr><th scope="row">${escapeHtml(model.id)}</th><td>${mpSampleRate(p.finalRequests)}</td>${mpUsageCells(model.recent24h)}<td>${mpCompactMoney(p.valuation,prices,model.id,p.finalRequests?.successes,p.finalCoverage?.complete===true&&model.coverage?.complete===true)}</td><td>${mpRowDetails(p.finalRequests,model.recent24h,model.coverage,p.valuation,mpCoverage(p.finalCoverage),prices,model.id)}</td></tr>`);
     }else for(const child of children){
       const name=child.id||'未知渠道';
       if(filter&&!String(model.id).toLowerCase().includes(filter)&&!String(name).toLowerCase().includes(filter))continue;
-      channels.push(`<tr><th scope="row">${escapeHtml(model.id)}</th><td>${escapeHtml(name)}</td><td>${child.id&&child.health?mpSampleRate(child.health):'不适用（无具名尝试）'}</td>${mpUsageCells(child.usage)}<td>${escapeHtml(mpMoney(child.valuation,prices,model.id,child.usage?.requests,true))}</td><td>${mpRowDetails(child.health,child.usage,child.coverage,child.valuation,child.id?mpHealthCoverage(child.health):'不适用',prices,model.id,true)}</td></tr>`);
+      channels.push(`<tr><th scope="row">${escapeHtml(model.id)}</th><td>${escapeHtml(name)}</td><td>${child.id&&child.health?mpSampleRate(child.health):'不适用（无具名尝试）'}</td>${mpUsageCells(child.usage)}<td>${mpCompactMoney(child.valuation,prices,model.id,child.usage?.requests)}</td><td>${mpRowDetails(child.health,child.usage,child.coverage,child.valuation,child.id?mpHealthCoverage(child.health):'不适用',prices,model.id,true)}</td></tr>`);
     }
   }
   // Keep only the selected projection mounted; the accepted snapshot reconstructs either table on demand.

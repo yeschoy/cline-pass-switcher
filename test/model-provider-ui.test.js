@@ -41,10 +41,10 @@ test('model and channel projections use distinct denominators, attribute only fi
   assert.equal(h.el('#modelProvidersChannelView').hidden,false);assert.equal(h.el('#modelProvidersModelView').hidden,true);
   assert.equal(h.el('#modelProvidersChannelTab').attrs['aria-pressed'],'true');assert.equal(h.el('#modelProvidersModelTab').attrs['aria-pressed'],'false');
   assert.match(h.el('#modelProvidersStatus').textContent,/渠道视图/);
-  assert.match(channel,/retry-failed<\/td><td>0\.0% · 1 样本<\/td><td>无数据 \/ 无数据/);
+  assert.match(channel,/retry-failed<\/td><td>0\.0% · 1 样本<\/td><td><span class="dim">—<\/span>/);
   assert.match(channel,/&lt;script&gt;evil&lt;\/script&gt;<\/td><td>100\.0% · 1 样本/);
   assert.doesNotMatch(channel,/<script>evil<\/script>/);
-  assert.match(channel,/未知渠道<\/td><td>不适用（无具名尝试）<\/td><td>0 \/ 0<\/td><td>0 · 无数据<\/td><td>\$0\.000000000000 · 部分/);
+  assert.match(channel,/未知渠道<\/td><td>不适用（无具名尝试）<\/td><td>0 \/ 0<\/td><td>0 · <span class="dim">—<\/span><\/td><td>\$0\.000000000000 · 部分/);
   assert.match(channel,/渠道尝试成功率不适用（无具名尝试）<br>最终成功归属用量请求 1/);
   assert.match(channel,/渠道成功率按具名尝试计算；用量与金额仅按最终成功请求归属/);
   assert.equal(h.el('#modelProvidersBody').innerHTML,'','inactive model rows are removed');
@@ -120,7 +120,7 @@ test('compact price is partial when final or model coverage is incomplete despit
 test('zero samples and unknown usage never become measured zero',async()=>{
   const h=harness();h.context.handler=async()=>({...data,models:[{id:'no-samples',recent24h:{inputTokens:0,inputKnownRequests:0},coverage,providerStatistics:{finalRequests:{successes:0,failures:0,samples:0,successRate:null},finalCoverage:coverage,valuation:{versions:{},...coverage},providers:[{id:'idle',usage:{requests:0},coverage,valuation:{versions:{},...coverage},health:{samples:0,successRate:null,coverageComplete:false,coverageFrom:0}}]}}]});
   await h.run("switchSection('modelProviders')");
-  assert.match(h.el('#modelProvidersBody').innerHTML,/无数据 · 0 样本<\/td><td>无数据 \/ 无数据/);
+  assert.match(h.el('#modelProvidersBody').innerHTML,/无数据 · 0 样本<\/td><td><span class="dim">—<\/span><\/td><td><span class="dim">—<\/span><\/td><td><span class="dim">—<\/span>/);
   assert.doesNotMatch(h.el('#modelProvidersBody').innerHTML,/0\.0%/);
   h.run("selectModelProviderView('channel')");assert.match(h.el('#modelProvidersChannelBody').innerHTML,/无数据 · 0 样本/);
   assert.equal(h.run('mpRatio(0)'),'0.0%');assert.equal(h.run('mpRatio(null)'),'无数据');
