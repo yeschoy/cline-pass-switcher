@@ -1219,3 +1219,23 @@ Committed-main raw-detail code is deployed raw-off at 512 MiB with 32 Legacy-own
 ### Next Steps
 
 - 如需容量验收，先确认Cline接入限额，再单独授权有界持续压测和错误规则改动。
+
+
+## Session 50: 排查代理 socket hang up
+<!-- trellis-session: v=2 fp=31c235b2faaeca22 -->
+
+**Date**: 2026-10-14
+**Task**: 排查代理 socket hang up
+**Branch**: `main`
+
+### Summary
+
+只读生产日志确认 hangup 仍偶发；主因是特定 SOCKS/账号侧 ≈60s transport_proxy（与 Agent 60s 超时同形），字面 socket hang up 很少；交付 diagnosis.md 后归档，未改代码/配置。
+
+### Git Commits
+
+(No commits - planning session)
+
+### Status
+
+[OK] **Completed**
