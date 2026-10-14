@@ -224,7 +224,7 @@ Account-level RPM runtime state is deliberately process-local and is never persi
   orModelsFetchedAt, orModelList,
   officialModelsFetch,
   statistics: {
-    version: 5,
+    version: 6,
     lifetime: { global: Aggregate, accounts: { [accountId]: Aggregate } },
     minuteBuckets: [{
       minute,
@@ -236,7 +236,8 @@ Account-level RPM runtime state is deliberately process-local and is never persi
       providerHealth: { [resolvedModelId]: { [provider]: SuccessDelta } },
       modelFinal: { [resolvedModelId]: { successes, failures, cancelled, overflowFields } },
       providerUsage: { [resolvedModelId]: { [providerOrEmptyForUnknown]: Aggregate } },
-      valuation: { [resolvedModelId]: { [providerOrEmptyForUnknown]: { [priceVersion]: { pricedRequests, lowPicoUsd, highPicoUsd, overflowFields } } } }
+      valuation: { [resolvedModelId]: { [providerOrEmptyForUnknown]: { [priceVersion]: { pricedRequests, lowPicoUsd, highPicoUsd, overflowFields } } } },
+      proxyHealth: { [proxyEndpointKey]: { requests, errors5xx, overflowFields } } // credential-free scheme://host[:port]; any attempt 5xx, ignores error rules
     }],
     recentCoverage: {
       droppedAccountMinuteCells,
@@ -252,7 +253,9 @@ Account-level RPM runtime state is deliberately process-local and is never persi
       providerHealthIncompleteAt: { [resolvedModelId]: { [provider]: minute } },
       usageTrackingStartedMinute, droppedUsageMinuteCells,
       usageIncompleteAt: { [resolvedModelId]: minute }, usageGlobalIncompleteAt,
-      droppedValuationMinuteCells, valuationIncompleteAt: { [resolvedModelId]: minute }, valuationGlobalIncompleteAt
+      droppedValuationMinuteCells, valuationIncompleteAt: { [resolvedModelId]: minute }, valuationGlobalIncompleteAt,
+      proxyHealthTrackingStartedMinute, droppedProxyHealthMinuteCells,
+      proxyHealthIncompleteAt: { [proxyEndpointKey]: minute }
     },
     priceVersions: { [internalVersion]: PriceSnapshot }, // at most 8 immutable snapshots; valuation cells reference their original version
     // v1 PriceSnapshot: exact { version, collectedAt, effectiveAt: null, source, currency: 'USD', models: { [pricedModel]: { tier, rates: [[input,output,cachedRead], ...] } } }; integer thousandths USD/1M

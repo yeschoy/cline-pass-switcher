@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/index.md", "reason": "控制台 UI 入口与契约"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "亲和枚举与禁止原始会话键"}

@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/index.md", "reason": "UI 契约检查"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "确认不泄露会话键"}

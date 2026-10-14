@@ -130,10 +130,14 @@ test('request and error sections share one log view and reset the selected type 
   assert.match(loadLogs, /params\.set\('result',\$\('#logResult'\)\.value\)/);
   assert.match(loadLogs, /x\.result\|\|legacyResult/);
   assert.match(loadLogs, /legacy_failed/);
-  assert.match(html, /亲和键\/上游键\/缓存/);
+  assert.match(html, /亲和键\/请求体键\/缓存/);
   assert.match(loadLogs, /affinityLogLabel\(x\)/);
   assert.match(loadLogs, /cacheHitLogLabel\(x\.cacheHit\)/);
   assert.match(html, /function affinityLogLabel/);
+  assert.match(html, /请求体会话键 \$\{upstream\}/);
+  assert.match(html, /none:'未写入'/);
+  assert.doesNotMatch(html, /上游 \$\{upstream\}/);
+  assert.doesNotMatch(html.slice(html.indexOf('function affinityLogLabel'), html.indexOf('function inboundProtocolLabel')), /未提供/);
   assert.match(html, /function cacheHitLogLabel/);assert.match(html,/bindingSourceLabels/);assert.match(html,/bindingResultLabels/);
   assert.match(loadLogs, /api\(`\/api\/logs\/\$\{type\}\?\$\{params\}`\)/);
   assert.match(loadLogs, /if\(queryId!==LOG_QUERY_ID\|\|type!==\$\('#logType'\)\.value\)return/);
