@@ -1771,7 +1771,7 @@ async function saveAccounts(payload=null){
       if(/^[a-f0-9]{64}$/.test(result.configurationRevision||''))WORKFLOW_CONFIGURATION_REVISION=result.configurationRevision;
       if(generation===WORKFLOW_GENERATION){WORKFLOW_DRAFT=JSON.parse(JSON.stringify(payload.accountWorkflow));WORKFLOW_CONTEXT_DIRTY=false;}
     }
-    accMsg(`已保存：${result.accounts} 个账号 · ${result.accountWorkflowEnabled?'可视化工作流':result.mode}`);
+    accMsg(result.unchanged?`配置与服务器一致，未重复写入：${result.accounts} 个账号`:`已保存：${result.accounts} 个账号 · ${result.accountWorkflowEnabled?'可视化工作流':result.mode}`);
     await loadAll();
   }catch(error){accMsg(saved?'保存已生效，但读取最新状态失败；请保留草稿并手动刷新，不要重复提交。':error.message,true);}
 }
@@ -2160,7 +2160,7 @@ function accMsg(msg, isErr) {
   el.textContent = msg;
   el.style.color = isErr ? 'var(--red)' : 'var(--green)';
   clearTimeout(el._t);
-  el._t = setTimeout(() => { el.textContent = ''; }, 8000);
+  if (!isErr) el._t = setTimeout(() => { el.textContent = ''; }, 8000);
 }
 
 let statusTimer;

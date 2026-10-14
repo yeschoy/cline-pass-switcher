@@ -442,6 +442,22 @@ function accountSave(view, patch = {}) {
     accountWorkflow: view.accountWorkflow, expectedConfigurationRevision: view.configurationRevision, ...patch };
 }
 
+test('a learned model does not expire the open account draft', async t => {
+  const f = await fixture(t);
+  const view = (await f.admin('/api/accounts')).body;
+  const file = path.join(f.dir, 'config.json');
+  const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+  cfg.knownModels = [...new Set([...(cfg.knownModels || []), 'cline-pass/learned-save-model'])];
+  fs.writeFileSync(file, JSON.stringify(cfg));
+  const reloaded = await f.admin('/api/config/reload', {});
+  assert.equal(reloaded.status, 200, JSON.stringify(reloaded.body));
+  assert.equal(reloaded.body.configurationRevision, view.configurationRevision);
+  const saved = await f.admin('/api/accounts', accountSave(view, { concurrencyWaitMs: 40 }));
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  assert.equal((await f.admin('/api/accounts')).body.concurrencyWaitMs, 40);
+  assert.ok(JSON.parse(fs.readFileSync(file, 'utf8')).knownModels.includes('cline-pass/learned-save-model'));
+});
+
 test('workflow API projects effective health and rejects invalid/stale saves without losing fields', async t => {
   const f = await fixture(t, { configure: c => ({ ...c, accounts: c.accounts.map(a => ({ ...a, note: 'retained note', headers: { 'X-Fixture': 'retained-header' }, perModel: { 'other-model': { upstreams: ['one'], pinMode: 'strict' } } })) }) });
   const view = (await f.admin('/api/accounts')).body;
@@ -452,6 +468,7 @@ test('workflow API projects effective health and rejects invalid/stale saves wit
   assert.equal(fs.readFileSync(path.join(f.dir, 'config.json'), 'utf8'), before);
   const changed = accountSave(view, { accountWorkflow: { ...view.accountWorkflow, missSteps: ['health', 'quota'] } });
   assert.equal((await f.admin('/api/accounts', changed)).status, 200);
+  assert.equal((await f.admin('/api/accounts', changed)).status, 200, 'repeating the saved draft with the old revision is a no-op');
   const latest = (await f.admin('/api/accounts')).body;
   assert.notEqual(latest.configurationRevision, view.configurationRevision);
   assert.equal((await f.admin('/api/accounts', accountSave(view))).status, 409);
