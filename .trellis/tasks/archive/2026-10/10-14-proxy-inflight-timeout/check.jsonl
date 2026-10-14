@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify proxy vs direct Agent timeout contract after change"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Verify documented agent idle timeout wording"}

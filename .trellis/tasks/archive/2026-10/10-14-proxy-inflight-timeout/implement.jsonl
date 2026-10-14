@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Account proxy Agent timeout / keepAlive contract"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Runtime env knobs for inbound/SSE/agent timeouts"}
+{"file": ".trellis/spec/backend/deployment-guidelines.md", "reason": "Non-stream attempt timeout and New API topology notes"}
+{"file": ".trellis/tasks/archive/2026-10/10-14-proxy-socket-hangup/research/diagnosis.md", "reason": "Prior production diagnosis of proxy hang up / ~60s cluster"}
