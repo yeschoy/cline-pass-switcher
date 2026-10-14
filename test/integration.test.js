@@ -939,7 +939,7 @@ test('legacy migration and cooldown state survive restart', async (t) => {
   const beforeRestart = JSON.parse(fs.readFileSync(metadataPath));
   assert.equal(fs.statSync(metadataPath).mode & 0o777, 0o600, 'new metadata containing the routing secret must be owner-only');
   assert.ok(beforeRestart.routingSecret);
-  assert.equal(beforeRestart.statistics.version, 5);
+  assert.equal(beforeRestart.statistics.version, 6);
   assert.ok(Number.isSafeInteger(beforeRestart.statistics.recentCoverage.modelTrackingStartedMinute));
   assert.equal(beforeRestart.statistics.minuteBuckets.at(-1).models['cooldown-model'].requests, 1);
   assert.ok(beforeRestart.accountStates[migrated.accounts[0].id].cooldownUntil > Date.now());
@@ -958,7 +958,7 @@ test('legacy migration and cooldown state survive restart', async (t) => {
   assert.deepEqual(seen, ['Bearer legacy-b']);
   const afterMeta = JSON.parse(fs.readFileSync(path.join(running.dir, 'metadata.json')));
   assert.equal(afterMeta.routingSecret, beforeRestart.routingSecret);
-  assert.equal(afterMeta.statistics.version, 5);
+  assert.equal(afterMeta.statistics.version, 6);
   assert.deepEqual(afterMeta.statistics.migration, beforeRestart.statistics.migration, 'legacy stats migration must be idempotent across restart');
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(running.dir, 'config.json'))).accounts.map((a) => a.id), migrated.accounts.map((a) => a.id));
 });
@@ -1408,7 +1408,7 @@ test('corrupt versioned statistics fail startup without overwriting metadata', a
 test('future statistics versions fail startup without overwriting metadata', async () => {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-future-statistics-')),holder=http.createServer(),port=await listen(holder);await close(holder);
   fs.writeFileSync(path.join(dir,'config.json'),JSON.stringify({port,accounts:[{id:'a',name:'A',key:'key',enabled:true,perModel:{}}],accountMode:'single',activeAccount:0,accountErrorRules:{},perModel:{},knownModels:['test']}));
-  const metadataPath=path.join(dir,'metadata.json'),bytes=Buffer.from(JSON.stringify({models:{},history:[],routingSecret:'secret',accountStates:{},statistics:{version:6}}));fs.writeFileSync(metadataPath,bytes);
+  const metadataPath=path.join(dir,'metadata.json'),bytes=Buffer.from(JSON.stringify({models:{},history:[],routingSecret:'secret',accountStates:{},statistics:{version:7}}));fs.writeFileSync(metadataPath,bytes);
   const child=spawn(process.execPath,['server.js'],{cwd:path.resolve('.'),env:{...process.env,DATA_DIR:dir,BIND_HOST:'127.0.0.1'},stdio:['ignore','pipe','pipe']});let output='';child.stderr.on('data',chunk=>{output+=chunk;});child.stdout.on('data',chunk=>{output+=chunk;});
   const code=await new Promise(resolve=>child.once('exit',resolve));assert.notEqual(code,0);assert.match(output,/unsupported statistics version/);assert.deepEqual(fs.readFileSync(metadataPath),bytes);fs.rmSync(dir,{recursive:true,force:true});
 });
@@ -1576,7 +1576,7 @@ test('model/provider reference statistics attribute only final usage and freeze 
   assert.doesNotMatch(running.output(),/\[统计\] 更新失败/,'unpriced/prototype-named models do not interrupt statistics finalization');
   assert.equal(stats.referencePrices.current.effectiveAt,null);assert.equal(stats.referencePrices.versions[current].collectedAt,'2026-09-29');
   const before=structuredClone(stats.models),metaPath=path.join(dir,'metadata.json');await stop(running.child);running.child=null;
-  const metadata=JSON.parse(fs.readFileSync(metaPath));assert.equal(metadata.statistics.version,5);assert.equal(metadata.statistics.minuteBuckets.at(-1).valuation['cline-pass/kimi-k3'].second[current].lowPicoUsd,51900000);
+  const metadata=JSON.parse(fs.readFileSync(metaPath));assert.equal(metadata.statistics.version,6);assert.equal(metadata.statistics.minuteBuckets.at(-1).valuation['cline-pass/kimi-k3'].second[current].lowPicoUsd,51900000);
   running=await startSwitcher(null,dir);stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();assert.deepEqual(stats.models,before);
   await stop(running.child);running.child=null;
   const older=JSON.parse(fs.readFileSync(metaPath)),version='clinepass-older-v2';
@@ -1817,13 +1817,13 @@ test('v4 statistics migrate without backfill, provider usage loss and money over
   t.after(async()=>{if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
   await stop(running.child);running.child=null;const metaPath=path.join(dir,'metadata.json'),metadata=JSON.parse(fs.readFileSync(metaPath));
   metadata.statistics.version=4;delete metadata.statistics.priceVersions;
-  for(const field of ['usageTrackingStartedMinute','droppedUsageMinuteCells','usageIncompleteAt','usageGlobalIncompleteAt','droppedValuationMinuteCells','valuationIncompleteAt','valuationGlobalIncompleteAt'])delete metadata.statistics.recentCoverage[field];
-  for(const bucket of metadata.statistics.minuteBuckets){delete bucket.modelFinal;delete bucket.providerUsage;delete bucket.valuation;}
+  for(const field of ['usageTrackingStartedMinute','droppedUsageMinuteCells','usageIncompleteAt','usageGlobalIncompleteAt','droppedValuationMinuteCells','valuationIncompleteAt','valuationGlobalIncompleteAt','proxyHealthTrackingStartedMinute','droppedProxyHealthMinuteCells','proxyHealthIncompleteAt'])delete metadata.statistics.recentCoverage[field];
+  for(const bucket of metadata.statistics.minuteBuckets){delete bucket.modelFinal;delete bucket.providerUsage;delete bucket.valuation;delete bucket.proxyHealth;}
   fs.writeFileSync(metaPath,JSON.stringify(metadata));running=await startSwitcher(null,dir,{NODE_ENV:'test',CLINE_PASS_TEST_USAGE_CELL_LIMIT:'1',CLINE_PASS_TEST_VALUATION_CELL_LIMIT:'1'});
   assert.equal((await rawJson(port,'/v1/chat/completions',{model:models[0],messages:[]})).status,200);
   assert.equal((await rawJson(port,'/v1/chat/completions',{model:models[1],messages:[]})).status,200);
   const stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json(),persisted=JSON.parse(fs.readFileSync(metaPath));
-  assert.equal(persisted.statistics.version,5);assert.equal(persisted.statistics.recentCoverage.droppedUsageMinuteCells,1);
+  assert.equal(persisted.statistics.version,6);assert.equal(persisted.statistics.recentCoverage.droppedUsageMinuteCells,1);
   assert.equal(persisted.statistics.recentCoverage.droppedValuationMinuteCells,1);
   assert.equal(stats.models.find(row=>row.id===models[0]).providerStatistics.coverage.complete,false);
   assert.equal(stats.models.find(row=>row.id===models[0]).providerStatistics.valuation.complete,false);
@@ -1844,7 +1844,7 @@ test('v4 statistics migrate without backfill, provider usage loss and money over
   const child=spawn(process.execPath,['server.js'],{cwd:path.resolve('.'),env:{...process.env,DATA_DIR:dir,BIND_HOST:'127.0.0.1'},stdio:['ignore','pipe','pipe']});
   let stderr='';child.stderr.on('data',chunk=>{stderr+=chunk;});
   assert.notEqual(await new Promise(resolve=>child.once('exit',resolve)),0);
-  assert.match(stderr,/invalid statistics valuation counter/);assert.deepEqual(fs.readFileSync(metaPath),bytes,'malformed v5 metadata must remain unchanged');
+  assert.match(stderr,/invalid statistics valuation counter/);assert.deepEqual(fs.readFileSync(metaPath),bytes,'malformed statistics metadata must remain unchanged');
 });
 
 test('direct success health has no thresholds and expires after the rolling window', async (t) => {
@@ -1860,7 +1860,7 @@ test('statistics v3 migrates to v4 without converting legacy weighted health int
   const port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-statistics-v4-migration-'));
   let running=await startSwitcher({port,accounts:[{id:'a',name:'A',key:'key',enabled:true,perModel:{}}],accountMode:'single',activeAccount:0,knownModels:['m'],perModel:{},errorRules:[]},dir);t.after(async()=>{if(running?.child)await stop(running.child);fs.rmSync(dir,{recursive:true,force:true});});
   await stop(running.child);running.child=null;const metadataPath=path.join(dir,'metadata.json'),metadata=JSON.parse(fs.readFileSync(metadataPath)),minute=Math.floor(Date.now()/60000),aggregate=structuredClone(metadata.statistics.lifetime.global);aggregate.requests=7;aggregate.lastUsedAt=minute*60000;metadata.statistics={version:3,lifetime:{global:structuredClone(aggregate),accounts:{a:structuredClone(aggregate)}},minuteBuckets:[{minute,global:structuredClone(aggregate),accounts:{a:structuredClone(aggregate)},health:{a:{...emptyHealthFixture(),results:5,penaltyUnits:25}},models:{m:structuredClone(aggregate)}}],recentCoverage:{droppedAccountMinuteCells:0,accountIncompleteAt:{},modelTrackingStartedMinute:minute,droppedModelMinuteCells:0,modelIncompleteAt:{},routingTrackingStartedMinute:minute},migration:metadata.statistics.migration};fs.writeFileSync(metadataPath,JSON.stringify(metadata));
-  running=await startSwitcher(null,dir);const stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json(),persisted=JSON.parse(fs.readFileSync(metadataPath));assert.equal(persisted.statistics.version,5);assert.deepEqual(persisted.statistics.minuteBuckets[0].providerUsage,{});assert.deepEqual(persisted.statistics.minuteBuckets[0].valuation,{});assert.deepEqual(persisted.statistics.minuteBuckets[0].modelFinal,{});assert.equal(stats.models.find(row=>row.id==='m').providerStatistics.coverage.complete,false);assert.equal(stats.lifetime.global.requests,7);assert.equal(stats.recent24h.global.requests,7);assert.equal(stats.accounts[0].recent24h.requests,7);assert.equal(stats.accounts[0].health.successRate,null);assert.equal(stats.accounts[0].health.samples,0);assert.equal(persisted.statistics.minuteBuckets[0].health.a.results,5);assert.deepEqual(persisted.statistics.minuteBuckets[0].accountHealth,{});assert.deepEqual(persisted.statistics.minuteBuckets[0].providerHealth,{});assert.equal(persisted.statistics.recentCoverage.accountHealthTrackingStartedMinute,minute);assert.equal(persisted.statistics.recentCoverage.providerHealthTrackingStartedMinute,minute);
+  running=await startSwitcher(null,dir);const stats=await(await fetch(`http://127.0.0.1:${port}/api/statistics`)).json(),persisted=JSON.parse(fs.readFileSync(metadataPath));assert.equal(persisted.statistics.version,6);assert.deepEqual(persisted.statistics.minuteBuckets[0].providerUsage,{});assert.deepEqual(persisted.statistics.minuteBuckets[0].valuation,{});assert.deepEqual(persisted.statistics.minuteBuckets[0].modelFinal,{});assert.deepEqual(persisted.statistics.minuteBuckets[0].proxyHealth,{});assert.equal(stats.models.find(row=>row.id==='m').providerStatistics.coverage.complete,false);assert.equal(stats.lifetime.global.requests,7);assert.equal(stats.recent24h.global.requests,7);assert.equal(stats.accounts[0].recent24h.requests,7);assert.equal(stats.accounts[0].health.successRate,null);assert.equal(stats.accounts[0].health.samples,0);assert.equal(persisted.statistics.minuteBuckets[0].health.a.results,5);assert.deepEqual(persisted.statistics.minuteBuckets[0].accountHealth,{});assert.deepEqual(persisted.statistics.minuteBuckets[0].providerHealth,{});assert.equal(persisted.statistics.recentCoverage.accountHealthTrackingStartedMinute,minute);assert.equal(persisted.statistics.recentCoverage.providerHealthTrackingStartedMinute,minute);assert.ok(Number.isSafeInteger(persisted.statistics.recentCoverage.proxyHealthTrackingStartedMinute));
 });
 
 test('runtime counter overflow becomes null with an exact marker', async (t) => {
@@ -2258,7 +2258,7 @@ test('the 50,000 account-minute union cap evicts an aggregate/health cell atomic
   fs.writeFileSync(path.join(dir,'metadata.json'),JSON.stringify({models:{},history:[],accountStates:{},accountQuotas:{},routingSecret:'cell-cap-secret',statistics}));
   let running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}`,accountMode:'single',activeAccount:cap,concurrencyWaitMs:0,accounts,knownModels:['m'],perModel:{},accountErrorRules:{}},dir,{NODE_ENV:'test',CLINE_PASS_TEST_ACCOUNT_MINUTE_CELL_LIMIT:String(cap)});t.after(async()=>{if(running?.child)await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
   assert.equal((await rawJson(port,'/v1/chat/completions',{model:'m',messages:[]})).status,200);const persisted=JSON.parse(fs.readFileSync(path.join(dir,'metadata.json'))),bucket=persisted.statistics.minuteBuckets[0];
-  assert.equal(persisted.statistics.version,5,'valid v1 statistics migrate before the new request is committed');
+  assert.equal(persisted.statistics.version,6,'valid v1 statistics migrate before the new request is committed');
   const fresh=`a${cap}`;
   const cells=new Set([...Object.keys(bucket.accounts),...Object.keys(bucket.health),...Object.keys(bucket.accountHealth)]);assert.equal(cells.size,cap);assert.equal(bucket.accounts.a0,undefined);assert.equal(bucket.health.a0,undefined);assert.equal(bucket.accountHealth.a0,undefined);assert.ok(bucket.accounts[fresh]);assert.ok(bucket.accountHealth[fresh]);assert.equal(persisted.statistics.recentCoverage.droppedAccountMinuteCells,1);assert.equal(persisted.statistics.recentCoverage.accountIncompleteAt.a0,minute);assert.equal(persisted.statistics.recentCoverage.accountHealthIncompleteAt.a0,minute);
 });

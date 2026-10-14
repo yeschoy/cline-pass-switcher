@@ -52,7 +52,7 @@ async function fixture(t, { count = 3, cap = 7, configure = c => c, onChat, meta
   prepareAdminFixture(dir);
   const state = { dir, cfg, seen, held, upstream, child: null, port: cfg.port };
   state.start = async () => {
-    const child = spawn(process.execPath, [...(perfHook ? ['--require', path.resolve('.trellis/tasks/09-30-selection-workflow/research/workflow-perf-hook.cjs')] : []), 'server.js'], { cwd: path.resolve('.'), env: { PATH: process.env.PATH, NODE_ENV: 'test', BIND_HOST: '127.0.0.1', DATA_DIR: dir, PORT: String(state.port), ...(envKey ? { CLINE_PASS_KEY: envKey } : {}), ...(directSockets === undefined ? {} : { CLINE_PASS_DIRECT_MAX_SOCKETS: String(directSockets) }), ...(perfHook ? { CLINE_PASS_TEST_PERF_PATH: path.join(dir, 'perf.json') } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [...(perfHook ? ['--require', path.resolve('.trellis/tasks/archive/2026-10/09-30-selection-workflow/research/workflow-perf-hook.cjs')] : []), 'server.js'], { cwd: path.resolve('.'), env: { PATH: process.env.PATH, NODE_ENV: 'test', BIND_HOST: '127.0.0.1', DATA_DIR: dir, PORT: String(state.port), ...(envKey ? { CLINE_PASS_KEY: envKey } : {}), ...(directSockets === undefined ? {} : { CLINE_PASS_DIRECT_MAX_SOCKETS: String(directSockets) }), ...(perfHook ? { CLINE_PASS_TEST_PERF_PATH: path.join(dir, 'perf.json') } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
     children.push(child); state.child = child;
     let output = ''; child.stdout.on('data', data => { output += data; }); child.stderr.on('data', data => { output += data; });
     for (let i = 0; i < 250; i++) {
