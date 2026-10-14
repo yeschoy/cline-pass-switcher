@@ -11,6 +11,9 @@ server.js                         HTTP server, configuration, routing, statistic
 lib/jsonl-log-store.js            ordinary request/error JSONL storage
 lib/detailed-log-capture.js       bounded detailed HTTP capture and sanitization
 lib/detailed-log-store.js         detailed-log persistence, retention, query, and clear
+lib/protocol-common.js            shared inbound-adapter helpers (SSE reader, reasoning tokens, estimates)
+lib/responses-adapter.js          OpenAI Responses ↔ Chat Completions
+lib/anthropic-adapter.js          Anthropic Messages ↔ Chat Completions
 test/*.test.js                    node:test unit, VM/UI-contract, and integration suites
 public/index.html                 static administration console served by server.js
 Dockerfile                        production image

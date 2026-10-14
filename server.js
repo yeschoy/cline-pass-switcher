@@ -20,6 +20,9 @@ import { DetailRoot, DetailRedactor, detailContext, detailRoute, observeStream, 
 import { projectRawHeaders } from './lib/raw-detail-headers.js';
 import { DetailedLogStore, parseDetailQuery, MAX_AGE_MS, RAW_MAX_AGE_MS, MAX_TOTAL_BYTES } from './lib/detailed-log-store.js';
 import { WORKFLOW_SELECTORS, defaultAccountWorkflow, normalizeAccountWorkflow, normalizeSelectionCounters, effectiveRoutingHealth, rankWorkflowCandidates, routingHealthRate } from './lib/account-workflow.js';
+import { AdapterError, createChatSseReader, estimateTokens } from './lib/protocol-common.js';
+import { responsesAdapter } from './lib/responses-adapter.js';
+import { anthropicAdapter } from './lib/anthropic-adapter.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || __dirname;
@@ -2275,13 +2278,25 @@ async function acquirePipelineAccountLease(identity, options = {}) {
     await waitForCapacity(duration);
   }
 }
+// Account saves only overwrite these fields. Learned models, routes, aliases,
+// client keys and logging have their own writes and must not invalidate this draft.
+const ACCOUNT_CONFIGURATION_FIELDS = Object.freeze([
+  'accounts', 'accountMode', 'activeAccount', 'concurrencyWaitMs', 'poolFullWaitMs',
+  'sessionProviderAffinityEnabled', 'quotaProtection', 'errorRules', 'retryRules',
+  'accountErrorRules', 'accountContentErrorRules', 'accountPipeline', 'accountWorkflow',
+]);
 function configurationRevision() {
-  return crypto.createHash('sha256').update(JSON.stringify(config)).digest('hex');
+  const snapshot = {};
+  for (const field of ACCOUNT_CONFIGURATION_FIELDS) snapshot[field] = config[field];
+  return crypto.createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
+}
+function accountConfigurationEqual(left, right) {
+  return ACCOUNT_CONFIGURATION_FIELDS.every((field) => isDeepStrictEqual(left[field], right[field]));
 }
 function checkConfigurationRevision(value, { required = false } = {}) {
   if (value === undefined && !required) return;
-  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) throw Object.assign(new Error('expectedConfigurationRevision must be a configuration revision'), { statusCode: 400 });
-  if (value !== configurationRevision()) throw Object.assign(new Error('configuration changed; reload and review the draft before saving'), { statusCode: 409 });
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) throw Object.assign(new Error('配置版本号无效，请刷新页面后再保存'), { statusCode: 400 });
+  if (value !== configurationRevision()) throw Object.assign(new Error('账号或调度配置已在其他地方变更，这次没有覆盖。请刷新核对后再保存，当前页面草稿还在。'), { statusCode: 409 });
 }
 function selectionCounterFor(id) {
   return Object.hasOwn(META.selectionCounters.accounts, id) ? META.selectionCounters.accounts[id] : { count: 0, lastSelected: 0 };
@@ -2528,18 +2543,25 @@ const chatHeaders = (key) => ({
 // Downstream client credentials never grant management access. Admin state is independent of config.json.
 let PROXY_KEY = config.proxyKey || '';
 function clientKeyIdFor(req) {
+  const allowApiKey = req.allowClientApiKey === true;
   const authorization = req.headers.authorization;
   const legacyHeader = req.headers['x-admin-key']; // legacy client header, model routes only
+  const apiKeyHeader = allowApiKey ? req.headers['x-api-key'] : undefined;
   const bearer = String(authorization || '').replace(/^Bearer\s+/i, '').trim();
   const header = String(legacyHeader || '').trim();
+  const apiKey = String(apiKeyHeader || '').trim();
   // In the original single-key open mode every model request was anonymous,
   // even if a client happened to send two inconsistent credential headers.
   if (!PROXY_KEY && !config.clientKeys.length) return 'legacy';
-  if (authorization !== undefined && legacyHeader !== undefined && bearer !== header) return null;
-  const match = clientKeyInventory(config, PROXY_KEY).find((item) => item.key && (bearer === item.key || header === item.key));
+  const presented = [];
+  if (authorization !== undefined) presented.push(bearer);
+  if (legacyHeader !== undefined) presented.push(header);
+  if (apiKeyHeader !== undefined) presented.push(apiKey);
+  if (presented.length >= 2 && presented.some((value) => value !== presented[0])) return null;
+  const match = clientKeyInventory(config, PROXY_KEY).find((item) => item.key && (bearer === item.key || header === item.key || (allowApiKey && apiKey === item.key)));
   if (match) return match.id;
   // With extra keys, only absent credentials can enter the anonymous Legacy pool.
-  return !PROXY_KEY && authorization === undefined && legacyHeader === undefined ? 'legacy' : null;
+  return !PROXY_KEY && authorization === undefined && legacyHeader === undefined && apiKeyHeader === undefined ? 'legacy' : null;
 }
 function unauthorized(res) {
   return sendJSON(res, 401, { error: { message: 'unauthorized', type: 'auth_error' } });
@@ -2801,7 +2823,7 @@ function reloadConfigFromDisk() {
   const raw = loadJson(CONFIG_PATH, undefined);
   if (!isPlainObject(raw)) throw new Error('config.json must be a JSON object');
   const restartOnly = RESTART_ONLY_CONFIG_FIELDS.filter((f) => Object.hasOwn(raw, f) && !envPinned(f) && !isDeepStrictEqual(raw[f], config[f]));
-  if (restartOnly.length) throw new Error(`changed fields need a restart or their own settings page: ${restartOnly.join(', ')}`);
+  if (restartOnly.length) throw new Error(`这些字段不能随账号配置热加载，本次未改动任何配置：${restartOnly.join(', ')}。请到对应设置页修改，或从文件里撤回这些字段后再热加载`);
   // An absent field keeps its live value; reload never runs startup migrations.
   const pick = (field) => Object.hasOwn(raw, field) ? raw[field] : config[field];
   if (!Array.isArray(pick('accounts'))) throw new Error('accounts must be an array');
@@ -3618,6 +3640,7 @@ function record(modelId, info, detail = detailContext.getStore()) {
     blockedBy: BLOCKED_BY_REASONS.has(info.blockedBy) ? info.blockedBy : null,
     retryAfter: Number.isSafeInteger(info.retryAfter) && info.retryAfter >= 0 ? Math.min(3600, info.retryAfter) : null,
     errorCategory: info.errorCategory || (result === 'failed' && info.error ? (info.proxyError ? 'proxy' : 'upstream') : null),
+    inboundProtocol: ['chat', 'responses', 'anthropic'].includes(info.inboundProtocol) ? info.inboundProtocol : 'chat',
   };
   if (detail?.requestId === request.requestId) { detail.result = result; if (detail.errorOnly && detail.status === null) detail.status = request.status; }
   const writes = [requestLogs.append(request)];
@@ -3651,7 +3674,7 @@ function record(modelId, info, detail = detailContext.getStore()) {
 }
 
 
-const NEVER_FORWARD_HEADERS = new Set(['authorization', 'proxy-authorization', 'cookie', 'host', 'content-length', 'connection', 'transfer-encoding', 'upgrade', 'keep-alive', 'te', 'trailer', 'x-codex-installation-id', 'x-oai-attestation']);
+const NEVER_FORWARD_HEADERS = new Set(['authorization', 'proxy-authorization', 'cookie', 'host', 'content-length', 'connection', 'transfer-encoding', 'upgrade', 'keep-alive', 'te', 'trailer', 'x-codex-installation-id', 'x-oai-attestation', 'x-api-key']);
 const CODEX_HEADERS = ['Originator','Session_id','Thread_id','Session-Id','Thread-Id','X-Client-Request-Id','User-Agent','X-Codex-Beta-Features','X-Codex-Turn-State','X-Codex-Turn-Metadata','X-Codex-Window-Id','X-Codex-Parent-Thread-Id','X-OpenAI-Subagent','X-OpenAI-Memgen-Request','X-ResponsesAPI-Include-Timing-Metrics','X-OpenAI-Internal-Codex-Responses-Lite'];
 const CLAUDE_HEADERS = ['X-Claude-Code-Session-Id','X-Claude-Code-Agent-Id','X-Claude-Code-Parent-Agent-Id','X-Stainless-Arch','X-Stainless-Lang','X-Stainless-Os','X-Stainless-Package-Version','X-Stainless-Retry-Count','X-Stainless-Runtime','X-Stainless-Runtime-Version','X-Stainless-Timeout','User-Agent','X-App','Anthropic-Beta','Anthropic-Dangerous-Direct-Browser-Access','Anthropic-Version'];
 const GENERIC_HEADERS = ['Session-Id','Session_id','Thread-Id','Thread_id','X-Http-Session-Id','X-Session-ID','X-Session-Affinity','X-Slot-Session-Id','X-Conversation-Id','X-Thread-Id','X-Parent-Session-ID','X-Parent-Session-Affinity','User-Agent','X-Client-Request-Id','HTTP-Referer','X-Title'];
@@ -5335,7 +5358,7 @@ function statisticsSegments(trace, finalAccountId, usage, clientDisconnect = fal
 function cacheHitOf(usage) {
   return usage?.cacheFieldPresent === true && usage.cachedTokens !== null ? usage.cachedTokens > 0 : null;
 }
-async function handleChat(req, res, clientKeyId) {
+async function handleChat(req, res, clientKeyId, adapter = null) {
   const detail = detailContext.getStore();
   const requestId = detail?.requestId || crypto.randomUUID();
   res.setHeader('X-Cline-Request-Id', requestId);
@@ -5354,21 +5377,36 @@ async function handleChat(req, res, clientKeyId) {
   try { body = JSON.parse(raw.toString('utf8')); } catch { return sendJSON(res, 400, { error: { message: 'invalid JSON body' } }); }
   if (detail?.profile === 'full') detail.redactor.learn(body);
   if (!body || typeof body !== 'object' || Array.isArray(body)) return sendJSON(res, 400, { error: { message: 'JSON body must be an object' } });
+  let adapterCtx = null;
+  let identityHints = {};
+  if (adapter) {
+    try {
+      const converted = adapter.toChat(body);
+      adapterCtx = converted.ctx;
+      identityHints = converted.identityHints || {};
+      body = converted.chatBody;
+    } catch (err) {
+      if (err instanceof AdapterError) return sendJSON(res, err.status, { error: { message: err.message, type: err.type, param: err.param, code: err.code } });
+      throw err;
+    }
+  }
   const requestedModel = typeof body.model === 'string' ? body.model.trim() : '';
   if (!requestedModel || requestedModel.length > 300) return sendJSON(res, 400, { error: { message: 'valid model is required' } });
   const sensitiveValues = sensitiveMessageValues(body);
   let statisticsFinalized = false;
   const finalizeStatistics = (facts) => { if (statisticsFinalized) return; statisticsFinalized = true; try { commitStatistics({ ...facts, modelId, affinityConfidence: identity?.confidence || 'none' }); } catch (error) { console.error(`[统计] 更新失败：${safeReason(error.message)}`); } };
   const modelId = resolveModelAlias(requestedModel);
-  const recordChat = (info) => record(modelId, info, detail);
+  const inboundProtocol = adapter?.protocol || 'chat';
+  const recordChat = (info) => record(modelId, { inboundProtocol, ...info }, detail);
   body = { ...body, model: modelId };
-  const identity = extractSessionIdentity(req, body);
+  const identityView = { ...body, ...identityHints };
+  const identity = extractSessionIdentity(req, identityView);
   // Keep legacy HRW/derived-affinity stable across upgrade; namespace new owners
   // so identical downstream sessions cannot share their process-local bindings.
   if (identity.fingerprint && clientKeyId !== 'legacy') identity.fingerprint = hmacHex(`client-owner\0${clientKeyId}\0${identity.fingerprint}`);
   identity.clientKeyId = clientKeyId;
   identity.credentialValid = () => clientKeyIdFor(req) === clientKeyId;
-  const forwardedHeaders = forwardHeadersFor(req, body);
+  const forwardedHeaders = forwardHeadersFor(req, identityView);
   const affinity = prepareChatAffinity(body, identity);
   body = affinity.body;
   const isStream = body.stream === true;
@@ -5462,11 +5500,27 @@ async function handleChat(req, res, clientKeyId) {
     const acc = chain.acc;
     const ctype = String(up.headers['content-type'] || 'text/event-stream');
     res.writeHead(up.status, {
-      'Content-Type': ctype, 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'Access-Control-Allow-Origin': '*',
+      'Content-Type': adapter ? 'text/event-stream; charset=utf-8' : ctype, 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'Access-Control-Allow-Origin': '*',
       'X-Cline-Target-Upstream': targets.length ? targets.join('>') : targetSource === 'auto' ? 'auto' : 'none', 'X-Cline-Attempts': String(chain.trace.length), 'X-Cline-Account': headerSafe(acc.name),
     });
     if (detail?.errorOnly) detail.status = up.status;
     const observer = createSseObserver();
+    const sseReader = adapter ? createChatSseReader() : null;
+    const encoder = adapter ? adapter.createStreamEncoder(adapterCtx) : null;
+    let encoderStarted = false;
+    const adapterBytes = (chunk) => {
+      let text = '';
+      if (!encoderStarted) { encoderStarted = true; text += encoder.start(); }
+      if (chunk) for (const event of sseReader.push(chunk)) text += encoder.push(event);
+      return text;
+    };
+    const adapterTerminal = (kind, error = null) => {
+      let text = '';
+      if (!encoderStarted) { encoderStarted = true; text += encoder.start(); }
+      for (const event of sseReader.flush()) text += encoder.push(event);
+      text += kind === 'fail' ? encoder.fail(error) : encoder.finish();
+      return text;
+    };
     let finalized = false;
     let heartbeat = null, blocked = false, atEventBoundary = true;
     const pendingDrains = new Set();
@@ -5477,6 +5531,7 @@ async function handleChat(req, res, clientKeyId) {
     };
     let upstreamTail = Buffer.alloc(0);
     const observeBoundary = (chunk) => {
+      if (adapter) { atEventBoundary = true; return; }
       // Do not inject a comment into an unfinished data line/event: that would
       // change the model event. Silence during a partial event cannot be pinged safely.
       const bytes = Buffer.from(chunk);
@@ -5490,7 +5545,7 @@ async function handleChat(req, res, clientKeyId) {
       if (!SSE_HEARTBEAT_MS || finalized || blocked || !atEventBoundary || observer.result().done || res.destroyed || res.writableEnded) return;
       heartbeat = setTimeout(() => {
         heartbeat = null;
-        try { writeDownstream(': PING\n\n'); }
+        try { writeDownstream(adapter ? encoder.heartbeat() : ': PING\n\n'); }
         catch (error) { onDownstreamError(error); }
       }, SSE_HEARTBEAT_MS);
       heartbeat.unref?.();
@@ -5506,6 +5561,7 @@ async function handleChat(req, res, clientKeyId) {
     let onDownstreamError;
     let forward;
     let onUpstreamError, onResponseClose;
+    let protocolFailWritten = false;
     const finalize = (error = null, origin = null) => {
       if (finalized) return;
       finalized = true;
@@ -5557,14 +5613,49 @@ async function handleChat(req, res, clientKeyId) {
       write(c, enc, cb) {
         observer.push(c);
         observeBoundary(c);
-        const submit = () => { try { writeDownstream(c, cb); } catch (error) { cb(error); } };
+        const payload = adapter ? adapterBytes(c) : c;
+        const submit = () => {
+          try {
+            if (adapter && !payload) { cb(); armHeartbeat(); return; }
+            writeDownstream(payload, cb);
+          } catch (error) { cb(error); }
+        };
         if (blocked) onDrain(submit);
         else submit();
       },
-      final(cb) { clearHeartbeat(); finalize(); res.end(); cb(); },
+      final(cb) {
+        clearHeartbeat();
+        let incompleteError = null;
+        if (adapter && !res.destroyed && !res.writableEnded) {
+          try {
+            const observed = observer.result();
+            const fail = !!(observed.error || (!encoder.hasTerminal && !observed.done && !sseReader.sawDone));
+            if (fail && !observed.error) incompleteError = 'stream ended before completion';
+            const extra = adapterTerminal(fail ? 'fail' : 'finish', observed.errorPayload || observed.error || incompleteError);
+            if (extra) writeDownstream(extra);
+          } catch { /* fail-open: still finalize the Chat lease/logs */ }
+        }
+        if (incompleteError) finalize(incompleteError, 'upstream');
+        else finalize();
+        res.end(); cb();
+      },
     });
-    onUpstreamError = (e) => { finalize(e.message, 'upstream'); if (!res.destroyed) res.destroy(e); forward.destroy(); };
-    onDownstreamError = (e) => { finalize(e.message, 'client_disconnect'); if (!up.body.destroyed) up.body.destroy(); if (!res.destroyed) res.destroy(e); forward.destroy(); };
+    onUpstreamError = (e) => {
+      if (adapter && !res.destroyed && !res.writableEnded) {
+        try {
+          const extra = adapterTerminal('fail', e.message);
+          protocolFailWritten = true;
+          finalize(e.message, 'upstream');
+          writeDownstream(extra, () => { if (!res.writableEnded) res.end(); });
+          return;
+        } catch { /* fall through to destroy */ }
+      }
+      finalize(e.message, 'upstream'); if (!res.destroyed) res.destroy(e); forward.destroy();
+    };
+    onDownstreamError = (e) => {
+      if (protocolFailWritten) return;
+      finalize(e.message, 'client_disconnect'); if (!up.body.destroyed) up.body.destroy(); if (!res.destroyed) res.destroy(e); forward.destroy();
+    };
     onResponseClose = () => { if (res.writableEnded) return; finalize('client disconnected', 'client_disconnect'); if (!up.body.destroyed) up.body.destroy(); forward.destroy(); };
     up.body.on('error', onUpstreamError);
     forward.on('error', onDownstreamError);
@@ -5572,7 +5663,7 @@ async function handleChat(req, res, clientKeyId) {
     res.on('close', onResponseClose);
     if (chain.streamHead) {
       observer.push(chain.streamHead);
-      try { writeDownstream(chain.streamHead); }
+      try { writeDownstream(adapter ? adapterBytes(chain.streamHead) : chain.streamHead); }
       catch (error) { onDownstreamError(error); return; }
     }
     up.body.pipe(forward);
@@ -5606,19 +5697,26 @@ async function handleChat(req, res, clientKeyId) {
     'X-Cline-Target-Upstream': targets.length ? targets.join('>') : targetSource === 'auto' ? 'auto' : 'none', 'X-Cline-Actual-Upstream': routing.finalProvider || 'unknown',
     'X-Cline-Canonical-Model': routing.canonicalSlug || '', 'X-Cline-Attempts': String(chain.trace.length), 'X-Cline-Account': headerSafe(acc?.name || ''),
   });
-  res.end(JSON.stringify(safeOut));
+  res.end(JSON.stringify(adapter
+    ? (status === 200 ? adapter.fromChat(safeOut, adapterCtx) : adapter.errorBody(status, safeOut.error))
+    : safeOut));
 }
 
 // ---------- HTTP 服务 ----------
 function sendJSON(res, status, obj) {
+  const body = res.protocolAdapter && status >= 400
+    ? res.protocolAdapter.errorBody(status, typeof obj?.error === 'string' ? { message: obj.error } : (obj?.error || { message: 'error' }))
+    : obj;
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...(res.adminResponse ? {} : { 'Access-Control-Allow-Origin': '*' }) });
-  res.end(JSON.stringify(obj));
+  res.end(JSON.stringify(body));
 }
 function sendBusy(res, message, retryAfter = 1, status = 429) {
   // retryAfter 为秒；RPM 阻塞时来自最早滚动窗口恢复时间，容量阻塞仍为 bounded 1-30s。
   const seconds = Math.min(3600, Math.max(1, Math.ceil(Number(retryAfter) || 1)));
+  const obj = { error: { message: safeReason(message || 'upstream accounts unavailable'), type: status === 429 ? 'rate_limit_error' : 'upstream_error' } };
+  const body = res.protocolAdapter ? res.protocolAdapter.errorBody(status, obj.error) : obj;
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...(res.adminResponse ? {} : { 'Access-Control-Allow-Origin': '*' }), 'Retry-After': String(seconds) });
-  res.end(JSON.stringify({ error: { message: safeReason(message || 'upstream accounts unavailable'), type: status === 429 ? 'rate_limit_error' : 'upstream_error' } }));
+  res.end(JSON.stringify(body));
 }
 
 // This remains the catalog owner: scoped entries are bounded, process-local and never enter metadata.
@@ -5662,7 +5760,7 @@ const server = http.createServer((req, res) => {
   const captureAllowed = config.rawBodyLogging !== true || rawBodyAvailable;
   const profile = captureAllowed && adminState?.initialized === true && config.detailedLogging === true && detailRoute(req.method, pathname)
     ? (config.rawBodyLogging === true ? 'raw-full' : 'full')
-    : captureAllowed && adminState?.initialized === true && config.errorDetailLogging === true && req.method === 'POST' && CHAT_PATHS.has(pathname) ? (config.rawBodyLogging === true ? 'raw-error' : 'error') : null;
+    : captureAllowed && adminState?.initialized === true && config.errorDetailLogging === true && req.method === 'POST' && (CHAT_PATHS.has(pathname) || pathname === '/v1/responses' || pathname === '/v1/messages') ? (config.rawBodyLogging === true ? 'raw-error' : 'error') : null;
   if (profile) {
     if (DetailRoot.active >= 128) { detailedLogs.recordDrop('activeLimit'); return dispatch(req, res); }
     const secrets = profile.startsWith('raw-') ? [] : [...clientKeyInventory(config, PROXY_KEY).map((item) => item.key), ...activeClientSecrets.keys(), process.env.PROXY_KEY, ...config.accounts.flatMap((account) => [account.key, account.proxyUrl, ...Object.values(account.headers || {})])];
@@ -5676,8 +5774,10 @@ server.headersTimeout = INBOUND_KEEP_ALIVE_MS + 5_000;
 async function dispatch(req, res) {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
-  const modelRoute = CHAT_PATHS.has(p) || p === '/v1/responses' || p === '/v1/models' || p === '/api/v1/models' || p === '/models';
+  const modelRoute = CHAT_PATHS.has(p) || p === '/v1/responses' || p === '/v1/messages' || p === '/v1/messages/count_tokens' || p === '/v1/models' || p === '/api/v1/models' || p === '/models';
   const managementRoute = p.startsWith('/api/') && p !== '/api/meta' && !modelRoute;
+  if (p === '/v1/responses') res.protocolAdapter = responsesAdapter;
+  else if (p === '/v1/messages' || p === '/v1/messages/count_tokens') { res.protocolAdapter = anthropicAdapter; req.allowClientApiKey = true; }
   if (managementRoute) { res.adminResponse = true; res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Content-Type-Options', 'nosniff'); }
   if (req.method === 'OPTIONS') {
     if (managementRoute) return sendJSON(res, 403, { error: { message: 'forbidden' } });
@@ -5711,8 +5811,18 @@ async function dispatch(req, res) {
         res.once('finish', release); res.once('close', release);
       }
     }
-    if (req.method === 'POST' && p === '/v1/responses') {
-      return sendJSON(res, 501, { error: { message: 'OpenAI Responses API is not supported; use /v1/chat/completions instead', type: 'unsupported_api', param: null, code: 'unsupported_api' } });
+    if (req.method === 'POST' && p === '/v1/messages/count_tokens') {
+      const raw = await readBody(req);
+      let countBody;
+      try { countBody = JSON.parse(raw.toString('utf8')); } catch { return sendJSON(res, 400, { error: { message: 'invalid JSON body' } }); }
+      if (!countBody || typeof countBody !== 'object' || Array.isArray(countBody)) return sendJSON(res, 400, { error: { message: 'JSON body must be an object' } });
+      try {
+        const { chatBody } = anthropicAdapter.toChat(countBody);
+        return sendJSON(res, 200, { input_tokens: estimateTokens(chatBody) });
+      } catch (err) {
+        if (err instanceof AdapterError) return sendJSON(res, err.status, { error: { message: err.message, type: err.type, param: err.param, code: err.code } });
+        throw err;
+      }
     }
     if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" });
@@ -5934,7 +6044,6 @@ async function dispatch(req, res) {
     if (req.method === 'POST' && p === '/api/accounts') {
       const body = await readJsonBody(req);
       if (!body || typeof body !== 'object' || !Array.isArray(body.accounts)) return sendJSON(res, 400, { error: { message: 'accounts array is required' } });
-      checkConfigurationRevision(body.expectedConfigurationRevision);
       if (!ACCOUNT_MODES.has(body.mode)) return sendJSON(res, 400, { error: { message: 'invalid account mode' } });
       const wait = Number(body.concurrencyWaitMs ?? 2000);
       if (!Number.isInteger(wait) || wait < 0 || wait > 30000) return sendJSON(res, 400, { error: { message: 'concurrencyWaitMs must be an integer from 0 to 30000' } });
@@ -5978,6 +6087,20 @@ async function dispatch(req, res) {
         concurrencyWaitMs: wait, poolFullWaitMs: poolWait, errorRules: requestedErrorRules, retryRules: requestedRetryRules,
         quotaProtection: requestedProtection, ...legacyRuleProjection(requestedErrorRules), accountPipeline: requestedPipeline, accountWorkflow: requestedWorkflow,
         sessionProviderAffinityEnabled: body.sessionProviderAffinityEnabled ?? config.sessionProviderAffinityEnabled };
+      let staleRevision = false;
+      try { checkConfigurationRevision(body.expectedConfigurationRevision); }
+      catch (error) {
+        if (error.statusCode !== 409) throw error;
+        staleRevision = true;
+      }
+      const savedView = { ok: true, accounts: config.accounts.length, mode: config.accountMode, active: config.activeAccount, accountWorkflowEnabled: config.accountWorkflow.enabled, configurationRevision: configurationRevision() };
+      // A retried save of the same draft must not look like a failure, and must not
+      // republish runtime state. A different draft against a newer server copy is refused.
+      if (staleRevision && accountConfigurationEqual(next, config)) return sendJSON(res, 200, { ...savedView, unchanged: true });
+      if (staleRevision) {
+        console.warn('[配置] 账号保存被拒绝：页面版本已过期，未覆盖当前配置');
+        return sendJSON(res, 409, { error: { message: '账号或调度配置已在其他地方变更，这次没有覆盖。请刷新核对后再保存，当前页面草稿还在。' } });
+      }
       // A failed config rename must not change live owner routing, invalidate bindings,
       // or clear existing RPM/quota state before the client sees a failed save.
       atomicWriteJson(CONFIG_PATH, next);
@@ -6183,7 +6306,11 @@ async function dispatch(req, res) {
       try {
         const { changed } = reloadConfigFromDisk();
         return sendJSON(res, 200, { ok: true, changed, configurationRevision: configurationRevision() });
-      } catch (error) { return sendJSON(res, 400, { error: { message: safeReason(error.message) } }); }
+      } catch (error) {
+        const message = safeReason(error.message);
+        console.error(`[配置] 热加载失败，继续使用原配置：${message}`);
+        return sendJSON(res, 400, { error: { message } });
+      }
     }
     if (req.method === 'POST' && p === '/api/config') {
       const body = await readJsonBody(req);
@@ -6224,6 +6351,8 @@ async function dispatch(req, res) {
       return sendJSON(res, 200, { object: 'list', data: ids.map((id) => ({ id, object: 'model' })) });
     }
     if (CHAT_PATHS.has(p) && req.method === 'POST') return await handleChat(req, res, req.clientKeyId);
+    if (p === '/v1/responses' && req.method === 'POST') return await handleChat(req, res, req.clientKeyId, responsesAdapter);
+    if (p === '/v1/messages' && req.method === 'POST') return await handleChat(req, res, req.clientKeyId, anthropicAdapter);
     return sendJSON(res, 404, { error: { message: `no route: ${req.method} ${p}` } });
   } catch (e) {
     return sendJSON(res, Number.isInteger(e?.statusCode) ? e.statusCode : 500, { error: { message: safeReason(e.message || 'internal error') } });

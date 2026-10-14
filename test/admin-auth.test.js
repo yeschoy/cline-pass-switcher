@@ -62,7 +62,7 @@ test('independent admin bootstrap, route matrix, CSRF, revocation, restart and c
     }
     assert.equal((await call(p, '/api/meta')).status, 200);
     assert.equal((await call(p, '/v1/responses', { method: 'POST' })).status, 401);
-    assert.equal((await call(p, '/v1/responses', { method: 'POST', headers: { Authorization: `Bearer ${clientKey}` } })).status, 501);
+    assert.equal((await call(p, '/v1/responses', { method: 'POST', headers: { Authorization: `Bearer ${clientKey}` } })).status, 400);
     assert.equal((await call(p, '/models', { headers: { Authorization: `Bearer ${clientKey}` } })).status, 200);
     assert.equal((await call(p, '/api/auth/login', { method: 'POST', body: { password: clientKey } })).status, 401);
     const tooLarge = await new Promise((resolve, reject) => {
@@ -97,7 +97,7 @@ test('independent admin bootstrap, route matrix, CSRF, revocation, restart and c
     assert.equal((await call(p, '/api/security', { method: 'POST', cookie: login.cookie, csrf: login.json.csrf, body: { proxyKey: 'rotated-client-key' } })).status, 200);
     assert.equal((await call(p, '/api/accounts', { cookie: login.cookie, headers: { 'Sec-Fetch-Site': 'cross-site' } })).status, 401);
     assert.equal((await call(p, '/api/accounts', { cookie: login.cookie, headers: { Host: 'evil.example', Origin: 'http://evil.example' } })).status, 401);
-    assert.equal((await call(p, '/v1/responses', { method: 'POST', headers: { Authorization: 'Bearer rotated-client-key' } })).status, 501);
+    assert.equal((await call(p, '/v1/responses', { method: 'POST', headers: { Authorization: 'Bearer rotated-client-key' } })).status, 400);
     assert.equal((await call(p, '/v1/responses', { method: 'POST', cookie: login.cookie })).status, 401);
     assert.equal((await call(p, '/api/auth/logout', { method: 'POST', cookie: login.cookie, csrf: login.json.csrf, body: {} })).status, 200);
     assert.equal((await call(p, '/api/accounts', { cookie: login.cookie })).status, 401);

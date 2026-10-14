@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend pre-development checklist and quality check"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Chat routing, retry, SSE lifecycle, header/credential boundary and statistics contracts reused by new protocols"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Trust-boundary validation, upstream/stream/cancellation error rules"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Ordinary log projection for new inboundProtocol field; detailed capture routes"}
+{"file": ".trellis/spec/backend/client-key-guidelines.md", "reason": "Client-key auth and exclusive account pool routing for new endpoints and x-api-key"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Placement of new lib modules and tests"}
+{"file": ".trellis/tasks/archive/2026-09/09-18-response-chat-tool-protocol-error/research/switcher-responses-feasibility.md", "reason": "Prior Responses-over-Chat research: mapping table, stream risks, Codex request shape"}

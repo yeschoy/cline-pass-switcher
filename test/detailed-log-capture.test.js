@@ -404,7 +404,7 @@ test('aggregate budget remains reserved until release; exhaustion affects only c
 
 test('route allowlist excludes management, quota and discovery', () => {
   for (const route of ['/api/accounts', '/api/logs/details', '/api/meta', '/api/models', '/']) assert.equal(detailRoute('GET', route), false);
-  for (const route of ['/api/test', '/api/probe', '/api/validate-upstreams', '/api/accounts/test', '/api/accounts/proxy-test', '/v1/responses']) assert.equal(detailRoute('POST', route), true);
+  for (const route of ['/api/test', '/api/probe', '/api/validate-upstreams', '/api/accounts/test', '/api/accounts/proxy-test', '/v1/responses', '/v1/messages']) assert.equal(detailRoute('POST', route), true);
   assert.equal(detailRoute('OPTIONS', '/v1/chat/completions'), false);
 });
 

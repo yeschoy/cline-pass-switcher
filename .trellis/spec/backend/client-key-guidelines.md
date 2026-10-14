@@ -25,10 +25,11 @@ GET/POST /api/accounts                      -> accounts[].clientKeyId; POST repl
 
 GET  /models | /v1/models | /api/v1/models
 POST /chat/completions | /v1/chat/completions | /api/v1/chat/completions
-POST /v1/responses // authenticated 501, no lease/network
+POST /v1/responses | /v1/messages  // same exclusive pool as Chat; Anthropic also accepts x-api-key
+POST /v1/messages/count_tokens     // client auth only; no lease/network/statistics
 ```
 
-All management operations require initialized non-pending admin Cookie, trusted transport/Origin and exact `X-CSRF-Token` for unsafe methods. Model routes accept `Authorization: Bearer <client key>` or legacy `X-Admin-Key: <client key>`, not administrator Cookie as model authentication. `GET /api/meta` remains public; `/api/models`, probes and tests remain independently admin-authorized.
+All management operations require initialized non-pending admin Cookie, trusted transport/Origin and exact `X-CSRF-Token` for unsafe methods. Model routes accept `Authorization: Bearer <client key>` or legacy `X-Admin-Key: <client key>`, not administrator Cookie as model authentication. `/v1/messages` and `/v1/messages/count_tokens` also accept `x-api-key`; Chat and Responses do not. Never forward `x-api-key` or the downstream Authorization. `GET /api/meta` remains public; `/api/models`, probes and tests remain independently admin-authorized.
 
 ## 3. Contracts
 

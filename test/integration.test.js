@@ -180,10 +180,11 @@ test('API compatibility, message pass-through and request outcomes are explicit'
   t.after(async () => { await stop(running.child); await close(mock); fs.rmSync(running.dir, { recursive: true, force: true }); });
 
   const beforeUnsupported = seen.length;
-  const unsupported = await rawJson(switchPort, '/v1/responses', { model: 'ignored' });
-  assert.equal(unsupported.status, 501);
-  assert.deepEqual(unsupported.json, { error: { message: 'OpenAI Responses API is not supported; use /v1/chat/completions instead', type: 'unsupported_api', param: null, code: 'unsupported_api' } });
-  assert.equal(seen.length, beforeUnsupported, 'unsupported API must not reach account routing or upstream');
+  const unsupported = await rawJson(switchPort, '/v1/responses', { model: 'ignored', previous_response_id: 'resp_x' });
+  assert.equal(unsupported.status, 400);
+  assert.equal(unsupported.json.error.type, 'invalid_request_error');
+  assert.match(unsupported.json.error.message, /previous_response_id/);
+  assert.equal(seen.length, beforeUnsupported, 'unsupported Responses fields must not reach account routing or upstream');
 
   const passthroughContents = ['', '   ', null, [], [{ type: 'text', text: '  ' }], [{}], [{ type: 'image_url', image_url: false }], undefined];
   for (const [index, content] of passthroughContents.entries()) {
@@ -2436,7 +2437,7 @@ test('concurrent detailed-root admission rejects only diagnostic capture at its 
     return (await response.json()).items.length === 128;
   }, 10000, '128 open detailed roots');
   const response = await fetch(`http://127.0.0.1:${port}/v1/responses`, { method: 'POST', headers: auth });
-  assert.equal(response.status, 501, 'the existing response is not changed by the diagnostic fence');
+  assert.equal(response.status, 400, 'the existing response is not changed by the diagnostic fence');
   const settings = await (await fetch(`http://127.0.0.1:${port}/api/logs/settings`, { headers: auth })).json();
   assert.equal(settings.health.dropped, 1);
   assert.equal(settings.health.dropReasons.activeLimit, 1);
@@ -2578,8 +2579,8 @@ test('detailed logging settings, route matrix, actual-call groups and credential
   assert.equal(emptyContent.response.status, 200); assert.equal(emptyContent.group.attempts.length, 1);
   const unauthorized = await groupAfter(rawJson(port, '/v1/chat/completions', { key: 'unread-secret' }));
   assert.equal(unauthorized.response.status, 401); assert.equal(unauthorized.group.bodies[0].state, 'unread');
-  const unsupported = await groupAfter(rawJson(port, '/v1/responses', { key: 'unread-secret' }, auth));
-  assert.equal(unsupported.response.status, 501); assert.equal(unsupported.group.bodies[0].state, 'unread');
+  const unsupported = await groupAfter(rawJson(port, '/v1/responses', { model: 'alias', previous_response_id: 'resp_x' }, auth));
+  assert.equal(unsupported.response.status, 400); assert.equal(unsupported.group.attempts.length, 0);
   const consoleTest = await groupAfter(rawJson(port, '/api/test', { model: 'alias' }, auth)); assert.equal(consoleTest.group.attempts.length, 1);
   const probe = await groupAfter(rawJson(port, '/api/probe', { model: 'probe' }, auth)); assert.equal(probe.group.attempts.length, 2);
   const validation = await groupAfter(rawJson(port, '/api/validate-upstreams', { model: 'probe' }, auth)); assert.equal(validation.group.attempts.length, 6); assert.equal(new Set(validation.group.attempts.map((a) => a.callId)).size, 6);

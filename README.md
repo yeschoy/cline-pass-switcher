@@ -18,7 +18,7 @@ Node.js 本地/服务器代理 + 网页控制台，用于 [Cline Pass](https://c
 - 📋 **观测** —— 独立滚动请求/错误 JSONL 日志，支持筛选、分页和清空；记录安全的亲和键类型、上游 key 是否提供、缓存命中三态、调度原因与供应商路径，但绝不记录实际会话键
 - 🏷️ **模型别名** —— 批量把 `cline-pass/*` 生成客户端短别名，原始模型仍保留
 - 🔑 **多客户端密钥与管理员登录分离** —— 每个下游密钥只调度专属上游账号池；独立管理员密码与可吊销会话保护管理 API
-- 🌐 **OpenAI 兼容** —— 任何 OpenAI 客户端 / Cline 扩展把 Base URL 指向代理即可，无侵入
+- 🌐 **三协议入站** —— OpenAI Chat Completions、OpenAI Responses 子集、Anthropic Messages 子集；内部仍统一调用 Cline `/chat/completions`。Codex CLI 与 Claude Code 可直连，无需外部 NewAPI 转换层
 
 ![控制台截图](docs/screenshot-top.png)
 
@@ -65,12 +65,12 @@ node server.js        # Node ≥ 18；完成首次改密后移除初始化变量
 > Cline Pass key 从哪里来？购买 Cline Pass 订阅后，在 Cline 的账户设置里创建 API Key。
 > 订阅模型 ID 均为 `cline-pass/*` 前缀（如 `cline-pass/glm-5.2`）。
 
-客户端接入（任何 OpenAI 兼容工具）：
+客户端接入（OpenAI Chat / Responses / Anthropic Messages）：
 
 ```
 Base URL: http://127.0.0.1:3123/v1
 API Key:  （在控制台「访问与安全」里设置 Legacy 或独立客户端密钥；单密钥模式留空 = Legacy 模型接口开放）
-Model:    cline-pass/glm-5.2 等
+Model:    cline-pass/glm-5.2 等（Claude Code 用环境变量填同一 ID，见下方）
 ```
 
 ---
@@ -137,7 +137,7 @@ location / {
 
 操作顺序：① 备份私有 DATA_DIR，完成独立管理员登录/CSRF；若 Legacy 为空且有 Legacy 归属账号，**先保存一个非空 Legacy 密钥**，否则创建额外密钥会被拒绝（不会把匿名旧用户悄悄改成新密钥用户）；② 在「访问与安全」创建并安全复制新密钥，一次性弹窗可换行显示长值，复制失败可手动全选复制；关闭一次性弹窗后无法再次查看，丢失只能轮换；③ 在「账号管理」新建账号时选择归属，或在抽屉中修改旧账号归属，点击**保存账号配置**并核对已接受状态，再给客户端分发对应 Bearer 密钥（兼容 `X-Admin-Key` 模型请求）；④ 轮换前通知客户端，确认后旧值立即拒绝**新准入**，生成值当次复制并更新客户端；⑤ 撤销前先保存所有归属账号的重分配，核对后确认撤销。已获 lease 的工作可继续使用原账号完成；等待中的旧密钥请求不允许在轮换/撤销后新获 lease。密钥操作成功会重新拉取服务器快照，未保存的账号草稿可能被覆盖，请先保存或自行留存；确认对话框不能代替服务器验证。
 
-`/chat/completions`、`/v1/chat/completions`、`/api/v1/chat/completions` 在认证后仅能调度该密钥归属的账号：单账号、轮询、HRW、成功率流水线、会话绑定、缓存活跃/备用、同账号 Provider 重试及首包前允许的一次换号都不得跨归属；空/不可用归属池安全失败，不借其他池。`/models`、`/v1/models`、`/api/v1/models` 的静态已知 ID/别名可共享，但 `exposeCatalog` 抓取只能使用当前客户端归属的账号，空池不能用管理员目录缓存或外池回退。`/v1/responses` 认证后仍返回 501，不发上游。管理员 `/api/models` 和明确 `accountId` 的探测/测试独立于客户端池，管理员不指定 ID 时保留现有全局选择能力。缓存池在各归属内**分别派生**活跃/备用集合，但共享 `metadata.json.cachePoolTargetSize` 这**一个数字**；某池扩容可能使其他池的派生活跃集扩大，实际角色计数是所有归属池的合计，不是每密钥独立配置/限流。`maxRpm` 仍按上游账号分别统计；月参考额度与模型参考消费等值也按原机制分别估算，绝不是每客户端密钥独立配额、账单或相互抵扣。
+`/chat/completions`、`/v1/chat/completions`、`/api/v1/chat/completions`、`/v1/responses`、`/v1/messages` 在认证后仅能调度该密钥归属的账号：单账号、轮询、HRW、成功率流水线、会话绑定、缓存活跃/备用、同账号 Provider 重试及首包前允许的一次换号都不得跨归属；空/不可用归属池安全失败，不借其他池。`/models`、`/v1/models`、`/api/v1/models` 的静态已知 ID/别名可共享，但 `exposeCatalog` 抓取只能使用当前客户端归属的账号，空池不能用管理员目录缓存或外池回退。`/v1/messages` 另接受 `x-api-key`（与 `Authorization` 冲突则 401）；Chat 与 Responses 路由不认该 Header。管理员 `/api/models` 和明确 `accountId` 的探测/测试独立于客户端池，管理员不指定 ID 时保留现有全局选择能力。缓存池在各归属内**分别派生**活跃/备用集合，但共享 `metadata.json.cachePoolTargetSize` 这**一个数字**；某池扩容可能使其他池的派生活跃集扩大，实际角色计数是所有归属池的合计，不是每密钥独立配置/限流。`maxRpm` 仍按上游账号分别统计；月参考额度与模型参考消费等值也按原机制分别估算，绝不是每客户端密钥独立配额、账单或相互抵扣。
 
 ### 环境变量
 
@@ -266,7 +266,45 @@ Cline Pass 订阅模型在 Cline 网关之后分成两条管道，钉住上游�
 
 ## NewAPI、会话粘性与 Header 边界
 
-NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流式/非流式 OpenAI Chat Completions。建议保持到 Switcher 的 HTTP/1.1 长连接（其入站 idle 95 秒，略长于 New API 默认的 90 秒连接池 idle），并关闭中间反代的 SSE 响应缓冲。Switcher 在首个上游 data 事件通过后才会向 New API 发送静默注释心跳 `: PING`（仅在完整 SSE 事件边界注入，不拆开未完成的 data 行）；这只维护 Switcher → New API 链路。若最终客户端也需要静默段心跳，请在 **New API 自己的现有运维设置**中启用其下游 ping；不需要修改 New API 源码。New API 普通 Chat 在收到上游响应头前的最终客户端取消可能不会立即传播到 Switcher，此处由首事件超时有界收敛。仅支持 HTTP/1.1 Chat Completions；不提供 HTTP/2/h2c 入站、Realtime WebSocket 或 Responses API。下游 `Authorization` 只用于本代理鉴权，转发到 Cline 的始终是所选账号密钥。
+NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流式/非流式 OpenAI Chat Completions。建议保持到 Switcher 的 HTTP/1.1 长连接（其入站 idle 95 秒，略长于 New API 默认的 90 秒连接池 idle），并关闭中间反代的 SSE 响应缓冲。Switcher 在首个上游 data 事件通过后才会向 New API 发送静默注释心跳 `: PING`（仅在完整 SSE 事件边界注入，不拆开未完成的 data 行）；这只维护 Switcher → New API 链路。若最终客户端也需要静默段心跳，请在 **New API 自己的现有运维设置**中启用其下游 ping；不需要修改 New API 源码。New API 普通 Chat 在收到上游响应头前的最终客户端取消可能不会立即传播到 Switcher，此处由首事件超时有界收敛。入站为 HTTP/1.1；不提供 HTTP/2/h2c 或 Realtime WebSocket。下游 `Authorization` / Anthropic `x-api-key` 只用于本代理鉴权，转发到 Cline 的始终是所选账号密钥。
+
+### 三协议端点（Chat 上游上的有损子集）
+
+内部始终调用 Cline `POST {upstreamBase}/chat/completions`。Responses / Anthropic 不是原生服务，不持久化 response 对象，也不执行任何工具。
+
+| 协议 | 方法 / 路径 | 说明 |
+|---|---|---|
+| OpenAI Chat Completions | `POST /chat/completions`、`/v1/chat/completions`、`/api/v1/chat/completions` | 原样透传，行为不变 |
+| OpenAI Responses | `POST /v1/responses` | 无状态子集，流式 typed SSE / 非流式 `object: response` |
+| Anthropic Messages | `POST /v1/messages` | Messages 子集；另接受 `x-api-key` |
+| Anthropic 计 token | `POST /v1/messages/count_tokens` | 本地启发式估算，不占账号、不走网络、不计入对话统计 |
+
+**支持：** `stream` true/false；文本；图片 URL / data URL；Responses `function` / 降级后的 `custom`（apply_patch）与 `local_shell`；Anthropic 自定义工具、`tool_use` / `tool_result`；`tool_choice` 与并行开关；`max_output_tokens` / `max_tokens`、temperature、top_p；Responses `text.format` JSON/JSON Schema；推理展示与当前工具循环内的回传（本网关签发的 `encrypted_content` / `signature`）；`prompt_cache_key` 与 Claude `metadata.user_id` 会话粘性。
+
+**明确拒绝（账号租约与网络之前返回该协议格式的 400）：** Responses `previous_response_id`、`conversation`、`background: true`、`store: true`、`context_management`、`prompt`、`item_reference`；托管/服务端工具（`web_search*`、`file_search`、`code_interpreter`、`mcp`、`computer*`、`image_generation` 及 Anthropic 带 `type` 的 server tools）；`file_id` / `input_file` / `document`。未知顶层字段忽略。
+
+Codex CLI（`~/.codex/config.toml`），关闭托管工具并把模型写成 `cline-pass/*` 或已有精确别名：
+
+```toml
+model = "cline-pass/glm-5.2"
+model_provider = "cline-pass-switcher"
+
+[model_providers.cline-pass-switcher]
+name = "Cline Pass Switcher"
+base_url = "http://127.0.0.1:3123/v1"
+env_key = "CLINE_PASS_CLIENT_KEY"
+wire_api = "responses"
+```
+
+Claude Code 用 Anthropic 变量指向同一 Base URL；模型名不会自动从 `claude-*` 映射，需显式填写：
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:3123
+export ANTHROPIC_API_KEY=<客户端密钥>
+export ANTHROPIC_MODEL=cline-pass/glm-5.2
+export ANTHROPIC_DEFAULT_SONNET_MODEL=cline-pass/glm-5.2
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=cline-pass/glm-5.2
+```
 
 `sticky` 模式分别识别 Codex 的 parent thread / `prompt_cache_key` / session/thread 字段，以及 Claude Code 的 parent-agent / session / agent 字段；parent/root 优先于 child/agent。直接 Chat 请求若已有合法 `prompt_cache_key` 或 `session_id` 会原样保留；若只收到 Codex/Claude 显式会话 Header/metadata，则派生域分离、不可反推原值的 `prompt_cache_key` 发给 Cline。无显式会话时仍只对首个 system/developer 与首个 user 消息做本机 HMAC 账号路由，但不会把该 fallback 冒充成显式上游 key。原始会话、派生 key、HMAC 指纹和消息不会进入普通日志/metadata。客户端真实提供的协议 Header 仍按允许列表透传；`Authorization`、`Proxy-Authorization`、Cookie、逐跳 Header、Installation ID 和 Attestation 始终剔除，也不会伪造 User-Agent、设备、浏览器或 TLS 指纹。NewAPI 若在到达 Switcher 前已丢失会话字段，本服务无法恢复原值，会如实显示 `message_hmac` 回退。
 
@@ -309,7 +347,7 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 默认脱敏的错误详情在失败后按需保存已读取的客户端入站 Header/正文（≤5 MiB）以及失败上游 attempt 改写后的请求 Header/正文和响应 Header/错误正文；无上游调用的本地拒绝只包含可获得的入站诊断，不伪造上游响应/错误行。超限请求、未读取的请求、容量/脱敏省略可能没有入站正文，未知入站凭据时其他 Header/正文也会为安全而省略。成功 attempt 的响应、完整成功 SSE 和最终客户端正文不保存；成功的请求不会单独发布详情。SSE 失败只保留触发错误的完整事件。收到响应前失败显示 `no-response`，起流后断开显示 `stream-transport-failed` 并保留响应 Header。失败后重试成功或换号成功，先前失败 attempt 仍可通过普通错误行中的 `requestId + attemptIndex + detailCallId` 精确查看。普通 JSONL 仍不保存 Header 值或正文。
 
 - 完整模式可按请求查看原始客户端输入、最终客户端响应及每次真实上游调用；错误模式仅列出失败的真实上游调用，无上游调用的本地拒绝只在详细日志页保留可用的入站诊断。正文按需加载，可复制脱敏文本。聊天 UUID 与普通请求日志一致；真实 native chat 调用拥有稳定的 attempt index 和独立调用 ID。`status` 是提交的 HTTP 状态，`result`（有值时）来自普通聊天终态；写出字节不证明客户端已收到。
-- 完整模式包含三种聊天别名、控制台测试/探测/渠道校验、账号/代理测试、模型列表及已有的 Responses 501/认证/验证拒绝；错误模式仅适用于三种聊天别名的真实失败上游调用。配置、日志查询、静态文件、后台额度及公开目录补充请求不记录；不捕获网关内部重试或代理/TLS 线缆数据。
+- 完整模式包含三种聊天别名、`/v1/responses`、`/v1/messages`、控制台测试/探测/渠道校验、账号/代理测试、模型列表及认证/验证拒绝；错误模式适用于上述聊天入口的真实失败上游调用。`count_tokens` 不捕获。配置、日志查询、静态文件、后台额度及公开目录补充请求不记录；不捕获网关内部重试或代理/TLS 线缆数据。
 - Header 名称/值、结构化凭据字段、Bearer/Basic、Cookie、URL 认证/凭据查询参数及当前请求已知凭据回显会脱敏，原值不可恢复。普通模型参数与 usage 计数保留。无法识别任意自由文本中的未知秘密；不要把此功能当作通用数据脱敏或备份工具。
 - 每个请求/响应正文独立捕获最多 **5 MiB**，不截断实际流量。保留安全文本/JSON 前缀及完整 SSE 事件；缺失尾部、截断、未读、中断、无效编码或无法安全解释的片段有明确状态。部分 JSON 可能补齐结构后脱敏，因此不是可重放的原始请求。
 - 文件独立存于 `DATA_DIR/detailed-logs/`（目录 0700、文件 0600），按最早请求整组清理，最多 **7 天 / 1 GiB**，高流量可能提前淘汰。查询仅扫描有界元数据，正文单独读取；游标按时间/UUID 继续，即使前页已淘汰也不会把路径当作游标。

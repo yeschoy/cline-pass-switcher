@@ -77,7 +77,9 @@ Chat endpoints:
 POST /chat/completions
 POST /v1/chat/completions
 POST /api/v1/chat/completions
-POST /v1/responses  // authenticated, deliberate 501 unsupported_api; never routed upstream
+POST /v1/responses  // authenticated Responses-over-Chat subset; protocol 400 before lease for unsupported fields
+POST /v1/messages
+POST /v1/messages/count_tokens  // client auth only; local estimate; no lease/network/statistics
 ```
 
 Management endpoints relevant to routing:
@@ -114,7 +116,7 @@ Operators who edit `data/config.json` by hand apply it with `POST /api/config/re
 - A changed candidate is written back atomically (generated account ids persist; env-pinned fields keep file bytes), then `applyAccountConfig()` publishes it with the identical per-account/per-route invalidation used by UI saves. In-flight responses keep their already-selected account.
 - `SHUTDOWN_TIMEOUT_MS` defaults to 25s in production (`CLINE_PASS_SHUTDOWN_MS`, 1s–120s) and compose `stop_grace_period: 30s` must stay above it, so SIGTERM drains streams and logs before any SIGKILL.
 
-Legacy `proxyKey` (effective `PROXY_KEY` at startup) and up to 16 additional client keys authenticate `/v1/models`, `/api/v1/models`, `/models`, `/v1/responses`, and all three chat-completions aliases via Bearer or the legacy `X-Admin-Key` client header. Authentication resolves a stable `clientKeyId` before leasing; only an empty Legacy key retains anonymous Legacy-owned model traffic, never management or access to additional keys' pools. See [client-key-guidelines.md](./client-key-guidelines.md) for complete routing, API and migration contracts. `GET /api/meta` remains public. Every other `/api/*` route requires the independent admin Cookie session, except the explicit `/api/auth/{state,session,login,bootstrap,password,logout}` exchange. A client key, Authorization header, or legacy `X-Admin-Key` never authenticates management. Management responses have no CORS wildcard and are `no-store`; unsafe methods require session CSRF header, same-origin checks and JSON for auth exchanges. Direct cleartext management HTTP is permitted only on loopback with a loopback Host; TLS termination requires configured HTTPS `publicBaseUrl`, an exact Host/Origin, `X-Forwarded-Proto: https`, a private/loopback socket peer, and a valid `X-Cline-Pass-Proxy-Token` equal to the independently provisioned 64-lowercase-hex `CLINE_PASS_ADMIN_PROXY_TOKEN`. The TLS proxy replaces both Headers (never forwards client-supplied attestations); a private-network model client cannot assert TLS merely by spoofing a forwarding Header. The application port must not be publicly exposed. Bootstrap requires a separate one-time code and immediate password change; pending sessions cannot use management routes. The route-auth matrix is executable in `test/admin-auth.test.js`.
+Legacy `proxyKey` (effective `PROXY_KEY` at startup) and up to 16 additional client keys authenticate `/v1/models`, `/api/v1/models`, `/models`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, and all three chat-completions aliases via Bearer or the legacy `X-Admin-Key` client header. `/v1/messages` and `count_tokens` additionally accept `x-api-key`; Chat and Responses ignore that Header. Conflicting presented credentials return `401`. A client `x-api-key` is never forwarded upstream. Authentication resolves a stable `clientKeyId` before leasing; only an empty Legacy key retains anonymous Legacy-owned model traffic, never management or access to additional keys' pools. See [client-key-guidelines.md](./client-key-guidelines.md) for complete routing, API and migration contracts. `GET /api/meta` remains public. Every other `/api/*` route requires the independent admin Cookie session, except the explicit `/api/auth/{state,session,login,bootstrap,password,logout}` exchange. A client key, Authorization header, or legacy `X-Admin-Key` never authenticates management. Management responses have no CORS wildcard and are `no-store`; unsafe methods require session CSRF header, same-origin checks and JSON for auth exchanges. Direct cleartext management HTTP is permitted only on loopback with a loopback Host; TLS termination requires configured HTTPS `publicBaseUrl`, an exact Host/Origin, `X-Forwarded-Proto: https`, a private/loopback socket peer, and a valid `X-Cline-Pass-Proxy-Token` equal to the independently provisioned 64-lowercase-hex `CLINE_PASS_ADMIN_PROXY_TOKEN`. The TLS proxy replaces both Headers (never forwards client-supplied attestations); a private-network model client cannot assert TLS merely by spoofing a forwarding Header. The application port must not be publicly exposed. Bootstrap requires a separate one-time code and immediate password change; pending sessions cannot use management routes. The route-auth matrix is executable in `test/admin-auth.test.js`.
 
 Existing environment keys are `DATA_DIR`, `CLINE_PASS_KEY`, `PROXY_KEY`, `PUBLIC_BASE_URL`, `PORT`, and `BIND_HOST`. Effective account/security values from `CLINE_PASS_KEY`, `PROXY_KEY` and `PUBLIC_BASE_URL` may be persisted by a later console save; `DATA_DIR` and `BIND_HOST` are not persisted. Connection-pool and SSE timing environment keys are separate, never persisted and enumerated with ranges in `database-guidelines.md`.
 
@@ -255,7 +257,7 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - Chat Completions validates the top-level JSON object and model identifier locally, but deliberately does not validate or normalize `messages[*].content`.
 - Empty strings, whitespace-only strings, `null`, missing content, empty arrays, empty multimodal parts, and empty tool results pass through unchanged. This preserves compatibility with clients that represent a successful no-output tool call as `""` or `"\n"`; the upstream owns message-role/content schema acceptance.
 - `messages: []` remains compatible.
-- `POST /v1/responses` returns authenticated `501 unsupported_api` directing callers to `/v1/chat/completions`, without reading/routing the payload or acquiring an account.
+- `POST /v1/responses` and `POST /v1/messages` convert to Chat Completions before leasing (`handleChat(..., adapter)`). Unsupported stateful/hosted/file inputs return that protocol's 400 envelope with zero account or network work. Chat Completions aliases stay byte-compatible (`adapter === null`). `POST /v1/messages/count_tokens` authenticates, converts, estimates locally, and never leases or records chat statistics.
 
 #### Abort and SSE lifecycle
 
@@ -309,7 +311,8 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 | Chat JSON is malformed or not an object | `400`; no upstream request |
 | Chat `model` is missing, blank, non-string, or over 300 characters | `400` |
 | Any `messages.<index>.content` value is empty, whitespace-only, `null`, missing, or an empty array/part | Do not reject or normalize locally; preserve it in the upstream request and return the upstream outcome |
-| `POST /v1/responses` | authenticated `501 unsupported_api`; no account/upstream request |
+| `POST /v1/responses` / `POST /v1/messages` unsupported subset | protocol-shaped 400; no account/upstream request |
+| `POST /v1/messages` / `count_tokens` `x-api-key` | accepted as the client key; ignored on Chat/Responses; conflict with Authorization → 401 |
 | Request body exceeds 50 MiB | Reject promptly with `413` as soon as the limit is crossed, even if the client pauses before request end; discard/drain the remaining body without buffering or destroying the socket |
 | No statically available account | `503` with a redacted error |
 | Accounts exist but required capacity is unavailable after waiting | `429`, `Retry-After` integer clamped to 1-30 seconds; the RPM-blocked path is the documented exception — `sendBusy()` clamps it to 1-3600 seconds derived from the earliest rolling-window recovery |
@@ -425,7 +428,7 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - a wrapped error after SSE output starts updates the existing provider trace and future account state without replaying or adding a pseudo-attempt;
 - a downstream close after observed `[DONE]` is `200 / success`; a close before `[DONE]` and a non-streaming cancellation are `499 / client_cancelled`, abort upstream work, stop failover, release capacity, and add no error attempt, usage, error/health result, or account action;
 - empty/whitespace/null/missing/empty-array message content and a newline-only tool result reach the local mock upstream unchanged instead of producing a Switcher validation error;
-- authenticated `POST /v1/responses` returns the stable 501 `unsupported_api` shape without account selection or upstream traffic;
+- authenticated `POST /v1/responses` and `POST /v1/messages` convert through the Chat chain; unsupported subset fields return protocol-shaped 400 with zero upstream/lease; Chat aliases remain unchanged (`test/protocol-integration.test.js`);
 - oversized clients receive prompt `413` before request end while request buffering remains bounded;
 - persisted history contains no account key or raw session value;
 - non-stream and fragmented/oversized streaming responses count only explicit usage, preserve known zero versus missing, and finalize global/account/resolved-model statistics once across provider retry, account replacement, success, failure and disconnect;

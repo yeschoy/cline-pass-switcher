@@ -150,8 +150,15 @@ test('low failures retain two detail/RPM attempts, high SSE fallback survives pi
   const next = await chat(); assert.equal(next.status, 200);
   assert.equal(hits.at(-1).account, 'low');
   await stop(child); child = await boot(dir, port);
-  const persisted = (await api(`/api/logs/requests?requestId=${first.id}`)).items;
+  const persisted = await waitFor(async () => {
+    const items = (await api(`/api/logs/requests?requestId=${first.id}`)).items;
+    return items?.length === 1 && items;
+  }, 'request log survives restart');
   assert.equal(persisted.length, 1);
-  assert.equal((await api(`/api/logs/details/${first.id}`)).attempts.length, 2);
+  const persistedDetails = await waitFor(async () => {
+    const value = await api(`/api/logs/details/${first.id}`);
+    return value.attempts?.length === 2 && value;
+  }, 'error details survive restart');
+  assert.equal(persistedDetails.attempts.length, 2);
   assert.equal(upstreamPorts.length, hits.length, 'one socket observation per real chat attempt');
 });
