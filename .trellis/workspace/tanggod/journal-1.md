@@ -1239,3 +1239,27 @@ Committed-main raw-detail code is deployed raw-off at 512 MiB with 32 Legacy-own
 ### Status
 
 [OK] **Completed**
+
+
+## Session 51: 三协议入站适配
+<!-- trellis-session: v=2 fp=38b6a53b65c3259f -->
+
+**Date**: 2026-10-14
+**Task**: 三协议入站适配
+**Branch**: `main`
+
+### Summary
+
+落地 Responses 与 Anthropic Messages 有损兼容子集（流式/非流式、工具、图片、推理回传、count_tokens），复用现有 Chat 上游调度；Bugbot 修复流式失败误记成功、call_id 不一致、推理覆盖与块交错；控制台请求日志增加入站协议列与筛选。配置保存草稿修复一并提交。真机 Codex/Claude 两轮工具循环仍待部署后验收。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1404d42` | feat(protocol): 适配 Responses 与 Anthropic Messages 入站 |
+| `123e0ca` | fix(config): 账号草稿版本号忽略自动学习模型，重复保存不覆盖 |
+| `ca5c480` | feat(console): 请求日志显示并筛选入站协议 |
+
+### Status
+
+[OK] **Completed**

@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 50
+- **Total Sessions**: 51
 - **Last Active**: 2026-10-14
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1241 | Active |
+| `journal-1.md` | ~1265 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 51 | 2026-10-14 | 三协议入站适配 | `1404d42`, `123e0ca`, `ca5c480` | `main` |
 | 50 | 2026-10-14 | 排查代理 socket hang up | - | `main` |
 | 49 | 2026-10-01 | 45账号池并发瓶颈与出口限流归因报告 | `ea1548b` | `codex/concurrency-root-cause-report` |
 | 48 | 2026-09-30 | 完成本地选号工作流与持久计数，待浏览器解锁验收 | `b78f50a`, `b66bf6b`, `92adcc1`, `701d998`, `001a9c1`, `849cc24`, `9bb8f79` | `codex/selection-workflow` |
