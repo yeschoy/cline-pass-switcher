@@ -143,6 +143,23 @@ test('request and error sections share one log view and reset the selected type 
   assert.match(clearLogs, /if\(\$\('#logPanel'\)\.hidden\|\|type!==\$\('#logType'\)\.value\)return;await loadLogs\(\)/);
 });
 
+test('request log shows and filters the inbound protocol with consistent column counts', () => {
+  assert.match(html, /<select id="logProtocol"[^>]*><option value="">协议：全部<\/option><option value="chat">Chat Completions<\/option><option value="responses">Responses<\/option><option value="anthropic">Anthropic Messages<\/option><\/select>/);
+  const header = html.slice(html.indexOf('<th>时间</th><th>请求 ID</th>'), html.indexOf('<tbody id="logBody">'));
+  const columns = (header.match(/<th>/g) || []).length;
+  assert.equal(columns, 10);
+  assert.match(header, /<th>入站协议<\/th>/);
+  const loadLogs = html.slice(html.indexOf('async function loadLogs'), html.indexOf('async function clearLogs'));
+  assert.match(loadLogs, /if\(type==='requests'&&\$\('#logProtocol'\)\.value\)params\.set\('inboundProtocol',\$\('#logProtocol'\)\.value\)/);
+  assert.match(loadLogs, /inboundProtocolLabel\(x\.inboundProtocol\)/);
+  const row = loadLogs.slice(loadLogs.indexOf('return `<tr>'), loadLogs.indexOf('</tr>`;}'));
+  assert.equal((row.match(/<td[ >]/g) || []).length, columns);
+  const logSpans = [...html.matchAll(/(logBody|logChainRow)[^\n]*?colspan="(\d+)"/g)].map((match) => Number(match[2]));
+  assert.ok(logSpans.length >= 3 && logSpans.every((span) => span === columns), String(logSpans));
+  assert.match(html, /'logStream','logProtocol','logOverflow'/);
+  assert.match(html, /function inboundProtocolLabel\(value\)\{return \(\{chat:'Chat Completions',responses:'Responses',anthropic:'Anthropic Messages'\}\)\[value\]\|\|'—';\}/);
+});
+
 test('error rule presets, pipeline controls and statistics rendering retain strict boundaries', () => {
   for (const id of ['standard','fast','conservative','observe','clear']) assert.match(html, new RegExp(`${id}:\\[`));
   const errorPresets = html.slice(html.indexOf('const ERROR_RULE_PRESETS='), html.indexOf('function previewErrorPreset'));

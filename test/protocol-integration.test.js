@@ -264,6 +264,9 @@ test('three inbound protocols share one Chat upstream with protocol-shaped IO', 
   }, 5000, 'inboundProtocol on request logs');
   assert.ok(logs.every((item) => ['chat', 'responses', 'anthropic'].includes(item.inboundProtocol)));
   assert.equal(JSON.stringify(logs).includes('hello world'), false);
+  const filtered = await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?inboundProtocol=anthropic&limit=200`)).json();
+  assert.ok(filtered.items.length > 0);
+  assert.ok(filtered.items.every((item) => item.inboundProtocol === 'anthropic'));
   const stats = await (await fetch(`http://127.0.0.1:${port}/api/statistics`)).json();
   assert.ok(stats.lifetime.global.requests >= 3);
   const accounts = (await (await fetch(`http://127.0.0.1:${port}/api/accounts`)).json()).accounts;
