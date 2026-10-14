@@ -1263,3 +1263,25 @@ Committed-main raw-detail code is deployed raw-off at 512 MiB with 32 Legacy-own
 ### Status
 
 [OK] **Completed**
+
+
+## Session 52: 代理进行中超时修复收尾
+<!-- trellis-session: v=2 fp=a4b750494ef31d24 -->
+
+**Date**: 2026-10-14
+**Task**: 代理进行中超时修复收尾
+**Branch**: `main`
+
+### Summary
+
+复测 SOCKS 非流式越过原 60s Agent idle；归档 10-14-proxy-inflight-timeout。规格已写明代理 Agent 省略 timeout。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9097237` | fix(proxy): 代理进行中不再因 Agent 60s 超时误杀非流请求 |
+
+### Status
+
+[OK] **Completed**
