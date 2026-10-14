@@ -1244,6 +1244,90 @@ test('SOCKS5 and SOCKS5H account proxies tunnel requests', async (t) => {
   assert.equal(hits,4);assert.equal(socksConnections,2);
 });
 
+test('SOCKS non-stream waits beyond former agent idle window under attempt timeout', async (t) => {
+  const delayMs = 1200;
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    setTimeout(() => {
+      if (res.destroyed) return;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'slow-ok' } }] }));
+    }, delayMs);
+  });
+  const upstreamPort = await listen(upstream);
+  let socksConnections = 0;
+  const socks = net.createServer((client) => {
+    socksConnections++;
+    let buffer = Buffer.alloc(0), stage = 0;
+    client.on('data', function onData(chunk) {
+      buffer = Buffer.concat([buffer, chunk]);
+      if (stage === 0) {
+        if (buffer.length < 2) return;
+        const n = buffer[1];
+        if (buffer.length < 2 + n) return;
+        buffer = buffer.subarray(2 + n);
+        client.write(Buffer.from([5, 0]));
+        stage = 1;
+      }
+      if (stage === 1) {
+        if (buffer.length < 5) return;
+        const atyp = buffer[3];
+        let off = 4, host;
+        if (atyp === 1) {
+          if (buffer.length < 10) return;
+          host = [...buffer.subarray(off, off + 4)].join('.');
+          off += 4;
+        } else if (atyp === 3) {
+          const n = buffer[off++];
+          if (buffer.length < off + n + 2) return;
+          host = buffer.subarray(off, off + n).toString();
+          off += n;
+        } else return client.destroy();
+        const port = buffer.readUInt16BE(off);
+        off += 2;
+        const rest = buffer.subarray(off);
+        buffer = Buffer.alloc(0);
+        stage = 2;
+        const target = net.connect(port, host, () => {
+          client.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
+          if (rest.length) target.write(rest);
+          client.removeListener('data', onData);
+          client.pipe(target);
+          target.pipe(client);
+        });
+        target.on('error', () => client.destroy());
+      }
+    });
+  });
+  const socksPort = await listen(socks);
+  const socket = http.createServer();
+  const switchPort = await listen(socket);
+  await close(socket);
+  const running = await startSwitcher({
+    port: switchPort,
+    upstreamBase: `http://127.0.0.1:${upstreamPort}`,
+    accountMode: 'single',
+    concurrencyWaitMs: 0,
+    accounts: [{ id: 'a', name: 'A', key: 'ka', enabled: true, proxyUrl: `socks5://127.0.0.1:${socksPort}`, perModel: {} }],
+    knownModels: ['slow-proxy'],
+    perModel: {},
+    accountErrorRules: {},
+  }, null, { NODE_ENV: 'test', CLINE_PASS_TEST_NON_STREAM_ATTEMPT_MS: '4000' });
+  t.after(async () => {
+    await stop(running.child);
+    await close(socks);
+    await close(upstream);
+    fs.rmSync(running.dir, { recursive: true, force: true });
+  });
+  const started = Date.now();
+  const result = await rawJson(switchPort, '/v1/chat/completions', { model: 'slow-proxy', messages: [] });
+  assert.equal(result.status, 200, result.text);
+  assert.match(result.text, /slow-ok/);
+  assert.doesNotMatch(result.text, /socket hang up/i);
+  assert.ok(Date.now() - started >= delayMs, 'must wait for the slow upstream through SOCKS');
+  assert.equal(socksConnections, 1);
+});
+
 test('usage statistics, health, pipeline validation and quota refresh are bounded and truthful', async (t) => {
   let quotaHits = 0;
   const upstream = http.createServer((req, res) => {

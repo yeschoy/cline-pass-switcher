@@ -3843,7 +3843,15 @@ const NON_STREAM_TIMEOUT_RETRY = boundedEnv('CLINE_PASS_NON_STREAM_TIMEOUT_RETRY
 const directSockets = boundedEnv('CLINE_PASS_DIRECT_MAX_SOCKETS', 512, 1, 1024);
 const proxySockets = boundedEnv('CLINE_PASS_PROXY_MAX_SOCKETS', 32, 1, 128);
 const directAgentOptions = { keepAlive: true, maxSockets: directSockets, maxFreeSockets: Math.min(directSockets, boundedEnv('CLINE_PASS_DIRECT_MAX_FREE_SOCKETS', 32, 1, 64)), scheduling: 'lifo', timeout: 60_000 };
-const proxyAgentOptions = { keepAlive: true, maxSockets: proxySockets, maxFreeSockets: Math.min(proxySockets, boundedEnv('CLINE_PASS_PROXY_MAX_FREE_SOCKETS', 2, 1, 16)), scheduling: 'lifo', timeout: 60_000 };
+// Proxy agents must not take Agent `timeout`: SocksProxyAgent/HttpsProxyAgent apply it to the
+// in-tunnel raw socket and destroy the request (~60s socket hang up) before NON_STREAM_ATTEMPT_MS /
+// SSE idle can fire. In-flight deadlines stay on req.setTimeout / setIdleTimeout only.
+const proxyAgentOptions = { keepAlive: true, maxSockets: proxySockets, maxFreeSockets: Math.min(proxySockets, boundedEnv('CLINE_PASS_PROXY_MAX_FREE_SOCKETS', 2, 1, 16)), scheduling: 'lifo' };
+function applyNestedSocketTimeouts(socket, ms) {
+  for (let current = socket; current; current = current._parent || current.socket) {
+    if (typeof current.setTimeout === 'function') current.setTimeout(ms);
+  }
+}
 const directHttpAgent = new http.Agent(directAgentOptions);
 const directHttpsAgent = new https.Agent(directAgentOptions);
 const proxyAgents = new Map();
@@ -3909,12 +3917,20 @@ function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, acc
           setIdleTimeout(ms) {
             // Node detaches IncomingMessage.socket once a complete response ends;
             // buffered first events still need forwarding, but no idle socket remains.
-            if (res.socket && !res.destroyed) { req.setTimeout(ms); res.setTimeout(ms); }
+            if (res.socket && !res.destroyed) {
+              req.setTimeout(ms);
+              res.setTimeout(ms);
+              applyNestedSocketTimeouts(res.socket, ms);
+              if (req.socket && req.socket !== res.socket) applyNestedSocketTimeouts(req.socket, ms);
+            }
           } }); }
       });
     } catch (error) { fail(error); return; }
     req.on('error', fail);
-    req.setTimeout(timeoutMs, () => { const error = new Error('upstream timeout'); response?.destroy(error); req.destroy(error); });
+    const onRequestTimeout = () => { const error = new Error('upstream timeout'); response?.destroy(error); req.destroy(error); };
+    req.setTimeout(timeoutMs, onRequestTimeout);
+    req.on('socket', (socket) => { applyNestedSocketTimeouts(socket, timeoutMs); });
+    if (req.socket) applyNestedSocketTimeouts(req.socket, timeoutMs);
     if (signal) {
       if (signal.aborted) { onAbort(); return; }
       signal.addEventListener('abort', onAbort, { once: true });
