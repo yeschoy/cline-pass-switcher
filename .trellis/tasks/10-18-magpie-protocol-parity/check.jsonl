@@ -1,0 +1,10 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Quality Check section for backend verification gates"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify fail envelopes and stream error contracts"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify Chat byte-stability and handleChat invariants"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify no body leakage and inboundProtocol projection"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-check adapter/server/test consistency"}
+{"file": ".trellis/tasks/10-18-magpie-protocol-parity/research/synthesis-round4.md", "reason": "AC coverage against frozen A–D scope"}
+{"file": ".trellis/tasks/10-18-magpie-protocol-parity/research/client-validation-rules-round4.md", "reason": "Check Codex/Claude hard rules are test-covered"}
+{"file": ".trellis/tasks/10-18-magpie-protocol-parity/research/magpie-pairing-algorithms-round4.md", "reason": "Check heal idempotency and interrupted copy match"}
+{"file": ".trellis/tasks/10-18-magpie-protocol-parity/prd.md", "reason": "Acceptance criteria AC1–AC8 checklist"}
+{"file": ".trellis/tasks/10-18-magpie-protocol-parity/implement.md", "reason": "Slice order and validation commands"}

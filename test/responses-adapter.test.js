@@ -99,13 +99,32 @@ test('responsesToChat rejects unsupported fields, hosted tools, files and unpair
     [{ model: 'm', tools: [{ type: 'web_search' }] }, 'tools[0].type'],
     [{ model: 'm', input: [{ type: 'message', role: 'user', content: [{ type: 'input_file', file_id: 'file_1' }] }] }, 'input_file'],
     [{ model: 'm', input: [{ type: 'message', role: 'user', content: [{ type: 'input_image', file_id: 'file_1' }] }] }, 'file_id'],
-    [{ model: 'm', input: [{ type: 'function_call_output', call_id: 'missing', output: 'x' }] }, 'call_id'],
     [{ model: 'm', input: [{ type: 'function_call', call_id: 'dup', name: 'a', arguments: '{}' }, { type: 'function_call', call_id: 'dup', name: 'b', arguments: '{}' }] }, 'call_id'],
     [{ model: 'm', tool_choice: { type: 'allowed_tools', tools: [] } }, 'tool_choice'],
   ];
   for (const [body, needle] of rejects) {
     assert.throws(() => responsesToChat(body), (err) => err instanceof AdapterError && err.status === 400 && `${err.message} ${err.param || ''}`.includes(needle));
   }
+});
+
+test('responsesToChat heals unanswered calls and orphan outputs', () => {
+  const unanswered = responsesToChat({
+    model: 'm',
+    input: [
+      { type: 'message', role: 'user', content: 'go' },
+      { type: 'function_call', call_id: 'c1', name: 'f', arguments: '{}' },
+      { type: 'message', role: 'user', content: 'next' },
+    ],
+  }).chatBody;
+  const tool = unanswered.messages.find((m) => m.role === 'tool');
+  assert.equal(tool.tool_call_id, 'c1');
+  assert.match(tool.content, /interrupted/);
+
+  const orphan = responsesToChat({
+    model: 'm',
+    input: [{ type: 'function_call_output', call_id: '', output: 'notice' }],
+  }).chatBody;
+  assert.ok(orphan.messages.some((m) => m.role === 'user' && String(m.content).includes('notice')));
 });
 
 test('chatToResponses builds text, tools, custom/local_shell, incomplete and null usage', () => {
@@ -315,4 +334,59 @@ test('Responses stream closes the message before late reasoning', () => {
 test('responsesErrorBody keeps OpenAI envelope fields', () => {
   assert.deepEqual(responsesErrorBody(401, { message: 'unauthorized', type: 'auth_error' }).error.type, 'auth_error');
   assert.equal(responsesErrorBody(400, { message: 'bad', param: 'store' }).error.param, 'store');
+});
+
+test('Responses stream finish rejects empty completed ([DONE] alone)', () => {
+  const ctx = responsesToChat({ model: 'm', input: 'hi' }).ctx;
+  const encoder = createResponsesStreamEncoder(ctx);
+  const events = parseSse(encoder.start() + encoder.finish());
+  assert.equal(events.at(-1).type, 'response.failed');
+  assert.match(events.at(-1).data.response.error.message, /empty response/i);
+  assert.equal(encoder.hasOutput, false);
+});
+
+test('tool_search degrades to Chat function and round-trips', () => {
+  const { chatBody, ctx } = responsesToChat({
+    model: 'm',
+    input: [
+      { type: 'message', role: 'user', content: 'find' },
+      { type: 'tool_search_call', call_id: 'c1', name: 'tool_search', arguments: '{"query":"ls"}' },
+      { type: 'function_call_output', call_id: 'c1', output: '[]' },
+    ],
+    tools: [{ type: 'tool_search' }],
+  });
+  assert.equal(chatBody.tools[0].function.name, 'tool_search');
+  assert.equal(chatBody.messages.find((m) => m.role === 'assistant').tool_calls[0].function.name, 'tool_search');
+  const out = chatToResponses({
+    choices: [{
+      finish_reason: 'tool_calls',
+      message: {
+        content: null,
+        tool_calls: [{ id: 'c2', type: 'function', function: { name: 'tool_search', arguments: '{"query":"x"}' } }],
+      },
+    }],
+  }, ctx);
+  assert.equal(out.output[0].type, 'tool_search_call');
+  assert.match(out.output[0].id, /^tsc_/);
+});
+
+test('responsesToChat mints missing call_id and bounds long ids', () => {
+  const long = `call_${'z'.repeat(80)}`;
+  const { chatBody } = responsesToChat({
+    model: 'm',
+    input: [
+      { type: 'function_call', name: 'f', arguments: '{}' },
+      { type: 'function_call', call_id: long, name: 'g', arguments: '{}' },
+      { type: 'function_call_output', call_id: long, output: 'ok' },
+    ],
+  });
+  const assistant = chatBody.messages.find((m) => m.role === 'assistant');
+  assert.match(assistant.tool_calls[0].id, /^call_/);
+  assert.ok(assistant.tool_calls[1].id.length <= 64);
+  const tools = chatBody.messages.filter((m) => m.role === 'tool');
+  assert.equal(tools.length, 2);
+  assert.match(tools[0].content, /interrupted/);
+  assert.equal(tools[0].tool_call_id, assistant.tool_calls[0].id);
+  assert.equal(tools[1].tool_call_id, assistant.tool_calls[1].id);
+  assert.equal(tools[1].content, 'ok');
 });

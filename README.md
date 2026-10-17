@@ -279,9 +279,15 @@ NewAPI 将渠道 Base URL 指向 `http://switcher:3123/v1` 即可使用现有流
 | Anthropic Messages | `POST /v1/messages` | Messages 子集；另接受 `x-api-key` |
 | Anthropic 计 token | `POST /v1/messages/count_tokens` | 本地启发式估算，不占账号、不走网络、不计入对话统计 |
 
-**支持：** `stream` true/false；文本；图片 URL / data URL；Responses `function` / 降级后的 `custom`（apply_patch）与 `local_shell`；Anthropic 自定义工具、`tool_use` / `tool_result`；`tool_choice` 与并行开关；`max_output_tokens` / `max_tokens`、temperature、top_p；Responses `text.format` JSON/JSON Schema；推理展示与当前工具循环内的回传（本网关签发的 `encrypted_content` / `signature`）；`prompt_cache_key` 与 Claude `metadata.user_id` 会话粘性。
+**支持：** `stream` true/false；文本；图片 URL / data URL；Responses `function` / 降级后的 `custom`（apply_patch）、`local_shell` 与 `tool_search`（映射为 Chat function 并回译）；Anthropic 自定义工具、`tool_use` / `tool_result`；`tool_choice` 与并行开关；`max_output_tokens` / `max_tokens`（Anthropic 缺省填 4096）、temperature、top_p；Responses `text.format` JSON/JSON Schema；推理展示与当前工具循环内的回传（本网关签发的 `encrypted_content` / `signature`）；`prompt_cache_key` 与 Claude `metadata.user_id` 会话粘性。
 
-**明确拒绝（账号租约与网络之前返回该协议格式的 400）：** Responses `previous_response_id`、`conversation`、`background: true`、`store: true`、`context_management`、`prompt`、`item_reference`；托管/服务端工具（`web_search*`、`file_search`、`code_interpreter`、`mcp`、`computer*`、`image_generation` 及 Anthropic 带 `type` 的 server tools）；`file_id` / `input_file` / `document`。未知顶层字段忽略。
+**Tool 历史 heal（仅 Responses / Anthropic → Chat，Chat 透传路径不变）：** 未回答的 tool call 合成固定 interrupted 文案；孤儿 / 空 `call_id` 的 output 降为 user 文本（不造假 call）；乱序结果按声明序重排；干净交换幂等。缺 `call_id` 会稳定铸造；Responses 出站 `call_id` ≤64；Anthropic `tool_use.id` 非法字符可逆编码为 `mp_…`。
+
+**流式失败形态：** 畸形上游 SSE JSON、仅有 `[DONE]` 而无有效输出时，Responses 发 `response.failed`（禁止空 `response.completed`）；Anthropic 先关闭已开 content block 再发 `error`，失败路径不发 `message_stop`。带 signature 的空 thinking 仍含 `thinking:""`。
+
+**模型族 reasoning 回传（按请求 model 名）：** DeepSeek 含 tool 的 assistant 缺 reasoning 时写入空格占位 `reasoning_content: " "`；Kimi / MiMo 将 `reasoning_details` 折成字符串；GLM 仅回传明文、不套 DeepSeek 占位；内容含 `<think>…</think>` 时拆到 reasoning（MiniMax 启发式）。
+
+**明确拒绝（账号租约与网络之前返回该协议格式的 400）：** Responses `previous_response_id`、`conversation`、`background: true`、`store: true`、`context_management`、`prompt`、`item_reference`；托管/服务端工具（`web_search*`、`file_search`、`code_interpreter`、`mcp`、`computer*`、`image_generation` 及 Anthropic 带 `type` 的 server tools；`tool_search` 已改为 function 降级）；`file_id` / `input_file` / `document`。未知顶层字段忽略。
 
 Codex CLI（`~/.codex/config.toml`），关闭托管工具并把模型写成 `cline-pass/*` 或已有精确别名：
 

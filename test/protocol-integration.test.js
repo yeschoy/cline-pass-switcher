@@ -121,6 +121,13 @@ test('three inbound protocols share one Chat upstream with protocol-shaped IO', 
           res.write('data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n');
           return setTimeout(() => res.end(), 5);
         }
+        if (body.model === 'corrupt-sse') {
+          res.write('data: {not-valid-json\n\n');
+          return res.end('data: [DONE]\n\n');
+        }
+        if (body.model === 'empty-done') {
+          return res.end('data: [DONE]\n\n');
+        }
         if (body.model === 'hold') {
           res.write('data: {"choices":[{"delta":{"content":"started"}}]}\n\n');
           streamPending.push(res);
@@ -146,7 +153,7 @@ test('three inbound protocols share one Chat upstream with protocol-shaped IO', 
       { id: 'a', name: 'A', key: 'key-a', enabled: true, maxConcurrent: 0, perModel: {} },
       { id: 'b', name: 'B', key: 'key-b', enabled: true, maxConcurrent: 0, perModel: {} },
     ],
-    knownModels: ['ok', 'pre-fail', 'busy', 'post-error', 'drop', 'truncated', 'hold', 'cline-pass/glm-5.2'],
+    knownModels: ['ok', 'pre-fail', 'busy', 'post-error', 'drop', 'truncated', 'hold', 'corrupt-sse', 'empty-done', 'cline-pass/glm-5.2'],
     perModel: { 'pre-fail': { upstreams: ['one'], pinMode: 'strict' }, busy: { upstreams: ['one', 'two'], pinMode: 'strict' } },
     errorRules: [{ id: 'ban-500', scope: 'account', action: 'hard-quarantine', when: { statuses: [500], body_contains: ['account failed'] } }],
   });
@@ -203,6 +210,12 @@ test('three inbound protocols share one Chat upstream with protocol-shaped IO', 
   assert.ok(parseSse(dropped.text).some((event) => event.type === 'response.failed'), dropped.text);
   const truncated = await rawStream(port, '/v1/responses', { model: 'truncated', stream: true, input: 'cut' }, auth);
   assert.ok(parseSse(truncated.text).some((event) => event.type === 'response.failed'), truncated.text);
+  const corrupt = await rawStream(port, '/v1/responses', { model: 'corrupt-sse', stream: true, input: 'bad' }, auth);
+  assert.ok(parseSse(corrupt.text).some((event) => event.type === 'response.failed'), corrupt.text);
+  const corruptAnthropic = await rawStream(port, '/v1/messages', { model: 'corrupt-sse', stream: true, messages: [{ role: 'user', content: 'bad' }], max_tokens: 16 }, auth);
+  assert.ok(parseSse(corruptAnthropic.text).some((event) => event.type === 'error'), corruptAnthropic.text);
+  const emptyDone = await rawStream(port, '/v1/responses', { model: 'empty-done', stream: true, input: 'none' }, auth);
+  assert.ok(parseSse(emptyDone.text).some((event) => event.type === 'response.failed'), emptyDone.text);
   const truncatedLog = await waitUntil(async () => {
     const page = await (await fetch(`http://127.0.0.1:${port}/api/logs/requests?requestedModel=truncated&limit=5`)).json();
     return page.items?.[0];

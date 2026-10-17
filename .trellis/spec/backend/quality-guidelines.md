@@ -257,7 +257,11 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - Chat Completions validates the top-level JSON object and model identifier locally, but deliberately does not validate or normalize `messages[*].content`.
 - Empty strings, whitespace-only strings, `null`, missing content, empty arrays, empty multimodal parts, and empty tool results pass through unchanged. This preserves compatibility with clients that represent a successful no-output tool call as `""` or `"\n"`; the upstream owns message-role/content schema acceptance.
 - `messages: []` remains compatible.
-- `POST /v1/responses` and `POST /v1/messages` convert to Chat Completions before leasing (`handleChat(..., adapter)`). Unsupported stateful/hosted/file inputs return that protocol's 400 envelope with zero account or network work. Chat Completions aliases stay byte-compatible (`adapter === null`). `POST /v1/messages/count_tokens` authenticates, converts, estimates locally, and never leases or records chat statistics.
+- `POST /v1/responses` and `POST /v1/messages` convert to Chat Completions before leasing (`handleChat(..., adapter)`). Unsupported stateful/hosted/file inputs (except Responses `tool_search`, which degrades to a Chat function) return that protocol's 400 envelope with zero account or network work. Chat Completions aliases stay byte-compatible (`adapter === null`). `POST /v1/messages/count_tokens` authenticates, converts, estimates locally, and never leases or records chat statistics.
+- Before lease, adapter `toChat` runs Magpie-aligned **tool-history heal** on the converted Chat messages (Responses also heals `input[]` first): unanswered calls get a synthetic tool result with the fixed English interrupted copy; orphan/empty-`call_id` outputs become user text; duplicate results keep the first; clean exchanges stay idempotent. Mint missing call ids **before** pairing so interrupted synthesis can see them. Chat aliases never run heal.
+- Call-id hygiene: outbound Responses `call_id` values are bounded to ≤64 with a stable map shared by call and output; Anthropic `tool_use`/`tool_result` ids are charset-safe on the wire (`mp_` + base64url) and restored on the way back. Stream tool fragments with empty ids are minted once per choice/index and later empty id fields are stripped.
+- Adapter stream finalization must not treat empty success as success: malformed upstream SSE JSON increments `corruptCount` and forces protocol failure; Responses must not emit empty `response.completed` when there was no valid choice/output (`[DONE]` alone is insufficient); Anthropic `fail` closes any open content block and emits `error` without a trailing successful `message_stop`. Signed empty thinking blocks still include `"thinking":""`.
+- Model-name reasoning replay (Chat upstream only): `deepseek` tool turns missing reasoning get a single-space `reasoning_content` placeholder; Kimi/MiMo fold `reasoning_details` into `reasoning_content`; GLM folds spellings without the DeepSeek placeholder; MiniMax-style `<think>` tags are split when present. Existing `clps1.` seal replay in the current tool loop remains first priority.
 
 #### Abort and SSE lifecycle
 
@@ -312,6 +316,9 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 | Chat `model` is missing, blank, non-string, or over 300 characters | `400` |
 | Any `messages.<index>.content` value is empty, whitespace-only, `null`, missing, or an empty array/part | Do not reject or normalize locally; preserve it in the upstream request and return the upstream outcome |
 | `POST /v1/responses` / `POST /v1/messages` unsupported subset | protocol-shaped 400; no account/upstream request |
+| Adapter stream: corrupt SSE / empty completed / Anthropic fail mid-block | protocol `response.failed` or Anthropic `error` (close open block; no false success end) |
+| Unanswered / orphan tool history on Responses/Anthropic | heal before lease (interrupted copy / user text); not a hard 400 for those shapes |
+| Responses `tool_search` | degrade to Chat function and round-trip; not hosted 400 |
 | `POST /v1/messages` / `count_tokens` `x-api-key` | accepted as the client key; ignored on Chat/Responses; conflict with Authorization → 401 |
 | Request body exceeds 50 MiB | Reject promptly with `413` as soon as the limit is crossed, even if the client pauses before request end; discard/drain the remaining body without buffering or destroying the socket |
 | No statically available account | `503` with a redacted error |
@@ -428,7 +435,7 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 - a wrapped error after SSE output starts updates the existing provider trace and future account state without replaying or adding a pseudo-attempt;
 - a downstream close after observed `[DONE]` is `200 / success`; a close before `[DONE]` and a non-streaming cancellation are `499 / client_cancelled`, abort upstream work, stop failover, release capacity, and add no error attempt, usage, error/health result, or account action;
 - empty/whitespace/null/missing/empty-array message content and a newline-only tool result reach the local mock upstream unchanged instead of producing a Switcher validation error;
-- authenticated `POST /v1/responses` and `POST /v1/messages` convert through the Chat chain; unsupported subset fields return protocol-shaped 400 with zero upstream/lease; Chat aliases remain unchanged (`test/protocol-integration.test.js`);
+- authenticated `POST /v1/responses` and `POST /v1/messages` convert through the Chat chain; unsupported subset fields return protocol-shaped 400 with zero upstream/lease; Chat aliases remain unchanged; heal/id/stream-fail/reasoning-replay contracts are pinned by `test/tool-pairing.test.js`, `test/protocol-ids.test.js`, `test/reasoning-replay.test.js`, adapter unit tests, and `test/protocol-integration.test.js`;
 - oversized clients receive prompt `413` before request end while request buffering remains bounded;
 - persisted history contains no account key or raw session value;
 - non-stream and fragmented/oversized streaming responses count only explicit usage, preserve known zero versus missing, and finalize global/account/resolved-model statistics once across provider retry, account replacement, success, failure and disconnect;
