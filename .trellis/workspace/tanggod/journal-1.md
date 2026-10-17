@@ -1285,3 +1285,25 @@ Committed-main raw-detail code is deployed raw-off at 512 MiB with 32 Legacy-own
 ### Status
 
 [OK] **Completed**
+
+
+## Session 53: HTML 429 按账号退避
+<!-- trellis-session: v=2 fp=9d5c1314af9c3989 -->
+
+**Date**: 2026-10-18
+**Task**: HTML 429 按账号退避
+**Branch**: `main`
+
+### Summary
+
+诊断 NewAPI HTML 429；backoff 改为按 account.id；对外文案改为 gateway HTML throttle；IP 限流假说记为待研。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `278b975` | fix: HTML 429 按账号退避并澄清限流文案 |
+
+### Status
+
+[OK] **Completed**
