@@ -151,17 +151,34 @@ test('request log shows and filters the inbound protocol with consistent column 
   assert.match(html, /<select id="logProtocol"[^>]*><option value="">协议：全部<\/option><option value="chat">Chat Completions<\/option><option value="responses">Responses<\/option><option value="anthropic">Anthropic Messages<\/option><\/select>/);
   const header = html.slice(html.indexOf('<th>时间</th><th>请求 ID</th>'), html.indexOf('<tbody id="logBody">'));
   const columns = (header.match(/<th>/g) || []).length;
-  assert.equal(columns, 10);
+  assert.equal(columns, 12);
   assert.match(header, /<th>入站协议<\/th>/);
+  assert.match(header, /<th>计划上游<\/th>/);
+  assert.match(header, /<th>实际上游<\/th>/);
+  assert.match(header, /<th>用量<\/th>/);
+  assert.doesNotMatch(header, /供应商路径/);
   const loadLogs = html.slice(html.indexOf('async function loadLogs'), html.indexOf('async function clearLogs'));
   assert.match(loadLogs, /if\(type==='requests'&&\$\('#logProtocol'\)\.value\)params\.set\('inboundProtocol',\$\('#logProtocol'\)\.value\)/);
   assert.match(loadLogs, /inboundProtocolLabel\(x\.inboundProtocol\)/);
+  assert.match(loadLogs, /planUpstreamLabel\(x,type\)/);
+  assert.match(loadLogs, /actualUpstreamLabel\(x,type\)/);
+  assert.match(loadLogs, /pinMatchClass\(targets,x\.actualProvider\)/);
+  assert.match(loadLogs, /usageLogLabel\(x,type\)/);
   const row = loadLogs.slice(loadLogs.indexOf('return `<tr>'), loadLogs.indexOf('</tr>`;}'));
   assert.equal((row.match(/<td[ >]/g) || []).length, columns);
   const logSpans = [...html.matchAll(/(logBody|logChainRow)[^\n]*?colspan="(\d+)"/g)].map((match) => Number(match[2]));
   assert.ok(logSpans.length >= 3 && logSpans.every((span) => span === columns), String(logSpans));
   assert.match(html, /'logStream','logProtocol','logOverflow'/);
   assert.match(html, /function inboundProtocolLabel\(value\)\{return \(\{chat:'Chat Completions',responses:'Responses',anthropic:'Anthropic Messages'\}\)\[value\]\|\|'—';\}/);
+  assert.match(html, /function planUpstreamLabel/);
+  assert.match(html, /function actualUpstreamLabel/);
+  assert.match(html, /function pinMatchClass/);
+  assert.match(html, /function usageLogLabel/);
+  assert.match(html, /return targets\.length\?targets\.join\(' → '\):'自动'/);
+  assert.match(html, /未报告/);
+  assert.match(html, /--bg: #f4f6f9/);
+  assert.doesNotMatch(html, /--bg: #0f1115/);
+  assert.doesNotMatch(html, /prefers-color-scheme|theme-toggle|darkMode|localStorage\.setItem\(['"]theme/);
 });
 
 test('error rule presets, pipeline controls and statistics rendering retain strict boundaries', () => {

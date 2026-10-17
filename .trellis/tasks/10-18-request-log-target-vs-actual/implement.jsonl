@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Ordinary request projection allowlist and sensitive-data boundary for new usage token fields"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Singleton only injection and provider plan/actual separation must not regress"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Console HTML/CSS/JS escape, table contract, and a11y expectations for log UI"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Change crosses server projection, JSONL store, public UI, and tests"}
+{"file": ".trellis/tasks/10-18-request-log-target-vs-actual/prd.md", "reason": "Accepted product scope and acceptance criteria"}
+{"file": ".trellis/tasks/10-18-request-log-target-vs-actual/design.md", "reason": "Contracts for usage fields, column layout, and light theme"}

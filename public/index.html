@@ -6,8 +6,8 @@
 <title>Cline Pass 上游控制台</title>
 <style>
   :root {
-    --bg: #0f1115; --card: #171a21; --card2: #1d212b; --border: #2a2f3c;
-    --text: #e6e9f0; --dim: #8b93a5; --accent: #4f8cff; --green: #34c77b; --orange: #f0a53c; --red: #e5534b;
+    --bg: #f4f6f9; --card: #ffffff; --card2: #f0f2f5; --border: #d8dde6;
+    --text: #1a1f2c; --dim: #6b7385; --accent: #2f6fed; --green: #1a9a57; --orange: #c47a12; --red: #d6453d;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font-family: "Segoe UI", system-ui, -apple-system, sans-serif; padding: 24px; width:min(100%,1800px); margin: 0 auto; }
@@ -48,13 +48,13 @@
   .modal-box { width:min(680px,calc(100% - 24px)); max-height:80vh; overflow:auto; background:var(--card); border:1px solid var(--border); border-radius:10px; padding:20px; }
   @media(max-width:600px){ body{padding:12px}.card{padding:12px}.drawer{padding:16px} }
   th { text-align: left; color: var(--dim); font-weight: 500; padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  td { padding: 9px 10px; border-bottom: 1px solid #22262f; vertical-align: middle; }
-  tr:hover td { background: #1a1e27; }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:hover td { background: #eef2f8; }
   .mono { font-family: Consolas, monospace; font-size: 12.5px; }
   .dim { color: var(--dim); }
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; background: #243447; color: #9cc3ff; }
-  .badge.green { background: #1d3a2a; color: var(--green); }
-  .badge.orange { background: #3d2f1a; color: var(--orange); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; background: #e8f0fe; color: #1a56db; }
+  .badge.green { background: #e6f6ec; color: var(--green); }
+  .badge.orange { background: #fff3e0; color: var(--orange); }
   select, input[type=number] { background: var(--card2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font-size: 12.5px; max-width: 200px; }
   input[type=number] { width: 64px; }
   .row-actions { display: flex; gap: 6px; }
@@ -76,7 +76,7 @@
   .empty { color: var(--dim); font-size: 13px; padding: 14px 10px; }
   .match { color: var(--green); } .mismatch { color: var(--orange); }
   tr.row-new td { animation: newflash 4s ease-out; }
-  @keyframes newflash { 0% { background: #1f3d2a; } 70% { background: #1f3d2a; } 100% { background: transparent; } }
+  @keyframes newflash { 0% { background: #e6f6ec; } 70% { background: #e6f6ec; } 100% { background: transparent; } }
   /* 上游优先级/排除面板 */
   .ups-wrap summary { list-style: none; cursor: pointer; padding: 4px 0; display: block; }
   .ups-wrap summary::-webkit-details-marker { display: none; }
@@ -84,7 +84,7 @@
   .ups-wrap[open] summary::before { content: '▾ '; }
   .ups-wrap summary:hover .ups-sum { color: var(--text); }
   .ups-panel { background: var(--card2); border: 1px solid var(--border); border-radius: 8px; padding: 6px; max-height: min(520px, 65vh); overflow-y: auto; min-width: 430px; }
-  .uprow { display: flex; align-items: center; gap: 10px; padding: 7px 6px; font-size: 12.5px; border-bottom: 1px dashed #232733; min-height: 40px; flex-wrap: nowrap; }
+  .uprow { display: flex; align-items: center; gap: 10px; padding: 7px 6px; font-size: 12.5px; border-bottom: 1px dashed var(--border); min-height: 40px; flex-wrap: nowrap; }
   .uprow:last-child { border-bottom: none; }
   .uprow.excluded .upslug, .uprow.excluded .upname { opacity: .5; }
   .upno { flex: none; width: 24px; height: 24px; border-radius: 50%; background: var(--card); border: 1px solid var(--border); color: var(--accent); font-weight: 700; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; }
@@ -112,9 +112,9 @@
   .ups-tools { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
   .ups-sum { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 2px 0; }
   .ups-sum .sum-auto { color: var(--dim); font-size: 12px; }
-  .ups-sum .sum-chip { background: #243447; color: #9cc3ff; border-radius: 10px; padding: 2px 9px; font-size: 11.5px; font-family: Consolas, monospace; white-space: nowrap; }
+  .ups-sum .sum-chip { background: #e8f0fe; color: #1a56db; border-radius: 10px; padding: 2px 9px; font-size: 11.5px; font-family: Consolas, monospace; white-space: nowrap; }
   .ups-sum .sum-chip.sum-more { background: var(--card2); color: var(--dim); }
-  .ups-sum .sum-chip.sum-ex { background: #3d221f; color: #ff8f86; }
+  .ups-sum .sum-chip.sum-ex { background: #fdecea; color: #c62828; }
   .trace { margin-top: 8px; font-size: 12.5px; word-break: break-all; }
   .trace .tr { font-family: Consolas, monospace; }
   .trace .tr.ok { color: var(--green); }
@@ -237,7 +237,7 @@
     <div class="card">
       <div class="toolbar"><h2 id="logTitle" style="margin:0">最终请求结果（每个请求一条）</h2><span id="logSectionStatus" class="badge green" aria-live="polite">当前板块：请求日志</span><input id="logType" type="hidden" value="requests"><input id="logFrom" type="datetime-local" title="开始时间"><input id="logTo" type="datetime-local" title="结束时间"><input id="logRequestId" placeholder="请求 ID"><input id="logModel" placeholder="模型"><input id="logAccount" placeholder="账号"><input id="logStatus" placeholder="状态码"><select id="logResult"><option value="">结果：全部</option><option value="success">成功</option><option value="client_cancelled">客户端取消</option><option value="failed">失败</option></select><input id="logProvider" placeholder="供应商"><input id="logStrategy" placeholder="策略/错误类别"><select id="logStream"><option value="">流式：全部</option><option value="true">流式</option><option value="false">非流式</option></select><select id="logProtocol" title="入站协议"><option value="">协议：全部</option><option value="chat">Chat Completions</option><option value="responses">Responses</option><option value="anthropic">Anthropic Messages</option></select><select id="logOverflow"><option value="">容量：全部</option><option value="true">容量溢出</option><option value="false">未溢出</option></select><select id="logSwitched"><option value="">换号：全部</option><option value="true">已换号</option><option value="false">未换号</option></select><button class="ghost" onclick="loadLogs()">筛选</button><button class="ghost" onclick="clearLogs()">清空当前日志</button></div>
       <p id="logDescription" class="dim">展示最终请求结果，每个请求一条；旧记录可能缺少 result，界面仅按历史状态显示 legacy_failed，不迁移或改写历史 JSONL。</p>
-      <div class="table-wrap" tabindex="0" role="region" aria-label="日志表，可横向滚动"><table style="min-width:1320px"><thead><tr><th>时间</th><th>请求 ID</th><th>请求/实际模型</th><th>入站协议</th><th>账号</th><th>策略/原因</th><th>状态 / 结果</th><th>供应商路径</th><th>亲和键/请求体键/缓存</th><th>详情</th></tr></thead><tbody id="logBody"><tr><td colspan="10" class="empty">暂无记录</td></tr></tbody></table></div>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="日志表，可横向滚动"><table style="min-width:1580px"><thead><tr><th>时间</th><th>请求 ID</th><th>请求/实际模型</th><th>入站协议</th><th>账号</th><th>策略/原因</th><th>状态 / 结果</th><th>计划上游</th><th>实际上游</th><th>用量</th><th>亲和键/请求体键/缓存</th><th>详情</th></tr></thead><tbody id="logBody"><tr><td colspan="12" class="empty">暂无记录</td></tr></tbody></table></div>
       <button id="logNext" class="ghost" onclick="loadLogs(true)" style="margin-top:10px">下一页</button>
     </div>
   </section>
@@ -2104,7 +2104,7 @@ async function openLogChain(requestId,attemptIndex,detailCallId,detailProfile,bu
   const id=LOG_CHAIN_ID,query=LOG_QUERY_ID,controller=new AbortController();
   LOG_CHAIN={requestId,attemptIndex,detailCallId,detailProfile,trigger:button,bodies:[],loaded:false};LOG_CHAIN_CONTROLLER=controller;
   button.setAttribute('aria-expanded','true');
-  button.closest('tr').insertAdjacentHTML('afterend',`<tr id="logChainRow"><td colspan="10"><div id="logChainPanel" class="log-chain-panel" role="region" aria-label="所选失败调用的请求链路"><div class="toolbar"><strong id="logChainTitle">关联详情加载中…</strong><button id="logChainClose" type="button" class="ghost" onclick="closeLogChain()">关闭链路</button></div><p id="logChainStatus" role="status" aria-live="polite">只加载元数据，不读取正文</p><p id="logChainAttempts" class="dim"></p><p id="logChainWarning"></p><div id="logChainLegs"></div><label for="logChainText">所选正文（可能为未脱敏原文）</label><textarea id="logChainText" readonly rows="12"></textarea><button id="logChainCopy" type="button" class="ghost" disabled onclick="copyLogChainBody()">复制已加载正文</button></div></td></tr>`);
+  button.closest('tr').insertAdjacentHTML('afterend',`<tr id="logChainRow"><td colspan="12"><div id="logChainPanel" class="log-chain-panel" role="region" aria-label="所选失败调用的请求链路"><div class="toolbar"><strong id="logChainTitle">关联详情加载中…</strong><button id="logChainClose" type="button" class="ghost" onclick="closeLogChain()">关闭链路</button></div><p id="logChainStatus" role="status" aria-live="polite">只加载元数据，不读取正文</p><p id="logChainAttempts" class="dim"></p><p id="logChainWarning"></p><div id="logChainLegs"></div><label for="logChainText">所选正文（可能为未脱敏原文）</label><textarea id="logChainText" readonly rows="12"></textarea><button id="logChainCopy" type="button" class="ghost" disabled onclick="copyLogChainBody()">复制已加载正文</button></div></td></tr>`);
   $('#logChainClose').focus();
   try{
     const group=await api('/api/logs/details/'+encodeURIComponent(requestId),null,'GET',false,{signal:controller.signal});
@@ -2135,8 +2135,35 @@ async function copyLogChainBody(){
   catch{if(id===LOG_CHAIN_ID&&bodyVersion===LOG_CHAIN_BODY_ID&&logChainVisible()){$('#logChainStatus').textContent='复制失败，请在文本框中选择并手动复制';$('#logChainText').focus();$('#logChainText').select();}}
 }
 for(const id of ['logFrom','logTo','logRequestId','logModel','logAccount','logStatus','logResult','logProvider','logStrategy','logStream','logProtocol','logOverflow','logSwitched'])$('#'+id).addEventListener('input',()=>{
-  LOG_QUERY_ID++;LOG_CURSOR=null;resetLogChain();$('#logBody').innerHTML='<tr><td colspan="10" class="empty">筛选已改变，请点击筛选</td></tr>';$('#logNext').disabled=true;
+  LOG_QUERY_ID++;LOG_CURSOR=null;resetLogChain();$('#logBody').innerHTML='<tr><td colspan="12" class="empty">筛选已改变，请点击筛选</td></tr>';$('#logNext').disabled=true;
 });
+function planUpstreamLabel(x,type){
+  if(type==='errors'){const path=Array.isArray(x?.providerPath)?x.providerPath:[];return path.length?path.join(' → '):(x?.targetProvider||'—');}
+  const targets=Array.isArray(x?.targetProviders)?x.targetProviders:[];
+  return targets.length?targets.join(' → '):'自动';
+}
+function actualUpstreamLabel(x,type){
+  if(type==='errors')return x?.actualProvider||'未知';
+  return x?.actualProvider||'未知';
+}
+function pinMatchClass(targets,actual){
+  if(!actual||!Array.isArray(targets)||!targets.length)return '';
+  return actual===targets[0]?'match':'mismatch';
+}
+function usageLogLabel(x,type){
+  if(type==='errors')return '—';
+  const fmt=(n)=>Number.isSafeInteger(n)&&n>=0?String(n):null;
+  const input=fmt(x?.inputTokens),output=fmt(x?.outputTokens),cached=fmt(x?.cachedTokens);
+  if(input===null&&output===null&&cached===null)return '未报告';
+  const line1=`${escapeHtml(input??'未报告')} / ${escapeHtml(output??'未报告')}`;
+  let line2='';
+  if(cached!==null){
+    const ratio=input!==null&&Number(input)>0?` (${((Number(cached)/Number(input))*100).toFixed(1)}%)`:'';
+    line2=`<br><span class="dim">缓存 ${escapeHtml(cached)}${escapeHtml(ratio)}</span>`;
+  }else line2='<br><span class="dim">缓存 未报告</span>';
+  const dur=Number.isSafeInteger(x?.durationMs)&&x.durationMs>=0?`<br><span class="dim">${escapeHtml(String(x.durationMs))} ms</span>`:'';
+  return line1+line2+dur;
+}
 function affinityLogLabel(x){
   const keyLabels={parent_session:'父会话',parent_thread:'父线程',parent_conversation:'父对话',parent_agent:'父 Agent',prompt_cache_key:'Codex prompt_cache_key',session_id:'会话 ID',thread_id:'线程 ID',conversation_id:'对话 ID',agent_id:'Agent ID',message_hmac:'消息 HMAC 回退',none:'无'};
   const confidenceLabels={explicit:'显式',fallback:'回退',none:'无'};
@@ -2162,7 +2189,7 @@ async function loadLogs(next=false){
   if(type==='requests'&&$('#logSwitched').value)params.set('switched',$('#logSwitched').value);
   const r=await api(`/api/logs/${type}?${params}`),items=r.items||[];
   if(queryId!==LOG_QUERY_ID||type!==$('#logType').value)return;
-  $('#logBody').innerHTML=items.map(x=>{const legacyResult=Number(x.status)>=200&&Number(x.status)<400?'success':'legacy_failed';const status=type==='requests'?`${x.status??'—'} / ${x.result||legacyResult}`:`${x.status??'—'} / ${x.upstreamStatus??'—'}`;const affinity=type==='requests'?`${affinityLogLabel(x)} · ${cacheHitLogLabel(x.cacheHit)}`:'—',detailAction=type==='errors'?errorDetailAction(x)+inlineErrorAction(x):'';const blockNote=type==='requests'&&['concurrency','rpm','mixed'].includes(x.blockedBy)?` · 阻塞 ${x.blockedBy}${Number.isSafeInteger(x.retryAfter)?` · Retry-After ${x.retryAfter}s`:''}`:'';return `<tr><td>${escapeHtml(new Date(x.ts).toLocaleString())}</td><td class="mono">${escapeHtml(x.requestId)}</td><td class="mono">${escapeHtml(x.requestedModel||'—')}<br><span class="dim">${escapeHtml(x.resolvedModel||'—')}</span></td><td>${escapeHtml(inboundProtocolLabel(x.inboundProtocol))}</td><td>${escapeHtml(x.accountName||'—')}</td><td>${escapeHtml(x.strategy||x.category||'—')}<br><span class="dim">${escapeHtml((x.selectionReason||x.accountAction||'')+blockNote)}</span></td><td>${escapeHtml(status)}</td><td>${escapeHtml((x.targetProviders||x.providerPath||[]).join(' → ')||x.actualProvider||x.targetProvider||'—')}</td><td>${escapeHtml(affinity)}</td><td>${detailAction}<details><summary>展开</summary><pre>${escapeHtml(JSON.stringify(x,null,2))}</pre></details></td></tr>`;}).join('')||'<tr><td colspan="10" class="empty">暂无记录</td></tr>';
+  $('#logBody').innerHTML=items.map(x=>{const legacyResult=Number(x.status)>=200&&Number(x.status)<400?'success':'legacy_failed';const status=type==='requests'?`${x.status??'—'} / ${x.result||legacyResult}`:`${x.status??'—'} / ${x.upstreamStatus??'—'}`;const affinity=type==='requests'?`${affinityLogLabel(x)} · ${cacheHitLogLabel(x.cacheHit)}`:'—',detailAction=type==='errors'?errorDetailAction(x)+inlineErrorAction(x):'';const blockNote=type==='requests'&&['concurrency','rpm','mixed'].includes(x.blockedBy)?` · 阻塞 ${x.blockedBy}${Number.isSafeInteger(x.retryAfter)?` · Retry-After ${x.retryAfter}s`:''}`:'';const plan=planUpstreamLabel(x,type);const actual=actualUpstreamLabel(x,type);const targets=type==='requests'&&Array.isArray(x.targetProviders)?x.targetProviders:[];const actualClass=type==='requests'?pinMatchClass(targets,x.actualProvider):'';const actualCell=actual==='未知'?`<span class="dim">${escapeHtml(actual)}</span>`:(actualClass?`<span class="${actualClass}">${escapeHtml(actual)}</span>`:escapeHtml(actual));return `<tr><td>${escapeHtml(new Date(x.ts).toLocaleString())}</td><td class="mono">${escapeHtml(x.requestId)}</td><td class="mono">${escapeHtml(x.requestedModel||'—')}<br><span class="dim">${escapeHtml(x.resolvedModel||'—')}</span></td><td>${escapeHtml(inboundProtocolLabel(x.inboundProtocol))}</td><td>${escapeHtml(x.accountName||'—')}</td><td>${escapeHtml(x.strategy||x.category||'—')}<br><span class="dim">${escapeHtml((x.selectionReason||x.accountAction||'')+blockNote)}</span></td><td>${escapeHtml(status)}</td><td class="mono">${escapeHtml(plan)}</td><td class="mono">${actualCell}</td><td>${usageLogLabel(x,type)}</td><td>${escapeHtml(affinity)}</td><td>${detailAction}<details><summary>展开</summary><pre>${escapeHtml(JSON.stringify(x,null,2))}</pre></details></td></tr>`;}).join('')||'<tr><td colspan="12" class="empty">暂无记录</td></tr>';
   LOG_CURSOR=r.nextCursor;$('#logNext').disabled=!LOG_CURSOR;
 }
 async function clearLogs(){const type=$('#logType').value,title=type==='errors'?'错误日志':'请求日志';if(!confirm(`确认清空${title}？此操作不可撤销。`))return;LOG_QUERY_ID++;resetLogChain();await api('/api/logs/'+type,null,'DELETE');if($('#logPanel').hidden||type!==$('#logType').value)return;await loadLogs();}

@@ -721,6 +721,14 @@ test('Chat affinity preserves caller keys, derives Claude keys and logs only saf
   assert.equal(byModel['cache-hit'].cacheHit, true);
   assert.equal(byModel['cache-miss'].cacheHit, false);
   assert.equal(byModel['cache-unknown'].cacheHit, null);
+  assert.equal(byModel['cache-hit'].inputTokens, 10);
+  assert.equal(byModel['cache-hit'].outputTokens, null, 'missing completion_tokens must stay null, not zero');
+  assert.equal(byModel['cache-hit'].cachedTokens, 4);
+  assert.equal(byModel['cache-miss'].inputTokens, 10);
+  assert.equal(byModel['cache-miss'].cachedTokens, 0, 'explicit zero cache remains known zero');
+  assert.equal(byModel['cache-unknown'].inputTokens, null);
+  assert.equal(byModel['cache-unknown'].outputTokens, null);
+  assert.equal(byModel['cache-unknown'].cachedTokens, null, 'absent usage must not fabricate zeros');
   const serialized = JSON.stringify(page);
   for (const forbidden of [rawCodexKey, rawClaudeSession, callerSession, derivedClaudeKey, 'child-session']) assert.equal(serialized.includes(forbidden), false, `ordinary logs leaked ${forbidden}`);
   assert.equal(fs.readFileSync(path.join(running.dir, 'metadata.json'), 'utf8').includes(rawClaudeSession), false);

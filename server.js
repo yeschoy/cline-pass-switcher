@@ -3716,6 +3716,9 @@ function record(modelId, info, detail = detailContext.getStore()) {
     upstreamPromptCacheKeyApplied: info.upstreamPromptCacheKeyApplied === true,
     providerOrderOverridesSticky: info.providerOrderOverridesSticky === true,
     cacheHit: typeof info.cacheHit === 'boolean' ? info.cacheHit : null,
+    inputTokens: Number.isSafeInteger(info.inputTokens) && info.inputTokens >= 0 ? info.inputTokens : null,
+    outputTokens: Number.isSafeInteger(info.outputTokens) && info.outputTokens >= 0 ? info.outputTokens : null,
+    cachedTokens: Number.isSafeInteger(info.cachedTokens) && info.cachedTokens >= 0 ? info.cachedTokens : null,
     bindingSource: BINDING_SOURCES.has(info.bindingSource) ? info.bindingSource : 'none',
     bindingResult: BINDING_RESULTS.has(info.bindingResult) ? info.bindingResult : 'not-applicable',
     preferredAccountId: info.preferredAccountId || null,
@@ -5499,6 +5502,14 @@ function statisticsSegments(trace, finalAccountId, usage, clientDisconnect = fal
 function cacheHitOf(usage) {
   return usage?.cacheFieldPresent === true && usage.cachedTokens !== null ? usage.cachedTokens > 0 : null;
 }
+function usageTokenProjection(usage) {
+  const token = (n) => Number.isSafeInteger(n) && n >= 0 ? n : null;
+  return {
+    inputTokens: token(usage?.inputTokens),
+    outputTokens: token(usage?.outputTokens),
+    cachedTokens: token(usage?.cachedTokens),
+  };
+}
 async function handleChat(req, res, clientKeyId, adapter = null) {
   const detail = detailContext.getStore();
   const requestId = detail?.requestId || crypto.randomUUID();
@@ -5568,6 +5579,7 @@ async function handleChat(req, res, clientKeyId, adapter = null) {
     upstreamPromptCacheKeyApplied: upstreamAffinitySent && affinity.usable,
     providerOrderOverridesSticky,
     cacheHit: cacheHitOf(usage),
+    ...usageTokenProjection(usage),
     bindingSource: selected?.bindingSource || sessionBindingSource(identity),
     bindingResult: selected?.bindingResult || 'not-applicable',
   });

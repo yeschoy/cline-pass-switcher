@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify request projection fields and missing≠0 semantics match implementation"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Verify log table column/escape/contract checks"}
+{"file": ".trellis/tasks/10-18-request-log-target-vs-actual/prd.md", "reason": "Acceptance criteria checklist for quality gate"}
+{"file": ".trellis/tasks/10-18-request-log-target-vs-actual/design.md", "reason": "Column count, usage null rules, and unique light theme must hold"}
+{"file": ".trellis/tasks/10-18-request-log-target-vs-actual/implement.md", "reason": "Validation commands and risky-file review"}
