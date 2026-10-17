@@ -1307,3 +1307,26 @@ Committed-main raw-detail code is deployed raw-off at 512 MiB with 32 Legacy-own
 ### Status
 
 [OK] **Completed**
+
+
+## Session 54: 归档亲和任务并部署 HTML429
+<!-- trellis-session: v=2 fp=b04b903ed4ca1088 -->
+
+**Date**: 2026-10-18
+**Task**: 归档亲和任务并部署 HTML429
+**Branch**: `main`
+
+### Summary
+
+归档 10-14-affinity-log-copy；将 main 4fbe782 发布为 20261018-4fbe782-html429-acct（机器门禁通过，待管理员验收）。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4fbe782` | chore(task): archive 10-14-affinity-log-copy |
+| `278b975` | fix: HTML 429 按账号退避并澄清限流文案 |
+
+### Status
+
+[OK] **Completed**
