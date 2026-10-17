@@ -5047,26 +5047,34 @@ function quotaShowsExhausted(account, now = Date.now()) {
   const quota = quotaProjection(account.id, now);
   return quota.status === 'fresh' && Object.values(quota.limits || {}).some((limit) => Number(limit?.percentUsed) >= 100);
 }
-// The Cline edge answers bursts from one egress IP with a bare HTML 429 before any provider sees
-// the request, so it says nothing about the account or the provider and rotating either cannot help.
+// Bare upstream HTTP 429 + text/html (no structured error) is classified as gateway_html_throttle.
+// Process-local backoff is keyed by account id; whether upstream keys on egress IP is unverified.
 const GATEWAY_BACKOFF_BASE_MS = 1000, GATEWAY_BACKOFF_MAX_MS = 8000, GATEWAY_BACKOFF_JITTER_MS = 250, GATEWAY_THROTTLE_RETRIES = 1;
 const gatewayThrottles = new Map();
 function isGatewayThrottle(result) {
   return Number(result?.upstreamStatus) === 429 && result?.terminalOrigin === 'upstream_http' && result?.responseContentType === 'text/html' && !result?.structuredError;
 }
-const gatewayEgressKey = (account) => account?.proxyUrl || '';
+// Process-local HTML-429 backoff is per account id (not per proxyUrl). Whether upstream
+// actually keys on egress IP remains unverified; do not share windows across accounts.
+const gatewayAccountKey = (account) => (account?.id != null && String(account.id)) || '';
 function noteGatewayThrottle(account, now = Date.now()) {
-  const key = gatewayEgressKey(account), previous = gatewayThrottles.get(key);
+  const key = gatewayAccountKey(account), previous = gatewayThrottles.get(key);
   // Concurrent rejections inside one window share it; only a rejection after the window escalates.
   const streak = !previous || now - previous.until > 30000 ? 0 : now < previous.until ? previous.streak : Math.min(previous.streak + 1, 3);
   const until = Math.max(previous?.until || 0, now + Math.min(GATEWAY_BACKOFF_MAX_MS, GATEWAY_BACKOFF_BASE_MS * 2 ** streak));
   gatewayThrottles.set(key, { until, streak });
   return until - now;
 }
-function clearGatewayThrottle(account) { gatewayThrottles.delete(gatewayEgressKey(account)); }
+function clearGatewayThrottle(account) { gatewayThrottles.delete(gatewayAccountKey(account)); }
 function gatewayWaitMs(account, now = Date.now()) {
-  const state = gatewayThrottles.get(gatewayEgressKey(account));
+  const state = gatewayThrottles.get(gatewayAccountKey(account));
   return state && state.until > now ? state.until - now + Math.floor(Math.random() * GATEWAY_BACKOFF_JITTER_MS) : 0;
+}
+function nonJsonUpstreamErrorBody(up, responseContentType, netError) {
+  if (!netError && Number(up?.status) === 429 && responseContentType === 'text/html') {
+    return { error: { message: 'upstream gateway rate limited (HTML throttle)', type: 'rate_limit_error' } };
+  }
+  return { error: { message: netError || 'upstream returned an invalid error response', type: 'upstream_error' } };
 }
 function classifyAttemptFailure(result, attempt, account, now = Date.now()) {
   const status = Number(result?.normalizedStatus || result?.status || 0);
@@ -5202,7 +5210,8 @@ async function attemptOnce(modelId, body, attempt, account, forwardedHeaders, si
     try { json = JSON.parse(res.text); } catch {}
     if (!json) {
       const status = normalizeStatus(res.status, null, 502);
-      return { status, upstreamStatus: res.status, normalizedStatus: status, out: { error: { message: 'upstream returned non-JSON', type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter, responseHeaders: res.headers, responseContentType, responseBytes, netError: 'non-JSON response', terminalOrigin: res.status >= 400 ? 'upstream_http' : 'upstream_envelope', acc: account, attemptToken: res.attemptToken, detailAttempt: res.detailAttempt, detailResponseBody: res.text, detailCaptureState: 'response-error' };
+      const htmlThrottle = Number(res.status) === 429 && responseContentType === 'text/html';
+      return { status, upstreamStatus: res.status, normalizedStatus: status, out: htmlThrottle ? nonJsonUpstreamErrorBody(res, responseContentType, null) : { error: { message: 'upstream returned non-JSON', type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter, responseHeaders: res.headers, responseContentType, responseBytes, netError: htmlThrottle ? null : 'non-JSON response', terminalOrigin: res.status >= 400 ? 'upstream_http' : 'upstream_envelope', acc: account, attemptToken: res.attemptToken, detailAttempt: res.detailAttempt, detailResponseBody: res.text, detailCaptureState: 'response-error' };
     }
     const un = unwrap(json, res.status);
     return { status: un.status, upstreamStatus: un.upstreamStatus, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing, structuredError: upstreamErrorOf(json), retryAfter, responseHeaders: res.headers, responseContentType, responseBytes, netError: null, terminalOrigin: un.status === 200 ? 'success' : (res.status >= 400 ? 'upstream_http' : 'upstream_envelope'), acc: account, attemptToken: res.attemptToken, detailAttempt: res.detailAttempt, detailResponseBody: un.status === 200 ? null : res.text, detailCaptureState: un.status === 200 ? 'success' : 'response-error' };
@@ -5411,7 +5420,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
               if (dataLine) try { json = JSON.parse(dataLine.trimStart().replace(/^data:\s*/, '')); } catch {}
             }
             const inferred = normalizeStatus(up.status, json, normalizeStatus(0, { error: text }, 502));
-            const un = json ? unwrap(json, up.status) : { status: inferred, upstreamStatus: up.status, normalizedStatus: inferred, body: { error: { message: netError || 'upstream returned an invalid error response', type: 'upstream_error' } }, routing: {} };
+            const un = json ? unwrap(json, up.status) : { status: inferred, upstreamStatus: up.status, normalizedStatus: inferred, body: nonJsonUpstreamErrorBody(up, responseContentType, netError), routing: {} };
             const result = {
               status: un.status, upstreamStatus: up.status, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing,
               structuredError: json ? upstreamErrorOf(json) : null, retryAfter: responseHeader(up.headers, 'retry-after'), responseHeaders: up.headers, responseContentType,

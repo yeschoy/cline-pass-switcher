@@ -377,12 +377,36 @@ test('gateway HTML 429 backs off and retries the same route without cooling or d
   throttled = Infinity;
   const calls = f.seen.length;
   const response = await fetch(`http://127.0.0.1:${f.port}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer fixture-client' }, body: JSON.stringify({ model, session_id: 'gateway', stream: true, messages: [{ role: 'user', content: 'Synthetic workflow request' }] }) });
-  await response.text();
+  const body = await response.text();
   assert.equal(response.status, 429);
+  assert.match(body, /upstream gateway rate limited \(HTML throttle\)/);
   assert.ok(Number(response.headers.get('retry-after')) >= 1);
   assert.equal(f.seen.length - calls, 2, 'one backoff retry, then the 429 is returned');
   assert.ok(f.seen.slice(calls).every(entry => entry.provider === 'first' && entry.account === f.seen[calls].account));
   view = (await f.admin('/api/accounts')).body;
+  assert.ok(view.accounts.every(account => !account.health.cooling && account.health.degrades === 0));
+});
+
+test('gateway HTML 429 backoff is per account and does not pause sibling accounts', async t => {
+  let throttleAccount = null;
+  const gatewayReject = res => { res.writeHead(429, { 'Content-Type': 'text/html' }); res.end('<html><title>429</title>429 Too Many Requests</html>'); };
+  // Both accounts share the same empty proxyUrl (legacy shared egress key); backoff must still be per account id.
+  const f = await fixture(t, { count: 2, configure: c => ({ ...c, accountWorkflow: { ...c.accountWorkflow, healthFilter: true, minimumHealth: .2 },
+    accounts: c.accounts.map(a => ({ ...a, proxyUrl: '' })),
+    perModel: { [model]: { upstreams: ['first'], pinMode: 'strict', maxRetries: 1, providerCooldownMs: 60000 } },
+    errorRules: [{ id: 'general-429', scope: 'account', action: 'cooldown', when: { statuses: [429] }, reset: { fallback: '10s', max: '10s' } }] }),
+    onChat(entry, res) { if (throttleAccount && entry.account === throttleAccount) gatewayReject(res); else success(res); } });
+  assert.equal((await f.chat('gw-acc-a')).success, true);
+  assert.equal((await f.chat('gw-acc-b')).success, true);
+  const accA = f.seen[0].account;
+  const accB = f.seen[1].account;
+  assert.notEqual(accA, accB, 'fixture must sticky-bind two sessions to different accounts');
+  throttleAccount = accA;
+  assert.equal((await f.chat('gw-acc-a')).status, 429);
+  const started = Date.now();
+  assert.equal((await f.chat('gw-acc-b')).success, true);
+  assert.ok(Date.now() - started < 700, 'sibling account must not wait for the throttled account backoff window');
+  const view = (await f.admin('/api/accounts')).body;
   assert.ok(view.accounts.every(account => !account.health.cooling && account.health.degrades === 0));
 });
 
