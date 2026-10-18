@@ -156,7 +156,14 @@ test('API compatibility, message pass-through and request outcomes are explicit'
     const chunks = [];
     req.on('data', (chunk) => chunks.push(chunk));
     req.on('end', () => {
-      const body = JSON.parse(Buffer.concat(chunks).toString());
+      // Quota/probe GETs can race the Chat mock; they must not break JSON chat assertions.
+      if (req.method !== 'POST' || String(req.url || '').includes('usage-limits')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end('{}');
+      }
+      const raw = Buffer.concat(chunks).toString();
+      if (!raw) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end('{"error":{"message":"empty body"}}'); }
+      const body = JSON.parse(raw);
       seen.push(body);
       if (body.model === 'done-close') {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
