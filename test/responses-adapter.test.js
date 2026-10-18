@@ -43,6 +43,25 @@ test('responsesToChat maps instructions, string input, tools and passthrough fie
   assert.equal(ctx.includeEncrypted, true);
 });
 
+test('responsesToChat accepts EasyInputMessage items without type (Codex/OpenAI)', () => {
+  const { chatBody } = responsesToChat({
+    model: 'm',
+    input: [
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'hi' },
+      { role: 'user', content: [{ type: 'input_text', text: 'again' }] },
+    ],
+  });
+  assert.deepEqual(chatBody.messages, [
+    { role: 'user', content: 'hello' },
+    { role: 'assistant', content: 'hi' },
+    { role: 'user', content: 'again' },
+  ]);
+
+  const stringItem = responsesToChat({ model: 'm', input: ['plain string item'] });
+  assert.deepEqual(stringItem.chatBody.messages, [{ role: 'user', content: 'plain string item' }]);
+});
+
 test('responsesToChat maps function/custom/local_shell history and current-loop reasoning', () => {
   const token = encodeReasoning({ text: 'plan patch', field: 'reasoning_content' });
   const stale = encodeReasoning({ text: 'old thought', field: 'reasoning' });
