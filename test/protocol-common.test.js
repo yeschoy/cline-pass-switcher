@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   AdapterError, createChatAggregator, createChatSseReader, decodeReasoning, encodeReasoning,
-  estimateTokens, extractReasoning, newId, unwrapChatPayload,
+  estimateTokens, extractReasoning, newId, normalizeChatImageParts, unwrapChatPayload,
 } from '../lib/protocol-common.js';
 
 function feed(reader, chunks) {
@@ -105,6 +105,32 @@ test('estimateTokens counts ASCII, CJK, images and tools with a minimum of 1', (
   assert.ok(cjk >= 5);
   const image = estimateTokens({ messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://x' } }] }] });
   assert.ok(image >= 1004);
+});
+
+test('normalizeChatImageParts wraps bare string image_url and is idempotent', () => {
+  const input = {
+    model: 'm',
+    messages: [
+      { role: 'user', content: 'hi' },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'see' },
+          { type: 'image_url', image_url: 'data:image/png;base64,abc', detail: 'low' },
+          { type: 'image_url', image_url: { url: 'https://ex.test/a.png', detail: 'high' } },
+        ],
+      },
+    ],
+  };
+  const out = normalizeChatImageParts(input);
+  assert.notEqual(out, input);
+  assert.deepEqual(out.messages[1].content[1], {
+    type: 'image_url',
+    image_url: { url: 'data:image/png;base64,abc', detail: 'low' },
+  });
+  assert.deepEqual(out.messages[1].content[2], input.messages[1].content[2]);
+  assert.equal(normalizeChatImageParts(out), out);
+  assert.equal(normalizeChatImageParts({ model: 'm', messages: [{ role: 'user', content: 'x' }] }).messages[0].content, 'x');
 });
 
 test('unwrapChatPayload and AdapterError helpers', () => {

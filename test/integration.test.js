@@ -214,6 +214,14 @@ test('API compatibility, message pass-through and request outcomes are explicit'
   assert.deepEqual(seen.at(-1).messages, emptyToolMessages, 'empty tool output must pass through unchanged');
 
   assert.equal((await rawJson(switchPort, '/v1/chat/completions', { model: 'valid-image', messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.test/image.png' } }] }] })).status, 200);
+  assert.equal((await rawJson(switchPort, '/v1/chat/completions', {
+    model: 'string-image-url',
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'see' }, { type: 'image_url', image_url: 'data:image/png;base64,abc' }] }],
+  })).status, 200);
+  assert.deepEqual(seen.at(-1).messages[0].content[1], {
+    type: 'image_url',
+    image_url: { url: 'data:image/png;base64,abc' },
+  }, 'bare string image_url must be normalized before upstream');
   assert.equal((await rawJson(switchPort, '/v1/chat/completions', { model: 'valid-tool', messages: [{ role: 'assistant', content: null, tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'lookup', arguments: '{}' } }] }] })).status, 200);
   assert.equal((await rawJson(switchPort, '/v1/chat/completions', { model: 'valid-function-call', messages: [{ role: 'assistant', content: '', function_call: { name: 'lookup', arguments: '{}' } }] })).status, 200);
 
@@ -221,9 +229,9 @@ test('API compatibility, message pass-through and request outcomes are explicit'
   await disconnectRequest(switchPort, { model: 'stream-cancel', stream: true, messages: [{ role: 'user', content: 'cancel' }] }, true);
   await disconnectRequest(switchPort, { model: 'nonstream-cancel', messages: [{ role: 'user', content: 'cancel' }] });
 
-  const logs = await waitForRequestLogs(switchPort, 15);
-  assert.equal(logs.length, 15, 'each accepted request must finalize exactly once');
-  for (const model of ['valid-image', 'valid-tool', 'valid-function-call', 'done-close', 'stream-cancel', 'nonstream-cancel']) {
+  const logs = await waitForRequestLogs(switchPort, 16);
+  assert.equal(logs.length, 16, 'each accepted request must finalize exactly once');
+  for (const model of ['valid-image', 'string-image-url', 'valid-tool', 'valid-function-call', 'done-close', 'stream-cancel', 'nonstream-cancel']) {
     assert.equal(logs.filter((item) => item.requestedModel === model).length, 1, `${model} must have one final request record`);
   }
   const byModel = new Map(logs.map((item) => [item.requestedModel, item]));
@@ -235,9 +243,9 @@ test('API compatibility, message pass-through and request outcomes are explicit'
   assert.equal((await (await fetch(`http://127.0.0.1:${switchPort}/api/logs/requests?result=client_cancelled`)).json()).items.length, 2);
   assert.equal((await (await fetch(`http://127.0.0.1:${switchPort}/api/logs/errors`)).json()).items.length, 0, 'client cancellation must not create attempt errors');
   const statistics = await (await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json();
-  assert.equal(statistics.lifetime.global.requests, 15); assert.equal(statistics.lifetime.global.errors, 0);
+  assert.equal(statistics.lifetime.global.requests, 16); assert.equal(statistics.lifetime.global.errors, 0);
   assert.equal(statistics.lifetime.global.usageRequests, 0); assert.equal(statistics.lifetime.global.inputTokens, 0, 'usage observed before cancellation must be discarded');
-  assert.equal(statistics.accounts[0].health.successes, 13, 'successful requests count for account success rate; cancellations do not'); assert.equal(statistics.accounts[0].health.degrades,0);
+  assert.equal(statistics.accounts[0].health.successes, 14, 'successful requests count for account success rate; cancellations do not'); assert.equal(statistics.accounts[0].health.degrades,0);
   const accounts = (await (await fetch(`http://127.0.0.1:${switchPort}/api/accounts`)).json()).accounts;
   assert.equal(accounts[0].activeCount, 0);
   assert.notEqual(accounts[0].state?.banned, true, 'abort-generated transport errors must not apply account rules');

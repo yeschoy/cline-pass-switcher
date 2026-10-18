@@ -20,7 +20,7 @@ import { DetailRoot, DetailRedactor, detailContext, detailRoute, observeStream, 
 import { projectRawHeaders } from './lib/raw-detail-headers.js';
 import { DetailedLogStore, parseDetailQuery, MAX_AGE_MS, RAW_MAX_AGE_MS, MAX_TOTAL_BYTES } from './lib/detailed-log-store.js';
 import { WORKFLOW_SELECTORS, defaultAccountWorkflow, normalizeAccountWorkflow, normalizeSelectionCounters, effectiveRoutingHealth, rankWorkflowCandidates, routingHealthRate } from './lib/account-workflow.js';
-import { AdapterError, createChatSseReader, estimateTokens } from './lib/protocol-common.js';
+import { AdapterError, createChatSseReader, estimateTokens, normalizeChatImageParts } from './lib/protocol-common.js';
 import { responsesAdapter } from './lib/responses-adapter.js';
 import { anthropicAdapter } from './lib/anthropic-adapter.js';
 
@@ -5543,6 +5543,8 @@ async function handleChat(req, res, clientKeyId, adapter = null) {
       throw err;
     }
   }
+  // Codex Chat may send image_url as a bare data:/https string; upstream DeepSeek rejects it.
+  body = normalizeChatImageParts(body);
   const requestedModel = typeof body.model === 'string' ? body.model.trim() : '';
   if (!requestedModel || requestedModel.length > 300) return sendJSON(res, 400, { error: { message: 'valid model is required' } });
   const sensitiveValues = sensitiveMessageValues(body);
