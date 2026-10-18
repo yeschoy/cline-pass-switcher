@@ -197,7 +197,7 @@ location / {
 | `exposeCatalog` | `true` 时代理的 `/models`、`/v1/models`、`/api/v1/models` 会合并目录模型；上游目录只用该客户端归属的合格账号抓取，空池不会用其他客户端账号或合成回退。静态已知模型/别名 ID 仍可全局可见；默认 `false` 不抓取目录 |
 | `knownModels` | 订阅模型清单（控制台主表） |
 | `modelAliases` | 客户端别名到现有 `cline-pass/*` 模型的映射；路由按解析后的模型执行 |
-| `perModel` | 每模型路由：`{ upstreams, exclude, pinMode, sort, maxRetries, providerCooldownMs }`。`upstreams` 非空时是权威来源顺序，否则使用探测到的渠道顺序；`pinMode: "strict"` 首次固定来源顺序首个可用渠道，失败后从剩余渠道按 Provider-model 24h 成功率回退；`pinMode: "preferred"` 从首次起就用同一健康顺序。每次 named HTTP attempt 只注入一个 provider。`maxRetries` 是首试后的外层重试次数，`providerCooldownMs` 为 0～300000（0 关闭）并在首包前确定性失败后短暂跳过该 Provider。账号内同名配置整项覆盖全局配置，不逐字段合并 |
+| `perModel` | 每模型路由：`{ upstreams, exclude, pinMode, sort, maxRetries, providerCooldownMs }`。`upstreams` 非空时是权威来源顺序，否则使用探测到的渠道顺序；`pinMode: "strict"` 首次固定来源顺序首个可用渠道，失败后从剩余渠道按 Provider-model 24h 成功率回退；`pinMode: "preferred"` 从首次起就用同一健康顺序。每次 named HTTP attempt 只注入一个 provider。`maxRetries` 是首试后的外层重试次数，`providerCooldownMs` 为 0～300000（0 关闭）并在首包前 500/504/网络超时/429/不可用 后短暂跳过该 Provider（502 不打开该 circuit）。账号内同名配置整项覆盖全局配置，不逐字段合并 |
 | `apiKey` | 旧版单 key 字段，启动时自动迁移进 `accounts` |
 
 定期校验回退：管理员先通过控制台或 `POST /api/providers/probe-schedule` 提交完整配置并将 `enabled` 置为 `false`，确认只停止**新的**后台付费请求；旧自动避开保持生效，逐账号/模型/渠道显式恢复后才能解除。升级前备份完整 DATA_DIR（配置、元数据及认证数据），旧镜像与新格式不能假定可安全共享写入；回退旧版须停服务后在隔离目录恢复整份旧备份。运行中的请求取消/失败也可能已在发出前保守计入预算。定期校验、负对照及生产发布不应以本地 mock 通过作为真实上游验证授权。

@@ -721,7 +721,7 @@ function render() {
           <option value="tps" ${sort === 'tps' ? 'selected' : ''}>最高吞吐</option>
         </select>
         <div style="margin-top:4px"><label class="dim">重试 <input type="number" min="0" max="20" value="${s.config.maxRetries ?? ''}" placeholder="全部" onchange="saveCfg(${jsArg(s.id)},'maxRetries',this.value)"></label></div>
-        <div style="margin-top:4px"><label class="dim" title="0=关闭；仅首包前确定性 Provider 故障触发，账号鉴权/代理/取消/首包后失败不触发">Provider 冷却(ms) <input type="number" min="0" max="300000" step="1" value="${Number(s.config.providerCooldownMs)||0}" onchange="saveCfg(${jsArg(s.id)},'providerCooldownMs',this.value)"></label></div>
+        <div style="margin-top:4px"><label class="dim" title="0=关闭；仅 500/504/网络超时/429/不可用 等首包前确定性故障触发；502 与账号鉴权/代理/取消不触发">Provider 冷却(ms) <input type="number" min="0" max="300000" step="1" value="${Number(s.config.providerCooldownMs)||0}" onchange="saveCfg(${jsArg(s.id)},'providerCooldownMs',this.value)"></label></div>
         ${DATA.accountId ? `<div style="margin-top:4px"><span class="badge ${s.configSource === 'account' ? 'green' : 'orange'}">${s.configSource === 'account' ? '账号专属' : '继承全局'}</span> <button class="ghost mini" onclick="${s.configSource === 'account' ? `inheritCfg(${jsArg(s.id)})` : `copyGlobalCfg(${jsArg(s.id)})`}">${s.configSource === 'account' ? '恢复继承' : '复制全局'}</button></div>` : ''}
       </td>
       <td><div class="row-actions">

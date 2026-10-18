@@ -746,9 +746,9 @@ test('provider cooldown skips repeated failures and admits only one half-open pr
       seen.push({ model: body.model, provider, at: Date.now() });
       const reply = () => {
         if (provider === 'first') {
-          const status = body.model === 'parameter' ? 418 : 500;
+          const status = body.model === 'parameter' ? 418 : body.model === 'gate502' ? 502 : 500;
           res.writeHead(status, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ error: { message: body.model === 'parameter' ? 'invalid parameter' : 'provider failed', status } }));
+          return res.end(JSON.stringify({ error: { message: body.model === 'parameter' ? 'invalid parameter' : body.model === 'gate502' ? 'Invalid input' : 'provider failed', status } }));
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }));
@@ -761,8 +761,8 @@ test('provider cooldown skips repeated failures and admits only one half-open pr
   const route = (providerCooldownMs) => ({ upstreams: ['first','second'], exclude: [], pinMode: 'strict', sort: null, maxRetries: null, providerCooldownMs });
   const running = await startSwitcher({
     port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 0,
-    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }], knownModels: ['cool','parameter','disabled','stale'],
-    perModel: { cool: route(80), parameter: route(80), disabled: route(0), stale: route(80) },
+    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }], knownModels: ['cool','parameter','disabled','stale','gate502'],
+    perModel: { cool: route(80), parameter: route(80), disabled: route(0), stale: route(80), gate502: route(80) },
     errorRules: [{ id: 'stale-hard', scope: 'provider-model', action: 'hard-quarantine', models: ['stale'], when: { statuses: [500] } }],
   });
   t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
@@ -784,6 +784,9 @@ test('provider cooldown skips repeated failures and admits only one half-open pr
   seen.length = 0;
   assert.equal((await request('parameter')).status, 200); assert.equal((await request('parameter')).status, 200);
   assert.deepEqual(seen.filter((entry) => entry.model === 'parameter').map((entry) => entry.provider), ['first','second','first','second'], 'ordinary parameter errors must not open the circuit');
+  seen.length = 0;
+  assert.equal((await request('gate502')).status, 200); assert.equal((await request('gate502')).status, 200);
+  assert.deepEqual(seen.filter((entry) => entry.model === 'gate502').map((entry) => entry.provider), ['first','second','first','second'], 'normalized 502 must not open the provider circuit');
   seen.length = 0;
   assert.equal((await request('disabled')).status, 200); assert.equal((await request('disabled')).status, 200);
   assert.deepEqual(seen.filter((entry) => entry.model === 'disabled').map((entry) => entry.provider), ['first','second','first','second'], 'unmatched failures degrade success rate without creating an implicit durable cooldown');

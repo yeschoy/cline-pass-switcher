@@ -4924,7 +4924,8 @@ function providerCircuitFailure(outcome, account) {
   if (outcome?.classification?.scope === 'account' || outcome?.classification?.scope === 'request') return null;
   if (outcome?.terminalOrigin === 'proxy' || (account?.proxyUrl && outcome?.upstreamStatus === 0)) return null;
   if (status === 429) return 'rate_limit';
-  if (status >= 500 || outcome?.terminalOrigin === 'network' || outcome?.terminalOrigin === 'timeout') return outcome?.terminalOrigin || 'server';
+  // 502 在本网关里常被用来归一化自身/输入类失败，不作为 provider circuit 依据；500/504 与明确 network/timeout 计入。
+  if (status === 500 || status === 504 || outcome?.terminalOrigin === 'network' || outcome?.terminalOrigin === 'timeout') return outcome?.terminalOrigin || 'server';
   if (/no allowed providers|no available providers|not found|unsupported|unavailable/i.test(message)) return 'unavailable';
   return null;
 }
