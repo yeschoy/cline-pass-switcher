@@ -12,6 +12,10 @@ lib/jsonl-log-store.js            ordinary request/error JSONL storage
 lib/detailed-log-capture.js       bounded detailed HTTP capture and sanitization
 lib/detailed-log-store.js         detailed-log persistence, retention, query, and clear
 lib/protocol-common.js            shared inbound-adapter helpers (SSE reader, reasoning tokens, estimates)
+lib/tool-pairing.js               Chat message tool-history heal (interrupted / orphan / reorder)
+lib/responses-pairing.js          Responses input join/orphan/pair before Chat conversion
+lib/protocol-ids.js               call_id ≤64, Anthropic charset encode/decode, stream id mend
+lib/reasoning-replay.js           model-family reasoning_content / think-tag replay for Chat upstream
 lib/responses-adapter.js          OpenAI Responses ↔ Chat Completions
 lib/anthropic-adapter.js          Anthropic Messages ↔ Chat Completions
 test/*.test.js                    node:test unit, VM/UI-contract, and integration suites

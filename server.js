@@ -5783,8 +5783,16 @@ async function handleChat(req, res, clientKeyId, adapter = null) {
         if (adapter && !res.destroyed && !res.writableEnded) {
           try {
             const observed = observer.result();
-            const fail = !!(observed.error || (!encoder.hasTerminal && !observed.done && !sseReader.sawDone));
-            if (fail && !observed.error) incompleteError = 'stream ended before completion';
+            const corrupt = (sseReader.corruptCount || 0) > 0;
+            // Corrupt SSE with no valid finish, missing terminal, or empty output → fail
+            // (Responses finish() also rejects empty completed; [DONE] alone is not success).
+            const fail = !!(observed.error
+              || (corrupt && !encoder.hasTerminal)
+              || (!encoder.hasTerminal && !observed.done && !sseReader.sawDone)
+              || (sseReader.sawDone && !encoder.hasTerminal && encoder.hasOutput === false));
+            if (fail && !observed.error) {
+              incompleteError = corrupt ? 'malformed upstream SSE' : 'stream ended before completion';
+            }
             const extra = adapterTerminal(fail ? 'fail' : 'finish', observed.errorPayload || observed.error || incompleteError);
             if (extra) writeDownstream(extra);
           } catch { /* fail-open: still finalize the Chat lease/logs */ }

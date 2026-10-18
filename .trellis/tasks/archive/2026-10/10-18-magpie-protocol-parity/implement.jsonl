@@ -1,0 +1,14 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend pre-dev checklist and guideline index before touching protocol adapters"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Protocol error envelopes, stream fail semantics, AdapterError/sendJSON boundaries"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "handleChat transport/streaming contracts; Chat route must stay byte-stable"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "inboundProtocol and no-body logging constraints when changing adapters"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Where new lib/tool-pairing.js and protocol-ids.js belong"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Prefer extending protocol-common over duplicating SSE/tool helpers"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Adapter changes touch server stream path and tests"}
+{"file": ".trellis/tasks/10-18-magpie-protocol-parity/research/synthesis-round4.md", "reason": "Frozen slice map A–D and client/model priorities"}
+{"file": ".trellis/tasks/10-18-magpie-protocol-parity/research/magpie-pairing-algorithms-round4.md", "reason": "Executable heal/id algorithms to reimplement in JS"}
+{"file": ".trellis/tasks/10-18-magpie-protocol-parity/research/client-validation-rules-round4.md", "reason": "Codex/Claude hard validation (empty completed, charset, call_id≤64)"}
+{"file": ".trellis/tasks/10-18-magpie-protocol-parity/research/cline-pass-model-matrix-round4.md", "reason": "Per-model reasoning replay rules for Slice D"}
+{"file": ".trellis/tasks/10-18-magpie-protocol-parity/research/switcher-behavior-audit-round2.md", "reason": "Current code line-level gaps G1–G11/A14"}
+{"file": ".trellis/tasks/10-18-magpie-protocol-parity/research/parity-gap-matrix.md", "reason": "Gap ID index aligned with PRD"}
+{"file": ".trellis/tasks/archive/2026-10/10-13-three-protocol-adapter/design.md", "reason": "Original adapter shape and non-goals to preserve"}

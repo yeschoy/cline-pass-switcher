@@ -36,6 +36,35 @@ test('Chat SSE reader unwraps {data:...} envelopes and recognizes [DONE]', () =>
   assert.equal(reader.sawDone, true);
 });
 
+test('Chat SSE reader yields corrupt events for malformed JSON', () => {
+  const reader = createChatSseReader();
+  const events = feed(reader, [
+    'data: {not-json\n\n',
+    'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
+  ]);
+  assert.equal(events[0].kind, 'corrupt');
+  assert.equal(reader.corruptCount, 1);
+  assert.equal(events[1].kind, 'delta');
+  assert.equal(events[1].payload.choices[0].delta.content, 'ok');
+});
+
+test('Chat aggregator continues tool fragments that share the same id across indexes', () => {
+  const agg = createChatAggregator();
+  agg.applyDelta({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_x', function: { name: 'fn', arguments: '{"a":' } }] } }] });
+  agg.applyDelta({ choices: [{ delta: { tool_calls: [{ index: 3, id: 'call_x', function: { arguments: '1}' } }] }, finish_reason: 'tool_calls' }] });
+  const snap = agg.snapshot();
+  assert.equal(snap.tool_calls.length, 1);
+  assert.equal(snap.tool_calls[0].id, 'call_x');
+  assert.equal(snap.tool_calls[0].function.arguments, '{"a":1}');
+});
+
+test('normalizeToolArguments maps empty string to {}', async () => {
+  const { normalizeToolArguments } = await import('../lib/protocol-common.js');
+  assert.equal(normalizeToolArguments(''), '{}');
+  assert.equal(normalizeToolArguments(null), '{}');
+  assert.equal(normalizeToolArguments('{"a":1}'), '{"a":1}');
+});
+
 test('Chat aggregator interleaves tool-call indexes and usage', () => {
   const agg = createChatAggregator();
   agg.applyDelta({ choices: [{ delta: { tool_calls: [{ index: 1, id: 'call_b', function: { name: 'beta', arguments: '{"x":' } }] } }] });

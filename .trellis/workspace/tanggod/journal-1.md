@@ -1330,3 +1330,25 @@ Committed-main raw-detail code is deployed raw-off at 512 MiB with 32 Legacy-own
 ### Status
 
 [OK] **Completed**
+
+
+## Session 55: 参考 magpie 完善三协议适配边角
+<!-- trellis-session: v=2 fp=4843c0b8b11c1553 -->
+
+**Date**: 2026-10-18
+**Task**: 参考 magpie 完善三协议适配边角
+**Branch**: `feat/magpie-protocol-parity`
+
+### Summary
+
+对照 magpie 落地三协议 heal/id/流式失败/reasoning 回传；AC1–AC8 通过；同步归档请求日志任务。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `04e6214` | feat: 对齐 magpie 完善三协议适配边角 |
+
+### Status
+
+[OK] **Completed**

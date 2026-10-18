@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AdapterError, encodeReasoning } from '../lib/protocol-common.js';
 import { anthropicErrorBody, anthropicToChat, chatToAnthropic, createAnthropicStreamEncoder } from '../lib/anthropic-adapter.js';
+import { anthropicOutId } from '../lib/protocol-ids.js';
 
 function parseSse(text) {
   const events = [];
@@ -39,7 +40,8 @@ test('anthropicToChat maps system blocks, images, tool_result order and identity
     stream: true,
   });
   assert.deepEqual(chatBody.messages[0], { role: 'system', content: 'sys-a\nsys-b' });
-  assert.equal(chatBody.messages[1].role, 'tool');
+  // Orphan tool_result (no prior tool_use) heals to a user message.
+  assert.equal(chatBody.messages[1].role, 'user');
   assert.equal(chatBody.messages[1].content, '[tool error] file text');
   assert.equal(chatBody.messages[2].role, 'user');
   assert.equal(chatBody.messages[2].content[0].type, 'text');
@@ -171,6 +173,60 @@ test('Anthropic error types follow HTTP status', () => {
   const failed = parseSse(encoder.start() + encoder.fail('nope'));
   assert.equal(failed.at(-1).type, 'error');
   assert.equal(failed.at(-1).data.error.message, 'nope');
+});
+
+test('Anthropic fail closes open blocks and does not emit message_stop', () => {
+  const ctx = anthropicToChat({ model: 'shown', messages: [{ role: 'user', content: 'hi' }] }).ctx;
+  const encoder = createAnthropicStreamEncoder(ctx);
+  let out = encoder.start();
+  out += encoder.push({ kind: 'delta', payload: { choices: [{ delta: { content: 'partial' } }] } });
+  out += encoder.fail('boom');
+  const events = parseSse(out);
+  assert.ok(events.some((event) => event.type === 'content_block_stop'));
+  assert.equal(events.at(-1).type, 'error');
+  assert.equal(events.some((event) => event.type === 'message_stop'), false);
+});
+
+test('signed empty thinking includes thinking:"" key', () => {
+  const ctx = anthropicToChat({ model: 'shown', messages: [{ role: 'user', content: 'hi' }] }).ctx;
+  const msg = chatToAnthropic({
+    choices: [{ finish_reason: 'stop', message: { content: 'hi', reasoning_content: '' } }],
+  }, ctx);
+  assert.equal(msg.content[0].type, 'thinking');
+  assert.equal(msg.content[0].thinking, '');
+  assert.equal(typeof msg.content[0].signature, 'string');
+  assert.equal(msg.content[1].type, 'text');
+});
+
+test('anthropicToChat defaults max_tokens to 4096', () => {
+  const { chatBody } = anthropicToChat({ model: 'm', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(chatBody.max_tokens, 4096);
+  const explicit = anthropicToChat({ model: 'm', messages: [{ role: 'user', content: 'hi' }], max_tokens: 16 }).chatBody;
+  assert.equal(explicit.max_tokens, 16);
+});
+
+test('Anthropic tool_use id charset encodes outbound and decodes inbound', () => {
+  const dirty = 'call/with:weird!';
+  const encoded = anthropicOutId(dirty);
+  const { chatBody, ctx } = anthropicToChat({
+    model: 'm',
+    messages: [
+      { role: 'user', content: 'go' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: encoded, name: 'f', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: encoded, content: 'ok' }] },
+    ],
+  });
+  const callId = chatBody.messages.find((m) => m.role === 'assistant').tool_calls[0].id;
+  assert.equal(callId, dirty);
+  assert.equal(chatBody.messages.find((m) => m.role === 'tool').tool_call_id, dirty);
+  const msg = chatToAnthropic({
+    choices: [{
+      finish_reason: 'tool_calls',
+      message: { content: null, tool_calls: [{ id: dirty, type: 'function', function: { name: 'f', arguments: '{}' } }] },
+    }],
+  }, ctx);
+  assert.match(msg.content[0].id, /^[A-Za-z0-9_-]+$/);
+  assert.equal(msg.content[0].id, encoded);
 });
 
 test('Claude Code-shaped request fixture converts a two-turn tool loop', () => {
