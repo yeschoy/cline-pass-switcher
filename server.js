@@ -4218,6 +4218,7 @@ const QUOTA_TIMEOUT_MS = process.env.NODE_ENV === 'test' ? Math.max(20, Number(p
 const QUOTA_SUCCESS_MS = process.env.NODE_ENV === 'test' ? Math.max(50, Number(process.env.CLINE_PASS_TEST_QUOTA_SUCCESS_MS) || 300000) : 300000;
 const QUOTA_FAILURE_MS = process.env.NODE_ENV === 'test' ? Math.max(50, Number(process.env.CLINE_PASS_TEST_QUOTA_FAILURE_MS) || 60000) : 60000;
 const QUOTA_GLOBAL_LIMIT = 2, QUOTA_PAGE_BATCH_LIMIT = 16;
+const QUOTA_NO_PLAN_RULE_ID = 'quota-no-plan';
 function quotaFailureCategory(error, status, account) {
   if (status === 401 || status === 403) return 'auth'; if (status === 429) return 'rate_limit'; if (status >= 500) return 'server'; if (status) return 'http';
   if (error?.code === 'RESPONSE_TOO_LARGE') return 'schema';
@@ -4374,13 +4375,16 @@ async function requestQuota(id, source) {
 }
 async function runQuotaJob(job, account) {
   const attemptedAt = Date.now();
-  let snapshot = null, errorCategory = null, timedOut = false;
+  let snapshot = null, errorCategory = null, timedOut = false, noPlan = false;
   job.controller = new AbortController();
   const deadline = setTimeout(() => { timedOut = true; job.controller.abort(); }, QUOTA_TIMEOUT_MS); deadline.unref?.();
   try {
     const result = await clineRequestJSON(`${config.upstreamBase.replace(/\/$/,'')}/users/me/plan/usage-limits`, { method: 'GET', headers: { Accept: 'application/json', Authorization: `Bearer ${job.key}` }, signal: job.controller.signal, timeoutMs: QUOTA_TIMEOUT_MS, account, proxyUrl: job.proxyUrl, maxResponseBytes: 256 * 1024 });
-    if (result.status < 200 || result.status >= 300) errorCategory = quotaFailureCategory(null, result.status, account);
-    else {
+    if (result.status < 200 || result.status >= 300) {
+      errorCategory = quotaFailureCategory(null, result.status, account);
+      // Cline answers 404 "no plan history" once the subscription is gone: the key is valid but cannot serve.
+      noPlan = result.status === 404 && /no plan history found/i.test(result.text || '');
+    } else {
       let json;
       try { json = JSON.parse(result.text); } catch { errorCategory = 'json'; }
       if (!errorCategory) try { snapshot = parseQuotaPayload(json, Date.now()); } catch { errorCategory = 'schema'; }
@@ -4399,6 +4403,7 @@ async function runQuotaJob(job, account) {
   } else {
     state.errorCategory = errorCategory || 'schema'; quotaFailureCounts.set(job.id, Math.min(4, (quotaFailureCounts.get(job.id) || 0) + 1));
     if (quotaProvisional.get(job.id)?.persistRetryAt === undefined) quotaProvisional.delete(job.id);
+    if (noPlan && !getAccountState(job.id)?.hardQuarantined) persistAccountAction(account, { ruleId: QUOTA_NO_PLAN_RULE_ID, scope: 'account', action: 'hard-quarantine', statusCode: 404 });
     reconcileSessionBindings();
   }
   try { saveMeta(); } catch (error) { console.error(`[额度] 持久化失败：${safeReason(error.message)}`); }

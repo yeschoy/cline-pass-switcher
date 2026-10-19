@@ -2410,6 +2410,20 @@ test('quota scheduler is bounded, strict, fail-open and discards stale credentia
   assert.equal(active,0);assert.ok(maxActive<=2,`quota concurrency exceeded 2 across refresh/configuration phases: ${maxActive}`);
 });
 
+test('quota refresh hard-quarantines an account whose Cline plan is gone', async (t) => {
+  const upstream=http.createServer((req,res)=>{req.resume();req.on('end',()=>{if(req.method==='GET'&&req.url.endsWith('/users/me/plan/usage-limits')){if(req.headers.authorization==='Bearer gone-key'){res.writeHead(404,{'Content-Type':'application/json'});return res.end('{"data":null,"error":"no plan history found for user","success":false}');}if(req.headers.authorization==='Bearer missing-key'){res.writeHead(404,{'Content-Type':'application/json'});return res.end('{"error":"not found"}');}res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify({success:true,data:{limits:[{type:'five_hour',percentUsed:0},{type:'weekly',percentUsed:10},{type:'monthly',percentUsed:10}]}}));}res.writeHead(200,{'Content-Type':'application/json'});res.end('{"choices":[{"message":{"content":"OK"}}]}');});});
+  const upstreamPort=await listen(upstream),port=await unusedPort(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'cps-no-plan-'));
+  const accounts=[{id:'gone',name:'Gone',key:'gone-key',enabled:true,perModel:{}},{id:'missing',name:'Missing',key:'missing-key',enabled:true,perModel:{}},{id:'ok',name:'Ok',key:'ok-key',enabled:true,perModel:{}}];
+  const running=await startSwitcher({port,upstreamBase:`http://127.0.0.1:${upstreamPort}/api/v1`,proxyKey:'quota-admin',accounts,accountMode:'roundrobin',activeAccount:0,knownModels:['m'],perModel:{},accountErrorRules:{},accountPipeline:{quotaPool:false,excludeUnhealthy:false,healthSort:false,sticky:false}},dir,{NODE_ENV:'test'});
+  t.after(async()=>{await stop(running.child);await close(upstream);fs.rmSync(dir,{recursive:true,force:true});});
+  const auth={'X-Admin-Key':'quota-admin'};
+  const result=await rawJson(port,'/api/statistics/quota-refresh',{force:true},auth);assert.equal(result.status,200);assert.equal(result.json.failed,2);
+  const states=JSON.parse(fs.readFileSync(path.join(dir,'metadata.json'),'utf8')).accountStates||{};
+  assert.equal(states.gone?.hardQuarantined,true,'no plan history means the subscription is gone');assert.equal(states.gone.ruleId,'quota-no-plan');assert.equal(states.gone.statusCode,404);
+  assert.equal(states.missing?.hardQuarantined??false,false,'an unrelated 404 stays an ordinary quota failure');assert.equal(states.ok?.hardQuarantined??false,false);
+  const view=await(await fetch(`http://127.0.0.1:${port}/api/accounts`,{headers:auth})).json();assert.equal(view.accounts.find(a=>a.id==='gone').state.hardQuarantined,true);
+});
+
 test('statistics quota refresh is authenticated, strict, routing-independent, cache-aware and truthful', async (t) => {
   let phase='full';const hits=[];
   const upstream=http.createServer((req,res)=>{req.resume();req.on('end',()=>{if(req.method!=='GET'){res.writeHead(200,{'Content-Type':'application/json'});return res.end('{"choices":[{"message":{"content":"OK"}}]}');}hits.push({auth:req.headers.authorization,path:req.url,phase});if(phase==='rate'){res.writeHead(429);return res.end('{}');}const limits=phase==='monthly'?[{type:'monthly',percentUsed:0}]:phase==='partial'?[{type:'weekly',percentUsed:25}]:[{type:'five_hour',percentUsed:0,resetsAt:'2026-09-15T00:00:00.000Z'},{type:'weekly',percentUsed:37.5},{type:'monthly',percentUsed:100,resetsAt:'2026-10-01T00:00:00.000Z'}];res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({success:true,data:{limits}}));});});
