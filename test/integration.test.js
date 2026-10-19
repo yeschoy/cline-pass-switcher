@@ -9,7 +9,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { DETAIL_DROP_REASONS } from '../lib/detailed-log-store.js';
-import { prepareAdminFixture, connectAdminFixture, fixtureHeaders, installFixtureFetch, bareFetch } from './admin-fixture.js';
+import { prepareAdminFixture, connectAdminFixture, fixtureHeaders, installFixtureFetch, bareFetch, keepDirectPipelineFixtures } from './admin-fixture.js';
 installFixtureFetch();
 
 const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
@@ -88,6 +88,7 @@ async function startSwitcher(config, existingDir = null, extraEnv = {}) {
   const dir = existingDir || fs.mkdtempSync(path.join(os.tmpdir(), 'cps-test-'));
   if (config) fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config));
   prepareAdminFixture(dir);
+  keepDirectPipelineFixtures(dir, config);
   const child = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: { ...process.env, ...extraEnv, DATA_DIR: dir, BIND_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
   child.stdout.on('data', (c) => { output += c; }); child.stderr.on('data', (c) => { output += c; });
@@ -3419,10 +3420,10 @@ test('strict first follows source order, retries and preferred follow provider-m
   fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({
     routingSecret: 'fixed-selection-secret',
     models: {
-      'discovered-model': { upstreams: ['d1', 'd2'], pipeline: 'planner' },
+      'discovered-model': { upstreams: ['d1', 'd2'], pipeline: 'direct' },
       'hard-model': { upstreams: ['a'], upstreamStatus: { a: { hardQuarantined: true } } },
       'cool-model': { upstreams: ['a', 'b'], upstreamStatus: { a: { cooldownUntil: Date.now() + 600000 } } },
-      'null-last': { upstreams: ['x', 'y'], pipeline: 'planner', upstreamStatus: { x: { hardQuarantined: true } } },
+      'null-last': { upstreams: ['x', 'y'], pipeline: 'direct', upstreamStatus: { x: { hardQuarantined: true } } },
       'configured-wins': { upstreams: ['d1', 'd2'] },
     },
   }));
@@ -3490,19 +3491,16 @@ test('strict first follows source order, retries and preferred follow provider-m
   assert.deepEqual(seen.map((row) => row.provider), ['d1'], 'stable discovered order is authoritative when nothing is configured');
 
   const named = seen.filter((row) => row.model === 'discovered-model');
-  for (const row of [...named]) assert.ok((row.only?.length ?? 0) <= 1 && (row.gatewayOnly?.length ?? 0) <= 1 && row.order === null);
+  for (const row of [...named]) {
+    assert.deepEqual(row.only, [row.provider]);
+    assert.equal(row.gatewayOnly, null);
+    assert.equal(row.order, null);
+  }
   const everyNamed = seen.concat(await (async () => { seen.length = 0; assert.equal((await call('strict-rate')).status, 200); return seen.slice(); })());
   for (const row of everyNamed) {
-    assert.ok((row.only?.length ?? 0) <= 1, 'provider.only is at most a singleton');
-    assert.ok((row.gatewayOnly?.length ?? 0) <= 1, 'gateway.only is at most a singleton');
-    assert.equal(row.order, null, 'named attempts never inject provider order');
-  }
-  // The unknown pipeline injects the same singleton only into both provider shapes.
-  const unknownPipeline = await (async () => { seen.length = 0; assert.equal((await call('strict-rate')).status, 200); return seen.slice(); })();
-  assert.ok(unknownPipeline.length > 0);
-  for (const row of unknownPipeline) {
-    assert.deepEqual(row.only, [row.provider], 'unknown pipeline injects a singleton provider.only');
-    assert.deepEqual(row.gatewayOnly, [row.provider], 'the same singleton is injected into providerOptions.gateway.only');
+    assert.deepEqual(row.only, [row.provider], 'direct pipeline injects a singleton provider.only');
+    assert.equal(row.gatewayOnly, null, 'direct pipeline does not inject gateway.only');
+    assert.equal(row.order, null, 'direct named attempts never inject provider order');
   }
 
   // Configured upstreams stay authoritative even when discovery already knows other providers.
@@ -4611,7 +4609,7 @@ test('non-stream attempt timeout is configurable and timeout fallback is opt-in'
   const upstream = http.createServer((req, res) => {
     const chunks = []; req.on('data', (chunk) => chunks.push(chunk)); req.on('end', () => {
       const body = JSON.parse(Buffer.concat(chunks).toString());
-      const provider = body.providerOptions?.gateway?.only?.[0] || null;
+      const provider = body.provider?.only?.[0] || body.providerOptions?.gateway?.only?.[0] || null;
       hits.push({ model: body.model, provider });
       const delay = provider === 'slow' ? 2000 : body.model === 'patient' ? 400 : 0;
       setTimeout(() => {

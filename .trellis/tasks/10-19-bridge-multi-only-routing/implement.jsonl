@@ -1,0 +1,13 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend pre-dev checklist and guide routing before changing server.js helpers"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Must rewrite gateway singleton-only/order contract and parseRouting/actual rules"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "targetProviders/actualProvider and error-row projection contracts"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Upstream classification / stream admission boundaries touched by routing observe"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend checklist for log UI actual column"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Log table plan/actual/usage rendering contract"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "preferred vs gateway order copy; error actual field"}
+{"file": ".trellis/tasks/10-19-bridge-multi-only-routing/prd.md", "reason": "Accepted requirements and AC"}
+{"file": ".trellis/tasks/10-19-bridge-multi-only-routing/design.md", "reason": "Outbound one-shot + detection design"}
+{"file": ".trellis/tasks/10-19-bridge-multi-only-routing/implement.md", "reason": "Execution checklist and verify commands"}
+{"file": ".trellis/tasks/10-19-bridge-multi-only-routing/research/bridge-multi-only-order.md", "reason": "Bridge applyProviderRouting body shape reference"}
+{"file": ".trellis/tasks/10-19-bridge-multi-only-routing/research/bridge-actual-provider-detection.md", "reason": "Bridge observeMetadata / routingFacts field priority"}
+{"file": ".trellis/tasks/10-19-bridge-multi-only-routing/research/local-gaps.md", "reason": "Local change points injectPrefs/runChatChain/parseRouting"}

@@ -6,7 +6,7 @@ import path from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
-import { prepareAdminFixture, connectAdminFixture, fixtureHeaders } from './admin-fixture.js';
+import { prepareAdminFixture, connectAdminFixture, fixtureHeaders, keepDirectPipelineFixtures } from './admin-fixture.js';
 import { defaultAccountWorkflow } from '../lib/account-workflow.js';
 
 const model = 'cline-pass/deepseek-v4.1-flash';
@@ -49,6 +49,7 @@ async function fixture(t, { count = 3, cap = 7, configure = c => c, onChat, meta
   });
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(cfg));
   if (metadata) fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify(metadata));
+  keepDirectPipelineFixtures(dir, cfg);
   prepareAdminFixture(dir);
   const state = { dir, cfg, seen, held, upstream, child: null, port: cfg.port };
   state.start = async () => {

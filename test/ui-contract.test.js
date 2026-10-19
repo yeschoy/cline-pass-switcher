@@ -172,6 +172,8 @@ test('request log shows and filters the inbound protocol with consistent column 
   assert.match(html, /function inboundProtocolLabel\(value\)\{return \(\{chat:'Chat Completions',responses:'Responses',anthropic:'Anthropic Messages'\}\)\[value\]\|\|'—';\}/);
   assert.match(html, /function planUpstreamLabel/);
   assert.match(html, /function actualUpstreamLabel/);
+  const actualFn = html.slice(html.indexOf('function actualUpstreamLabel'), html.indexOf('function pinMatchClass'));
+  assert.doesNotMatch(actualFn, /targetProvider|providerPath|gateway\.order/);
   assert.match(html, /function pinMatchClass/);
   assert.match(html, /function usageLogLabel/);
   assert.match(html, /return targets\.length\?targets\.join\(' → '\):'自动'/);
@@ -229,6 +231,9 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   assert.match(html, /cacheTokenRatio/); assert.match(html, /cacheHitRequestRate/);
   assert.match(html, /function affinityMetrics/); assert.match(html, /explicitAffinityRequests/); assert.match(html, /providerCircuitCooldownRequests/); assert.match(html, /providerHalfOpenRequests/);
   assert.match(html, /每次 HTTP attempt 仅发送一个 provider\.only/);
+  assert.match(html, /gateway\.order（order 仅为优先级提示，不代表实际命中）/);
+  assert.match(html, /首选顺序可能覆盖远端 sticky/);
+  assert.doesNotMatch(html, /provider\.order 覆盖 sticky/);
   assert.match(html, /function providerHealthView\(state\)/);assert.match(html, /成功率/);assert.match(html, /⏸冷却/);assert.match(html, /硬隔离/);assert.match(html,/recoverProvider/);
   const providerOrder = html.slice(html.indexOf('function sortedUpstreams'), html.indexOf('function upstreamOptions'));
   assert.doesNotMatch(providerOrder, /\.sort\(/);assert.match(providerOrder, /meta && meta\.upstreams/);

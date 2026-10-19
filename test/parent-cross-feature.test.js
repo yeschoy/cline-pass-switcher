@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { prepareAdminFixture, connectAdminFixture, installFixtureFetch } from './admin-fixture.js';
+import { prepareAdminFixture, connectAdminFixture, installFixtureFetch, keepDirectPipelineFixtures } from './admin-fixture.js';
 installFixtureFetch();
 
 const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
@@ -92,6 +92,7 @@ test('low failures retain two detail/RPM attempts, high SSE fallback survives pi
     accountPipeline: { quotaPool: true, healthSort: true, sticky: true, order: ['sticky','healthSort','quotaPool'], cachePoolSize: 2, cachePoolMaxSize: 3, cachePoolLowQuotaSize: 1 },
   };
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config));
+  keepDirectPipelineFixtures(dir, config);
   let child = await boot(dir, port);
   t.after(async () => { releaseRefresh?.(); await stop(child); upstream.closeAllConnections?.(); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
   await stop(child);

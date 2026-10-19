@@ -1,9 +1,9 @@
 // Cline Pass 上游观察/切换代理
 // Node >= 18。
 //
-// 网关行为（实测结论，README 有证据）：
-// - planner 管道只接受 providerOptions.gateway.only；direct 管道接受 provider.only。
-// - switcher 的每个具名 HTTP attempt 只注入一个 provider，外层负责健康路由和顺序回退。
+// 网关行为：
+// - planner 与未识别管道：一次 HTTP 写入 providerOptions.gateway.only 与同序 .order。
+// - direct 管道：每次具名 attempt 只注入一个 provider.only，外层本地顺序回退。
 import http from 'node:http';
 import https from 'node:https';
 import crypto from 'node:crypto';
@@ -3000,20 +3000,136 @@ async function orEndpoints(slug) {
 //   OpenRouter；是否对当前账号/模型严格生效仍需手动负对照及实际 Provider 证据。
 function slugify(s) { return String(s).toLowerCase().replace(/\s+/g, '-'); }
 
+function plainObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+// Response-evidenced provider token. Structured routing keeps a safe slug's original
+// case so prototype-key fixtures and configured pins still match. Bare display names are slugified.
+const ACTUAL_PROVIDER_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
+function boundedActualProvider(value, { slugifyDisplay = false } = {}) {
+  if (typeof value !== 'string') return null;
+  const raw = value.trim();
+  if (!raw || raw.length > 200) return null;
+  if (!slugifyDisplay && ACTUAL_PROVIDER_TOKEN.test(raw)) return raw;
+  const token = slugify(raw);
+  return /^[a-z0-9][a-z0-9._/-]{0,199}$/.test(token) ? token : null;
+}
+function responseRoutingFact(body) {
+  if (!plainObject(body)) return null;
+  for (const key of ['finalProvider', 'resolvedProvider']) {
+    for (const namespace of ['provider_metadata', 'providerMetadata']) {
+      const routing = plainObject(plainObject(plainObject(body[namespace])?.gateway)?.routing);
+      const provider = boundedActualProvider(routing?.[key]);
+      if (provider) return { provider, source: `${namespace}.gateway.routing.${key}` };
+    }
+  }
+  return null;
+}
+const ROUTING_ERROR_PATTERN = /"(finalProvider|resolvedProvider)"\s*:\s*"([^"]+)"/g;
+function errorRoutingFact(body) {
+  const message = typeof body?.error === 'string' ? body.error : (typeof body?.error?.message === 'string' ? body.error.message : '');
+  if (!message) return null;
+  const matches = [...message.matchAll(ROUTING_ERROR_PATTERN)];
+  for (const key of ['finalProvider', 'resolvedProvider']) {
+    const hit = matches.find((item) => item[1] === key);
+    const provider = hit ? boundedActualProvider(hit[2]) : null;
+    if (provider) return { provider, source: `error.message.${key}` };
+  }
+  return null;
+}
+// Bridge stickiness: finalProvider locks out weaker facts; resolvedProvider ignores a later bare provider.
+function createRoutingObserver() {
+  let provider = null, source = '';
+  const apply = (fact) => {
+    if (!fact?.provider) return;
+    // Error-text recovery fills a missing or bare provider. It must not replace
+    // a structured final or resolved fact already observed on this response.
+    if (fact.source.startsWith('error.message.') && (source.endsWith('.finalProvider') || source.endsWith('.resolvedProvider'))) return;
+    if (source.endsWith('.finalProvider') && !fact.source.endsWith('.finalProvider')) return;
+    if (source.endsWith('.resolvedProvider') && fact.source === 'provider') return;
+    provider = fact.provider;
+    source = fact.source;
+  };
+  const observe = (json) => {
+    const root = plainObject(json);
+    if (!root) return;
+    const data = plainObject(root.data);
+    const frame = data && (data.choices || data.error || data.usage || data.provider || data.provider_metadata || data.providerMetadata) ? data : root;
+    const bare = boundedActualProvider(frame.provider, { slugifyDisplay: true });
+    if (bare) apply({ provider: bare, source: 'provider' });
+    const roots = [{ value: frame, prefix: '' }];
+    const choices = Array.isArray(frame.choices) ? frame.choices : [];
+    choices.forEach((choice, index) => {
+      const row = plainObject(choice);
+      if (!row) return;
+      for (const key of ['delta', 'message']) {
+        const child = plainObject(row[key]);
+        if (child) roots.push({ value: child, prefix: `choices[${index}].${key}.` });
+      }
+    });
+    for (const item of roots) {
+      const fact = responseRoutingFact(item.value);
+      if (fact) apply({ provider: fact.provider, source: item.prefix + fact.source });
+    }
+    const fromError = errorRoutingFact(frame) || (frame !== root ? errorRoutingFact(root) : null);
+    if (fromError) apply(fromError);
+  };
+  const observeText = (text) => {
+    if (typeof text !== 'string' || !text || source.endsWith('.finalProvider')) return;
+    const sample = text.length > 200000 ? text.slice(0, 100000) + text.slice(-100000) : text;
+    const structured = /"(?:provider_metadata|providerMetadata)"[\s\S]{0,400}"routing"[\s\S]{0,400}"(finalProvider|resolvedProvider)"\s*:\s*"([^"]+)"/g;
+    const matches = [...sample.matchAll(structured)];
+    for (const key of ['finalProvider', 'resolvedProvider']) {
+      const hit = matches.find((item) => item[1] === key);
+      const found = hit ? boundedActualProvider(hit[2]) : null;
+      if (found) { apply({ provider: found, source: `provider_metadata.gateway.routing.${key}` }); break; }
+    }
+    if (source.endsWith('.finalProvider') || source.endsWith('.resolvedProvider')) return;
+    const errorish = sample.match(/"message"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    if (errorish) {
+      const decoded = errorish[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+      apply(errorRoutingFact({ error: { message: decoded } }));
+    }
+  };
+  return { observe, observeText, result: () => ({ provider, source }) };
+}
+function routingFrame(json) {
+  const root = plainObject(json) || {};
+  const data = plainObject(root.data);
+  return data && (data.choices || data.error || data.usage || data.provider || data.provider_metadata || data.providerMetadata) ? data : root;
+}
+function firstGatewayRouting(json) {
+  const frame = routingFrame(json);
+  const nodes = [frame];
+  const choice = plainObject(frame.choices?.[0]);
+  if (plainObject(choice?.message)) nodes.push(choice.message);
+  if (plainObject(choice?.delta)) nodes.push(choice.delta);
+  for (const node of nodes) {
+    for (const namespace of ['provider_metadata', 'providerMetadata']) {
+      const routing = plainObject(plainObject(plainObject(node?.[namespace])?.gateway)?.routing);
+      if (routing) return { frame, routing };
+    }
+  }
+  return { frame, routing: {} };
+}
 function parseRouting(json) {
-  const d = json?.data && json.data.choices ? json.data : json;
-  const msg = d?.choices?.[0]?.message;
-  const rt = msg?.provider_metadata?.gateway?.routing || d?.provider_metadata?.gateway?.routing || {};
-  const direct = typeof d?.provider === 'string' ? d.provider : null;
+  const observer = createRoutingObserver();
+  observer.observe(json);
+  const observed = observer.result();
+  const { frame, routing } = firstGatewayRouting(json);
+  const msg = frame?.choices?.[0]?.message;
+  const direct = typeof frame?.provider === 'string' ? frame.provider : null;
+  const structured = observed.source && observed.source !== 'provider';
   return {
     content: msg?.content ?? null,
-    usage: d?.usage || null,
-    pipeline: rt.finalProvider ? 'planner' : direct ? 'direct' : null,
-    canonicalSlug: rt.canonicalSlug || (typeof d?.model === 'string' && d.model.includes('/') ? d.model : null),
-    finalProvider: rt.finalProvider || (direct ? slugify(direct) : null),
-    finalProviderName: rt.finalProvider || direct,
-    fallbacks: rt.fallbacksAvailable || [],
-    plan: rt.planningReasoning || '',
+    usage: frame?.usage || null,
+    pipeline: structured ? 'planner' : observed.source === 'provider' ? 'direct' : null,
+    canonicalSlug: routing.canonicalSlug || (typeof frame?.model === 'string' && frame.model.includes('/') ? frame.model : null),
+    finalProvider: observed.provider,
+    finalProviderName: structured ? observed.provider : (routing.finalProvider || direct),
+    providerSource: observed.source || null,
+    fallbacks: Array.isArray(routing.fallbacksAvailable) ? routing.fallbacksAvailable : [],
+    plan: typeof routing.planningReasoning === 'string' ? routing.planningReasoning : '',
   };
 }
 
@@ -3475,7 +3591,12 @@ function commitStatistics({ ts = Date.now(), modelId = null, finalProvider = nul
     // an observed final Provider and a matching real named successful attempt.
     if (succeeded) {
       const last = globalTrace.at(-1);
-      const provider = last?.healthAction === 'success' && last.upstream && last.upstream === finalProvider ? last.upstream : '';
+      // Gateway multi-list attempts store the allow-list head in `upstream`. Usage
+      // follows the response-evidenced health provider, and still requires that
+      // evidence to match finalProvider. A direct or singleton pin keeps the old
+      // rule: the observed provider must equal that pin, otherwise the unknown row.
+      const named = last && Object.hasOwn(last, 'healthProvider') ? last.healthProvider : last?.upstream;
+      const provider = last?.healthAction === 'success' && named && named === finalProvider ? named : '';
       const byModel = statisticCell(bucket.providerUsage,modelId,()=>({}));
       const delta = emptyAggregate(); addCounter(delta,'requests'); addUsage(delta,usage);
       mergeAggregate(aggregateCell(byModel,provider),delta);
@@ -3500,9 +3621,10 @@ function commitStatistics({ ts = Date.now(), modelId = null, finalProvider = nul
     }
   }
   if (!clientDisconnect && validStatisticModelId(modelId)) for (const attempt of globalTrace) {
-    if (!attempt.upstream) continue;
+    const sampleId = Object.hasOwn(attempt, 'healthProvider') ? attempt.healthProvider : attempt.upstream;
+    if (!sampleId) continue;
     const sample = attempt.healthAction === 'success' ? 'successes' : attempt.ruleScope === 'provider-model' && SAMPLE_FAILURE_ACTIONS.has(attempt.healthAction) ? 'degrades' : null;
-    if (sample) addSuccessCounter(providerSuccessHealthCell(bucket, modelId, attempt.upstream), sample);
+    if (sample) addSuccessCounter(providerSuccessHealthCell(bucket, modelId, sampleId), sample);
   }
   // Proxy 5xx rate ignores error-rule healthAction: any attempt status 500–599 counts.
   if (!clientDisconnect) {
@@ -3769,10 +3891,12 @@ function record(modelId, info, detail = detailContext.getStore()) {
     const detailProfile = ['error', 'full', 'raw-error', 'raw-full'].includes(attempt.detailProfile) && DETAIL_CALL_ID.test(attempt.callId || '') ? attempt.detailProfile : null;
     const bounded = boundedReason(attempt.note, info.sensitiveValues);
     bounded.reasonTruncated ||= attempt.reasonTruncated === true;
+    const actualProvider = boundedActualProvider(attempt.actualProvider);
     writes.push(errorLogs.append({ ts, requestId: request.requestId, requestedModel: request.requestedModel, resolvedModel: request.resolvedModel,
       accountId: attempt.accountId || info.accountId || null, accountName: attempt.account || info.account || null, attemptIndex,
       providerSelection: PROVIDER_SELECTIONS.has(attempt.providerSelection) ? attempt.providerSelection : null,
       targetProvider: attempt.upstream || null, providerPath: (info.trace || []).slice(0, traceIndex + 1).map((t) => t.upstream || 'auto'),
+      ...(actualProvider ? { actualProvider } : {}),
       status: attempt.normalizedStatus || attempt.status, upstreamStatus: attempt.upstreamStatus ?? null,
       category: attempt.upstreamStatus === 0 ? (info.proxyError ? 'proxy' : 'network') : 'upstream', ...bounded, accountAction: attempt.ruleScope === 'account' ? attempt.ruleAction || null : null,
       ruleId: typeof attempt.ruleId === 'string' && ERROR_RULE_ID.test(attempt.ruleId) ? attempt.ruleId : null,
@@ -4615,16 +4739,22 @@ function scheduleQuotaRefresh() {
   arm();
 }
 function createSseObserver(maxBytes = 64 * 1024) {
-  let pending = Buffer.alloc(0), discardTail = Buffer.alloc(0), discarding = false, usage = null, provider = null, canonical = null, error = null, errorPayload = null, errorEvent = null, normalizedStatus = null, responseBytes = 0, done = false;
+  const routingObserver = createRoutingObserver();
+  const ROUTING_EVENT_MAX = 1024 * 1024;
+  let pending = Buffer.alloc(0), discardTail = Buffer.alloc(0), discarding = false, usage = null, canonical = null, error = null, errorPayload = null, errorEvent = null, normalizedStatus = null, responseBytes = 0, done = false;
   const observeEvent = (buffer) => {
     const payload = buffer.toString('utf8').split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.replace(/^data:\s?/, '')).join('\n');
     if (!payload) return;
     if (payload === '[DONE]') { done = true; return; }
-    let event; try { event = JSON.parse(payload); } catch { return; }
-    const raw = event?.data && (event.data.choices || event.data.error || event.data.usage) ? event.data : event;
+    const captureError = buffer.length <= maxBytes;
+    if (Buffer.byteLength(payload) > ROUTING_EVENT_MAX) { routingObserver.observeText(payload); return; }
+    let event; try { event = JSON.parse(payload); } catch { routingObserver.observeText(payload); return; }
+    const raw = event?.data && (event.data.choices || event.data.error || event.data.usage || event.data.provider || event.data.provider_metadata || event.data.providerMetadata) ? event.data : event;
+    routingObserver.observe(raw || {});
     const normalized = normalizeUsage(raw?.usage); if (normalized) usage = normalized;
-    const routing = parseRouting(raw || {}); if (routing.finalProvider) provider = routing.finalProvider; if (routing.canonicalSlug) canonical = routing.canonicalSlug;
-    if (typeof raw?.provider === 'string') provider = slugify(raw.provider); if (typeof raw?.model === 'string') canonical = raw.model;
+    const routing = parseRouting(raw || {}); if (routing.canonicalSlug) canonical = routing.canonicalSlug;
+    if (typeof raw?.model === 'string') canonical = raw.model;
+    if (!captureError) return;
     const eventError = upstreamErrorOf(event); if (!error && eventError) { error = safeReason(errText(eventError)); errorPayload = eventError; errorEvent = Buffer.from(buffer); normalizedStatus = normalizeStatus(200, event, 502); }
   };
   return {
@@ -4632,6 +4762,7 @@ function createSseObserver(maxBytes = 64 * 1024) {
       let data = Buffer.from(chunk);
       responseBytes = Math.min(Number.MAX_SAFE_INTEGER, responseBytes + data.length);
       if (discarding) {
+        routingObserver.observeText(data.toString('utf8'));
         data = Buffer.concat([discardTail, data]);
         const match = /\r?\n\r?\n/.exec(data.toString('latin1'));
         if (!match) { discardTail = data.subarray(Math.max(0, data.length - 3)); return; }
@@ -4640,11 +4771,18 @@ function createSseObserver(maxBytes = 64 * 1024) {
       pending = Buffer.concat([pending, data]);
       while (true) {
         const match = /\r?\n\r?\n/.exec(pending.toString('latin1')); if (!match) break;
-        const end = match.index; if (end <= maxBytes) observeEvent(pending.subarray(0, end + match[0].length)); pending = pending.subarray(end + match[0].length);
+        const end = match.index;
+        observeEvent(pending.subarray(0, end + match[0].length));
+        pending = pending.subarray(end + match[0].length);
       }
-      if (pending.length > maxBytes) { discardTail = pending.subarray(Math.max(0, pending.length - 3)); pending = Buffer.alloc(0); discarding = true; }
+      if (pending.length > ROUTING_EVENT_MAX) {
+        routingObserver.observeText(pending.toString('utf8'));
+        discardTail = pending.subarray(Math.max(0, pending.length - 3));
+        pending = Buffer.alloc(0);
+        discarding = true;
+      }
     },
-    result() { return { usage, provider, canonical, error, errorPayload, errorEvent, normalizedStatus, responseBytes, done }; },
+    result() { return { usage, provider: routingObserver.result().provider, canonical, error, errorPayload, errorEvent, normalizedStatus, responseBytes, done }; },
   };
 }
 function readFirstSseEvent(stream, maxBytes = 64 * 1024) {
@@ -4783,30 +4921,39 @@ function unwrap(json, httpStatus = 200) {
   return { status: 200, upstreamStatus: httpStatus, normalizedStatus: 200, body: d, routing: r };
 }
 
-// 每个具名 HTTP attempt 只钉住一个 provider。preferred 与 strict 都由 switcher 外层逐次回退；
-// planner 使用 providerOptions.gateway.only，direct 使用 provider.only，未知管道同时注入同一个单元素 only。
+// planner / 未识别管道：一次注入完整 gateway.only + gateway.order。direct：单元素 provider.only，不发 order。
 const OR_SORT = { cost: 'price', ttft: 'latency', tps: 'throughput' };
-function injectPrefs(body, modelId, { upstream, sort = null }) {
+function gatewayOwnedPipeline(modelId) { return META.models[modelId]?.pipeline !== 'direct'; }
+function injectPrefs(body, modelId, attempt = {}) {
   const b = JSON.parse(JSON.stringify(body));
-  const provider = isPlainObject(b.provider) ? { ...b.provider } : {};
-  const gateway = isPlainObject(b.providerOptions?.gateway) ? { ...b.providerOptions.gateway } : {};
-  delete provider.only; delete provider.order;
-  delete gateway.only; delete gateway.order;
-  if (isPlainObject(b.provider)) b.provider = provider;
-  if (isPlainObject(b.providerOptions?.gateway)) b.providerOptions = { ...b.providerOptions, gateway };
-  const pipeline = META.models[modelId]?.pipeline || null;
-  const useVercel = pipeline === 'planner' || pipeline === null;
-  const useOpenRouter = pipeline === 'direct' || pipeline === null;
-  if (useVercel && (upstream || sort)) {
-    if (upstream) gateway.only = [upstream];
+  const upstream = attempt.upstream || null;
+  const sort = attempt.sort || null;
+  const gatewayOwned = gatewayOwnedPipeline(modelId);
+  const options = isPlainObject(b.providerOptions) ? { ...b.providerOptions } : {};
+  if (gatewayOwned) {
+    const list = Array.isArray(attempt.upstreams) && attempt.upstreams.length ? attempt.upstreams.slice() : (upstream ? [upstream] : []);
+    const gateway = {};
+    if (list.length) { gateway.only = list.slice(); gateway.order = list.slice(); }
     if (sort) gateway.sort = sort;
-    b.providerOptions = { ...(b.providerOptions || {}), gateway };
+    if (Object.keys(gateway).length) options.gateway = gateway;
+    else delete options.gateway;
+    if (Object.keys(options).length) b.providerOptions = options;
+    else delete b.providerOptions;
+    delete b.provider;
+    return b;
   }
-  if (useOpenRouter && (upstream || sort)) {
-    if (upstream) provider.only = [upstream];
-    if (sort) provider.sort = OR_SORT[sort] || sort;
-    b.provider = provider;
-  }
+  const provider = isPlainObject(b.provider) ? { ...b.provider } : {};
+  delete provider.only; delete provider.order;
+  const gateway = isPlainObject(options.gateway) ? { ...options.gateway } : {};
+  delete gateway.only; delete gateway.order;
+  if (Object.keys(gateway).length) options.gateway = gateway;
+  else delete options.gateway;
+  if (Object.keys(options).length) b.providerOptions = options;
+  else delete b.providerOptions;
+  if (upstream) provider.only = [upstream];
+  if (sort) provider.sort = OR_SORT[sort] || sort;
+  if (Object.keys(provider).length) b.provider = provider;
+  else delete b.provider;
   return b;
 }
 
@@ -4929,11 +5076,17 @@ function providerCircuitFailure(outcome, account) {
   if (/no allowed providers|no available providers|not found|unsupported|unavailable/i.test(message)) return 'unavailable';
   return null;
 }
+// Multi-provider gateway attempts attribute rules/health only to response evidence. Direct and singleton pins keep the planned slug.
+function scopedProvider(attempt, routing) {
+  if (attempt?.gatewayMulti && Array.isArray(attempt.upstreams) && attempt.upstreams.length > 1) return boundedActualProvider(routing?.finalProvider);
+  return attempt?.upstream || null;
+}
 function settleProviderCircuit(modelId, cfg, account, attempt, outcome) {
-  if (!attempt?.upstream || !(Number(cfg?.providerCooldownMs) > 0)) return null;
+  const provider = scopedProvider(attempt, outcome?.routing);
+  if (!provider || !(Number(cfg?.providerCooldownMs) > 0)) return null;
   const routeKey = providerCircuitRouteKey(account.id, modelId);
   if (attempt.circuitAccountGeneration !== (providerCircuitAccountGenerations.get(account.id) || 0) || attempt.circuitRouteGeneration !== (providerCircuitRouteGenerations.get(routeKey) || 0)) return null;
-  const key = attempt.circuitKey || providerCircuitKey(account.id, modelId, attempt.upstream), state = providerCircuitStates.get(key);
+  const key = provider === attempt.upstream && attempt.circuitKey ? attempt.circuitKey : providerCircuitKey(account.id, modelId, provider), state = providerCircuitStates.get(key);
   if (Number(outcome?.status) === 200) {
     if (state) providerCircuitStates.delete(key);
     return attempt.circuitHalfOpen ? 'half-open-success' : null;
@@ -5205,7 +5358,7 @@ async function attemptOnce(modelId, body, attempt, account, forwardedHeaders, si
   try {
     const res = await clineRequestJSON(`${config.upstreamBase}/chat/completions`, {
       headers: responseHeadersFor(account, forwardedHeaders), body: requestBody, signal, timeoutMs, account, attemptOwner, permit,
-      attemptMeta: { model: modelId, provider: attempt.upstream ? [attempt.upstream] : [] },
+      attemptMeta: { model: modelId, provider: Array.isArray(attempt.upstreams) && attempt.upstreams.length ? attempt.upstreams : (attempt.upstream ? [attempt.upstream] : []) },
     });
     const responseContentType = normalizeResponseContentType(res.headers);
     const responseBytes = safeResponseBytes(res.text);
@@ -5245,7 +5398,7 @@ function settleAttempt(modelId, attempt, result, account, { clientDisconnected =
   if (result.status === 200) {
     settleDetail(false, result.detailCaptureState || 'success');
     clearGatewayThrottle(account);
-    const healthAction = updateSuccess && currentGeneration ? updateProviderHealth(modelId, attempt.upstream, { success: true }) : 'none';
+    const healthAction = updateSuccess && currentGeneration ? updateProviderHealth(modelId, scopedProvider(attempt, result.routing), { success: true }) : 'none';
     const providerCircuitAction = updateSuccess && currentGeneration ? settleProviderCircuit(modelId, cfg, account, attempt, result) : null;
     return { classification: null, policy: null, accountAction: null, healthAction, providerCircuitAction, retryDecision: null };
   }
@@ -5260,7 +5413,8 @@ function settleAttempt(modelId, attempt, result, account, { clientDisconnected =
     return { classification, policy: { ruleId: null, scope: null, action: 'ignore', statusCode: Number(result.normalizedStatus || result.status), matchedBy: ['default'] },
       accountAction: null, quotaRemovalAction: null, healthAction: 'none', providerCircuitAction: null, retryDecision: null, gatewayThrottle: true };
   }
-  const policy = matchErrorRule({ result, classification, modelId, provider: attempt.upstream, sensitiveValues });
+  const scoped = scopedProvider(attempt, result.routing);
+  const policy = matchErrorRule({ result, classification, modelId, provider: scoped, sensitiveValues });
   const accountAction = policy.scope === 'account' && ['cooldown','hard-quarantine'].includes(policy.action) ? policy : null;
   const quotaSignal = currentGeneration && result.upstreamStatus === 429 && result.terminalOrigin === 'upstream_http' &&
     hasExplicitAccountQuotaEvidence(result.structuredError) &&
@@ -5272,9 +5426,9 @@ function settleAttempt(modelId, attempt, result, account, { clientDisconnected =
   const removesAccount = !!accountAction || !!quotaRemovalAction;
   if (currentGeneration && policy.scope === 'account') persistAccountAction(account, policy);
   if (quotaRemovalAction === 'waiting-refresh') persistLowQuotaHold(account);
-  else if (currentGeneration && policy.scope === 'provider-model') persistProviderAction(modelId, attempt.upstream, policy);
+  else if (currentGeneration && policy.scope === 'provider-model') persistProviderAction(modelId, scoped, policy);
   const healthAction = currentGeneration ? (policy.action === 'degrade' ? 'degrade' : policy.action) : 'none';
-  if (currentGeneration && policy.scope === 'provider-model' && policy.action === 'degrade') updateProviderHealth(modelId, attempt.upstream, { classification, note: `${classification.evidence}:${classification.failureClass}` });
+  if (currentGeneration && policy.scope === 'provider-model' && policy.action === 'degrade') updateProviderHealth(modelId, scoped, { classification, note: `${classification.evidence}:${classification.failureClass}` });
   const providerCircuitAction = currentGeneration && !removesAccount ? settleProviderCircuit(modelId, cfg, account, attempt, result) : null;
   const retryDecision = matchRetryRule(result, sensitiveValues);
   return { classification, policy, accountAction, quotaRemovalAction, healthAction, providerCircuitAction, retryDecision };
@@ -5285,7 +5439,7 @@ function traceAttempt(attempt, result, account, ms, diagnostic) {
   const detailProfile = token && ['error', 'full', 'raw-error', 'raw-full'].includes(result.detailAttempt?.root?.profile) ? result.detailAttempt.root.profile : null;
   const note = boundedReason(diagnostic.policy?.ruleId ? `rule:${diagnostic.policy.ruleId}` : result.ordinaryReason || result.note);
   return {
-    upstream: attempt.upstream, status: result.status, upstreamStatus: result.upstreamStatus, normalizedStatus: result.normalizedStatus,
+    upstream: attempt.upstream, healthProvider: scopedProvider(attempt, result.routing), actualProvider: boundedActualProvider(result.routing?.finalProvider), status: result.status, upstreamStatus: result.upstreamStatus, normalizedStatus: result.normalizedStatus,
     providerSelection: PROVIDER_SELECTIONS.has(attempt.selection) ? attempt.selection : null,
     ...(token ? { attemptIndex: token.attemptIndex, callId: token.callId } : {}), ...(detailProfile ? { detailProfile } : {}),
     terminalOrigin: result.terminalOrigin, ms, note: note.reason, reasonTruncated: note.reasonTruncated, account: account.name, accountId: account.id,
@@ -5302,8 +5456,40 @@ function traceAttempt(attempt, result, account, ms, diagnostic) {
   };
 }
 
-// 两级重试：本函数固定一个账号，仅在该账号内按健康计划逐个尝试 provider。
-// 只有 account-scoped 错误命中 cooldown/hard-quarantine 时，外层 handleChat 才能终止本链并最多换号一次。
+function gatewayInjectList(modelId, plan, account, now) {
+  let list = plan.mode === 'preferred' ? healthOrderedProviders(plan, plan.available) : [...plan.available];
+  if (list.includes(plan.preferredProvider)) list = [plan.preferredProvider, ...list.filter((provider) => provider !== plan.preferredProvider)];
+  if (!(plan.providerCooldownMs > 0) || !account) return list;
+  return list.filter((provider) => {
+    const state = providerCircuitStates.get(providerCircuitKey(account.id, modelId, provider));
+    return !state || (!(state.cooldownUntil > now) && !state.halfOpen);
+  });
+}
+function gatewayCircuitRetryAfter(modelId, plan, account, now) {
+  let blockedUntil = null;
+  for (const provider of plan.available) {
+    const state = providerCircuitStates.get(providerCircuitKey(account.id, modelId, provider));
+    if (!state || (!(state.cooldownUntil > now) && !state.halfOpen)) return null;
+    blockedUntil = Math.min(blockedUntil ?? Infinity, state.cooldownUntil > now ? state.cooldownUntil : now + 1000);
+  }
+  return blockedUntil == null ? null : retryAfterSeconds(Math.max(1000, blockedUntil - now));
+}
+function gatewayNamedAttempt(modelId, plan, account, list, now) {
+  const only = list.length === 1 ? list[0] : null;
+  const circuit = {};
+  if (only && plan.providerCooldownMs > 0 && account) {
+    const key = providerCircuitKey(account.id, modelId, only);
+    const state = providerCircuitStates.get(key);
+    if (state && (state.cooldownUntil > now || state.halfOpen)) return { attempt: null, retryAfter: retryAfterSeconds(Math.max(1000, (state.cooldownUntil > now ? state.cooldownUntil : now + 1000) - now)) };
+    if (state) { circuit.circuitKey = key; circuit.circuitHalfOpen = true; }
+    else circuit.circuitKey = key;
+  }
+  const hinted = list[0] === plan.preferredProvider && plan.available.includes(plan.preferredProvider);
+  const selection = plan.autoHeldExploration ? 'probe-exploration' : hinted ? 'session-preferred' : plan.mode === 'strict' ? 'strict-first' : 'health';
+  return { attempt: namedProviderAttempt(plan, list[0], { upstreams: list.slice(), selection, gatewayMulti: true, ...circuit }), retryAfter: null };
+}
+// 两级重试：本函数固定一个账号。direct 管道在该账号内逐个尝试 provider；
+// planner/未识别管道只发一次带完整 only+order 的 HTTP。账号级替换仍由外层处理。
 async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream = false, attemptTimeoutMs = NON_STREAM_ATTEMPT_MS, sensitiveValues = [], attemptOwner = null, preferredProvider = null } = {}) {
   const t0 = Date.now();
   const plan = buildProviderPlan(modelId, cfg, account, t0, preferredProvider), trace = [], attempted = new Set();
@@ -5313,14 +5499,24 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
   // 上一个真实上游尝试的终态；本地 RPM 阻塞时保留它作为历史事实，不被伪造成 upstream 429。
   let rpmBlockedAfter = null;
   const auto = plan.source === 'auto';
+  const useGatewayList = !auto && gatewayOwnedPipeline(modelId);
+  let gatewayList = null;
+  if (useGatewayList) {
+    gatewayList = gatewayInjectList(modelId, plan, account, t0);
+    plan.plannedOrder = gatewayList;
+    plan.maxAttempts = 1;
+  }
   const maxAttempts = auto ? 1 : plan.maxAttempts;
   const nextAttempt = () => auto
     ? (attempted.size ? { attempt: null, retryAfter: null } : { attempt: autoProviderAttempt(plan), retryAfter: null })
-    : selectProviderAttempt(modelId, plan, account, attempted);
+    : useGatewayList
+      ? (attempted.size ? { attempt: null, retryAfter: null } : gatewayNamedAttempt(modelId, plan, account, gatewayList, Date.now()))
+      : selectProviderAttempt(modelId, plan, account, attempted);
   const routingFail = (message, retryAfter) => ({ status: 503, upstreamStatus: null, normalizedStatus: 503,
     out: { error: { message, type: 'upstream_error' } }, routing: {}, acc: account, trace, t0, plan,
     retryAfter: retryAfter || null, netError: null, accountAction: null, clientDisconnected: false, retryStop: false, routingFailure: true });
   if (!auto && !plan.available.length) return routingFail(plan.allExcluded ? 'no provider available after exclusions' : 'no provider is currently eligible', plan.retryAfter);
+  if (useGatewayList && !gatewayList.length) return routingFail('provider half-open probe is already in progress', gatewayCircuitRetryAfter(modelId, plan, account, t0) || plan.retryAfter || 1);
   let last = null;
   let activeReq = null;
   let keepCloseHook = false;
@@ -5374,7 +5570,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
           const send = injectPrefs(body, modelId, attempt), requestBody = JSON.stringify(send);
           let up = null, netError = null, transportOrigin = null, failedAttemptToken = null, failedDetailAttempt = null;
           try {
-            up = await clineRequest(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, forwardedHeaders), body: requestBody, signal: ctrl.signal, timeoutMs: SSE_FIRST_EVENT_MS, account, attemptOwner, permit, attemptMeta: { model: modelId, provider: attempt.upstream ? [attempt.upstream] : [] } });
+            up = await clineRequest(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, forwardedHeaders), body: requestBody, signal: ctrl.signal, timeoutMs: SSE_FIRST_EVENT_MS, account, attemptOwner, permit, attemptMeta: { model: modelId, provider: Array.isArray(attempt.upstreams) && attempt.upstreams.length ? attempt.upstreams : (attempt.upstream ? [attempt.upstream] : []) } });
           } catch (e) { netError = timedOut ? 'upstream timeout' : errText(e.message); failedAttemptToken = e.attemptToken || null; failedDetailAttempt = e.detailAttempt || null; }
           const responseContentType = normalizeResponseContentType(up?.headers);
           let isSSE = !!up && up.status === 200 && responseContentType === 'text/event-stream';

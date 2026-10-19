@@ -6,6 +6,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { keepDirectPipelineFixtures } from './admin-fixture.js';
 
 const legacyKey = 'synthetic-legacy-client-123', adminPassword = 'synthetic-independent-admin-123';
 const upstreamKeys = { legacy: 'synthetic-upstream-legacy', team: 'synthetic-upstream-team' };
@@ -71,6 +72,7 @@ test('legacy migration, exclusive same-session routing, v3 final usage and sanit
     ], accountMode: 'sticky', activeAccount: 0, concurrencyWaitMs: 0,
     knownModels: [mimo, deepseek], perModel: { [mimo]: { upstreams: ['first', 'second'], pinMode: 'strict' }, [deepseek]: { upstreams: ['second'], pinMode: 'strict' } },
   }));
+  keepDirectPipelineFixtures(dir, JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8')));
   const salt = crypto.randomBytes(32).toString('hex');
   fs.writeFileSync(path.join(dir, 'admin-auth.json'), JSON.stringify({ version: 1, initialized: true, salt,
     hash: crypto.scryptSync(adminPassword, Buffer.from(salt, 'hex'), 64).toString('hex') }), { mode: 0o600 });

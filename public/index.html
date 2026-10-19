@@ -271,12 +271,12 @@
     <b>实测结论（决定了本工具的工作方式）：</b><br>
     ① <b>上游可枚举、可观测</b>：部分订阅模型的响应元数据会提供真实模型、可用上游及本次实际命中的上游；
     手动「探测」还会向当前账号发送一次语法合法的假渠道请求，尝试发现渠道并做负对照；若网关忽略钉选，它可能生成内容并计费。<br>
-    ② <b>不同管道使用不同的单渠道参数</b>：直连管道（OpenRouter）用顶层 <code class="mono">provider.only</code>；
-    规划器管道（Vercel AI Gateway）用 <code class="mono">providerOptions.gateway.only</code>。switcher 每次具名 HTTP attempt 只注入一个 provider，
-    但网关是否严格执行须按账号/模型查看负对照结果与实际 Provider；管道识别或计划渠道本身不是命中证明。
+    ② <b>不同管道使用不同的渠道参数</b>：直连管道（OpenRouter）用顶层 <code class="mono">provider.only</code>，每次 HTTP attempt 仅发送一个 provider.only，并由 switcher 本地逐个回退。
+    规划器管道与尚未识别的管道把过滤后的允许列表一次写入 <code class="mono">providerOptions.gateway.only</code> 与同序 <code class="mono">gateway.order</code>；<code class="mono">order</code> 只是网关优先级提示，不保证远端遵守，也不会被写成实际上游。
+    网关是否严格执行须按账号/模型查看负对照结果与实际 Provider；管道识别或计划渠道本身不是命中证明。
     <code class="mono">sort</code> 只在已选 Provider 内排序。<br>
     ③ <b>目录模型 :free 变体</b>：属于直连管道，是否遵守 <code class="mono">only</code> 仍需验证。<br>
-    ④ <b>多上游优先级 + 健康故障转移</b>：strict 首次固定使用来源顺序首个可用渠道，失败后从剩余渠道中按 Provider-model 24h 成功率回退；preferred 从首次起就用同一健康顺序。每次 HTTP attempt 只发送单 provider 请求，全部冷却时仅放行最早恢复者；SSE 开始后只更新未来健康状态、绝不重放。
+    ④ <b>多上游优先级 + 健康故障转移</b>：strict 保持来源顺序，preferred 按 Provider-model 24h 成功率重排。直连管道用该顺序在本地逐次回退，每次 HTTP attempt 只发送单 provider 请求。规划器与未识别管道只把该顺序写入一次 <code class="mono">gateway.order</code>，不再为列表中的下一个渠道另发 HTTP。全部冷却时仅放行最早恢复者；SSE 开始后只更新未来健康状态、绝不重放。
   </div>
 
   <div class="toolbar">
@@ -710,7 +710,7 @@ function render() {
         ${upstreamPanel(s.id, m, s.config)}
       </td>
       <td>
-        <div><select onchange="saveCfg(${jsArg(s.id)},'pinMode',this.value)" title="两种模式都由 switcher 外层逐次回退；每次 HTTP attempt 仅发送一个 provider.only。strict 首次用来源顺序首个可用渠道，失败后按 Provider-model 24h 成功率；preferred 从首次起使用同一健康顺序。">
+        <div><select onchange="saveCfg(${jsArg(s.id)},'pinMode',this.value)" title="直连管道由 switcher 外层逐次回退，每次 HTTP attempt 仅发送一个 provider.only。规划器与未识别管道把过滤后的允许列表一次写入 gateway.only 与 gateway.order（order 仅为优先级提示，不代表实际命中）。strict 保持来源顺序；preferred 按 Provider-model 24h 成功率重排该列表。maxRetries 只增加直连管道的额外 HTTP 次数。">
           <option value="strict" ${mode === 'strict' ? 'selected' : ''}>首选固定+健康回退</option>
           <option value="preferred" ${mode === 'preferred' ? 'selected' : ''}>Switcher 健康自动选择</option>
         </select></div>
@@ -1119,7 +1119,7 @@ function showTest(r, model, target) {
       <div>实际上游 <b class="${hit && !hitExcluded ? 'match' : 'mismatch'}">${escapeHtml(r.actual || '未知')}</b></div>
       <div>耗时 <b>${r.ms} ms</b></div>
     </div>${traceHtml(r.trace)}
-    ${hitExcluded ? `<div class="mismatch">⚠ 排除未生效：命中了被排除的上游 ${escapeHtml(r.actual)}（该渠道可能不在本地已知清单内，或网关未遵守白名单；先点「探测」刷新渠道列表再试）</div>` : hit ? '✔ 上游匹配，选择已生效。' : (r.actual ? '✘ 未命中首个目标上游：渠道可能限流或不可钉（点「校验」检查全部渠道）；strict 首次固定来源顺序首个可用渠道，失败后按渠道成功率回退，preferred 从首次起按成功率选择。' : '该模型响应未携带上游信息，无法回读实际上游。')}
+    ${hitExcluded ? `<div class="mismatch">⚠ 排除未生效：命中了被排除的上游 ${escapeHtml(r.actual)}（该渠道可能不在本地已知清单内，或网关未遵守白名单；先点「探测」刷新渠道列表再试）</div>` : hit ? '✔ 上游匹配，选择已生效。' : (r.actual ? '✘ 未命中首个目标上游：渠道可能限流或不可钉（点「校验」检查全部渠道）。直连管道会按来源顺序或成功率继续本地回退；规划器管道只发送一次 gateway.order 提示，实际命中以响应为准。' : '该模型响应未携带上游信息，无法回读实际上游。')}
     <div class="dim" style="margin-top:6px">回复：${escapeHtml(r.content || '(空)')}　·　背后模型：${escapeHtml(r.canonicalSlug || '—')}　·　管道：${r.pipeline === 'direct' ? '直连(OpenRouter)' : r.pipeline === 'planner' ? '规划器(Vercel)' : '未知'}</div>`;
 }
 
@@ -2142,8 +2142,7 @@ function planUpstreamLabel(x,type){
   const targets=Array.isArray(x?.targetProviders)?x.targetProviders:[];
   return targets.length?targets.join(' → '):'自动';
 }
-function actualUpstreamLabel(x,type){
-  if(type==='errors')return x?.actualProvider||'未知';
+function actualUpstreamLabel(x){
   return x?.actualProvider||'未知';
 }
 function pinMatchClass(targets,actual){
@@ -2171,7 +2170,7 @@ function affinityLogLabel(x){
   const upstreamLabels={caller_prompt_cache_key:'caller prompt_cache_key',caller_session_id:'caller session_id',caller_invalid:'caller 字段非法',derived_codex:'派生 Codex key',derived_claude:'派生 Claude key',none:'未写入'};
   const bindingSourceLabels={explicit:'显式绑定源',fallback:'回退绑定源',none:'无绑定源'},bindingResultLabels={hit:'绑定命中',miss:'绑定未命中',invalidated:'旧绑定失效后重选','temporary-overflow':'绑定满载临时溢出',provisional:'命中暂定绑定','not-applicable':'绑定不适用'};
   const key=keyLabels[x?.affinityKeyType]||'未知',confidence=confidenceLabels[x?.affinityConfidence]||'未知',upstream=upstreamLabels[x?.upstreamPromptCacheKeySource]||'未知',bindingSource=bindingSourceLabels[x?.bindingSource]||'绑定源未知',bindingResult=bindingResultLabels[x?.bindingResult]||'绑定状态未知';
-  return `亲和 ${key}（${confidence}） · 请求体会话键 ${upstream} · ${bindingSource} / ${bindingResult}${x?.providerOrderOverridesSticky?' · provider.order 覆盖 sticky':''}`;
+  return `亲和 ${key}（${confidence}） · 请求体会话键 ${upstream} · ${bindingSource} / ${bindingResult}${x?.providerOrderOverridesSticky?' · 首选顺序可能覆盖远端 sticky':''}`;
 }
 function inboundProtocolLabel(value){return ({chat:'Chat Completions',responses:'Responses',anthropic:'Anthropic Messages'})[value]||'—';}
 function cacheHitLogLabel(value){return value===true?'缓存命中':value===false?'缓存明确未命中':'缓存未知';}

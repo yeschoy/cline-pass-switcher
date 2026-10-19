@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Quality check commands and backend review gates"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify gateway multi only+order and detection contracts after change"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify request/error actualProvider projection honesty"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Verify UI never fills actual from plan; stream/error actual display"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Verify order/preferred copy and log state fields"}
+{"file": ".trellis/tasks/10-19-bridge-multi-only-routing/prd.md", "reason": "Acceptance criteria for goal-backward check"}
+{"file": ".trellis/tasks/10-19-bridge-multi-only-routing/design.md", "reason": "Design risks and test strategy"}
+{"file": ".trellis/tasks/10-19-bridge-multi-only-routing/research/local-gaps.md", "reason": "Gap table must be closed or explicitly deferred"}

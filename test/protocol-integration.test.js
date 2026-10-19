@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { prepareAdminFixture, connectAdminFixture, fixtureHeaders, installFixtureFetch } from './admin-fixture.js';
+import { prepareAdminFixture, connectAdminFixture, fixtureHeaders, installFixtureFetch, keepDirectPipelineFixtures } from './admin-fixture.js';
 installFixtureFetch();
 
 const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
@@ -54,6 +54,7 @@ async function startSwitcher(config) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-protocol-'));
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config));
   prepareAdminFixture(dir);
+  keepDirectPipelineFixtures(dir, config);
   const child = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: { ...process.env, DATA_DIR: dir, BIND_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
   child.stdout.on('data', (c) => { output += c; }); child.stderr.on('data', (c) => { output += c; });

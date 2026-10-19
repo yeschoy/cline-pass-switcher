@@ -7,6 +7,7 @@ import http from 'node:http';
 import net from 'node:net';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { keepDirectPipelineFixtures } from './admin-fixture.js';
 
 const legacy = 'legacy-client-key-123', admin = 'separate-admin-password-123';
 const model = 'cline-pass/glm-5.3-flash';
@@ -79,7 +80,8 @@ async function scenario(t, config, run, env = {}, quota = {}) {
         }
         if (input.stream) {
           res.setHeader('Content-Type', 'text/event-stream');
-          if (input.providerOptions?.gateway?.only?.[0] === 'first') return res.end('data: {"error":{"message":"provider failed","status":502}}\n\n');
+          const pin = input.provider?.only?.[0] || input.providerOptions?.gateway?.only?.[0];
+          if (pin === 'first') return res.end('data: {"error":{"message":"provider failed","status":502}}\n\n');
           return res.end('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n');
         }
         res.setHeader('Content-Type', 'application/json');
@@ -103,7 +105,9 @@ async function scenario(t, config, run, env = {}, quota = {}) {
   t.after(async () => { upstream.release(); upstream.finishStreams(); await stop(child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
   const upstreamPort = await listen(upstream);
   const portServer = http.createServer(); const port = await listen(portServer); await close(portServer);
-  fixture(dir, { proxyKey: legacy, accounts: [{ id: 'one', name: 'one', key: 'upstream-one' }], upstreamBase: `http://127.0.0.1:${upstreamPort}/api/v1`, ...config });
+  const stored = { proxyKey: legacy, accounts: [{ id: 'one', name: 'one', key: 'upstream-one' }], upstreamBase: `http://127.0.0.1:${upstreamPort}/api/v1`, ...config };
+  fixture(dir, stored);
+  keepDirectPipelineFixtures(dir, stored);
   child = await start(dir, port, env);
   const login = await api(port, '/api/auth/login', { method: 'POST', body: { password: admin } });
   assert.equal(login.status, 200);
@@ -493,7 +497,7 @@ test('a deleted key remains a redaction seed until its original in-flight work f
 });
 
 test('owner-scoped SSE first-event retry, secret redaction and empty legacy startup/rotation compatibility', async (t) => {
-  await scenario(t, { proxyKey: '', accounts: [{ id: 'one', name: 'one', key: 'upstream-one' }] }, async ({ dir, port, upstream, manage, restart }) => {
+  await scenario(t, { proxyKey: '', knownModels: [model], accounts: [{ id: 'one', name: 'one', key: 'upstream-one' }] }, async ({ dir, port, upstream, manage, restart }) => {
     assert.equal((await chat(port)).status, 200, 'empty legacy key stays open');
     const rejected = await manage('/api/security/client-keys', 'POST', { name: 'Team B' });
     assert.equal(rejected.status, 400, 'must configure legacy before creating an additional key with a legacy account');

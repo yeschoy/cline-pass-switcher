@@ -7,6 +7,28 @@ import crypto from 'node:crypto';
 const password = 'fixture-independent-admin-password';
 const sessions = new Map();
 const nativeFetch = globalThis.fetch;
+// Local-walk fixtures predate gateway one-shot routing. They keep the direct
+// pipeline unless metadata already names one. Planner and unknown coverage is
+// test/gateway-multi-only.test.js and must not call this helper.
+export function keepDirectPipelineFixtures(dir, config) {
+  if (!dir || !config) return;
+  const ids = new Set([...(config.knownModels || []), ...Object.keys(config.perModel || {})]);
+  for (const account of config.accounts || []) for (const id of Object.keys(account.perModel || {})) ids.add(id);
+  if (!ids.size) return;
+  const file = path.join(dir, 'metadata.json');
+  let meta = {};
+  if (fs.existsSync(file)) {
+    try { meta = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return; }
+  }
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return;
+  meta.models ||= {};
+  let changed = false;
+  for (const id of ids) {
+    const row = meta.models[id] && typeof meta.models[id] === 'object' && !Array.isArray(meta.models[id]) ? meta.models[id] : {};
+    if (row.pipeline == null) { meta.models[id] = { ...row, pipeline: 'direct' }; changed = true; }
+  }
+  if (changed) fs.writeFileSync(file, JSON.stringify(meta));
+}
 export function prepareAdminFixture(dir) {
   const filename = path.join(dir, 'admin-auth.json');
   if (fs.existsSync(filename)) return;
