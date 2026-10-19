@@ -957,3 +957,29 @@ test('probe recovery fences an earlier pending status read without replacing an 
   await h.run("recoverProbeHold('id0','model','one',{disabled:false})");
   assert.equal(h.el('#probeAccountScope').focused,false,'a late recovery does not focus the hidden console');
 });
+
+test('drain tier and warm boundary controls hydrate, validate and round-trip in the full save only when the server supports them', async () => {
+  const h=harness();
+  const loaded=fixture();loaded.accountPipeline={...loaded.accountPipeline,drainEnabled:true,drainThreshold:96,drainMaxConcurrent:3,warmThreshold:90};loaded.accountWorkflow={version:1,enabled:true,bindingEnabled:true,onBindingBusy:'overflow',missSteps:['quota','health'],quotaFilter:true,quotaPools:['hot','warm','unknown'],healthFilter:false,minimumHealth:0.2,unknownHealth:'optimistic',selector:'roundrobin'};
+  loaded.cachePool={scope:'per-client-key',minSize:0,maxSize:0,lowSize:0,targetSize:0,actual:{high:0,low:0,unknown:0,drain:1},binding:{enabled:false,size:0,maxEntries:50000}};
+  loaded.accounts[0].quota={pool:'drain'};loaded.accounts[0].effectiveMaxConcurrent=1;
+  h.context.next=loaded;h.run("render=()=>{};api=async(path)=>path==='/api/accounts'?next:path==='/api/models'?{subscription:[]}:path==='/api/statistics'?{models:[]}:path==='/api/model-aliases'?{aliases:{}}:{};");
+  await h.run('loadAll()');
+  assert.equal(h.el('#drainEnabled').checked,true);assert.equal(h.el('#drainThreshold').value,'96');assert.equal(h.el('#drainMaxConcurrent').value,'3');assert.equal(h.el('#warmThreshold').value,'90');
+  assert.equal(h.el('#drainEnabled').disabled,false);
+  assert.match(h.el('#cachePoolRuntime').textContent,/已用 <90% 高额度，90%–<96% 低额度，96%–<100% drain 档（并发上限 3）/);
+  assert.match(h.el('#accBody').innerHTML,/drain·并发1/);
+  assert.equal(h.run("WORKFLOW_SELECTOR_LABELS.roundrobin"),'轮询：最久未选优先');
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(pipelineDrainDraft())')),{drainEnabled:true,drainThreshold:96,drainMaxConcurrent:3,warmThreshold:90});
+  for(const [id,value] of [['drainThreshold','90'],['drainThreshold','100'],['drainThreshold','x'],['drainMaxConcurrent','0'],['drainMaxConcurrent','1.5'],['warmThreshold','0']]){
+    const before=h.el('#'+id).value;h.el('#'+id).value=value;assert.throws(()=>h.run('pipelineDrainDraft()'),undefined,`${id}=${value}`);h.el('#'+id).value=before;
+  }
+  h.el('#drainEnabled').checked=false;h.el('#warmThreshold').value='95';assert.throws(()=>h.run('pipelineDrainDraft()'));h.el('#warmThreshold').value='90';
+  h.el('#drainMaxConcurrent').value='5';
+  assert.equal(h.run('collectAccounts().accountPipeline.drainMaxConcurrent'),5);
+  assert.equal(h.run('collectAccounts().accountPipeline.drainEnabled'),false);
+  // Older server snapshot: the controls are disabled and the strict save never sends unknown fields.
+  const old=fixture();h.context.next=old;await h.run('loadAll()');
+  assert.equal(h.el('#drainEnabled').disabled,true);
+  assert.equal(Object.hasOwn(JSON.parse(h.run('JSON.stringify(collectAccounts().accountPipeline)')),'drainEnabled'),false);
+});

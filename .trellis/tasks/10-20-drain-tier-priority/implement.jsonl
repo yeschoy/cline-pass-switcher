@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "后端总入口与开发前检查清单"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "账号路由/缓存池/低额度池/额度 job/并发准入契约（核心）"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "accountWorkflow/accountPipeline/selectionCounters 持久化与校验"}
+{"file": ".trellis/spec/backend/client-key-guidelines.md", "reason": "按客户端 key 隔离的号池，LRU 与成员计算需按 owner"}
+{"file": ".trellis/spec/backend/schema-changing-deployment-guidelines.md", "reason": "新配置字段被旧镜像拒绝，回滚约束"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "控制台工作流/缓存池面板改动"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "工作流草稿、预测与配置 revision 状态"}

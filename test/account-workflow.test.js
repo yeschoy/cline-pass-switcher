@@ -96,7 +96,30 @@ test('other picker modes remain distinct and health unknown policy is explicit',
   assert.equal(rankWorkflowCandidates(rows, { ...base, selector: 'health' })[0].id, 'b');
   assert.equal(rankWorkflowCandidates(rows, { ...base, selector: 'health', unknownHealth: 'unknown-last' })[0].id, 'a');
   assert.equal(rankWorkflowCandidates(rows, { ...base, selector: 'least-connections' })[0].id, 'c');
-  assert.equal(rankWorkflowCandidates(rows, { ...base, selector: 'roundrobin', cursor: 1 })[0].id, 'b');
+  assert.equal(rankWorkflowCandidates(rows, { ...base, selector: 'roundrobin', cursor: 1 })[0].id, 'a');
+  const lru = { a: { count: 3, lastSelected: 9 }, b: { count: 1, lastSelected: 4 }, c: { count: 9, lastSelected: 7 } };
+  assert.deepEqual(rankWorkflowCandidates(rows, { ...base, selector: 'roundrobin', counts: lru, cursor: 2 }).map(x => x.id), ['b', 'c', 'a']);
+});
+
+test('roundrobin is least-recently-selected first and rotates strictly', () => {
+  const rows = ['a', 'b', 'c'].map(id => ({ id, healthRate: null }));
+  const counts = {};
+  let sequence = 0;
+  const pick = (available = rows) => {
+    const id = rankWorkflowCandidates(available, { selector: 'roundrobin', counts, activeCounts: new Map(), cursor: sequence, unknownHealth: 'optimistic' })[0].id;
+    counts[id] = { count: (counts[id]?.count || 0) + 1, lastSelected: ++sequence };
+    return id;
+  };
+  assert.deepEqual([pick(), pick(), pick(), pick(), pick(), pick()], ['a', 'b', 'c', 'a', 'b', 'c']);
+  // 'a' is busy and skipped; once free it is the least recently selected and goes next.
+  assert.equal(pick(rows.filter(x => x.id !== 'a')), 'b');
+  assert.equal(pick(), 'a');
+  // A new account (lastSelected 0) is taken once, then joins the normal rotation.
+  rows.push({ id: 'd', healthRate: null });
+  assert.deepEqual([pick(), pick(), pick(), pick(), pick()], ['d', 'c', 'b', 'a', 'd']);
+  // Corrupt counter rows are rejected with the bounded error, not a TypeError.
+  for (const bad of [null, 1, { count: 1, lastSelected: -1 }, { count: 1, lastSelected: 1.5 }])
+    assert.throws(() => rankWorkflowCandidates(rows.slice(0, 2), { selector: 'roundrobin', counts: { a: bad } }), /invalid workflow selection count/);
 });
 
 test('persistent counters preserve stable IDs, prune only removed IDs and reject corruption', () => {

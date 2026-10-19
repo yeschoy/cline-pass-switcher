@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "路由/准入/额度契约与测试要求"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "配置字段校验与兼容"}
+{"file": ".trellis/spec/backend/schema-changing-deployment-guidelines.md", "reason": "旧镜像兼容与回滚门禁"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "前端质量检查"}

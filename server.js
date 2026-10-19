@@ -804,7 +804,7 @@ function admissionWaitBudgets() {
   return { normal, pool: config.poolFullWaitMs ?? normal };
 }
 function poolWaitBudget(candidates, waits) {
-  const pureFull = candidates.length > 0 && candidates.every((a) => a.maxConcurrent > 0 && !accountHasCapacity(a) && rpmAvailable(a));
+  const pureFull = candidates.length > 0 && candidates.every((a) => effectiveMaxConcurrent(a) > 0 && !accountHasCapacity(a) && rpmAvailable(a));
   return pureFull ? waits.pool : waits.normal;
 }
 function poolWaitForBlock(start, candidates, facts, waits) {
@@ -845,6 +845,8 @@ function validateAccountErrorRulesInput(rules = {}) {
   return null;
 }
 const PIPELINE_KEYS = ['quotaPool', 'healthSort', 'sticky'];
+const DRAIN_PIPELINE_KEYS = ['drainEnabled', 'drainThreshold', 'drainMaxConcurrent', 'warmThreshold'];
+const DRAIN_PIPELINE_DEFAULTS = Object.freeze({ drainEnabled: false, drainThreshold: 95, drainMaxConcurrent: 2, warmThreshold: 80 });
 const PIPELINE_DEFAULT_ORDER = ['quotaPool', 'healthSort', 'sticky'];
 const LEGACY_PIPELINE_ORDER = ['excludeUnhealthy', 'quotaPool', 'healthSort', 'sticky'];
 const SESSION_BINDING_EXPLICIT_TTL_MS = 7_200_000;
@@ -877,13 +879,14 @@ function normalizeAccountPipeline(value, {
   fallbackSessionBindingExplicitTtlMs = SESSION_BINDING_EXPLICIT_TTL_MS,
   fallbackSessionBindingFallbackTtlMs = SESSION_BINDING_FALLBACK_TTL_MS,
   fallbackSessionBindingMaxEntries = SESSION_BINDING_MAX_ENTRIES,
+  fallbackDrain = null,
 } = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     if (strict) throw new Error('accountPipeline must be an object');
     value = {};
   }
   const legacy = Object.hasOwn(value, 'excludeUnhealthy');
-  const allowed = [...PIPELINE_KEYS, ...(legacy ? ['excludeUnhealthy'] : []), 'order', 'cachePoolSize', 'cachePoolMaxSize', 'cachePoolLowQuotaSize', 'sessionBindingExplicitTtlMs', 'sessionBindingFallbackTtlMs', 'sessionBindingMaxEntries'];
+  const allowed = [...PIPELINE_KEYS, ...(legacy ? ['excludeUnhealthy'] : []), 'order', 'cachePoolSize', 'cachePoolMaxSize', 'cachePoolLowQuotaSize', 'sessionBindingExplicitTtlMs', 'sessionBindingFallbackTtlMs', 'sessionBindingMaxEntries', ...DRAIN_PIPELINE_KEYS];
   if (strict && Object.keys(value).some((key) => !allowed.includes(key))) throw new Error('accountPipeline contains an unknown field');
   if (strict) {
     for (const key of PIPELINE_KEYS) if (typeof value[key] !== 'boolean') throw new Error(`accountPipeline.${key} must be boolean`);
@@ -933,6 +936,26 @@ function normalizeAccountPipeline(value, {
   if (out.sessionBindingFallbackTtlMs > out.sessionBindingExplicitTtlMs) {
     if (strict) throw new Error('accountPipeline.sessionBindingFallbackTtlMs must not exceed sessionBindingExplicitTtlMs');
     out.sessionBindingFallbackTtlMs = Math.min(SESSION_BINDING_FALLBACK_TTL_MS, out.sessionBindingExplicitTtlMs);
+  }
+  // Drain tier / warm boundary. Kept in accountPipeline because an older image's
+  // non-strict startup normalizer silently drops unknown accountPipeline keys.
+  const drainFallback = (field, valid) => valid(fallbackDrain?.[field]) ? fallbackDrain[field] : DRAIN_PIPELINE_DEFAULTS[field];
+  const validPercent = (x) => typeof x === 'number' && Number.isFinite(x) && x > 0 && x < 100;
+  const validCap = (x) => Number.isInteger(x) && x >= 1 && x <= 100000;
+  const drainField = (field, valid, message) => {
+    if (value[field] === undefined) return drainFallback(field, valid);
+    if (valid(value[field])) return value[field];
+    if (strict) throw new Error(`accountPipeline.${field} ${message}`);
+    return DRAIN_PIPELINE_DEFAULTS[field];
+  };
+  out.drainEnabled = drainField('drainEnabled', (x) => typeof x === 'boolean', 'must be boolean');
+  out.drainThreshold = drainField('drainThreshold', validPercent, 'must be a number between warmThreshold and 100');
+  out.drainMaxConcurrent = drainField('drainMaxConcurrent', validCap, 'must be an integer from 1 to 100000');
+  out.warmThreshold = drainField('warmThreshold', validPercent, 'must be a positive number below the drain/reserve boundary');
+  if (!(out.warmThreshold < out.drainThreshold) || (!out.drainEnabled && !(out.warmThreshold < 95))) {
+    if (strict) throw new Error(out.warmThreshold < out.drainThreshold ? 'accountPipeline.warmThreshold must be below 95 while drain is disabled' : 'accountPipeline.drainThreshold must be greater than warmThreshold');
+    out.drainThreshold = DRAIN_PIPELINE_DEFAULTS.drainThreshold;
+    out.warmThreshold = DRAIN_PIPELINE_DEFAULTS.warmThreshold;
   }
   return out;
 }
@@ -1729,12 +1752,13 @@ function enabledAccounts({ excludeIds = new Set(), clientKeyId = null, pruneCool
     const st = getAccountState(a.id);
     if (st?.hardQuarantined || st?.banned || st?.protectionMonthlyAt || st?.protectionShortAt || (quotaProvisional.get(a.id)?.until || 0) > Date.now()) return false;
     if (st?.cooldownUntil && st.cooldownUntil > Date.now()) return false;
-    if (st?.quotaDisposition && configuredCachePoolLowQuotaSize() > 0 && cachePoolEnabled()) return false;
+    if (st?.quotaDisposition && lowQuotaProtectionApplies(a.id)) return false;
     return true;
   });
 }
-function accountHasCapacity(a) {
-  return !a?.maxConcurrent || (activeCounts.get(a.id) || 0) < a.maxConcurrent;
+function accountHasCapacity(a, settings = drainSettings(), pool = null) {
+  const limit = settings.active ? effectiveMaxConcurrent(a, settings, pool) : a?.maxConcurrent;
+  return !limit || (activeCounts.get(a.id) || 0) < limit;
 }
 // lease 持有首个 RPM permit；后续每个真实 attempt 通过 takeRpmPermit() 独立预留。
 function createLease(account, firstPermit) {
@@ -1841,8 +1865,10 @@ function strategyRank(mode, list) {
 function selectionResult(lease, mode, preferred, reason, identity, overflow = false) {
   // Snapshot at admission, not at attempt settlement: concurrent quota refresh cannot
   // retroactively make a high/unknown lease eligible for the low-account hold.
-  lease.quotaRole = cachePoolEnabled() && configuredCachePoolLowQuotaSize() > 0
-    ? ({ warm: 'low', hot: 'high', unknown: 'unknown' }[quotaProjection(lease.account.id).pool] || null) : null;
+  const pool = cachePoolEnabled() ? quotaProjection(lease.account.id).pool : null;
+  lease.quotaRole = pool && configuredCachePoolLowQuotaSize() > 0
+    ? ({ warm: 'low', hot: 'high', unknown: 'unknown', drain: 'low' }[pool] || null)
+    : pool === 'drain' ? 'low' : null;
   return {
     lease, strategy: mode, preferredAccountId: preferred?.id || null, preferredAccountName: preferred?.name || null,
     selectedAccountId: lease.account.id, selectedAccountName: lease.account.name, reason, overflow,
@@ -1903,7 +1929,41 @@ function sessionBindingConfigured() { return config.accountWorkflow?.enabled ? c
 function sessionBindingEnabled(identity, ownerRequestId) { return sessionBindingConfigured() && !!identity?.fingerprint && !!ownerRequestId; }
 function pipelineEnabled() { return cachePoolEnabled() || PIPELINE_KEYS.some((key) => config.accountPipeline?.[key]); }
 function quotaRoutingEnabled() { return config.accountPipeline?.quotaPool === true || cachePoolEnabled(); }
-function quotaProjection(accountId, now = Date.now()) {
+// Drain tier settings: only effective while the guided workflow and its drain switch are both on.
+// Callers that hold a request snapshot pass its policy/pipeline; everything else reads live config.
+function drainSettings(policy = config.accountWorkflow, pipeline = config.accountPipeline) {
+  const active = policy?.enabled === true && pipeline?.drainEnabled === true;
+  return {
+    active,
+    drainThreshold: Number.isFinite(pipeline?.drainThreshold) ? pipeline.drainThreshold : DRAIN_PIPELINE_DEFAULTS.drainThreshold,
+    drainMaxConcurrent: Number.isInteger(pipeline?.drainMaxConcurrent) && pipeline.drainMaxConcurrent > 0 ? pipeline.drainMaxConcurrent : DRAIN_PIPELINE_DEFAULTS.drainMaxConcurrent,
+    warmThreshold: Number.isFinite(pipeline?.warmThreshold) ? pipeline.warmThreshold : DRAIN_PIPELINE_DEFAULTS.warmThreshold,
+  };
+}
+function drainActive() { return drainSettings().active; }
+function quotaPoolFor(maximum, settings = drainSettings()) {
+  if (maximum < settings.warmThreshold) return 'hot';
+  if (maximum < (settings.active ? settings.drainThreshold : 95)) return 'warm';
+  return settings.active && maximum < 100 ? 'drain' : 'reserve';
+}
+function effectiveMaxConcurrent(account, settings = drainSettings(), pool = null) {
+  const configured = Math.max(0, Math.floor(Number(account?.maxConcurrent) || 0));
+  if (!settings.active || !account?.id) return configured;
+  if ((pool ?? quotaProjection(account.id, Date.now(), settings).pool) !== 'drain') return configured;
+  return configured ? Math.min(configured, settings.drainMaxConcurrent) : settings.drainMaxConcurrent;
+}
+// The low-quota hold/exhaustion lifecycle normally requires a positive low-quota slot.
+// While drain is active it also protects drain accounts (and exhausted former drain accounts).
+function lowQuotaProtectionApplies(accountId) {
+  if (!cachePoolEnabled()) return false;
+  if (configuredCachePoolLowQuotaSize() > 0) return true;
+  if (!drainActive() || accountId === undefined) return false;
+  const pool = quotaProjection(accountId).pool;
+  // A held former drain account whose snapshot is now stale/failed (unknown) or exhausted
+  // (reserve) keeps its hold; only a fresh hot/warm snapshot reconciles it away.
+  return pool === 'drain' || ((pool === 'reserve' || pool === 'unknown') && !!getAccountState(accountId)?.quotaDisposition);
+}
+function quotaProjection(accountId, now = Date.now(), settings = drainSettings()) {
   const disposition = getAccountState(accountId);
   const safeDisposition = { quotaDisposition: ['waiting-refresh','quota-exhausted'].includes(disposition?.quotaDisposition) ? disposition.quotaDisposition : null, quotaRetryAt: Number.isSafeInteger(disposition?.quotaRetryAt) && disposition.quotaRetryAt > now ? disposition.quotaRetryAt : null, protectionMonthlyAt: disposition?.protectionMonthlyAt || null, protectionShortWindows: disposition?.protectionShortWindows || null, protectionRetryAt: disposition?.protectionRetryAt > now ? disposition.protectionRetryAt : null, protectionPendingUntil: (quotaProvisional.get(accountId)?.until || 0) > now ? quotaProvisional.get(accountId).until : null, protectionPersistence: disposition?.protectionMonthlyAt ? (quotaProvisional.get(accountId)?.persistRetryAt !== undefined ? 'pending' : 'persisted') : null };
   const q = META.accountQuotas?.[accountId];
@@ -1911,7 +1971,7 @@ function quotaProjection(accountId, now = Date.now()) {
   const complete = snapshot && q.errorCategory == null && q.lastSuccessAt === snapshot.fetchedAt && q.lastAttemptAt <= q.lastSuccessAt && ['five_hour','weekly','monthly'].every((type) => snapshot.limits?.[type]) && snapshot.fetchedAt <= now && now - snapshot.fetchedAt <= QUOTA_STALE_MS;
   if (!complete) return { ...safeDisposition, status: 'unknown', pool: 'unknown', fetchedAt: snapshot?.fetchedAt || null, limits: snapshot?.limits || {}, errorCategory: q?.errorCategory || null };
   const maximum = Math.max(...Object.values(snapshot.limits).map((limit) => limit.percentUsed));
-  return { ...safeDisposition, status: 'fresh', pool: maximum < 80 ? 'hot' : maximum < 95 ? 'warm' : 'reserve', fetchedAt: snapshot.fetchedAt, limits: snapshot.limits, errorCategory: null };
+  return { ...safeDisposition, status: 'fresh', pool: quotaPoolFor(maximum, settings), fetchedAt: snapshot.fetchedAt, limits: snapshot.limits, errorCategory: null };
 }
 function statisticsQuotaProjection(account, now = Date.now()) {
   const quota = quotaProjection(account.id, now), state = META.accountQuotas?.[account.id];
@@ -1919,27 +1979,28 @@ function statisticsQuotaProjection(account, now = Date.now()) {
   const job = quotaJobs.get(account.id), activeJob = job && quotaJobAccount(job) && quotaJobHasOwner(job) ? job : null;
   let nextAttemptAt = null;
   if (!reason && state?.errorCategory && state.lastAttemptAt) nextAttemptAt = state.lastAttemptAt + quotaFailureDelay(account.id);
-  else if (!reason) { const successAt = successfulQuotaTime(state, now); if (successAt) nextAttemptAt = quotaNextAttemptAt(account, successAt, now); else if (cachePoolEnabled() && configuredCachePoolLowQuotaSize() > 0 && getAccountState(account.id)?.quotaDisposition === 'waiting-refresh') nextAttemptAt = now; }
+  else if (!reason) { const successAt = successfulQuotaTime(state, now); if (successAt) nextAttemptAt = quotaNextAttemptAt(account, successAt, now); else if (getAccountState(account.id)?.quotaDisposition === 'waiting-refresh' && lowQuotaProtectionApplies(account.id)) nextAttemptAt = now; }
   return { ...quota, lastAttemptAt: state?.lastAttemptAt || null, lastSuccessAt: state?.lastSuccessAt || null, refresh: { eligible: reason === null, reason, state: activeJob ? (activeJob.state === 'running' ? 'fetching' : 'queued') : 'idle', nextAttemptAt } };
 }
 function quotaNextAttemptAt(account, successAt, now = Date.now()) {
   const disposition = getAccountState(account.id);
   if (disposition?.protectionShortAt) return disposition.protectionRetryAt > successAt ? disposition.protectionRetryAt : successAt + QUOTA_SUCCESS_MS;
-  if (cachePoolEnabled() && configuredCachePoolLowQuotaSize() > 0) {
+  if (disposition?.quotaDisposition && lowQuotaProtectionApplies(account.id)) {
     if (disposition?.quotaDisposition === 'waiting-refresh') return successAt >= disposition.quotaDispositionAt ? successAt + QUOTA_SUCCESS_MS : now;
     if (disposition?.quotaDisposition === 'quota-exhausted' && disposition.quotaRetryAt > successAt) return disposition.quotaRetryAt;
   }
   return successAt + QUOTA_SUCCESS_MS;
 }
-function pipelineCandidates(list, healthFor = (id) => successHealthProjection('account', id)) {
-  return list.map((account) => ({ account, health: healthFor(account.id), quota: quotaProjection(account.id) }));
+function pipelineCandidates(list, healthFor = (id) => successHealthProjection('account', id), settings = drainSettings()) {
+  const now = Date.now();
+  return list.map((account) => ({ account, health: healthFor(account.id), quota: quotaProjection(account.id, now, settings) }));
 }
 function buildPipelineGroups(list, identity, candidates = pipelineCandidates(list), { skipSticky = false } = {}) {
   const diagnostics = [];
   // Role-aware cache pools fix role priority before any optional quota/health/sticky step.
   // With low=0 this is the original single group and preserves legacy ranking.
   const roleAware = cachePoolEnabled() && configuredCachePoolLowQuotaSize() > 0;
-  let groups = roleAware ? ['warm','hot','unknown'].map((role) => ({ candidates: candidates.filter((candidate) => candidate.quota.pool === role), quota: role, health: 'ordinary' })).filter((group) => group.candidates.length)
+  let groups = roleAware ? ['warm','drain','hot','unknown'].map((role) => ({ candidates: candidates.filter((candidate) => candidate.quota.pool === role), quota: role, health: 'ordinary' })).filter((group) => group.candidates.length)
     : [{ candidates, quota: 'ordinary', health: 'ordinary' }];
   let stickyApplied = false;
   const applySticky = () => {
@@ -1954,7 +2015,7 @@ function buildPipelineGroups(list, identity, candidates = pipelineCandidates(lis
     if (!config.accountPipeline[step]) continue;
     if (step === 'quotaPool') {
       if (!groups.some((group) => group.candidates.some((candidate) => candidate.quota.pool !== 'unknown'))) diagnostics.push('quota-all-unknown');
-      else groups = groups.flatMap((group) => ['hot','warm','unknown','reserve'].map((pool) => ({ ...group, candidates: group.candidates.filter((candidate) => candidate.quota.pool === pool), quota: pool })).filter((next) => next.candidates.length));
+      else groups = groups.flatMap((group) => ['hot','warm','drain','unknown','reserve'].map((pool) => ({ ...group, candidates: group.candidates.filter((candidate) => candidate.quota.pool === pool), quota: pool })).filter((next) => next.candidates.length));
     } else if (step === 'healthSort' && config.accountMode !== 'load-health') {
       groups = groups.flatMap((group) => {
         const rates = [...new Set(group.candidates.map((candidate) => candidate.health.successRate).filter((rate) => rate !== null))].sort((a,b) => b-a);
@@ -1974,7 +2035,10 @@ function cachePoolMembership(list, candidates = null, settings = null) {
   const size = pipeline.cachePoolSize, maxSize = pipeline.cachePoolMaxSize, targetSize = cachePoolTargetFor(pipeline, settings?.targetSize ?? META.cachePoolTargetSize);
   const lowSize = pipeline.cachePoolLowQuotaSize;
   const stable = (left, right) => (left.account.priority || 100) - (right.account.priority || 100) || (left.account.id < right.account.id ? -1 : left.account.id > right.account.id ? 1 : 0);
-  let eligibleCandidates = candidates.filter((candidate) => candidate.quota.pool !== 'reserve').sort(stable);
+  // Drain accounts (only produced while drain is active) always join the active set on top of
+  // the target, so they never displace an ordinary member (and its session bindings).
+  const drain = candidates.filter((candidate) => candidate.quota.pool === 'drain').sort(stable);
+  let eligibleCandidates = candidates.filter((candidate) => candidate.quota.pool !== 'reserve' && candidate.quota.pool !== 'drain').sort(stable);
   let activeCandidates;
   if (lowSize > 0) {
     const remaining = (candidate) => 100 - Math.max(...Object.values(candidate.quota.limits).map((limit) => limit.percentUsed));
@@ -1988,8 +2052,9 @@ function cachePoolMembership(list, candidates = null, settings = null) {
     eligibleCandidates = [...selected, ...[...high, ...low, ...unknown].filter((candidate) => !chosen.has(candidate.account.id))];
     activeCandidates = eligibleCandidates.slice(0, targetSize);
   } else activeCandidates = eligibleCandidates.slice(0, targetSize);
+  if (drain.length) { eligibleCandidates = [...drain, ...eligibleCandidates]; activeCandidates = [...drain, ...activeCandidates]; }
   const activeIds = new Set(activeCandidates.map((candidate) => candidate.account.id));
-  const actual = { high: activeCandidates.filter((c) => c.quota.pool === 'hot').length, low: activeCandidates.filter((c) => c.quota.pool === 'warm').length, unknown: activeCandidates.filter((c) => c.quota.pool === 'unknown').length };
+  const actual = { high: activeCandidates.filter((c) => c.quota.pool === 'hot').length, low: activeCandidates.filter((c) => c.quota.pool === 'warm').length, unknown: activeCandidates.filter((c) => c.quota.pool === 'unknown').length, ...(drain.length ? { drain: drain.length } : {}) };
   return { size, maxSize, lowSize, targetSize, actual, activeIds, activeCandidates, eligibleCandidates, candidates, byId: new Map(candidates.map((candidate) => [candidate.account.id, candidate])) };
 }
 function rpmProjection(account, now = Date.now()) {
@@ -2011,10 +2076,10 @@ function cachePoolRoles() {
   return roles;
 }
 function cachePoolActualByOwner() {
-  const actual = { high: 0, low: 0, unknown: 0 };
+  const actual = { high: 0, low: 0, unknown: 0, ...(drainActive() ? { drain: 0 } : {}) };
   for (const owner of clientKeyInventory()) {
     const counts = cachePoolMembership(enabledAccounts({ clientKeyId: owner.id }))?.actual;
-    if (counts) for (const role of Object.keys(actual)) actual[role] += counts[role];
+    if (counts) for (const role of Object.keys(actual)) actual[role] += counts[role] || 0;
   }
   return actual;
 }
@@ -2040,7 +2105,7 @@ function cachePipelineFacts(plan, membership, candidate, tier, capacityFallback)
     cachePoolLowQuotaSize: membership.lowSize,
     cachePoolTargetSize: membership.targetSize,
     cachePoolActual: membership.actual,
-    selectedQuotaRole: membership.lowSize ? ({ warm: 'low', hot: 'high', unknown: 'unknown' }[candidate?.quota.pool] || null) : null,
+    selectedQuotaRole: membership.lowSize ? ({ warm: 'low', hot: 'high', unknown: 'unknown', drain: 'low' }[candidate?.quota.pool] || null) : candidate?.quota.pool === 'drain' ? 'low' : null,
     cachePoolTier: tier,
     cachePoolFallback: false,
   };
@@ -2073,7 +2138,7 @@ function growCachePoolOne(membership) {
   const active = membership.activeCandidates.map((candidate) => candidate.account);
   if (!active.length) return null;
   for (const account of active) {
-    if (!account.maxConcurrent) return null;
+    if (!effectiveMaxConcurrent(account)) return null;
     if (accountHasCapacity(account)) return null;
     if (!rpmAvailable(account)) return null;
   }
@@ -2361,9 +2426,10 @@ function workflowHealthEligible(candidate, policy) {
 }
 function workflowSelectionContext(identity, { excludeIds = new Set(), preview = false, snapshot = workflowSnapshot(identity) } = {}) {
   const list = enabledAccounts({ excludeIds, clientKeyId: identity.clientKeyId ?? null, pruneCooldowns: !preview });
-  const candidates = pipelineCandidates(list, workflowAccountHealth);
+  const drain = drainSettings(snapshot.policy, snapshot.pipeline);
+  const candidates = pipelineCandidates(list, workflowAccountHealth, drain);
   const membership = cachePoolMembership(list, candidates, { enabled: snapshot.pipeline.cachePoolSize > 0, pipeline: snapshot.pipeline });
-  return { list, candidates, membership, active: membership?.activeCandidates || [], snapshot };
+  return { list, candidates, membership, active: membership?.activeCandidates || [], snapshot, drain };
 }
 function workflowFilteredCandidates(context, excludeId = null) {
   const policy = context.snapshot.policy;
@@ -2375,7 +2441,8 @@ function workflowFilteredCandidates(context, excludeId = null) {
   for (const step of policy.missSteps) {
     const before = candidates.length;
     const enabled = step === 'quota' ? policy.quotaFilter : policy.healthFilter;
-    if (step === 'quota' && enabled) candidates = candidates.filter(candidate => policy.quotaPools.includes(candidate.quota.pool));
+    // Drain is governed by its own switch, so an older quotaPools list never filters it out.
+    if (step === 'quota' && enabled) candidates = candidates.filter(candidate => candidate.quota.pool === 'drain' || policy.quotaPools.includes(candidate.quota.pool));
     if (step === 'health' && enabled) candidates = candidates.filter(candidate => workflowHealthEligible(candidate, policy));
     trace.push({ node: step, before, after: candidates.length, result: enabled ? 'filtered' : 'disabled',
       ...(step === 'health' && enabled ? { minimumHealth: policy.minimumHealth } : {}) });
@@ -2388,6 +2455,16 @@ function workflowRank(candidates, policy) {
     selector: policy.selector, counts: META.selectionCounters.accounts, activeCounts,
     cursor: META.selectionCounters.sequence, unknownHealth: policy.unknownHealth,
   }).map(row => byId.get(row.id));
+}
+// Drain accounts are tried first; each tier is ranked independently by the configured selector.
+function workflowTierRank(candidates, context) {
+  if (!context.drain?.active) return { ranked: workflowRank(candidates, context.snapshot.policy), drainCount: null };
+  const drain = candidates.filter(candidate => candidate.quota.pool === 'drain');
+  const rest = candidates.filter(candidate => candidate.quota.pool !== 'drain');
+  return { ranked: [...workflowRank(drain, context.snapshot.policy), ...workflowRank(rest, context.snapshot.policy)], drainCount: drain.length };
+}
+function workflowCandidateHasCapacity(candidate, context) {
+  return accountHasCapacity(candidate.account, context.drain || drainSettings(), candidate.quota.pool);
 }
 function recordWorkflowSelection(account) {
   const state = META.selectionCounters, previous = selectionCounterFor(account.id);
@@ -2412,10 +2489,11 @@ function workflowDecision(identity, context, { account = null, kind, counted = f
 }
 function tryWorkflowSelection(identity, context, { excludeId = null, kind = 'new-selection', bindingInvalidated = false } = {}) {
   const filtered = workflowFilteredCandidates(context, excludeId);
-  const available = filtered.candidates.filter(candidate => accountHasCapacity(candidate.account) && rpmAvailable(candidate.account));
+  const available = filtered.candidates.filter(candidate => workflowCandidateHasCapacity(candidate, context) && rpmAvailable(candidate.account));
+  const tiers = workflowTierRank(available, context);
   const trace = [...(bindingInvalidated ? [{ node: 'binding', result: 'invalidated' }] : []), ...filtered.trace,
-    { node: 'capacity', before: filtered.candidates.length, after: available.length, result: 'concurrency-and-rpm' }];
-  for (const candidate of workflowRank(available, context.snapshot.policy)) {
+    { node: 'capacity', before: filtered.candidates.length, after: available.length, result: 'concurrency-and-rpm', ...(tiers.drainCount !== null ? { drainAfter: tiers.drainCount } : {}) }];
+  for (const candidate of tiers.ranked) {
     const counter = selectionCounterFor(candidate.account.id);
     if (counter.count >= Number.MAX_SAFE_INTEGER || META.selectionCounters.sequence >= Number.MAX_SAFE_INTEGER) throw Object.assign(new Error('selection counter limit reached; explicit reset required'), { statusCode: 503 });
     const claimed = tryLeaseResult(candidate.account, Date.now(), identity.clientKeyId ?? null);
@@ -2504,7 +2582,7 @@ function previewAccountWorkflow(body) {
   if (!policy.enabled) return { simulation: true, configurationRevision: revision, decision: { kind: 'legacy', counted: false, accountId: null, nodes: [{ node: 'workflow', result: 'disabled' }] } };
   const identity = { clientKeyId: owner, workflowSnapshot: { policy, pipeline, revision, waits: admissionWaitBudgets() } };
   const context = workflowSelectionContext(identity, { preview: true });
-  const available = account => accountHasCapacity(account) && workflowPreviewRpmAvailable(account);
+  const availableCandidate = candidate => workflowCandidateHasCapacity(candidate, context) && workflowPreviewRpmAvailable(candidate.account);
   const bound = policy.bindingEnabled ? context.active.find(candidate => candidate.account.id === body.boundAccountId && workflowHealthEligible(candidate, policy)) : null;
   const finish = details => {
     const decision = workflowDecision(identity, context, details);
@@ -2513,17 +2591,18 @@ function previewAccountWorkflow(body) {
       selectedAccountName: details.account?.name || null, candidateCount: context.active.length,
       note: 'Prediction only: no lease, counter, binding or upstream request was changed.' };
   };
-  if (bound && available(bound.account)) {
+  if (bound && availableCandidate(bound)) {
     const count = selectionCounterFor(bound.account.id).count;
     return finish({ account: bound.account, kind: 'binding-hit', before: count, after: count,
       trace: [{ node: 'binding', result: 'hit' }, ...(policy.healthFilter ? [{ node: 'health', result: 'filtered', before: 1, after: 1, minimumHealth: policy.minimumHealth }] : [])] });
   }
   if (bound && policy.onBindingBusy !== 'overflow') return finish({ kind: policy.onBindingBusy === 'reject' ? 'binding-busy' : 'binding-wait', trace: [{ node: 'binding', result: 'busy' }, { node: 'wait', result: policy.onBindingBusy === 'reject' ? 'disabled' : 'would-wait' }] });
   const filtered = workflowFilteredCandidates(context, bound?.account.id);
-  const candidates = filtered.candidates.filter(candidate => available(candidate.account));
+  const candidates = filtered.candidates.filter(availableCandidate);
+  const tiers = workflowTierRank(candidates, context);
   const trace = [...(body.boundAccountId && !bound && policy.bindingEnabled ? [{ node: 'binding', result: 'invalidated' }] : []),
-    ...filtered.trace, { node: 'capacity', before: filtered.candidates.length, after: candidates.length, result: 'concurrency-and-rpm' }, { node: 'selector', result: policy.selector }];
-  const chosen = workflowRank(candidates, policy)[0];
+    ...filtered.trace, { node: 'capacity', before: filtered.candidates.length, after: candidates.length, result: 'concurrency-and-rpm', ...(tiers.drainCount !== null ? { drainAfter: tiers.drainCount } : {}) }, { node: 'selector', result: policy.selector }];
+  const chosen = tiers.ranked[0];
   if (!chosen) return finish({ kind: filtered.candidates.length ? 'capacity-blocked' : 'filtered', trace });
   const count = selectionCounterFor(chosen.account.id).count;
   if (count >= Number.MAX_SAFE_INTEGER || META.selectionCounters.sequence >= Number.MAX_SAFE_INTEGER) return finish({ kind: 'counter-exhausted', trace });
@@ -2540,7 +2619,7 @@ function projectWorkflowDiagnostics(value) {
     selector: WORKFLOW_SELECTORS.includes(row.selector) ? row.selector : null,
     kind: row.kind, accountId: typeof row.accountId === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(row.accountId) ? row.accountId : null,
     counted: row.counted === true, countBefore: count(row.countBefore), countAfter: count(row.countAfter),
-    nodes: (Array.isArray(row.nodes) ? row.nodes : []).slice(0, 8).filter(node => nodeNames.has(node?.node) && results.has(node?.result)).map(node => ({ node: node.node, result: node.result, ...(count(node.before) !== null ? { before: node.before } : {}), ...(count(node.after) !== null ? { after: node.after } : {}), ...(node.node === 'health' && Number.isFinite(node.minimumHealth) && node.minimumHealth >= 0 && node.minimumHealth <= 1 ? { minimumHealth: node.minimumHealth } : {}) })),
+    nodes: (Array.isArray(row.nodes) ? row.nodes : []).slice(0, 8).filter(node => nodeNames.has(node?.node) && results.has(node?.result)).map(node => ({ node: node.node, result: node.result, ...(count(node.before) !== null ? { before: node.before } : {}), ...(count(node.after) !== null ? { after: node.after } : {}), ...(node.node === 'capacity' && count(node.drainAfter) !== null ? { drainAfter: node.drainAfter } : {}), ...(node.node === 'health' && Number.isFinite(node.minimumHealth) && node.minimumHealth >= 0 && node.minimumHealth <= 1 ? { minimumHealth: node.minimumHealth } : {}) })),
   }));
   return decisions.length ? { version: 1, decisions } : null;
 }
@@ -2837,7 +2916,7 @@ function applyAccountConfig(next) {
   if (quotaRoutingWasEnabled !== quotaRoutingEnabled()) advanceQuotaRoutingEpoch();
   // Enabling role-aware routing must evaluate the latest already-persisted
   // successful snapshot immediately, not wait behind its five-minute cache.
-  if (cachePoolEnabled() && configuredCachePoolLowQuotaSize() > 0) for (const account of accs) {
+  if (cachePoolEnabled() && (configuredCachePoolLowQuotaSize() > 0 || drainActive())) for (const account of accs) {
     const quota = META.accountQuotas?.[account.id];
     if (quota?.snapshot && quota.lastSuccessAt === quota.snapshot.fetchedAt) reconcileQuotaDisposition(account.id, quota.snapshot);
   }
@@ -2897,6 +2976,7 @@ function reloadConfigFromDisk() {
     fallbackSessionBindingExplicitTtlMs: config.accountPipeline.sessionBindingExplicitTtlMs,
     fallbackSessionBindingFallbackTtlMs: config.accountPipeline.sessionBindingFallbackTtlMs,
     fallbackSessionBindingMaxEntries: config.accountPipeline.sessionBindingMaxEntries,
+    fallbackDrain: config.accountPipeline,
   });
   const workflow = normalizeAccountWorkflow(pick('accountWorkflow'));
   if (workflow.enabled && pipeline.cachePoolSize < 1) throw new Error('enabled accountWorkflow requires a positive cachePoolSize');
@@ -3797,7 +3877,7 @@ const AFFINITY_KEY_TYPES = new Set(['parent_session','parent_thread','parent_con
 const AFFINITY_CONFIDENCE = new Set(['explicit','fallback','none']);
 const UPSTREAM_PROMPT_KEY_SOURCES = new Set(['caller_prompt_cache_key','caller_session_id','caller_invalid','derived_codex','derived_claude','none']);
 const PIPELINE_DIAGNOSTICS = new Set(['quota-all-unknown']);
-const PIPELINE_QUOTA_POOLS = new Set(['ordinary','hot','warm','unknown','reserve']);
+const PIPELINE_QUOTA_POOLS = new Set(['ordinary','hot','warm','drain','unknown','reserve']);
 const PIPELINE_HEALTH_LAYERS = new Set(['rated','unknown']);
 const BINDING_SOURCES = new Set(['explicit','fallback','none']);
 const BINDING_RESULTS = new Set(['hit','miss','invalidated','temporary-overflow','provisional','not-applicable']);
@@ -4280,7 +4360,7 @@ function quotaDemandOutcome(account, { force = false, pageToken = null, protecti
     const next = state?.protectionRetryAt > lastSuccessAt ? state.protectionRetryAt : (lastSuccessAt || 0) + QUOTA_SUCCESS_MS;
     if (state?.protectionShortAt && now < next) return 'cached';
   }
-  const disposition = cachePoolEnabled() && configuredCachePoolLowQuotaSize() > 0 ? getAccountState(account.id) : null;
+  const disposition = getAccountState(account.id)?.quotaDisposition && lowQuotaProtectionApplies(account.id) ? getAccountState(account.id) : null;
   if (!forceRequired && disposition?.quotaDisposition === 'waiting-refresh' && lastSuccessAt && lastSuccessAt >= disposition.quotaDispositionAt && now - lastSuccessAt < QUOTA_SUCCESS_MS) return 'cached';
   if (!forceRequired && disposition?.quotaDisposition === 'quota-exhausted' && lastSuccessAt) {
     const next = disposition.quotaRetryAt > lastSuccessAt ? disposition.quotaRetryAt : lastSuccessAt + QUOTA_SUCCESS_MS;
@@ -4460,9 +4540,14 @@ function signalQuotaProtection(account) {
 // A partial known-100 snapshot confirms exhaustion; an incomplete/failed snapshot
 // never proves that a previously confirmed exhaustion (or waiting hold) recovered.
 function reconcileQuotaDisposition(id, snapshot) {
-  if (!cachePoolEnabled() || configuredCachePoolLowQuotaSize() === 0) return;
+  if (!cachePoolEnabled()) return;
   const now = Date.now(), state = getAccountState(id);
   const windows = Object.values(snapshot.limits || {});
+  if (configuredCachePoolLowQuotaSize() === 0) {
+    // Drain-only relaxation: a drain-range (or now exhausted) snapshot, or an existing hold, is reconciled.
+    const settings = drainSettings(), maximum = windows.length ? Math.max(...windows.map((window) => window.percentUsed)) : -Infinity;
+    if (!settings.active || !(state?.quotaDisposition || maximum >= settings.drainThreshold)) return;
+  }
   const exhausted = windows.filter((window) => window.percentUsed >= 100);
   if (exhausted.length) {
     const resets = exhausted.map((window) => Date.parse(window.resetsAt)).filter((at) => Number.isSafeInteger(at) && at > now);
@@ -6395,7 +6480,7 @@ async function dispatch(req, res) {
           const recent = projectAggregate(aggregateRange(a.id).aggregate), lifetime = META.statistics.lifetime.accounts[a.id], health = healthProjection(a);
           return { ...a, state: getAccountState(a.id), activeCount: activeCounts.get(a.id) || 0, rpm: rpmProjection(a), health,
             selectionCount: selectionCounterFor(a.id).count, effectiveRoutingHealth: effectiveRoutingHealth(routingHealthRate(health), config.accountWorkflow.unknownHealth),
-            quota: quotaProjection(a.id), cachePoolRole: cacheRoles.get(a.id) ?? null, cachePoolQuotaRole: configuredCachePoolLowQuotaSize() > 0 && cacheRoles.get(a.id) === 'active' ? ({ hot: 'high', warm: 'low', unknown: 'unknown' }[quotaProjection(a.id).pool] || null) : null,
+            quota: quotaProjection(a.id), effectiveMaxConcurrent: effectiveMaxConcurrent(a), cachePoolRole: cacheRoles.get(a.id) ?? null, cachePoolQuotaRole: configuredCachePoolLowQuotaSize() > 0 && cacheRoles.get(a.id) === 'active' ? ({ hot: 'high', warm: 'low', unknown: 'unknown', drain: 'low' }[quotaProjection(a.id).pool] || null) : null,
             statistics: { recent24h: recent, lifetimeRequests: lifetime ? lifetime.requests : 0, lifetimeErrors: lifetime ? lifetime.errors : 0 } };
         }),
         mode: config.accountMode, active: config.activeAccount, concurrencyWaitMs: config.concurrencyWaitMs, poolFullWaitMs: config.poolFullWaitMs,
@@ -6438,6 +6523,7 @@ async function dispatch(req, res) {
           fallbackSessionBindingExplicitTtlMs: config.accountPipeline.sessionBindingExplicitTtlMs,
           fallbackSessionBindingFallbackTtlMs: config.accountPipeline.sessionBindingFallbackTtlMs,
           fallbackSessionBindingMaxEntries: config.accountPipeline.sessionBindingMaxEntries,
+          fallbackDrain: config.accountPipeline,
         });
       } catch (e) { return sendJSON(res, 400, { error: { message: e.message } }); }
       if (requestedWorkflow.enabled && requestedPipeline.cachePoolSize < 1) return sendJSON(res, 400, { error: { message: 'enabled accountWorkflow requires a positive cachePoolSize' } });
