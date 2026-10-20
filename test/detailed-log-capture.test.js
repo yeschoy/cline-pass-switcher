@@ -4,7 +4,7 @@ import { Readable, Writable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
-import { BodyCapture, CaptureBudget, captureBudget, DetailRedactor, MAX_BODY_BYTES, MAX_PAYLOAD_BYTES, MAX_SANITIZED_PAYLOAD_BYTES, observeStream, detailRoute, DetailRoot } from '../lib/detailed-log-capture.js';
+import { BodyCapture, CaptureBudget, captureBudget, DetailRedactor, MAX_BODY_BYTES, MAX_REDACTION_SECRETS, MAX_REDACTION_SECRET_BYTES, MAX_PAYLOAD_BYTES, MAX_SANITIZED_PAYLOAD_BYTES, observeStream, detailRoute, DetailRoot } from '../lib/detailed-log-capture.js';
 import { DetailedLogStore, DETAIL_DROP_REASONS } from '../lib/detailed-log-store.js';
 
 const mockDropHealth = () => ({ dropped: 0, dropReasons: Object.fromEntries(DETAIL_DROP_REASONS.map((reason) => [reason, 0])) });
@@ -418,7 +418,7 @@ test('partial JSON retains safe message text, redacts escaped credentials and kn
   }
   const fragmented = capture(['safe output known-sec'], new DetailRedactor(['known-secret']), {}, false);
   assert.equal(fragmented.text, 'safe output [REDACTED]');
-  const hugeSecret = capture([JSON.stringify({ key: 'x'.repeat(65537), echo: 'x'.repeat(65537) })]);
+  const hugeSecret = capture([JSON.stringify({ key: 'x'.repeat(MAX_REDACTION_SECRET_BYTES + 1), echo: 'x'.repeat(MAX_REDACTION_SECRET_BYTES + 1) })]);
   assert.equal(hugeSecret.descriptor.state, 'resource-limited'); assert.equal(hugeSecret.text, '');
   const deepPrefix = capture(['['.repeat(65)], new DetailRedactor(), {}, false);
   assert.equal(deepPrefix.descriptor.state, 'resource-limited'); assert.equal(deepPrefix.text, '');
@@ -786,7 +786,7 @@ test('one root drop classifies capture, redaction and multiple-body limits witho
     assert.equal(f.root.input.budget.used, 0);
   }
   {
-    const f = makeRoot({ secrets: Array.from({ length: 257 }, (_, i) => `fixture-secret-${i}`) });
+    const f = makeRoot({ secrets: Array.from({ length: MAX_REDACTION_SECRETS + 1 }, (_, i) => `fixture-secret-${i}`) });
     f.root.input.add('safe'); f.root.input.end(); f.root.output.end(); f.root.finalize(); check(f, 'redactionSecretLimit');
   }
   for (const [headers, key] of [
@@ -796,7 +796,7 @@ test('one root drop classifies capture, redaction and multiple-body limits witho
     const f = makeRoot({ headers }); f.root.input.add('safe'); f.root.input.end(); f.root.output.end(); f.root.finalize(); check(f, key);
   }
   {
-    const f = makeRoot({ secrets: Array.from({ length: 257 }, (_, i) => `fixture-secret-${i}`), budget: new CaptureBudget(1) });
+    const f = makeRoot({ secrets: Array.from({ length: MAX_REDACTION_SECRETS + 1 }, (_, i) => `fixture-secret-${i}`), budget: new CaptureBudget(1) });
     f.root.input.add('safe'); f.root.input.end(); f.root.output.add('also limited'); f.root.output.end(); f.root.finalize();
     check(f, 'captureBudget'); assert.equal(f.store.health.dropReasons.redactionSecretLimit, 0, 'budget outranks secret limit');
   }
@@ -848,4 +848,23 @@ test('unconsumed GET payloads remain unread instead of claiming a complete empty
     assert.equal(group.bodies[0].descriptor.state, unread ? 'unread' : 'complete');
     assert.equal(group.bodies[0].descriptor.complete, !unread);
   }
+});
+
+test('redactor keeps working with a 2000-entry proxy pool worth of usernames', () => {
+  const usernames = Array.from({ length: 2000 }, (_, i) => `user-test-session-cps${(1e9 + i * 7919).toString(36)}${i}`);
+  const t0 = performance.now();
+  const redactor = new DetailRedactor([...usernames, 'pass-test']);
+  assert.equal(redactor.limited, false, 'seed limit fits a full pool');
+  const text = JSON.stringify({ message: `${'safe words '.repeat(9000)}${usernames[1234]} then pass-test and ${usernames[7]}` });
+  const out = redactor.text(text);
+  const elapsed = performance.now() - t0;
+  assert.doesNotMatch(out, /user-test-session-|pass-test/);
+  assert.match(out, /safe words/);
+  // Generous bound (construction plus ~100 KiB of text); guards against per-seed linear scans, not machine speed.
+  assert.ok(elapsed < 2000, `redaction took ${elapsed}ms`);
+  // A full manual pool with a distinct (percent-encoded) username and password per entry still fits.
+  const manual = Array.from({ length: 2000 }, (_, i) => [`user-test-%40${i}`, `pass-test-%3A${i}`]).flat();
+  const manualRedactor = new DetailRedactor([...manual, ...Array.from({ length: 64 }, (_, i) => `fixture-account-key-${i}`)]);
+  assert.equal(manualRedactor.limited, false, 'seed limit fits a full manual pool');
+  assert.doesNotMatch(manualRedactor.text(`echo user-test-@1999 and pass-test-:1999`), /user-test-|pass-test-/);
 });

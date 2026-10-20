@@ -23,6 +23,8 @@ import { WORKFLOW_SELECTORS, defaultAccountWorkflow, normalizeAccountWorkflow, n
 import { AdapterError, createChatSseReader, estimateTokens, normalizeChatImageParts } from './lib/protocol-common.js';
 import { responsesAdapter } from './lib/responses-adapter.js';
 import { anthropicAdapter } from './lib/anthropic-adapter.js';
+import { normalizeProxyUrl, normalizeProxyPool, createProxyPoolRuntime, parseRetryAfter as parsePoolRetryAfter } from './lib/proxy-pool.js';
+import { createFloppyDataSource, FLOPPYDATA_ERRORS } from './lib/floppydata-source.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || __dirname;
@@ -32,6 +34,9 @@ const SELECTION_COUNTERS_PATH = path.join(DATA_DIR, 'selection-counters.json');
 const ADMIN_PATH = path.join(DATA_DIR, 'admin-auth.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const LOG_DIR = path.join(DATA_DIR, 'logs');
+// 出口凭据脱敏缓存（见 configuredEgressSecrets）；放在顶部，启动规范化阶段的脱敏也可用。
+const poolConfigSecretCache = new WeakMap();
+let poolSecretPatternCache = { pool: undefined, seeds: undefined, values: [], pattern: null };
 
 // Raw capture needs an explicit operator readiness signal AND memory headroom.
 // A 512 MiB container was OOM-killed below the 512 MiB retained reservation;
@@ -273,6 +278,7 @@ function boundedProviderNote(value) {
     return values;
   })].filter(Boolean);
   for (const secret of secrets) note = note.split(String(secret)).join('[REDACTED]');
+  note = redactPoolEgressSecrets(note);
   return note.replace(/(?:https?|socks5h?):\/\/[^\s]+/gi, '[REDACTED_PROXY]').replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, 'Bearer [REDACTED]').slice(0, 160);
 }
 function normalizeProviderHealthState(value = {}) {
@@ -657,17 +663,6 @@ const ACCOUNT_MODES = new Set(['single', 'roundrobin', 'sticky', 'least-connecti
 const FORBIDDEN_CUSTOM_HEADER = /(?:authorization|proxy-authorization|cookie|set-cookie|host|content-length|connection|transfer-encoding|upgrade|keep-alive|te|trailer|session|thread|conversation|attestation|installation|api[-_]?key|access[-_]?token|secret|credential|device[-_]?id)/i;
 function validateNote(note) {
   return typeof note === 'string' && note.length <= 500 && !/[\x00-\x09\x0b-\x1f\x7f\r]/.test(note);
-}
-function normalizeProxyUrl(value, { strict = false } = {}) {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  try {
-    if (raw.length > 2048) throw new Error('too long');
-    const u = new URL(raw);
-    if (!['http:', 'https:', 'socks5:', 'socks5h:'].includes(u.protocol) || !u.hostname || u.search || u.hash || (u.pathname && u.pathname !== '/')) throw new Error('invalid');
-    if (u.port && (!Number.isInteger(Number(u.port)) || Number(u.port) < 1 || Number(u.port) > 65535)) throw new Error('port');
-    return u.toString();
-  } catch { if (strict) throw new Error('proxyUrl must be an http, https, socks5 or socks5h URL without path/query/hash'); console.warn('[配置] 已禁用一个非法账号代理 URL'); return ''; }
 }
 function validateAndNormalizeHeaders(value, { strict = false } = {}) {
   const fail = (message) => { if (strict) throw new Error(message); console.warn(`[配置] 已禁用非法账号请求头：${message}`); return {}; };
@@ -1492,6 +1487,11 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   if (config.activeAccount !== activeAccount) { config.activeAccount = activeAccount; dirty = true; }
   META.models ||= {}; META.history ||= []; META.accountStates ||= {};
   if (!META.routingSecret || typeof META.routingSecret !== 'string') { META.routingSecret = crypto.randomBytes(32).toString('hex'); dirty = true; }
+  // proxyPool 缺省即关闭且不写回（旧配置字节不变）；存在时一律 strict，非法则启动失败而不是静默关闭。
+  if (Object.hasOwn(loadedConfig, 'proxyPool')) {
+    const pool = normalizeProxyPool(config.proxyPool, { strict: true, secret: META.routingSecret });
+    if (!isDeepStrictEqual(pool, config.proxyPool)) { config.proxyPool = pool; dirty = true; }
+  }
   if (normalizeProviderHealthMetadata()) dirty = true;
   if (normalizeProviderProbeMetadata()) dirty = true;
   if (normalizeAccountStates()) dirty = true;
@@ -2389,8 +2389,19 @@ async function acquirePipelineAccountLease(identity, options = {}) {
 const ACCOUNT_CONFIGURATION_FIELDS = Object.freeze([
   'accounts', 'accountMode', 'activeAccount', 'concurrencyWaitMs', 'poolFullWaitMs',
   'sessionProviderAffinityEnabled', 'quotaProtection', 'errorRules', 'retryRules',
-  'accountErrorRules', 'accountContentErrorRules', 'accountPipeline', 'accountWorkflow',
+  'accountErrorRules', 'accountContentErrorRules', 'accountPipeline', 'accountWorkflow', 'proxyPool',
 ]);
+// 全局出口代理池配置。缺省（字段不存在）等价于关闭的默认值，且不会被写回 config.json。
+const PROXY_POOL_OFF = Object.freeze(normalizeProxyPool(undefined));
+function effectiveProxyPool(candidate = config) { return candidate.proxyPool || PROXY_POOL_OFF; }
+// 管理保存/热加载的严格输入：undefined 表示"保留现值"；返回需要合并进候选配置的片段。
+// 当前文件没有 proxyPool 且请求值等于关闭的默认值时保持字段缺省，避免无意义地改变 config 字节。
+function proxyPoolPatch(value, current = config) {
+  if (value === undefined) return {};
+  const pool = normalizeProxyPool(value, { strict: true, secret: META.routingSecret });
+  if (!Object.hasOwn(current, 'proxyPool') && isDeepStrictEqual(pool, PROXY_POOL_OFF)) return {};
+  return { proxyPool: pool };
+}
 function configurationRevision() {
   const snapshot = {};
   for (const field of ACCOUNT_CONFIGURATION_FIELDS) snapshot[field] = config[field];
@@ -2890,6 +2901,7 @@ function applyAccountConfig(next) {
   const previousPerModel = config.perModel || {};
   const accs = next.accounts, seen = new Set(accs.map((a) => a.id));
   const quotaRoutingWasEnabled = quotaRoutingEnabled();
+  const previousProxyPool = effectiveProxyPool();
   if (next.sessionProviderAffinityEnabled !== config.sessionProviderAffinityEnabled) {
     sessionProviderAffinityGeneration++;
     for (const [key, entry] of sessionBindings) if (entry.kind === 'provider') deleteSessionBinding(key, entry, { count: false });
@@ -2933,6 +2945,8 @@ function applyAccountConfig(next) {
   reconcileSessionBindings();
   markProbeConfigWrite({ preserveProbeCells: true });
   saveMeta(); RR_COUNTER = 0; strategyCounters.clear(); pruneProxyAgents(); scheduleQuotaRefresh();
+  // 代理池只影响每次调用的出口，不触碰账号的 quota/binding/circuit/RPM 状态。
+  applyProxyPoolConfig(previousProxyPool, effectiveProxyPool());
   notifyCapacityWaiters();
 }
 // Credentials, listener and logging settings have their own lifecycles; reload refuses rather than half-applying them.
@@ -2981,7 +2995,8 @@ function reloadConfigFromDisk() {
   const workflow = normalizeAccountWorkflow(pick('accountWorkflow'));
   if (workflow.enabled && pipeline.cachePoolSize < 1) throw new Error('enabled accountWorkflow requires a positive cachePoolSize');
   if (mode === 'load-health' && pipeline.sticky) throw new Error('load-health cannot enable sticky');
-  const next = { ...config, accounts: accs, accountMode: mode, activeAccount: active, concurrencyWaitMs: wait, poolFullWaitMs: poolWait,
+  const poolPatch = Object.hasOwn(raw, 'proxyPool') ? { proxyPool: normalizeProxyPool(raw.proxyPool, { strict: true, secret: META.routingSecret }) } : {};
+  const next = { ...config, ...poolPatch, accounts: accs, accountMode: mode, activeAccount: active, concurrencyWaitMs: wait, poolFullWaitMs: poolWait,
     errorRules, ...legacyRuleProjection(errorRules), retryRules: normalizeRetryRules(pick('retryRules'), { strict: true }),
     quotaProtection: normalizeQuotaProtection(pick('quotaProtection'), { strict: true }), accountPipeline: pipeline, accountWorkflow: workflow,
     sessionProviderAffinityEnabled: affinity, exposeCatalog, knownModels: knownModels.map((m) => m.trim()),
@@ -3413,7 +3428,7 @@ async function validateUpstreams(modelId, acc, lease = null) {
       try {
         response = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, { headers: chatHeaders(acc.key), body: JSON.stringify(body), attemptMeta: { model: modelId, provider: [slug] }, permit: claim.permit }, 60000, acc);
       } catch (error) {
-        results[slug] = { status: 'unknown', accountFault: acc.proxyUrl ? 'proxy' : 'network', ms: Date.now() - t0, note: safeReason(error.message) };
+        results[slug] = { status: 'unknown', accountFault: egressOrigin(error?.egress, acc), ms: Date.now() - t0, note: safeReason(error.message) };
         return;
       }
       const { status: httpStatus, json } = response;
@@ -3710,19 +3725,29 @@ function commitStatistics({ ts = Date.now(), modelId = null, finalProvider = nul
   if (!clientDisconnect) {
     const byAccount = new Map(config.accounts.map((account) => [account.id, account]));
     for (const segment of new Map(segments.filter((s) => currentIds.has(s.accountId)).map((s) => [s.accountId, s])).values()) {
-      const key = proxyEndpointKey(byAccount.get(segment.accountId)?.proxyUrl);
-      if (!key) continue;
-      if (!Object.hasOwn(bucket.proxyHealth, key)) {
-        const proxyCells = stats.minuteBuckets.reduce((sum, cell) => sum + Object.keys(cell.proxyHealth || {}).length, 0);
-        if (proxyCells >= MAX_PROXY_HEALTH_MINUTE_CELLS) {
-          stats.recentCoverage.droppedProxyHealthMinuteCells++;
-          stats.recentCoverage.proxyHealthIncompleteAt[key] = Math.max(stats.recentCoverage.proxyHealthIncompleteAt[key] || 0, minute);
-          continue;
-        }
+      // 按 attempt 实际出口归属（池条目 / 账号代理）；trace 未携带出口时退回账号配置的代理。
+      // 每个（账号段, 出口键）计 1 次请求；该出口上任一 attempt 为 5xx 时计 1 次 errors5xx。
+      const fallbackKey = proxyEndpointKey(byAccount.get(segment.accountId)?.proxyUrl);
+      const byKey = new Map();
+      for (const attempt of segment.trace || []) {
+        const key = attempt.egressEndpointKey === undefined ? fallbackKey : (attempt.egressEndpointKey && proxyEndpointKey(attempt.egressEndpointKey) === attempt.egressEndpointKey ? attempt.egressEndpointKey : null);
+        if (!key) continue;
+        const list = byKey.get(key) || [];
+        list.push(attempt); byKey.set(key, list);
       }
-      const cell = proxyHealthCell(bucket.proxyHealth, key);
-      addSuccessCounter(cell, 'requests');
-      if ((segment.trace || []).some(attemptStatusIs5xx)) addSuccessCounter(cell, 'errors5xx');
+      for (const [key, attempts] of byKey) {
+        if (!Object.hasOwn(bucket.proxyHealth, key)) {
+          const proxyCells = stats.minuteBuckets.reduce((sum, cell) => sum + Object.keys(cell.proxyHealth || {}).length, 0);
+          if (proxyCells >= MAX_PROXY_HEALTH_MINUTE_CELLS) {
+            stats.recentCoverage.droppedProxyHealthMinuteCells++;
+            stats.recentCoverage.proxyHealthIncompleteAt[key] = Math.max(stats.recentCoverage.proxyHealthIncompleteAt[key] || 0, minute);
+            continue;
+          }
+        }
+        const cell = proxyHealthCell(bucket.proxyHealth, key);
+        addSuccessCounter(cell, 'requests');
+        if (attempts.some(attemptStatusIs5xx)) addSuccessCounter(cell, 'errors5xx');
+      }
     }
   }
   pruneStatistics(ts);
@@ -3902,7 +3927,7 @@ function record(modelId, info, detail = detailContext.getStore()) {
     ts, model: modelId, ...safeInfo, result,
     error: safeInfo.error ? boundedReason(safeInfo.error, info.sensitiveValues).reason : safeInfo.error,
     trace: Array.isArray(safeInfo.trace) ? safeInfo.trace.map((attempt) => {
-      const { attemptIndex: _attemptIndex, callId: _callId, detailProfile: _detailProfile, reasonTruncated: _reasonTruncated, ...legacyAttempt } = attempt;
+      const { attemptIndex: _attemptIndex, callId: _callId, detailProfile: _detailProfile, reasonTruncated: _reasonTruncated, egressEndpointKey: _egressEndpointKey, ...legacyAttempt } = attempt;
       return { ...legacyAttempt, note: boundedReason(attempt.note, info.sensitiveValues).reason };
     }) : safeInfo.trace,
   };
@@ -3954,6 +3979,7 @@ function record(modelId, info, detail = detailContext.getStore()) {
       retryDecision: t.retryDecision === 'stop' ? 'stop' : 'continue',
       retryMatchedBy: Array.isArray(t.retryMatchedBy) ? t.retryMatchedBy.filter((value) => RETRY_MATCH_KINDS.has(value)).slice(0, 2) : [],
       responseContentType: t.responseContentType || null, responseBytes: Number.isSafeInteger(t.responseBytes) ? t.responseBytes : null,
+      egress: EGRESS_LABEL.test(t.egress || '') ? t.egress : null, poolFallback: t.poolFallback === true,
     })) : [],
     status: result === 'client_cancelled' ? 499 : result === 'success' ? 200 : (info.normalizedStatus || 502), result, upstreamStatus: info.upstreamStatus ?? null,
     durationMs: Number(info.ms) || 0, accountActions: info.accountActions || [], switched: (info.accountPath || []).length > 1, appliedHeaderNames: info.appliedHeaderNames || [],
@@ -3962,6 +3988,9 @@ function record(modelId, info, detail = detailContext.getStore()) {
     retryAfter: Number.isSafeInteger(info.retryAfter) && info.retryAfter >= 0 ? Math.min(3600, info.retryAfter) : null,
     errorCategory: info.errorCategory || (result === 'failed' && info.error ? (info.proxyError ? 'proxy' : 'upstream') : null),
     inboundProtocol: ['chat', 'responses', 'anthropic'].includes(info.inboundProtocol) ? info.inboundProtocol : 'chat',
+    // 最后一次真实 attempt 的出口：direct | account-proxy | pool:<8hex>；无 attempt 时为 null / false。
+    egress: Array.isArray(info.trace) && EGRESS_LABEL.test(info.trace.at(-1)?.egress || '') ? info.trace.at(-1).egress : null,
+    poolFallback: Array.isArray(info.trace) && info.trace.at(-1)?.poolFallback === true,
   };
   if (detail?.requestId === request.requestId) { detail.result = result; if (detail.errorOnly && detail.status === null) detail.status = request.status; }
   const writes = [requestLogs.append(request)];
@@ -3978,7 +4007,7 @@ function record(modelId, info, detail = detailContext.getStore()) {
       targetProvider: attempt.upstream || null, providerPath: (info.trace || []).slice(0, traceIndex + 1).map((t) => t.upstream || 'auto'),
       ...(actualProvider ? { actualProvider } : {}),
       status: attempt.normalizedStatus || attempt.status, upstreamStatus: attempt.upstreamStatus ?? null,
-      category: attempt.upstreamStatus === 0 ? (info.proxyError ? 'proxy' : 'network') : 'upstream', ...bounded, accountAction: attempt.ruleScope === 'account' ? attempt.ruleAction || null : null,
+      category: attempt.upstreamStatus === 0 ? (EGRESS_LABEL.test(attempt.egress || '') ? (attempt.egress === 'direct' ? 'network' : 'proxy') : info.proxyError ? 'proxy' : 'network') : 'upstream', ...bounded, accountAction: attempt.ruleScope === 'account' ? attempt.ruleAction || null : null,
       ruleId: typeof attempt.ruleId === 'string' && ERROR_RULE_ID.test(attempt.ruleId) ? attempt.ruleId : null,
       ruleScope: ERROR_RULE_SCOPES.has(attempt.ruleScope) ? attempt.ruleScope : null,
       ruleAction: ERROR_RULE_ACTIONS.has(attempt.ruleAction) ? attempt.ruleAction : null,
@@ -3989,6 +4018,7 @@ function record(modelId, info, detail = detailContext.getStore()) {
       retryDecision: attempt.retryDecision === 'stop' ? 'stop' : 'continue',
       retryMatchedBy: Array.isArray(attempt.retryMatchedBy) ? attempt.retryMatchedBy.filter((value) => RETRY_MATCH_KINDS.has(value)).slice(0, 2) : [],
       responseContentType: attempt.responseContentType || null, responseBytes: Number.isSafeInteger(attempt.responseBytes) ? attempt.responseBytes : null,
+      egress: EGRESS_LABEL.test(attempt.egress || '') ? attempt.egress : null, poolFallback: attempt.poolFallback === true,
       ...(detailProfile ? { detailProfile, detailCallId: attempt.callId } : {}) }));
   }
   void Promise.all(writes);
@@ -4192,10 +4222,207 @@ function pruneProxyAgents() {
   const retained = new Set(config.accounts.map((account) => account.proxyUrl).filter(Boolean));
   for (const [url, agent] of proxyAgents) if (!retained.has(url)) { agent.destroy(); proxyAgents.delete(url); }
 }
-function clineRequestJSON(url, { headers = {}, body, signal, timeoutMs = 120000, account = null, proxyUrl = '', method = 'POST', maxResponseBytes = Infinity, attemptOwner = null, attemptMeta = null, permit = null, ephemeralProxy = false } = {}) {
-  return clineRequest(url, { headers, body, signal, timeoutMs, account, proxyUrl, method, attemptOwner, attemptMeta, permit, ephemeralProxy }).then(async (res) => ({ ...res, text: await streamToString(res.body, maxResponseBytes) }));
+// ---------- 全局出口代理池：运行时与 FloppyData 来源 ----------
+// 池条目的 agent 由 runtime 管理，与 proxyAgents（账号固定代理缓存，上限 128）完全分开。
+const PROXY_POOL_FREE_SOCKET_TIMEOUT_MS = boundedEnv('CLINE_PASS_PROXY_FREE_SOCKET_TIMEOUT_MS', 60_000, 1000, 600_000);
+function createPoolProxyAgent(proxyUrl) {
+  const protocol = new URL(proxyUrl).protocol;
+  const agent = protocol === 'socks5:' || protocol === 'socks5h:'
+    ? new SocksProxyAgent(proxyUrl, proxyAgentOptions) : new HttpsProxyAgent(proxyUrl, proxyAgentOptions);
+  // 不使用 Agent `timeout`（会作用于在途隧道，见 proxyAgentOptions 注释）；只在 socket 回到空闲池时
+  // 设置 free-socket 超时，复用时 clineRequest 的 'socket' 处理会改回本次请求的超时。
+  const keepSocketAlive = agent.keepSocketAlive.bind(agent);
+  agent.keepSocketAlive = (socket) => {
+    const keep = keepSocketAlive(socket);
+    if (keep) socket.setTimeout(PROXY_POOL_FREE_SOCKET_TIMEOUT_MS);
+    return keep;
+  };
+  // https-proxy-agent 把非 200 的 CONNECT 应答（如 407 认证失败、502 无法连上游）回放成"上游响应"，
+  // 池条目会被误当成上游 407/502。这里把它改为连接阶段错误：条目冷却并换条目重试（R4/R5）。
+  // 错误信息只带状态码，不带代理 URL 或凭据。账号固定代理（proxyAgentFor）保持原行为不变。
+  if (agent instanceof HttpsProxyAgent) {
+    const connect = agent.connect.bind(agent);
+    agent.connect = async (req, opts) => {
+      let status = 0;
+      const onProxyConnect = (res) => { status = Number(res?.statusCode) || 0; };
+      req.once('proxyConnect', onProxyConnect);
+      let socket;
+      try { socket = await connect(req, opts); }
+      finally { req.removeListener('proxyConnect', onProxyConnect); }
+      if (status && status !== 200) { socket?.destroy?.(); throw new Error(`proxy CONNECT rejected with status ${status}`); }
+      return socket;
+    };
+  }
+  return agent;
 }
-function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, account = null, proxyUrl = '', method = 'POST', attemptOwner = null, attemptMeta = null, permit = null, ephemeralProxy = false } = {}) {
+const proxyPoolRuntime = createProxyPoolRuntime({ secret: META.routingSecret, createAgent: createPoolProxyAgent, retireGraceMs: SSE_STREAM_IDLE_MS + 60_000 });
+const proxyPoolUsesFloppyData = () => { const pool = effectiveProxyPool(); return pool.enabled && pool.source === 'floppydata'; };
+const floppyDataSource = createFloppyDataSource({
+  getConfig: () => effectiveProxyPool().floppydata,
+  normalizeUrl: (value) => normalizeProxyUrl(value, { strict: true }),
+  // 来源已被切走/关闭时迟到的批次不得重新填充池。
+  onBatch: (urls) => { if (proxyPoolUsesFloppyData()) proxyPoolRuntime.replaceEntries(urls); },
+});
+// 启动规范化、管理保存、热加载之后调用；只改变出口选择，不触碰账号运行时状态。
+function applyProxyPoolConfig(previous, next) {
+  proxyPoolRuntime.configure(next);
+  if (!next.enabled) { floppyDataSource.stop(); proxyPoolRuntime.replaceEntries([]); return; }
+  if (next.source === 'manual') { floppyDataSource.stop(); proxyPoolRuntime.replaceEntries(next.entries); return; }
+  const wasFloppyData = !!previous?.enabled && previous.source === 'floppydata';
+  if (!wasFloppyData || !floppyDataSource.running) {
+    floppyDataSource.stop(); proxyPoolRuntime.replaceEntries([]); void floppyDataSource.start();
+    return;
+  }
+  // 身份字段变化：旧批立即退役（在途请求跑完再销毁），并立即导入新批；只改刷新间隔：重排定时器。
+  if (floppyDataSource.reconfigure(previous.floppydata, next.floppydata) === 'restart') proxyPoolRuntime.replaceEntries([]);
+}
+applyProxyPoolConfig(PROXY_POOL_OFF, effectiveProxyPool());
+// GET /api/proxy-pool/status：只含短 id、协议、无凭据 endpointKey、状态与枚举。
+function proxyPoolStatusProjection() {
+  const pool = effectiveProxyPool(), runtime = proxyPoolRuntime.status();
+  return {
+    enabled: pool.enabled, source: pool.source, strategy: pool.strategy,
+    total: runtime.total, available: runtime.available, retiring: runtime.retiring, fallbacks: runtime.fallbacks,
+    floppydata: pool.source === 'floppydata' ? floppyDataSource.status() : null,
+    entries: runtime.entries,
+  };
+}
+// POST /api/proxy-pool/test：抽样条目各发一次空探测（与 /api/accounts/proxy-test 相同的空 messages 请求体），
+// 用与真实池流量相同构造（CONNECT 非 200 即失败）的一次性 agent、显式代理出口，不带任何账号 key（不占账号 lease/RPM，不产生计费调用）；
+// 只看隧道能否到达上游（任何 HTTP 状态即 ok），不写条目冷却、不计条目 RPM。
+const PROXY_POOL_TEST_MAX = 50, PROXY_POOL_TEST_DEFAULT = 10, PROXY_POOL_TEST_CONCURRENCY = 8, PROXY_POOL_TEST_TIMEOUT_MS = 15000;
+async function testProxyPoolEntries(sample = PROXY_POOL_TEST_DEFAULT) {
+  const targets = proxyPoolRuntime.sampleEntries(Math.min(PROXY_POOL_TEST_MAX, sample));
+  const results = new Array(targets.length);
+  const model = config.knownModels[0] || 'cline-pass/glm-5.3-flash';
+  let next = 0;
+  const worker = async () => {
+    while (next < targets.length) {
+      const index = next++, target = targets[index], t0 = Date.now();
+      try {
+        const result = await clineRequestJSON(`${config.upstreamBase}/chat/completions`, {
+          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, messages: [], max_tokens: 1 }),
+          proxyUrl: target.url, ephemeralProxy: true, proxyAgentFactory: createPoolProxyAgent, timeoutMs: PROXY_POOL_TEST_TIMEOUT_MS, maxResponseBytes: 256 * 1024,
+        });
+        results[index] = { entryId: target.entryId, ok: result.status > 0, ms: Date.now() - t0, status: result.status };
+      } catch (error) {
+        results[index] = { entryId: target.entryId, ok: false, ms: Date.now() - t0, errorCategory: /timeout/i.test(String(error?.message || '')) ? 'timeout' : 'proxy' };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(PROXY_POOL_TEST_CONCURRENCY, targets.length) }, worker));
+  return results;
+}
+// 每次上游调用的出口（同步、不排队）。池关闭时与旧逻辑逐字等价：proxyUrl || account.proxyUrl || 直连。
+// 返回对象的 url/entry 不可枚举，展开或序列化时不会带出凭据。
+function resolveEgress(account, proxyUrl = '', egressHint = null) {
+  let kind, url = '', entry = null, poolFallback = false, retryAt = null;
+  const pool = effectiveProxyPool();
+  if (proxyUrl) { kind = 'explicit'; url = proxyUrl; }
+  else if (pool.enabled) {
+    const exclude = egressHint?.exclude instanceof Set && egressHint.exclude.size ? egressHint.exclude : undefined;
+    const picked = proxyPoolRuntime.pickEntry({ exclude });
+    if (picked.entry) { kind = 'pool'; entry = picked.entry; url = entry.url; }
+    else {
+      url = account?.proxyUrl || ''; kind = url ? 'account' : 'direct'; poolFallback = true; retryAt = picked.retryAt ?? null;
+      try { proxyPoolRuntime.noteFallback(); } catch {}
+    }
+  } else { url = account?.proxyUrl || ''; kind = url ? 'account' : 'direct'; }
+  const egress = { kind, entryId: entry?.entryId || null, endpointKey: entry ? entry.endpointKey : proxyEndpointKey(url), poolFallback, connectPhase: false };
+  Object.defineProperty(egress, 'url', { value: url, enumerable: false });
+  Object.defineProperty(egress, 'poolRetryAt', { value: retryAt, enumerable: false });
+  Object.defineProperty(egress, 'entry', { value: entry, enumerable: false });
+  return egress;
+}
+// 传输失败归因：看本次 attempt 实际使用的出口；缺少 egress（极少数旧路径）时退回账号配置。
+function egressOrigin(egress, account) {
+  if (egress && typeof egress === 'object') return ['explicit', 'pool', 'account'].includes(egress.kind) ? 'proxy' : 'network';
+  return account?.proxyUrl ? 'proxy' : 'network';
+}
+// 日志里的出口枚举：direct | account-proxy | pool:<8hex>。显式代理（proxy-test）也记为 account-proxy。
+const EGRESS_LABEL = /^(?:direct|account-proxy|pool:[0-9a-f]{8})$/;
+function egressLabel(egress) {
+  if (!egress || typeof egress !== 'object') return null;
+  if (egress.kind === 'pool') return /^[0-9a-f]{8}$/.test(egress.entryId || '') ? `pool:${egress.entryId}` : null;
+  if (egress.kind === 'account' || egress.kind === 'explicit') return 'account-proxy';
+  return egress.kind === 'direct' ? 'direct' : null;
+}
+// 池上 HTML 429 的终态 Retry-After：全池最早恢复时间（含本请求已用条目），按秒向上取整并限制在 1..60。
+function poolRetryAfterSeconds(now = Date.now()) {
+  let at = null;
+  try { at = proxyPoolRuntime.earliestRetryAt(); } catch {}
+  return Number.isFinite(at) ? Math.min(60, Math.max(1, Math.ceil((at - now) / 1000))) : 1;
+}
+// ---------- 出口凭据脱敏种子 ----------
+// 账号代理 URL 与解码后的用户名/密码、手动池条目、FloppyData apiKey、当前批与退役批条目的用户名/密码。
+// 池相关部分按 config.proxyPool 对象引用与 runtime 种子数组引用缓存（换批或保存后自动失效）。
+function proxyUrlSecretParts(url) {
+  const out = [];
+  if (typeof url !== 'string' || !url) return out;
+  try {
+    const u = new URL(url);
+    for (const raw of [u.username, u.password]) {
+      if (!raw) continue;
+      out.push(raw);
+      try { out.push(decodeURIComponent(raw)); } catch {}
+    }
+  } catch {}
+  return out;
+}
+function poolConfigSecrets(pool) {
+  if (!pool || typeof pool !== 'object') return { urls: [], parts: [] };
+  let cached = poolConfigSecretCache.get(pool);
+  if (!cached) {
+    const urls = [], parts = [];
+    for (const url of Array.isArray(pool.entries) ? pool.entries : []) { if (typeof url === 'string' && url) { urls.push(url); parts.push(...proxyUrlSecretParts(url)); } }
+    if (typeof pool.floppydata?.apiKey === 'string' && pool.floppydata.apiKey) parts.push(pool.floppydata.apiKey);
+    cached = { urls, parts };
+    poolConfigSecretCache.set(pool, cached);
+  }
+  return cached;
+}
+function runtimeEgressSeeds() {
+  // 启动规范化阶段 runtime 尚未初始化（TDZ）：此时没有池条目。
+  try { return proxyPoolRuntime.secretSeeds(); } catch { return []; }
+}
+// 池部分（可达数千项）：去重后的值与一次扫描的正则，供字符串脱敏使用，避免逐项 split。
+function poolEgressSecrets() {
+  const pool = config?.proxyPool, seeds = runtimeEgressSeeds();
+  if (poolSecretPatternCache.pool === pool && poolSecretPatternCache.seeds === seeds) return poolSecretPatternCache;
+  const { urls, parts } = poolConfigSecrets(pool);
+  const values = [...new Set([...urls, ...parts, ...seeds])].filter((value) => typeof value === 'string' && value);
+  // 与 safeReason 一致：短于 8 个字符的值（如 "proxy"、"admin"）只按完整词匹配，避免把普通单词整段替换。
+  const escape = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const sorted = values.slice().sort((a, b) => b.length - a.length);
+  const long = sorted.filter((value) => value.length >= 8).map(escape), short = sorted.filter((value) => value.length < 8).map(escape);
+  const alternatives = [...long, ...(short.length ? [`(?<![A-Za-z0-9])(?:${short.join('|')})(?![A-Za-z0-9])`] : [])];
+  const pattern = alternatives.length ? new RegExp(alternatives.join('|'), 'g') : null;
+  poolSecretPatternCache = { pool, seeds, values, pattern };
+  return poolSecretPatternCache;
+}
+function configuredEgressSecrets({ includeUrls = true } = {}) {
+  const out = new Set();
+  for (const account of config?.accounts || []) {
+    if (includeUrls && account.proxyUrl) out.add(account.proxyUrl);
+    for (const value of proxyUrlSecretParts(account.proxyUrl)) out.add(value);
+  }
+  const { urls, parts } = poolConfigSecrets(config?.proxyPool);
+  if (includeUrls) for (const url of urls) out.add(url);
+  for (const value of parts) out.add(value);
+  for (const value of runtimeEgressSeeds()) out.add(value);
+  return [...out].filter(Boolean);
+}
+function redactPoolEgressSecrets(text) {
+  const { pattern } = poolEgressSecrets();
+  if (!pattern) return text;
+  pattern.lastIndex = 0;
+  return text.replace(pattern, '[REDACTED]');
+}
+function clineRequestJSON(url, { headers = {}, body, signal, timeoutMs = 120000, account = null, proxyUrl = '', method = 'POST', maxResponseBytes = Infinity, attemptOwner = null, attemptMeta = null, permit = null, ephemeralProxy = false, proxyAgentFactory = null, egressHint = null } = {}) {
+  return clineRequest(url, { headers, body, signal, timeoutMs, account, proxyUrl, method, attemptOwner, attemptMeta, permit, ephemeralProxy, proxyAgentFactory, egressHint }).then(async (res) => ({ ...res, text: await streamToString(res.body, maxResponseBytes) }));
+}
+// proxyAgentFactory 只与 ephemeralProxy + 显式 proxyUrl 一起使用（池连通性测试），构造的 agent 用完即销毁。
+function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, account = null, proxyUrl = '', method = 'POST', attemptOwner = null, attemptMeta = null, permit = null, ephemeralProxy = false, proxyAgentFactory = null, egressHint = null } = {}) {
   const root = detailContext.getStore();
   const nativeChat = method === 'POST' && url === `${config.upstreamBase}/chat/completions`;
   let detailAttempt = null, attemptToken = null, req = null;
@@ -4204,6 +4431,11 @@ function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, acc
     let response = null;
     let cleanup = () => {};
     let agent = null, disposableAgent = ephemeralProxy;
+    // 出口：池条目 / 账号代理 / 直连 / 显式代理。connected 之前的传输错误属于连接阶段。
+    let egress = null, poolEntry = null, sent = false, connected = false, connectTimer = null;
+    const clearConnectTimer = () => { if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; } };
+    const markConnected = () => { if (connected) return; connected = true; clearConnectTimer(); };
+    const releaseEntry = () => { clearConnectTimer(); try { poolEntry?.release(); } catch {} };
     const dispose = () => { if (disposableAgent) agent?.destroy(); };
     const onAbort = () => { response?.destroy(new Error('aborted')); req?.destroy(new Error('aborted')); };
     const fail = (error) => {
@@ -4211,10 +4443,17 @@ function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, acc
       dispose();
       // 未调用 req.end() 就结束的 attempt 不是真实上游请求：立即退还预留并唤醒等待者。
       try { permit?.release(); } catch {}
+      if (egress && sent && !connected && !response && !signal?.aborted && !egress.connectPhase) {
+        egress.connectPhase = true;
+        // 只有池条目自身的连接阶段失败才让条目冷却；客户端取消不算。
+        if (poolEntry) { try { poolEntry.noteConnectFailure(); } catch {} }
+      }
+      releaseEntry();
       if (!settled) {
         settled = true;
         if (attemptToken) error.attemptToken = attemptToken;
         if (detailAttempt) { detailAttempt.state = 'transport-failed'; error.detailAttempt = detailAttempt; }
+        if (egress) error.egress = egress;
         reject(error);
       }
     };
@@ -4225,18 +4464,32 @@ function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, acc
       lib = u.protocol === 'https:' ? https : http;
       data = Buffer.isBuffer(body) ? body : Buffer.from(String(body || ''));
       cleanup = () => signal?.removeEventListener('abort', onAbort);
-      const effectiveProxy = proxyUrl || account?.proxyUrl || '';
-      disposableAgent = !!effectiveProxy && (ephemeralProxy || !config.accounts.some((a) => a.proxyUrl === effectiveProxy) ||
-        (!proxyAgents.has(effectiveProxy) && proxyAgents.size >= MAX_CACHED_PROXY_AGENTS));
-      agent = effectiveProxy ? proxyAgentFor(effectiveProxy, { ephemeral: disposableAgent }) : u.protocol === 'https:' ? directHttpsAgent : directHttpAgent;
+      egress = resolveEgress(account, proxyUrl, egressHint);
+      poolEntry = egress.entry;
+      if (poolEntry) {
+        disposableAgent = false;
+        agent = poolEntry.agent;
+        if (!agent) throw new Error('proxy pool agent unavailable');
+      } else {
+        const effectiveProxy = egress.url;
+        disposableAgent = !!effectiveProxy && (ephemeralProxy || !config.accounts.some((a) => a.proxyUrl === effectiveProxy) ||
+          (!proxyAgents.has(effectiveProxy) && proxyAgents.size >= MAX_CACHED_PROXY_AGENTS));
+        agent = !effectiveProxy ? (u.protocol === 'https:' ? directHttpsAgent : directHttpAgent)
+          : proxyAgentFactory && ephemeralProxy ? proxyAgentFactory(effectiveProxy) : proxyAgentFor(effectiveProxy, { ephemeral: disposableAgent });
+      }
       requestHeaders = { ...headers }; if (method !== 'GET') requestHeaders['Content-Length'] = data.length;
       req = lib.request({ protocol: u.protocol, hostname: u.hostname, port: u.port, path: `${u.pathname}${u.search}`, method, headers: requestHeaders, agent }, (res) => {
         response = res;
-        res.once('end', () => { cleanup(); dispose(); });
-        res.once('close', () => { cleanup(); dispose(); });
+        markConnected();
+        res.once('end', () => { cleanup(); dispose(); releaseEntry(); });
+        res.once('close', () => { cleanup(); dispose(); releaseEntry(); });
+        // 网关按出口 IP 限流的 HTML 429：只让该池条目冷却，账号不受影响。
+        if (poolEntry && res.statusCode === 429 && /^\s*text\/html\b/i.test(String(res.headers['content-type'] || ''))) {
+          try { poolEntry.noteThrottle(parsePoolRetryAfter(res.headers['retry-after'])); } catch {}
+        }
         if (detailAttempt) { detailAttempt.status = res.statusCode || 502; detailAttempt.responseHeaders = root.raw ? projectRawHeaders(res.headers, res.rawHeaders) : res.headers; }
         const responseBody = detailAttempt?.output ? observeStream(res, detailAttempt.output) : res;
-        if (!settled) { settled = true; resolve({ status: res.statusCode || 502, headers: res.headers, body: responseBody, attemptToken, detailAttempt,
+        if (!settled) { settled = true; resolve({ status: res.statusCode || 502, headers: res.headers, body: responseBody, attemptToken, detailAttempt, egress,
           setIdleTimeout(ms) {
             // Node detaches IncomingMessage.socket once a complete response ends;
             // buffered first events still need forwarding, but no idle socket remains.
@@ -4252,21 +4505,47 @@ function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, acc
     req.on('error', fail);
     const onRequestTimeout = () => { const error = new Error('upstream timeout'); response?.destroy(error); req.destroy(error); };
     req.setTimeout(timeoutMs, onRequestTimeout);
-    req.on('socket', (socket) => { applyNestedSocketTimeouts(socket, timeoutMs); });
-    if (req.socket) applyNestedSocketTimeouts(req.socket, timeoutMs);
+    // 连接阶段识别：复用的 keep-alive socket 已连接；新 socket 等 'connect'（https 目标等 'secureConnect'）。
+    // 经代理的 socket 在交给 req 时隧道已建立（http 目标此时即已连接）。
+    const trackConnect = (socket) => {
+      if (connected || !socket) return;
+      if (req.reusedSocket) return markConnected();
+      if (u.protocol === 'https:') {
+        if (socket._secureEstablished) return markConnected();
+        socket.once('secureConnect', markConnected);
+      } else {
+        if (!socket.connecting) return markConnected();
+        socket.once('connect', markConnected);
+      }
+    };
+    req.on('socket', (socket) => { applyNestedSocketTimeouts(socket, timeoutMs); trackConnect(socket); });
+    if (req.socket) { applyNestedSocketTimeouts(req.socket, timeoutMs); trackConnect(req.socket); }
+    if (poolEntry) {
+      const ms = effectiveProxyPool().connectTimeoutMs;
+      // 代理握手尚未把 socket 交给 req 时，req.destroy() 的 error 要等握手结束才会发出：直接 fail 结算。
+      connectTimer = setTimeout(() => {
+        connectTimer = null;
+        if (connected || response) return;
+        const error = new Error('proxy connect timeout');
+        req.destroy(error); fail(error);
+      }, ms);
+      connectTimer.unref?.();
+    }
     if (signal) {
       if (signal.aborted) { onAbort(); return; }
       signal.addEventListener('abort', onAbort, { once: true });
     }
     try {
       req.end(method === 'GET' ? undefined : data);
+      sent = true;
       // 已把请求交给 Node transport：此后 DNS/connect/proxy/TLS/成功/错误/超时/取消都不退还 RPM。
       permit?.commit();
+      try { poolEntry?.commit(); } catch {}
       if (nativeChat) {
         if (attemptOwner) attemptToken = { attemptIndex: attemptOwner.nextAttemptIndex++, callId: crypto.randomUUID() };
         try { attemptOwner?.onAttemptCommit?.(); } catch {}
         try {
-          detailAttempt = root?.attempt({ token: attemptToken, url, method, headers: req.getHeaders(), body: body || '', account, proxyUrl, model: attemptMeta?.model || '', provider: attemptMeta?.provider ?? null }) || null;
+          detailAttempt = root?.attempt({ token: attemptToken, url, method, headers: req.getHeaders(), body: body || '', account, proxyUrl: egress?.url || '', model: attemptMeta?.model || '', provider: attemptMeta?.provider ?? null }) || null;
           if (!attemptToken && detailAttempt) attemptToken = { attemptIndex: detailAttempt.attemptIndex, callId: detailAttempt.callId };
         } catch { detailedLogs.recordDrop('attemptCaptureFailure'); detailAttempt = null; }
       }
@@ -4302,7 +4581,7 @@ const QUOTA_NO_PLAN_RULE_ID = 'quota-no-plan';
 function quotaFailureCategory(error, status, account) {
   if (status === 401 || status === 403) return 'auth'; if (status === 429) return 'rate_limit'; if (status >= 500) return 'server'; if (status) return 'http';
   if (error?.code === 'RESPONSE_TOO_LARGE') return 'schema';
-  if (/timeout/i.test(error?.message || '')) return 'timeout'; return account.proxyUrl ? 'proxy' : 'network';
+  if (/timeout/i.test(error?.message || '')) return 'timeout'; return egressOrigin(error?.egress, account);
 }
 function quotaFailureDelay(id) { return Math.min(15 * QUOTA_FAILURE_MS, QUOTA_FAILURE_MS * (2 ** (quotaFailureCounts.get(id) || 0))); }
 function successfulQuotaTime(q, now = Date.now()) {
@@ -4459,7 +4738,7 @@ async function runQuotaJob(job, account) {
   job.controller = new AbortController();
   const deadline = setTimeout(() => { timedOut = true; job.controller.abort(); }, QUOTA_TIMEOUT_MS); deadline.unref?.();
   try {
-    const result = await clineRequestJSON(`${config.upstreamBase.replace(/\/$/,'')}/users/me/plan/usage-limits`, { method: 'GET', headers: { Accept: 'application/json', Authorization: `Bearer ${job.key}` }, signal: job.controller.signal, timeoutMs: QUOTA_TIMEOUT_MS, account, proxyUrl: job.proxyUrl, maxResponseBytes: 256 * 1024 });
+    const result = await clineRequestJSON(`${config.upstreamBase.replace(/\/$/,'')}/users/me/plan/usage-limits`, { method: 'GET', headers: { Accept: 'application/json', Authorization: `Bearer ${job.key}` }, signal: job.controller.signal, timeoutMs: QUOTA_TIMEOUT_MS, account, maxResponseBytes: 256 * 1024 });
     if (result.status < 200 || result.status >= 300) {
       errorCategory = quotaFailureCategory(null, result.status, account);
       // Cline answers 404 "no plan history" once the subscription is gone: the key is valid but cannot serve.
@@ -5205,13 +5484,14 @@ function redactSecrets(value) {
     return values;
   })].filter(Boolean);
   for (const k of keys) s = s.split(k).join('[REDACTED]');
+  s = redactPoolEgressSecrets(s);
   s = s.replace(/(?:https?|socks5h?):\/\/[^\s]+/gi, '[REDACTED_PROXY]').replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, 'Bearer [REDACTED]');
   return s;
 }
 // 把结构化上游错误归一成单行脱敏字符串；非 JSON 响应只使用通用原因，原始正文不进入诊断。
 const errText = (e) => redactSecrets(e == null ? '' : typeof e === 'string' ? e : JSON.stringify(e));
 function ordinaryFailureReason(result, sensitiveValues = []) {
-  const seeds = [config.apiKey, ...clientKeyInventory(config, PROXY_KEY).map((item) => item.key), ...activeClientSecrets.keys(), process.env.PROXY_KEY, ...config.accounts.flatMap((account) => [account.key, account.proxyUrl, ...Object.values(account.headers || {})])].filter(Boolean);
+  const seeds = [config.apiKey, ...clientKeyInventory(config, PROXY_KEY).map((item) => item.key), ...activeClientSecrets.keys(), process.env.PROXY_KEY, ...config.accounts.flatMap((account) => [account.key, account.proxyUrl, ...Object.values(account.headers || {})]), ...configuredEgressSecrets({ includeUrls: false })].filter(Boolean);
   const redactor = new DetailRedactor(seeds);
   redactor.learnHeaders(result?.responseHeaders || {});
   redactor.learn(result?.structuredError);
@@ -5319,6 +5599,9 @@ function gatewayWaitMs(account, now = Date.now()) {
   const state = gatewayThrottles.get(gatewayAccountKey(account));
   return state && state.until > now ? state.until - now + Math.floor(Math.random() * GATEWAY_BACKOFF_JITTER_MS) : 0;
 }
+function isPoolConnectFailure(result) {
+  return result?.egress?.kind === 'pool' && result.egress.connectPhase === true && Number(result?.upstreamStatus) === 0;
+}
 function nonJsonUpstreamErrorBody(up, responseContentType, netError) {
   if (!netError && Number(up?.status) === 429 && responseContentType === 'text/html') {
     return { error: { message: 'upstream gateway rate limited (HTML throttle)', type: 'rate_limit_error' } };
@@ -5330,6 +5613,8 @@ function classifyAttemptFailure(result, attempt, account, now = Date.now()) {
   const origin = result?.terminalOrigin || '';
   const error = result?.structuredError;
   const errorText = structuredErrorText(error || result?.out?.error?.message);
+  // 池条目自身在连接阶段失败（代理拒绝/握手/认证/连接超时）：只归因到该条目，不连带账号或 provider。
+  if (isPoolConnectFailure(result)) return { scope: 'proxy', evidence: 'proxy_pool_connect', failureClass: 'network', retryAfterMs: null };
   if (status === 429) {
     const retryAfterMs = parseRetryAfter(result?.retryAfter, now);
     if (quotaShowsExhausted(account, now)) return { scope: 'account', evidence: 'fresh_account_quota', failureClass: 'rate_limit', retryAfterMs };
@@ -5445,11 +5730,11 @@ function persistProviderAction(modelId, provider, action) {
 function responseHeadersFor(account, forwardedHeaders) {
   return { ...forwardedHeaders, ...(account?.headers || {}), 'Content-Type': 'application/json', Authorization: `Bearer ${account.key}` };
 }
-async function attemptOnce(modelId, body, attempt, account, forwardedHeaders, signal, attemptOwner, permit = null, timeoutMs = NON_STREAM_ATTEMPT_MS) {
+async function attemptOnce(modelId, body, attempt, account, forwardedHeaders, signal, attemptOwner, permit = null, timeoutMs = NON_STREAM_ATTEMPT_MS, egressHint = null) {
   const send = injectPrefs(body, modelId, attempt), requestBody = JSON.stringify(send);
   try {
     const res = await clineRequestJSON(`${config.upstreamBase}/chat/completions`, {
-      headers: responseHeadersFor(account, forwardedHeaders), body: requestBody, signal, timeoutMs, account, attemptOwner, permit,
+      headers: responseHeadersFor(account, forwardedHeaders), body: requestBody, signal, timeoutMs, account, attemptOwner, permit, egressHint,
       attemptMeta: { model: modelId, provider: Array.isArray(attempt.upstreams) && attempt.upstreams.length ? attempt.upstreams : (attempt.upstream ? [attempt.upstream] : []) },
     });
     const responseContentType = normalizeResponseContentType(res.headers);
@@ -5460,13 +5745,13 @@ async function attemptOnce(modelId, body, attempt, account, forwardedHeaders, si
     if (!json) {
       const status = normalizeStatus(res.status, null, 502);
       const htmlThrottle = Number(res.status) === 429 && responseContentType === 'text/html';
-      return { status, upstreamStatus: res.status, normalizedStatus: status, out: htmlThrottle ? nonJsonUpstreamErrorBody(res, responseContentType, null) : { error: { message: 'upstream returned non-JSON', type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter, responseHeaders: res.headers, responseContentType, responseBytes, netError: htmlThrottle ? null : 'non-JSON response', terminalOrigin: res.status >= 400 ? 'upstream_http' : 'upstream_envelope', acc: account, attemptToken: res.attemptToken, detailAttempt: res.detailAttempt, detailResponseBody: res.text, detailCaptureState: 'response-error' };
+      return { status, upstreamStatus: res.status, normalizedStatus: status, out: htmlThrottle ? nonJsonUpstreamErrorBody(res, responseContentType, null) : { error: { message: 'upstream returned non-JSON', type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter, responseHeaders: res.headers, responseContentType, responseBytes, netError: htmlThrottle ? null : 'non-JSON response', terminalOrigin: res.status >= 400 ? 'upstream_http' : 'upstream_envelope', acc: account, attemptToken: res.attemptToken, detailAttempt: res.detailAttempt, detailResponseBody: res.text, detailCaptureState: 'response-error', egress: res.egress || null };
     }
     const un = unwrap(json, res.status);
-    return { status: un.status, upstreamStatus: un.upstreamStatus, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing, structuredError: upstreamErrorOf(json), retryAfter, responseHeaders: res.headers, responseContentType, responseBytes, netError: null, terminalOrigin: un.status === 200 ? 'success' : (res.status >= 400 ? 'upstream_http' : 'upstream_envelope'), acc: account, attemptToken: res.attemptToken, detailAttempt: res.detailAttempt, detailResponseBody: un.status === 200 ? null : res.text, detailCaptureState: un.status === 200 ? 'success' : 'response-error' };
+    return { status: un.status, upstreamStatus: un.upstreamStatus, normalizedStatus: un.normalizedStatus, out: un.body, routing: un.routing, structuredError: upstreamErrorOf(json), retryAfter, responseHeaders: res.headers, responseContentType, responseBytes, netError: null, terminalOrigin: un.status === 200 ? 'success' : (res.status >= 400 ? 'upstream_http' : 'upstream_envelope'), acc: account, attemptToken: res.attemptToken, detailAttempt: res.detailAttempt, detailResponseBody: un.status === 200 ? null : res.text, detailCaptureState: un.status === 200 ? 'success' : 'response-error', egress: res.egress || null };
   } catch (e) {
-    const origin = /timeout/i.test(e.message) ? 'timeout' : account?.proxyUrl ? 'proxy' : 'network';
-    return { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${errText(e.message)}`, type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter: null, responseHeaders: {}, responseContentType: null, responseBytes: 0, netError: errText(e.message), terminalOrigin: origin, acc: account, attemptToken: e.attemptToken || null, detailAttempt: e.detailAttempt || null, detailResponseBody: null, detailCaptureState: 'no-response' };
+    const origin = /timeout/i.test(e.message) ? 'timeout' : egressOrigin(e.egress, account);
+    return { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${errText(e.message)}`, type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter: null, responseHeaders: {}, responseContentType: null, responseBytes: 0, netError: errText(e.message), terminalOrigin: origin, acc: account, attemptToken: e.attemptToken || null, detailAttempt: e.detailAttempt || null, detailResponseBody: null, detailCaptureState: 'no-response', egress: e.egress || null };
   }
 }
 function settleAttempt(modelId, attempt, result, account, { clientDisconnected = false, updateSuccess = true, cfg = {}, sensitiveValues = [], quotaRole = null } = {}) {
@@ -5489,7 +5774,8 @@ function settleAttempt(modelId, attempt, result, account, { clientDisconnected =
   }
   if (result.status === 200) {
     settleDetail(false, result.detailCaptureState || 'success');
-    clearGatewayThrottle(account);
+    // 池条目上的成功不说明账号自身出口已恢复：账号级 HTML 429 退避只由账号出口的 attempt 维护。
+    if (result.egress?.kind !== 'pool') clearGatewayThrottle(account);
     const healthAction = updateSuccess && currentGeneration ? updateProviderHealth(modelId, scopedProvider(attempt, result.routing), { success: true }) : 'none';
     const providerCircuitAction = updateSuccess && currentGeneration ? settleProviderCircuit(modelId, cfg, account, attempt, result) : null;
     return { classification: null, policy: null, accountAction: null, healthAction, providerCircuitAction, retryDecision: null };
@@ -5499,11 +5785,22 @@ function settleAttempt(modelId, attempt, result, account, { clientDisconnected =
   result.classification = classification;
   result.ordinaryReason = ordinaryFailureReason(result, sensitiveValues);
   if (classification.scope === 'gateway') {
-    const backoffMs = noteGatewayThrottle(account);
-    result.retryAfter = String(Math.ceil(backoffMs / 1000));
+    // 池条目上的 HTML 429 只让该条目冷却（clineRequest 内已记），不触发账号级退避；
+    // Retry-After 取全池最早恢复时间。账号出口（含池回退）沿用按账号退避。
+    if (result.egress?.kind === 'pool') result.retryAfter = String(poolRetryAfterSeconds());
+    else {
+      const backoffMs = noteGatewayThrottle(account);
+      result.retryAfter = String(Math.ceil(backoffMs / 1000));
+    }
     if (attempt.circuitHalfOpen) { const state = providerCircuitStates.get(attempt.circuitKey); if (state) state.halfOpen = false; }
     return { classification, policy: { ruleId: null, scope: null, action: 'ignore', statusCode: Number(result.normalizedStatus || result.status), matchedBy: ['default'] },
       accountAction: null, quotaRemovalAction: null, healthAction: 'none', providerCircuitAction: null, retryDecision: null, gatewayThrottle: true };
+  }
+  if (classification.scope === 'proxy') {
+    // 池条目连接阶段失败：条目已冷却；不评估 error/retry 规则，不降级账号，不打开 provider circuit。
+    if (attempt.circuitHalfOpen) { const state = providerCircuitStates.get(attempt.circuitKey); if (state) state.halfOpen = false; }
+    return { classification, policy: { ruleId: null, scope: null, action: 'ignore', statusCode: Number(result.normalizedStatus || result.status), matchedBy: ['default'] },
+      accountAction: null, quotaRemovalAction: null, healthAction: 'none', providerCircuitAction: null, retryDecision: null, poolConnectFailure: true };
   }
   const scoped = scopedProvider(attempt, result.routing);
   const policy = matchErrorRule({ result, classification, modelId, provider: scoped, sensitiveValues });
@@ -5545,6 +5842,9 @@ function traceAttempt(attempt, result, account, ms, diagnostic) {
     retryDecision: diagnostic.retryDecision?.decision || 'continue',
     retryMatchedBy: Array.isArray(diagnostic.retryDecision?.matchedBy) ? diagnostic.retryDecision.matchedBy.filter((value) => RETRY_MATCH_KINDS.has(value)) : [],
     responseContentType: result.responseContentType || null, responseBytes: Number.isSafeInteger(result.responseBytes) ? result.responseBytes : null,
+    egress: egressLabel(result.egress), poolFallback: result.egress?.poolFallback === true,
+    // 仅进程内用于 proxyHealth 统计归属（scheme://host[:port]，不含凭据）；不进入日志投影。
+    egressEndpointKey: result.egress ? result.egress.endpointKey || null : undefined,
   };
 }
 
@@ -5625,10 +5925,28 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
     attempted.delete(attempt.upstream || 'auto');
     return 'retry';
   };
+  // 出口池：本账号段内已用过的池条目与换代理次数（独立于 provider 重试、gateway 重试与换号）。
+  const egressExclude = new Set(), egressHint = { exclude: egressExclude };
+  let egressRetries = 0;
+  // 池条目首包前 HTML 429 或连接阶段失败：立即换一个本请求未用过的池条目重试，不等待。
+  // 次数用完或池里没有其他可用条目时停止，绝不追加一次走账号出口的请求。
+  const egressStep = (result, attempt) => {
+    const egress = result?.egress;
+    if (egress?.kind !== 'pool' || !(isGatewayThrottle(result) || egress.connectPhase === true)) return null;
+    if (egress.url) egressExclude.add(egress.url);
+    if (egressRetries < effectiveProxyPool().egressRetries && !clientClosed && proxyPoolRuntime.hasAvailable(egressExclude)) {
+      egressRetries++;
+      attempted.delete(attempt.upstream || 'auto');
+      return 'retry';
+    }
+    return 'stop';
+  };
+  // 下一次 attempt 预计走池条目时不做账号级 HTML 429 等待；回退到账号出口（或池关闭）时与原逻辑一致。
+  const poolEgressExpected = () => effectiveProxyPool().enabled && proxyPoolRuntime.hasAvailable(egressExclude);
   try {
     for (let index = 0; index < maxAttempts; index++) {
       if (clientClosed) break;
-      const gatewayWait = gatewayWaitMs(account);
+      const gatewayWait = poolEgressExpected() ? 0 : gatewayWaitMs(account);
       if (gatewayWait > 0) {
         await new Promise((resolve) => setTimeout(resolve, gatewayWait));
         if (clientClosed) break;
@@ -5660,10 +5978,10 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
       try {
         if (stream) {
           const send = injectPrefs(body, modelId, attempt), requestBody = JSON.stringify(send);
-          let up = null, netError = null, transportOrigin = null, failedAttemptToken = null, failedDetailAttempt = null;
+          let up = null, netError = null, transportOrigin = null, failedAttemptToken = null, failedDetailAttempt = null, failedEgress = null;
           try {
-            up = await clineRequest(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, forwardedHeaders), body: requestBody, signal: ctrl.signal, timeoutMs: SSE_FIRST_EVENT_MS, account, attemptOwner, permit, attemptMeta: { model: modelId, provider: Array.isArray(attempt.upstreams) && attempt.upstreams.length ? attempt.upstreams : (attempt.upstream ? [attempt.upstream] : []) } });
-          } catch (e) { netError = timedOut ? 'upstream timeout' : errText(e.message); failedAttemptToken = e.attemptToken || null; failedDetailAttempt = e.detailAttempt || null; }
+            up = await clineRequest(`${config.upstreamBase}/chat/completions`, { headers: responseHeadersFor(account, forwardedHeaders), body: requestBody, signal: ctrl.signal, timeoutMs: SSE_FIRST_EVENT_MS, account, attemptOwner, permit, egressHint, attemptMeta: { model: modelId, provider: Array.isArray(attempt.upstreams) && attempt.upstreams.length ? attempt.upstreams : (attempt.upstream ? [attempt.upstream] : []) } });
+          } catch (e) { netError = timedOut ? 'upstream timeout' : errText(e.message); failedAttemptToken = e.attemptToken || null; failedDetailAttempt = e.detailAttempt || null; failedEgress = e.egress || null; }
           const responseContentType = normalizeResponseContentType(up?.headers);
           let isSSE = !!up && up.status === 200 && responseContentType === 'text/event-stream';
           let firstChunk = null, streamErrorBody = null;
@@ -5688,7 +6006,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
             } catch (e) {
               isSSE = false;
               netError = timedOut ? 'upstream timeout' : errText(e.message);
-              transportOrigin = timedOut || /timeout/i.test(netError) ? 'timeout' : account.proxyUrl ? 'proxy' : 'network';
+              transportOrigin = timedOut || /timeout/i.test(netError) ? 'timeout' : egressOrigin(up.egress, account);
             }
           }
           const ms = Date.now() - t1;
@@ -5702,7 +6020,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
               try { rest = await streamToString(up.body); }
               catch (e) {
                 if (!netError) netError = timedOut ? 'upstream timeout' : errText(e.message);
-                transportOrigin = timedOut || /timeout/i.test(netError) ? 'timeout' : account.proxyUrl ? 'proxy' : 'network';
+                transportOrigin = timedOut || /timeout/i.test(netError) ? 'timeout' : egressOrigin(up.egress, account);
               }
             }
             const text = (firstChunk ? firstChunk.toString('utf8') : '') + rest;
@@ -5720,12 +6038,16 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
               terminalOrigin: up.status >= 400 ? 'upstream_http' : transportOrigin || 'upstream_envelope', acc: account,
               attemptToken: up.attemptToken, detailAttempt: up.detailAttempt,
               detailResponseBody: streamErrorBody || (transportOrigin ? null : text), detailCaptureState: transportOrigin ? 'stream-transport-failed' : 'response-error',
+              egress: up.egress || null,
             };
             result.note = errText(un.body?.error?.message || netError);
             const diagnostic = settleAttempt(modelId, attempt, result, account, { clientDisconnected: clientClosed, cfg, sensitiveValues, quotaRole });
             trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
             if (!attempt.upstream) learnAvailableProviders(modelId, result.note);
             last = { ...result, accountAction: diagnostic.accountAction, quotaRemovalAction: diagnostic.quotaRemovalAction, classification: diagnostic.classification };
+            const egressNext = egressStep(result, attempt);
+            if (egressNext === 'stop') break;
+            if (egressNext === 'retry') { index--; continue; }
             const gateway = gatewayStep(diagnostic, attempt);
             if (gateway === 'stop') break;
             if (gateway === 'retry') { index--; continue; }
@@ -5734,11 +6056,14 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
             continue;
           }
           if (!up) {
-            const origin = timedOut || /timeout/i.test(netError || '') ? 'timeout' : account.proxyUrl ? 'proxy' : 'network';
-            const result = { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${netError || 'no response'}`, type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter: null, responseHeaders: {}, responseContentType: null, responseBytes: 0, netError: netError || 'no response', terminalOrigin: origin, acc: account, note: netError || 'no response', attemptToken: failedAttemptToken, detailAttempt: failedDetailAttempt, detailResponseBody: null, detailCaptureState: 'no-response' };
+            const origin = timedOut || /timeout/i.test(netError || '') ? 'timeout' : egressOrigin(failedEgress, account);
+            const result = { status: 502, upstreamStatus: 0, normalizedStatus: 502, out: { error: { message: `upstream fetch failed: ${netError || 'no response'}`, type: 'upstream_error' } }, routing: {}, structuredError: null, retryAfter: null, responseHeaders: {}, responseContentType: null, responseBytes: 0, netError: netError || 'no response', terminalOrigin: origin, acc: account, note: netError || 'no response', attemptToken: failedAttemptToken, detailAttempt: failedDetailAttempt, detailResponseBody: null, detailCaptureState: 'no-response', egress: failedEgress };
             const diagnostic = settleAttempt(modelId, attempt, result, account, { clientDisconnected: clientClosed, cfg, sensitiveValues, quotaRole });
             trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
             last = { ...result, accountAction: diagnostic.accountAction, quotaRemovalAction: diagnostic.quotaRemovalAction, classification: diagnostic.classification };
+            const egressNext = egressStep(result, attempt);
+            if (egressNext === 'stop') break;
+            if (egressNext === 'retry') { index--; continue; }
             if (diagnostic.retryDecision?.decision === 'stop') { retryStop = true; break; }
             if (last.accountAction?.action === 'cooldown' || last.accountAction?.action === 'hard-quarantine' || last.quotaRemovalAction) break;
             continue;
@@ -5746,12 +6071,12 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
           up.setIdleTimeout(SSE_STREAM_IDLE_MS);
           clearTimeout(timer);
           keepCloseHook = true;
-          const result = { status: 200, upstreamStatus: 200, normalizedStatus: 200, terminalOrigin: 'success', responseHeaders: up.headers, responseContentType, responseBytes: safeResponseBytes(firstChunk), note: 'stream', attemptToken: up.attemptToken, detailAttempt: up.detailAttempt, detailResponseBody: null, detailCaptureState: 'stream-started' };
+          const result = { status: 200, upstreamStatus: 200, normalizedStatus: 200, terminalOrigin: 'success', responseHeaders: up.headers, responseContentType, responseBytes: safeResponseBytes(firstChunk), note: 'stream', attemptToken: up.attemptToken, detailAttempt: up.detailAttempt, detailResponseBody: null, detailCaptureState: 'stream-started', egress: up.egress || null };
           const diagnostic = settleAttempt(modelId, attempt, result, account, { updateSuccess: false, cfg, sensitiveValues });
           trace.push(traceAttempt(attempt, result, account, ms, diagnostic));
           return { status: 200, streamUp: up, streamHead: firstChunk, streamAttempt: attempt, streamAttemptToken: up.attemptToken, streamDetailAttempt: up.detailAttempt, acc: account, trace, t0, plan, started: true, cleanupClientClose, retryStop: false, routingFailure: false };
         }
-        const result = await attemptOnce(modelId, body, attempt, account, forwardedHeaders, ctrl.signal, attemptOwner, permit, attemptTimeoutMs);
+        const result = await attemptOnce(modelId, body, attempt, account, forwardedHeaders, ctrl.signal, attemptOwner, permit, attemptTimeoutMs, egressHint);
         if (timedOut && result.status !== 200) { result.terminalOrigin = 'timeout'; result.netError = 'upstream timeout'; result.out = { error: { message: 'upstream fetch failed: upstream timeout', type: 'upstream_error' } }; }
         const ms = Date.now() - t1;
         result.note = result.netError || (result.status !== 200 ? errText(result.out?.error?.message) : 'ok');
@@ -5760,6 +6085,9 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
         if (result.status !== 200 && !attempt.upstream) learnAvailableProviders(modelId, result.note);
         last = { ...result, accountAction: diagnostic.accountAction, quotaRemovalAction: diagnostic.quotaRemovalAction, classification: diagnostic.classification };
         if (result.status === 200) { last.successfulAttempt = attempt; break; }
+        const egressNext = egressStep(result, attempt);
+        if (egressNext === 'stop') break;
+        if (egressNext === 'retry') { index--; continue; }
         const gateway = gatewayStep(diagnostic, attempt);
         if (gateway === 'stop') break;
         if (gateway === 'retry') { index--; continue; }
@@ -5783,6 +6111,10 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
   return { ...last, trace, t0, plan, netError: last.netError || null, clientDisconnected: clientClosed, retryStop, routingFailure: false };
 }
 
+// 传输失败（upstreamStatus 0）是否发生在代理出口上：按每个 attempt 实际出口判断；旧 trace 无 egress 时退回账号配置。
+function traceProxyError(trace, account) {
+  return (trace || []).some((t) => t.upstreamStatus === 0 && (EGRESS_LABEL.test(t.egress || '') ? t.egress !== 'direct' : !!account?.proxyUrl));
+}
 function statisticsSegments(trace, finalAccountId, usage, clientDisconnect = false) {
   const grouped = new Map();
   for (const attempt of trace || []) { const list = grouped.get(attempt.accountId) || []; list.push(attempt); grouped.set(attempt.accountId, list); }
@@ -6022,23 +6354,23 @@ async function handleChat(req, res, clientKeyId, adapter = null) {
       const attempt = chain.streamAttempt || { upstream: providerAttempt?.upstream || null };
       const disconnected = origin === 'client_disconnect';
       if (observed.error && providerAttempt) {
-        const result = { status: observed.normalizedStatus, upstreamStatus: 200, normalizedStatus: observed.normalizedStatus, routing: { finalProvider: observed.provider }, structuredError: observed.errorPayload, failureText: observed.error, retryAfter: null, responseHeaders: up.headers, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: 'upstream_envelope', note: safeReason(observed.error, sensitiveValues), attemptToken: chain.streamAttemptToken, detailAttempt: chain.streamDetailAttempt, detailResponseBody: observed.errorEvent, detailCaptureState: 'response-error' };
+        const result = { status: observed.normalizedStatus, upstreamStatus: 200, normalizedStatus: observed.normalizedStatus, routing: { finalProvider: observed.provider }, structuredError: observed.errorPayload, failureText: observed.error, retryAfter: null, responseHeaders: up.headers, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: 'upstream_envelope', note: safeReason(observed.error, sensitiveValues), attemptToken: chain.streamAttemptToken, detailAttempt: chain.streamDetailAttempt, detailResponseBody: observed.errorEvent, detailCaptureState: 'response-error', egress: up.egress || null };
         const diagnostic = settleAttempt(modelId, attempt, result, acc, { cfg, sensitiveValues, quotaRole: lease.quotaRole });
         Object.assign(providerAttempt, traceAttempt(attempt, result, acc, providerAttempt.ms, diagnostic));
         const action = diagnostic.accountAction;
         if (action) accountActions.push({ account: acc.name, action: action.action, statusCode: action.statusCode, ruleId: action.ruleId || null, scope: action.scope });
       } else if (error && !disconnected && providerAttempt) {
-        const result = { status: 502, upstreamStatus: 200, normalizedStatus: 502, routing: {}, structuredError: null, failureText: error, retryAfter: null, responseHeaders: up.headers, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: /timeout/i.test(String(error)) ? 'timeout' : acc.proxyUrl ? 'proxy' : 'network', note: 'stream transport error', attemptToken: chain.streamAttemptToken, detailAttempt: chain.streamDetailAttempt, detailResponseBody: null, detailCaptureState: 'stream-transport-failed' };
+        const result = { status: 502, upstreamStatus: 200, normalizedStatus: 502, routing: {}, structuredError: null, failureText: error, retryAfter: null, responseHeaders: up.headers, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: /timeout/i.test(String(error)) ? 'timeout' : egressOrigin(up.egress, acc), note: 'stream transport error', attemptToken: chain.streamAttemptToken, detailAttempt: chain.streamDetailAttempt, detailResponseBody: null, detailCaptureState: 'stream-transport-failed', egress: up.egress || null };
         const diagnostic = settleAttempt(modelId, attempt, result, acc, { cfg, sensitiveValues, quotaRole: lease.quotaRole });
         Object.assign(providerAttempt, traceAttempt(attempt, result, acc, providerAttempt.ms, diagnostic));
         const action = diagnostic.accountAction;
         if (action) accountActions.push({ account: acc.name, action: action.action, statusCode: action.statusCode, ruleId: action.ruleId || null, scope: action.scope });
       } else if (!disconnected && providerAttempt) {
-        const result = { status: 200, upstreamStatus: 200, normalizedStatus: 200, routing: { finalProvider: observed.provider }, structuredError: null, retryAfter: null, responseHeaders: up.headers, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: 'success', note: 'stream', attemptToken: chain.streamAttemptToken, detailAttempt: chain.streamDetailAttempt, detailResponseBody: null, detailCaptureState: 'success' };
+        const result = { status: 200, upstreamStatus: 200, normalizedStatus: 200, routing: { finalProvider: observed.provider }, structuredError: null, retryAfter: null, responseHeaders: up.headers, responseContentType: 'text/event-stream', responseBytes: observed.responseBytes, terminalOrigin: 'success', note: 'stream', attemptToken: chain.streamAttemptToken, detailAttempt: chain.streamDetailAttempt, detailResponseBody: null, detailCaptureState: 'success', egress: up.egress || null };
         const diagnostic = settleAttempt(modelId, attempt, result, acc, { cfg, sensitiveValues });
         Object.assign(providerAttempt, traceAttempt(attempt, result, acc, providerAttempt.ms, diagnostic));
       } else if (providerAttempt) {
-        const diagnostic = settleAttempt(modelId, attempt, { status: 499, upstreamStatus: 200, normalizedStatus: 499, responseHeaders: up.headers, attemptToken: chain.streamAttemptToken, detailAttempt: chain.streamDetailAttempt, detailCaptureState: 'client-cancelled' }, acc, { clientDisconnected: true, cfg, sensitiveValues });
+        const diagnostic = settleAttempt(modelId, attempt, { status: 499, upstreamStatus: 200, normalizedStatus: 499, responseHeaders: up.headers, attemptToken: chain.streamAttemptToken, detailAttempt: chain.streamDetailAttempt, detailCaptureState: 'client-cancelled', egress: up.egress || null }, acc, { clientDisconnected: true, cfg, sensitiveValues });
         providerAttempt.healthAction = 'none';
         providerAttempt.providerCircuitAction = diagnostic.providerCircuitAction || null;
         providerAttempt.responseBytes = observed.responseBytes;
@@ -6051,7 +6383,7 @@ async function handleChat(req, res, clientKeyId, adapter = null) {
       const usage = requestResult === 'success' ? observed.usage : null;
       if (requestResult === 'success') rememberSessionProvider(identity, modelId, acc, chain.streamAttempt, providerSequence, affinityGeneration);
       finalizeStatistics({ globalError: requestResult === 'failed', finalProvider: observed.provider, usage, clientDisconnect: clientCancelled, segments: statisticsSegments(chain.trace, acc.id, usage, clientCancelled) });
-      recordChat({ requestId, requestedModel, resolvedModel: modelId, provider: observed.provider, canonical: observed.canonical, ms: Date.now() - chain.t0, stream: true, result: requestResult, error: safeStreamError, upstreamStatus: providerAttempt?.upstreamStatus ?? null, normalizedStatus, account: acc.name, accountId: acc.id, attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, accountPath, accountActions, ...affinityFacts(usage), strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, providerPlanSource: targetSource, providerMode: targetMode, appliedHeaderNames: Object.keys(acc.headers || {}), proxyError: !!acc.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), sensitiveValues });
+      recordChat({ requestId, requestedModel, resolvedModel: modelId, provider: observed.provider, canonical: observed.canonical, ms: Date.now() - chain.t0, stream: true, result: requestResult, error: safeStreamError, upstreamStatus: providerAttempt?.upstreamStatus ?? null, normalizedStatus, account: acc.name, accountId: acc.id, attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, accountPath, accountActions, ...affinityFacts(usage), strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, providerPlanSource: targetSource, providerMode: targetMode, appliedHeaderNames: Object.keys(acc.headers || {}), proxyError: traceProxyError(chain.trace, acc), sensitiveValues });
     };
     forward = new Writable({
       write(c, enc, cb) {
@@ -6141,7 +6473,7 @@ async function handleChat(req, res, clientKeyId, adapter = null) {
     requestId, requestedModel, resolvedModel: modelId, provider: routing.finalProvider || null, canonical: routing.canonicalSlug || null, ms: Date.now() - chain.t0, stream: false, result: disconnected ? 'client_cancelled' : status === 200 ? 'success' : 'failed',
     attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, error: disconnected ? null : status !== 200 ? safeOut.error.message : null,
     account: acc?.name || null, accountId: acc?.id || null, accountPath, accountActions, accountAction: chain.accountAction?.action || accountActions.at(-1)?.action || null, upstreamStatus: chain.upstreamStatus, normalizedStatus: chain.normalizedStatus, ...affinityFacts(usage),
-    strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, providerPlanSource: targetSource, providerMode: targetMode, appliedHeaderNames: Object.keys(acc?.headers || {}), proxyError: !!acc?.proxyUrl && chain.trace.some((t) => t.upstreamStatus === 0), errorCategory: chain.routingFailure ? 'routing' : chain.localRpm ? 'rpm' : null, blockedBy: chain.localRpm ? 'rpm' : null, retryAfter: chain.localRpm && Number.isSafeInteger(chain.retryAfter) ? chain.retryAfter : null, sensitiveValues,
+    strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, providerPlanSource: targetSource, providerMode: targetMode, appliedHeaderNames: Object.keys(acc?.headers || {}), proxyError: traceProxyError(chain.trace, acc), errorCategory: chain.routingFailure ? 'routing' : chain.localRpm ? 'rpm' : null, blockedBy: chain.localRpm ? 'rpm' : null, retryAfter: chain.localRpm && Number.isSafeInteger(chain.retryAfter) ? chain.retryAfter : null, sensitiveValues,
   });
   if (res.destroyed) return;
   res.writeHead(disconnected ? 499 : status, {
@@ -6171,6 +6503,30 @@ function sendBusy(res, message, retryAfter = 1, status = 429) {
   res.end(JSON.stringify(body));
 }
 
+// 带账号 key 的目录请求与其他上游调用一样经 clineRequest 选出口（代理池 / 账号代理 / 直连）；
+// 配置的代理失败时不回退直连。详细日志 attempt 投影与原 fetchJSON 路径一致。
+const CATALOG_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+async function catalogFetchJSON(url, account, timeoutMs = 60000) {
+  const root = detailContext.getStore();
+  const headers = chatHeaders(account.key);
+  const capture = root?.method === 'GET' && url === `${config.upstreamBase}/models`;
+  let result;
+  try { result = await clineRequestJSON(url, { method: 'GET', headers, account, timeoutMs, maxResponseBytes: CATALOG_MAX_RESPONSE_BYTES }); }
+  catch (error) {
+    if (capture) root.attempt({ url, method: 'GET', headers, account, proxyUrl: error?.egress?.url || '' });
+    throw error;
+  }
+  const attempt = capture ? root.attempt({ url, method: 'GET', headers, account, proxyUrl: result.egress?.url || '' }) : null;
+  if (attempt) {
+    attempt.status = result.status;
+    attempt.responseHeaders = root.raw ? projectRawHeaders(result.headers, result.body?.rawHeaders) : result.headers;
+    attempt.redirected = false;
+    attempt.output.add(result.text); attempt.output.end();
+  }
+  let json = null;
+  try { json = JSON.parse(result.text); } catch { json = { raw: result.text }; }
+  return { status: result.status, json };
+}
 // This remains the catalog owner: scoped entries are bounded, process-local and never enter metadata.
 const clientCatalogs = new Map();
 async function catalog(clientKeyId = null) {
@@ -6180,7 +6536,7 @@ async function catalog(clientKeyId = null) {
   const scoped = clientKeyId === null ? null : clientCatalogs.get(clientKeyId);
   if (scoped?.account === account && Date.now() - scoped.fetchedAt < 3600e3) return scoped.ids;
   // Admin's persisted global catalog cannot authenticate a client or stand in for its owned account.
-  const { json } = await fetchJSON(`${config.upstreamBase}/models`, { headers: chatHeaders(account.key) }, 60000, account);
+  const { json } = await catalogFetchJSON(`${config.upstreamBase}/models`, account);
   const ids = (json?.data || []).map((m) => m.id);
   if (clientKeyId !== null) {
     if (ids.length) clientCatalogs.set(clientKeyId, { account, ids, fetchedAt: Date.now() });
@@ -6215,7 +6571,7 @@ const server = http.createServer((req, res) => {
     : captureAllowed && adminState?.initialized === true && config.errorDetailLogging === true && req.method === 'POST' && (CHAT_PATHS.has(pathname) || pathname === '/v1/responses' || pathname === '/v1/messages') ? (config.rawBodyLogging === true ? 'raw-error' : 'error') : null;
   if (profile) {
     if (DetailRoot.active >= 128) { detailedLogs.recordDrop('activeLimit'); return dispatch(req, res); }
-    const secrets = profile.startsWith('raw-') ? [] : [...clientKeyInventory(config, PROXY_KEY).map((item) => item.key), ...activeClientSecrets.keys(), process.env.PROXY_KEY, ...config.accounts.flatMap((account) => [account.key, account.proxyUrl, ...Object.values(account.headers || {})])];
+    const secrets = profile.startsWith('raw-') ? [] : [...clientKeyInventory(config, PROXY_KEY).map((item) => item.key), ...activeClientSecrets.keys(), process.env.PROXY_KEY, ...config.accounts.flatMap((account) => [account.key, account.proxyUrl, ...Object.values(account.headers || {})]), ...configuredEgressSecrets({ includeUrls: false })];
     const root = new DetailRoot(req, res, detailedLogs, secrets, { profile });
     return detailContext.run(root, () => dispatch(req, res));
   }
@@ -6425,6 +6781,33 @@ async function dispatch(req, res) {
         return sendJSON(res, 200, { ok: false, proxyType: new URL(proxyUrl).protocol.replace(':', ''), ms: Date.now() - t0, errorCategory: 'proxy', reason: safeReason(reason) });
       } finally { leased.lease.release(); }
     }
+    if (p === '/api/proxy-pool/status' || p === '/api/proxy-pool/refresh' || p === '/api/proxy-pool/balance' || p === '/api/proxy-pool/test') {
+      // 代理池管理接口：只投影短 id、协议、无凭据的 endpointKey 与枚举；绝不返回 URL、用户名、密码或 apiKey。
+      if (url.search) return sendJSON(res, 400, { error: { message: 'proxy pool endpoints do not accept query parameters' } });
+      const pool = effectiveProxyPool();
+      if (req.method === 'GET' && p === '/api/proxy-pool/status') return sendJSON(res, 200, proxyPoolStatusProjection());
+      if (req.method === 'POST' && p === '/api/proxy-pool/refresh') {
+        if (!pool.enabled || pool.source !== 'floppydata') return sendJSON(res, 409, { error: { message: 'proxy pool refresh requires the enabled floppydata source' } });
+        await floppyDataSource.refresh();
+        return sendJSON(res, 200, proxyPoolStatusProjection());
+      }
+      if (req.method === 'GET' && p === '/api/proxy-pool/balance') {
+        if (!pool.floppydata?.apiKey) return sendJSON(res, 409, { error: { message: 'floppydata apiKey is not configured', code: 'unauthorized' } });
+        try { return sendJSON(res, 200, { ok: true, ...(await floppyDataSource.balance()) }); }
+        catch (error) {
+          const code = FLOPPYDATA_ERRORS.includes(error?.code) ? error.code : 'network';
+          return sendJSON(res, 502, { error: { message: 'floppydata balance query failed', code } });
+        }
+      }
+      if (req.method === 'POST' && p === '/api/proxy-pool/test') {
+        const body = await readJsonBody(req);
+        if (!isPlainObject(body) || Object.keys(body).some((key) => key !== 'sample') || (body.sample !== undefined && (!Number.isSafeInteger(body.sample) || body.sample < 1 || body.sample > PROXY_POOL_TEST_MAX))) {
+          return sendJSON(res, 400, { error: { message: `expected only optional integer sample from 1 to ${PROXY_POOL_TEST_MAX}` } });
+        }
+        return sendJSON(res, 200, { results: await testProxyPoolEntries(body.sample ?? PROXY_POOL_TEST_DEFAULT) });
+      }
+      return sendJSON(res, 405, { error: { message: 'method not allowed' } });
+    }
     if (req.method === 'POST' && p === '/api/statistics/quota-refresh') {
       if (url.search) return sendJSON(res, 400, { error: { message: 'quota refresh does not accept query parameters' } });
       if (quotaPageBatches >= QUOTA_PAGE_BATCH_LIMIT) { res.setHeader('Retry-After', '1'); return sendJSON(res, 429, { error: { message: 'too many active quota refreshes' } }); }
@@ -6486,7 +6869,7 @@ async function dispatch(req, res) {
             statistics: { recent24h: recent, lifetimeRequests: lifetime ? lifetime.requests : 0, lifetimeErrors: lifetime ? lifetime.errors : 0 } };
         }),
         mode: config.accountMode, active: config.activeAccount, concurrencyWaitMs: config.concurrencyWaitMs, poolFullWaitMs: config.poolFullWaitMs,
-        accountWorkflow: config.accountWorkflow, configurationRevision: configurationRevision(),
+        accountWorkflow: config.accountWorkflow, proxyPool: effectiveProxyPool(), configurationRevision: configurationRevision(),
         selectionCounters: { persistent: true, persistenceError: selectionCounterPersistenceError, sequence: META.selectionCounters.sequence },
         quotaProtection: config.quotaProtection, errorRules: config.errorRules, retryRules: config.retryRules, accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline, sessionProviderAffinityEnabled: config.sessionProviderAffinityEnabled,
         cachePool: { minSize: configuredCachePoolSize(), maxSize: configuredCachePoolMaxSize(), lowSize: configuredCachePoolLowQuotaSize(), targetSize: configuredCachePoolTargetSize(), scope: 'per-client-key', actual: cachePoolActualByOwner(), binding: sessionBindingSummary() },
@@ -6501,7 +6884,7 @@ async function dispatch(req, res) {
       if (!Number.isInteger(wait) || wait < 0 || wait > 30000) return sendJSON(res, 400, { error: { message: 'concurrencyWaitMs must be an integer from 0 to 30000' } });
       const poolWait = body.poolFullWaitMs === undefined ? config.poolFullWaitMs : body.poolFullWaitMs;
       if (poolWait !== null && (!Number.isInteger(poolWait) || poolWait < 0 || poolWait > 30000)) return sendJSON(res, 400, { error: { message: 'poolFullWaitMs must be null or an integer from 0 to 30000' } });
-      let requestedErrorRules = config.errorRules, requestedPipeline = config.accountPipeline, requestedRetryRules = config.retryRules, requestedProtection = config.quotaProtection, requestedWorkflow = config.accountWorkflow;
+      let requestedErrorRules = config.errorRules, requestedPipeline = config.accountPipeline, requestedRetryRules = config.retryRules, requestedProtection = config.quotaProtection, requestedWorkflow = config.accountWorkflow, requestedProxyPool = {};
       if (body.sessionProviderAffinityEnabled !== undefined && typeof body.sessionProviderAffinityEnabled !== 'boolean') return sendJSON(res, 400, { error: { message: 'sessionProviderAffinityEnabled must be boolean' } });
       try {
         if (body.accountWorkflow !== undefined) requestedWorkflow = normalizeAccountWorkflow(body.accountWorkflow);
@@ -6516,6 +6899,7 @@ async function dispatch(req, res) {
         }
         if (body.retryRules !== undefined) requestedRetryRules = normalizeRetryRules(body.retryRules, { strict: true });
         if (body.quotaProtection !== undefined) requestedProtection = normalizeQuotaProtection(body.quotaProtection, { strict: true });
+        requestedProxyPool = proxyPoolPatch(body.proxyPool);
         if (body.accountPipeline !== undefined) requestedPipeline = normalizeAccountPipeline(body.accountPipeline, {
           strict: true,
           fallbackOrder: config.accountPipeline.order,
@@ -6536,7 +6920,7 @@ async function dispatch(req, res) {
       let accs, nextActive;
       try { ({ accs, active: nextActive } = normalizeAccountList(body.accounts, body.active)); }
       catch (error) { return sendJSON(res, 400, { error: { message: error.message } }); }
-      const next = { ...config, accounts: accs, accountMode: body.mode, activeAccount: nextActive,
+      const next = { ...config, ...requestedProxyPool, accounts: accs, accountMode: body.mode, activeAccount: nextActive,
         concurrencyWaitMs: wait, poolFullWaitMs: poolWait, errorRules: requestedErrorRules, retryRules: requestedRetryRules,
         quotaProtection: requestedProtection, ...legacyRuleProjection(requestedErrorRules), accountPipeline: requestedPipeline, accountWorkflow: requestedWorkflow,
         sessionProviderAffinityEnabled: body.sessionProviderAffinityEnabled ?? config.sessionProviderAffinityEnabled };
@@ -6623,7 +7007,7 @@ async function dispatch(req, res) {
         ({ json } = await accountFetchJSON(`${config.upstreamBase}/chat/completions`, {
           headers: chatHeaders(k), body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Say OK' }], max_tokens: 512 }), attemptMeta: { model, provider: [] }, permit: claim.permit,
         }, 120000, account));
-      } catch (e) { return sendJSON(res, 200, { ok: false, ms: Date.now() - t0, error: safeReason(e.message), errorCategory: proxyUrl ? 'proxy' : 'network' }); }
+      } catch (e) { return sendJSON(res, 200, { ok: false, ms: Date.now() - t0, error: safeReason(e.message), errorCategory: e?.egress ? egressOrigin(e.egress, account) : proxyUrl ? 'proxy' : 'network' }); }
       finally { leased?.lease.release(); }
       if (json?.error && !json?.data) {
         const rawMsg = typeof json.error === 'string' ? json.error : JSON.stringify(json.error);
@@ -6834,12 +7218,15 @@ function stopQuotaWork() {
   for (const controller of probeControllers) controller.abort();
   for (const job of [...quotaJobs.values()]) { detachQuotaJob(job); cancelQuotaJob(job); }
   pumpQuotaQueue();
+  // 退出时不再发起 FloppyData 导入；已有池条目继续服务在途请求，直到 destroyRuntimeConnections。
+  floppyDataSource.stop();
 }
 function destroyRuntimeConnections() {
   server.closeAllConnections?.();
   for (const socket of inboundSockets) socket.destroy();
   for (const agent of proxyAgents.values()) agent.destroy();
   proxyAgents.clear();
+  proxyPoolRuntime.destroyAll();
   directHttpAgent.destroy(); directHttpsAgent.destroy();
 }
 function shutdown(signal) {
