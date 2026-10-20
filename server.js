@@ -5273,7 +5273,9 @@ function hasExplicitAccountQuotaEvidence(error) {
     const quota = '(?:quota|limit|allowance|credits?|usage limit)';
     const exhausted = '(?:exhausted|depleted|reached|exceeded|used up)';
     return new RegExp(`${owner}(?: [a-z0-9]+){0,4} ${quota}(?: [a-z0-9]+){0,4} ${exhausted}`).test(words)
-      || new RegExp(`${quota}(?: [a-z0-9]+){0,4} ${exhausted}(?: [a-z0-9]+){0,4} ${owner}`).test(words);
+      || new RegExp(`${quota}(?: [a-z0-9]+){0,4} ${exhausted}(?: [a-z0-9]+){0,4} ${owner}`).test(words)
+      // Cline INFERENCE_CAP_ERROR: "You have reached your 5-hour|weekly|monthly Clinepass limit".
+      || new RegExp(`${exhausted}(?: [a-z0-9]+){0,4} clinepass ${quota}`).test(words);
   });
 }
 function hasExplicitProviderEvidence(error, upstream) {

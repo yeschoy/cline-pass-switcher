@@ -306,3 +306,34 @@ test('5h and week holds require fresh complete all-window recovery and survive r
   await waitFor(async () => !(await row(s)).state?.protectionShortAt, 'complete recovery', 6000);
   assert.equal((await chat(s)).status, 200); assert.equal(chatCalls, 1);
 });
+
+test('Cline INFERENCE_CAP_ERROR Clinepass limit 429 removes the account and fails over; provider capacity 429 does not', async (t) => {
+  const capBody = { error: { code: 'INFERENCE_CAP_ERROR', message: 'Error 429: You have reached your weekly Clinepass limit. The limit resets in 2d 8h, please try again later.' } };
+  const capacityBody = { error: { message: 'The request limited providers for this model and they are currently at capacity' } };
+  let aBody = capBody, aCalls = 0;
+  const s = await setup(t, (req, res) => {
+    const isA = req.headers.authorization === 'Bearer local-a';
+    if (req.method === 'GET') return reply(res, 200, limits(isA && aBody === capBody ? { five_hour: 7, weekly: 100, monthly: 50 } : { five_hour: 0, weekly: 0, monthly: 0 }));
+    if (isA) { aCalls++; return reply(res, 429, aBody); }
+    reply(res, 200, { choices: [{ message: { content: 'OK' } }] });
+  }, [account('a'), account('b')]);
+  for (let i = 0; i < 4; i++) assert.equal((await chat(s)).status, 200, 'cap 429 fails over to the healthy account');
+  assert.equal(aCalls, 1, 'capped account is removed after the first Clinepass limit 429');
+  const capped = await waitFor(async () => (await request(s, '/api/logs/requests')).data.items.flatMap((item) => item.attempts).find((a) => a.account === 'a'), 'cap attempt log');
+  assert.equal(capped.scopeEvidence, 'structured_account_quota');
+  assert.equal(capped.quotaRemovalAction, 'protection-pending');
+  aBody = capacityBody;
+  const fresh = await setup(t, (req, res) => {
+    if (req.method === 'GET') return reply(res, 200, limits({ five_hour: 0, weekly: 0, monthly: 0 }));
+    if (req.headers.authorization === 'Bearer local-a') return reply(res, 429, aBody);
+    reply(res, 200, { choices: [{ message: { content: 'OK' } }] });
+  }, [account('a'), account('b')]);
+  let capacity;
+  for (let i = 0; i < 4 && !capacity; i++) {
+    await chat(fresh);
+    capacity = (await request(fresh, '/api/logs/requests')).data.items.flatMap((item) => item.attempts).find((a) => a.account === 'a' && a.upstreamStatus === 429);
+  }
+  assert.ok(capacity, 'provider capacity 429 attempt logged');
+  assert.notEqual(capacity.scopeEvidence, 'structured_account_quota');
+  assert.equal(capacity.quotaRemovalAction, null);
+});
