@@ -1352,3 +1352,27 @@ Committed-main raw-detail code is deployed raw-off at 512 MiB with 32 Legacy-own
 ### Status
 
 [OK] **Completed**
+
+
+## Session 56: 上游出口动态代理池（手动/FloppyData）
+<!-- trellis-session: v=2 fp=d5bd8d45466dfe23 -->
+
+**Date**: 2026-10-21
+**Task**: 上游出口动态代理池（手动/FloppyData）
+**Branch**: `main`
+
+### Summary
+
+实现全局 proxyPool：每次上游调用轮询/随机选代理，覆盖账号代理；池无可用时回退账号原出口；池条目 HTML 429/连接失败冷却并在首包前换代理重试；可选每代理限速；FloppyData 定时导入 100 个住宅会话（3 分钟换批，内存保存）；日志 egress 短标识与脱敏；管理 API 与控制台卡片；spec/README 同步。已知环境问题：proxy-inflight-timeout 测试在 HEAD 上挂起，multi-client-keys 一条基线失败。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3b04cb1` | feat: 全局上游出口代理池（手动导入/FloppyData），按调用轮询选代理、冷却与换代理重试 |
+| `519b52b` | docs: 代理池 spec 契约与 README 使用说明，补充出口 IP 限流实测记录 |
+| `aee4545` | chore(trellis): 代理池任务规划与调研记录 |
+
+### Status
+
+[OK] **Completed**

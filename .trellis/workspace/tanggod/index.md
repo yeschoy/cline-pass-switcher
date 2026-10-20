@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 55
-- **Last Active**: 2026-10-18
+- **Total Sessions**: 56
+- **Last Active**: 2026-10-21
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1354 | Active |
+| `journal-1.md` | ~1378 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 56 | 2026-10-21 | 上游出口动态代理池（手动/FloppyData） | `3b04cb1`, `519b52b`, `aee4545` | `main` |
 | 55 | 2026-10-18 | 参考 magpie 完善三协议适配边角 | `04e6214` | `feat/magpie-protocol-parity` |
 | 54 | 2026-10-18 | 归档亲和任务并部署 HTML429 | `4fbe782`, `278b975` | `main` |
 | 53 | 2026-10-18 | HTML 429 按账号退避 | `278b975` | `main` |
