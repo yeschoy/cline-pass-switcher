@@ -18,6 +18,8 @@ lib/protocol-ids.js               call_id ≤64, Anthropic charset encode/decode
 lib/reasoning-replay.js           model-family reasoning_content / think-tag replay for Chat upstream
 lib/responses-adapter.js          OpenAI Responses ↔ Chat Completions
 lib/anthropic-adapter.js          Anthropic Messages ↔ Chat Completions
+lib/proxy-pool.js                 egress pool config normalization, entry IDs, in-memory selection/cooldown/RPM/retire runtime
+lib/floppydata-source.js          FloppyData batch import, refresh scheduling and balance (fetch/timers injected)
 test/*.test.js                    node:test unit, VM/UI-contract, and integration suites
 public/index.html                 static administration console served by server.js
 Dockerfile                        production image
@@ -43,6 +45,7 @@ Extract a module only when it owns a cohesive, independently testable boundary:
 - `JsonlLogGroup` owns both ordinary segmented JSONL streams, their combined retention budget and pagination.
 - `DetailRedactor`, `BodyCapture`, and `DetailRoot` own bounded capture/sanitization.
 - `DetailedLogStore` owns the separate detailed-log filesystem and serialization queue.
+- `createProxyPoolRuntime()` owns pool entry state and agents; `createFloppyDataSource()` owns FloppyData import timing. `server.js` only wires them into `clineRequest()`, the chat loop, configuration and routes.
 
 Do not create one-use service classes, controller wrappers, repositories, factories, or interfaces around code that still has one implementation. Keep modules dependent on Node standard APIs unless the existing proxy agents are required.
 

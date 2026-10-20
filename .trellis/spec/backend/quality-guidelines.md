@@ -47,9 +47,25 @@ pruneProxyAgents()
 readFirstSseEvent(stream, maxBytes = 64 * 1024)
 runChatChain(req, body, modelId, cfg, account, forwardedHeaders,
   { stream = false, attemptTimeoutMs = 120000, sensitiveValues = [], attemptOwner = null, preferredProvider = null })
-clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000,
-  account = null, proxyUrl = "", ephemeralProxy = false })
-// response: { status, headers, body, setIdleTimeout(ms), attemptToken, detailAttempt }
+clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, method = "POST",
+  account = null, proxyUrl = "", ephemeralProxy = false, proxyAgentFactory = null,
+  egressHint = null, attemptOwner = null, attemptMeta = null, permit = null })
+// response: { status, headers, body, setIdleTimeout(ms), attemptToken, detailAttempt, egress }
+// rejection: Error with .egress (plus .attemptToken / .detailAttempt when present)
+clineRequestJSON(url, { ...clineRequest options, maxResponseBytes = Infinity }) // adds text
+resolveEgress(account, proxyUrl = "", egressHint = null)
+// -> { kind: "explicit" | "pool" | "account" | "direct", entryId, endpointKey, poolFallback, connectPhase }
+//    non-enumerable: url, entry (pool lease handle), poolRetryAt
+egressOrigin(egress, account)      // "proxy" for explicit/pool/account, else "network"
+egressLabel(egress)                // "direct" | "account-proxy" | "pool:<8hex>" | null
+poolRetryAfterSeconds(now)         // whole-pool earliest recovery, ceil seconds, clamped 1-60
+isPoolConnectFailure(result)       // egress.kind === "pool" && connectPhase && upstreamStatus === 0
+createPoolProxyAgent(proxyUrl)     // pool-only agent; non-200 CONNECT -> connect error
+configuredEgressSecrets({ includeUrls = true })
+effectiveProxyPool(candidate = config)   // candidate.proxyPool || PROXY_POOL_OFF
+proxyPoolPatch(value, current = config)  // {} when omitted or absent-and-default; else { proxyPool }
+applyProxyPoolConfig(previous, next)
+catalogFetchJSON(url, account, timeoutMs = 60000)
 normalizeUsage(raw)
 createSseObserver(maxBytes = 64 * 1024)
 commitStatistics({ ts, modelId, finalProvider, globalError, usage, segments, clientDisconnect })
@@ -104,13 +120,17 @@ GET  /api/model-aliases
 POST /api/model-aliases
 GET/DELETE /api/logs/requests
 GET/DELETE /api/logs/errors
+GET  /api/proxy-pool/status      // credential-free pool/entry projection
+POST /api/proxy-pool/refresh     // body not read; 409 unless enabled floppydata source
+GET  /api/proxy-pool/balance     // FloppyData traffic balance on demand
+POST /api/proxy-pool/test        // exact {} or { sample: 1-50 }; default 10
 ```
 
 #### Config hot reload and shutdown
 
 Operators who edit `data/config.json` by hand apply it with `POST /api/config/reload` (UI button "从配置文件热加载") or `docker kill -s HUP cline-pass-console`, never `docker restart`. Both call `reloadConfigFromDisk()`:
 
-- Hot fields: `accounts`, `accountMode`, `activeAccount`, `concurrencyWaitMs`, `poolFullWaitMs`, `errorRules` (legacy projections re-derived), `retryRules`, `quotaProtection`, `accountPipeline`, `accountWorkflow`, `sessionProviderAffinityEnabled`, `perModel`, `modelAliases`, `knownModels`, `exposeCatalog`. An absent field keeps its live value; startup migrations never run on reload.
+- Hot fields: `accounts`, `accountMode`, `activeAccount`, `concurrencyWaitMs`, `poolFullWaitMs`, `errorRules` (legacy projections re-derived), `retryRules`, `quotaProtection`, `accountPipeline`, `accountWorkflow`, `sessionProviderAffinityEnabled`, `perModel`, `modelAliases`, `knownModels`, `exposeCatalog`, `proxyPool`. An absent field keeps its live value; startup migrations never run on reload. A present `proxyPool` goes through strict `normalizeProxyPool(..., { secret: META.routingSecret })`; a rejected value refuses the whole reload and leaves the file unchanged. A published change calls `applyProxyPoolConfig()` (see the egress proxy pool scenario below).
 - Validation is the same strict path as `POST /api/accounts` (`accountInputError` with new ids allowed, `normalizeAccountList`, strict rule/pipeline normalizers, alias/route validators). Any failure throws before mutation; HTTP returns 400 and SIGHUP logs `[配置] SIGHUP 热加载失败`.
 - Restart-only fields (`port`, `apiKey`, `proxyKey`, `clientKeys`, `publicBaseUrl`, `upstreamBase`, probe identity/schedule, logging switches) that differ from live values refuse the whole reload; their env-pinned copies (`PORT`, `PROXY_KEY`, `PUBLIC_BASE_URL`) are ignored instead. An injected `CLINE_PASS_KEY` account is re-added if the file lacks it.
 - A changed candidate is written back atomically (generated account ids persist; env-pinned fields keep file bytes), then `applyAccountConfig()` publishes it with the identical per-account/per-route invalidation used by UI saves. In-flight responses keep their already-selected account.
@@ -221,6 +241,7 @@ A successful model probe builds its known provider set from the observed `finalP
 - **Gateway allow-list (planner and unknown pipeline).** `injectPrefs()` strips client `provider.only` / `provider.order` / `gateway.only` / `gateway.order`, deletes a conflicting top-level `provider` object, and injects the filtered ordered allow-list once as both `providerOptions.gateway.only` and `providerOptions.gateway.order`. Other `providerOptions` namespaces are preserved. `order` is a priority hint for the gateway, not a promise the gateway will honor it, and it is not copied into `actualProvider`. `sort` still applies only inside the gateway object (`gateway.sort`), never as a second cross-provider walk. An empty candidate source stays one unattributed `auto` attempt with no `only` or `order`.
 - **Direct pipeline.** Named attempts still inject exactly one `provider.only`. `injectPrefs()` deletes incoming `provider.order` / `gateway.order` and does not emit `order`. Local sequential retry and `maxRetries` keep their existing meaning. `sort` is `provider.sort` inside that single provider.
 - A 429 is account-scoped only with a fresh complete 100%-used quota snapshot or explicit structured account/subscription/plan quota-exhaustion semantics. Routing/final-provider or structured provider fields make it provider-scoped. An upstream-HTTP 429 with `text/html` and no structured error is classified as `scope=gateway`, evidence `gateway_html_throttle` (historical docs called this egress-IP throttling; that IP hypothesis is **unverified** in production and must not be treated as fact). It bypasses `errorRules` entirely (even a matching account cooldown rule), the provider circuit and every health sample. The **account id** enters a process-local backoff of 1s doubling to at most 8s (concurrent rejections for that account share one window; a success clears that account’s window only—other accounts are not paused, even on the same `proxyUrl`); every chain attempt on that account waits out its window plus up to 250ms jitter before sending. The rejected chain retries the same provider once after the backoff, never rotates provider or account, and otherwise returns the 429 with `Retry-After` from the backoff and a clear `rate_limit_error` message (`upstream gateway rate limited (HTML throttle)`), not a generic invalid-response string. Other ambiguous 429 responses are unknown.
+- **HTML 429 on a pool entry.** When the attempt's `egress.kind === 'pool'`, the same `gateway` classification applies (no rule, circuit or health sample), but `clineRequest()` cools only that entry (`Retry-After` seconds or HTTP-date clamped 1-600 s, else `throttleCooldownMs`) and `settleAttempt()` neither calls `noteGatewayThrottle(account)` nor waits on the account window. `egressStep()` runs before `gatewayStep()` (non-stream, pre-stream SSE error and `!up` branches): it adds the entry to the request-local `egressExclude` and, while `egressRetries < proxyPool.egressRetries`, the client is connected and `hasAvailable(egressExclude)`, immediately retries the same provider on another unused entry (`attempted.delete(upstream)`, `index--`, no wait; budget independent of provider retries, gateway retries and account replacement). Otherwise it stops with no account-egress replay: the final `429 rate_limit_error` carries `Retry-After = poolRetryAfterSeconds()` (earliest recovery over the **whole** active pool, including entries this request used, ceil seconds clamped 1-60). The pre-attempt account backoff wait is skipped when `poolEgressExpected()` (pool enabled and `hasAvailable(egressExclude)`); a success on a pool entry does not clear the account backoff. A `poolFallback` attempt (account/direct egress) and pool-off traffic keep the per-account backoff and single same-egress retry unchanged.
 - Unmatched Provider failures no longer create implicit durable cooldowns. Explicit provider-model cooldown/hard-quarantine rules own durable state; the existing positive per-account `providerCooldownMs` circuit remains a separate process-local compatibility mechanism.
 - Provider-model state is keyed by `(resolvedModel, provider)` and shared across accounts. Hard quarantine survives restart and success and clears only through exact `POST /api/providers/recover` or identity cleanup. A named real attempt is the only source of provider-model samples; an unattributed `auto` attempt creates no named state or provider-model sample.
 
@@ -249,7 +270,9 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 
 - Empty `proxyUrl` selects the process-wide native `http.Agent` or `https.Agent` (both `keepAlive: true`, `scheduling: 'lifo'`, 512 max sockets / 32 max free per agent by default, bounded runtime overrides). `http:`/`https:` use `HttpsProxyAgent`; `socks5:`/`socks5h:` use `SocksProxyAgent`, each explicitly keep-alive with 32 max sockets / 2 max free by default. Direct agents may set a 60-second **free-socket** idle timeout (pool reclaim between requests). Proxy agent options must **omit** Agent `timeout`: `SocksProxyAgent` / `HttpsProxyAgent` would otherwise apply it to the in-tunnel raw socket and destroy in-flight Chat with `socket hang up` before `NON_STREAM_ATTEMPT_MS` / SSE first-event / stream-idle can fire. In-flight deadlines stay on `req.setTimeout` / `setIdleTimeout`, and `clineRequest()` walks TLS→raw (`_parent` / `.socket`) to keep nested socket timeouts aligned with the attempt deadline. Proxy free tunnels rely on `maxFreeSockets` and peer close. Do not substitute `fetch` or global Agent defaults for `clineRequest()`.
 - `proxyAgents` caches only URLs referenced by persisted accounts and stops at 128 URLs. Excess/new non-persisted URLs get disposable agents rather than enlarging the cache; saving account changes calls `pruneProxyAgents()` to destroy stale agents before removal. `/api/accounts/proxy-test` always passes `ephemeralProxy: true`, even for a saved URL; its agent is destroyed on response end/close, setup failure, or abort and never enters the cache. The in-flight request retains its agent until settlement; do not destroy it just because response headers arrived.
-- The account proxy applies to account-bound Cline chat/probe/validation/test and quota-upstream traffic. Probe and validation accept an optional account ID, lease that account once, and keep probe+harvest or the whole validation batch on it; unknown/unavailable/busy accounts return 400/409/429. Public catalog/document fetching and ordinary management APIs remain direct.
+- The account proxy applies to account-bound Cline chat/probe/validation/test, quota-upstream traffic and the account-keyed `catalog()` `/models` fetch (`catalogFetchJSON()` → `clineRequestJSON(GET)`, 16 MiB body cap, no redirect following). Probe and validation accept an optional account ID, lease that account once, and keep probe+harvest or the whole validation batch on it; unknown/unavailable/busy accounts return 400/409/429. Public document fetching (`fetchOfficialModels`, OpenRouter lists), FloppyData API calls and ordinary management APIs remain direct.
+- Every keyed upstream call picks its egress in `resolveEgress()` inside `clineRequest()`, synchronously and per call: explicit `proxyUrl` (only `/api/accounts/proxy-test` and `/api/proxy-pool/test`) → `kind: 'explicit'`; pool enabled and `pickEntry()` returns an entry → `kind: 'pool'`, which **overrides** the account's `proxyUrl`; pool enabled but no entry (empty, all cooling, all at `maxRpmPerProxy`) → the account's own egress (`account` or `direct`) with `poolFallback: true` (D10); pool disabled or absent → exactly the legacy `account.proxyUrl || direct`. Fallback is decided only by "no entry available"; a pool entry that fails is never followed by an account-egress or direct request inside the same attempt.
+- Pool entry agents come from `createPoolProxyAgent()` and are owned by the pool runtime, separate from `proxyAgents` (whose 128 cap and `pruneProxyAgents()` stay unchanged). They use the same proxy options, set a free-socket timeout of `CLINE_PASS_PROXY_FREE_SOCKET_TIMEOUT_MS` only when a socket returns to the idle pool, and convert a non-200 HTTP CONNECT reply (407/502 …) into a connect-phase error carrying only the status. Account fixed-proxy agents keep the legacy `https-proxy-agent` behavior of replaying a non-200 CONNECT as an upstream response.
 - A configured proxy failure is a proxy/network attempt failure and never retries the same request without an agent.
 - `requestedModel` is preserved for diagnostics. `resolvedModel = modelAliases[requestedModel] || requestedModel` replaces outbound `body.model` and owns global/account `perModel` lookup. Aliases are not chained.
 - `/v1/models` (also `/models` and `/api/v1/models`) exposes the de-duplicated union of original visible models and aliases so old clients remain compatible. Optional upstream catalog IDs are fetched only with an authenticated owner's eligible account, never the synthetic/global admin fallback when that owner has no eligible pool.
@@ -292,14 +315,14 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 
 #### Model/Provider reference statistics (v5)
 
-- The authenticated `GET /api/statistics` retains its existing fields and adds `referencePrices` (`current` immutable project reference snapshot plus at most eight persisted version snapshots) and `models[].providerStatistics`. Final model outcomes are separate from the legacy request/error aggregate: `finalRequests` counts successes, failures, and cancellations independently; `samples = successes + failures`, so cancellation cannot be mistaken for success. `finalCoverage` starts at v5 migration, never backfills earlier final outcomes. Provider `health` continues to count only named real success/degrade attempts, not all terminal requests. `proxyHealth` (statistics v6) aggregates credential-free proxy endpoints (`scheme://host[:port]`): each proxied-account chat segment increments `requests`, and any attempt with status 500–599 increments `errors5xx`, independent of error-rule `healthAction`; direct accounts are excluded and history is not backfilled.
+- The authenticated `GET /api/statistics` retains its existing fields and adds `referencePrices` (`current` immutable project reference snapshot plus at most eight persisted version snapshots) and `models[].providerStatistics`. Final model outcomes are separate from the legacy request/error aggregate: `finalRequests` counts successes, failures, and cancellations independently; `samples = successes + failures`, so cancellation cannot be mistaken for success. `finalCoverage` starts at v5 migration, never backfills earlier final outcomes. Provider `health` continues to count only named real success/degrade attempts, not all terminal requests. `proxyHealth` (statistics v6) aggregates credential-free proxy endpoints (`scheme://host[:port]`): each (account segment, actual attempt `egress.endpointKey`) pair increments `requests` once, and any attempt on that endpoint with status 500–599 increments `errors5xx`, independent of error-rule `healthAction`. Attribution follows the egress each attempt really used (pool entry, account proxy, explicit), falling back to the account's configured `proxyUrl` only for a trace without egress; direct attempts are excluded, all FloppyData entries aggregate under their shared gateway key, and history is not backfilled.
 - Final successful usage is committed once per resolved model. The per-Provider usage owner counts only successful final requests whose response-evidenced provider matches the attempt's health provider; otherwise it uses an explicit null/unknown Provider row. On a direct or singleton pin that health provider is the planned slug, so a different observed provider stays unknown. On a planner/unknown multi-provider attempt the health provider is only the response-evidenced actual, never the allow-list head. `parseRouting()` / the shared routing observer follows Bridge priority: `finalProvider` then `resolvedProvider`, under `provider_metadata` or `providerMetadata`, walked on the response root and each `choices[].delta` / `choices[].message`; a bare top-level `provider` is weaker and cannot replace a sticky final or resolved value; `error.message` may recover the same two keys by regex and must not replace an already observed final or resolved provider. SSE routing observation is not limited to the 64 KiB content/error capture cap (JSON events are parsed through 1 MiB; larger events are field-scanned). Candidate lists (`fallbacksAvailable`) never count. Neither the configured target nor a successful named attempt alone proves the final remote Provider. Without a documented trustworthy new field, do not fill unknown from either. Failed retries have health samples but no usage. `usage.requests` is the number of final successful requests (including those with no usage); each `*KnownRequests` field is its own evidence coverage. The model aggregate retains its earlier 24h scope; Provider usage and valuation are v5-only and have independent start/loss coverage. Missing or invalid usage is unknown, not zero; cache Token ratio and cache-hit request rate retain separate denominators.
 - Historical snapshot `clinepass-2026-09-24-v1` remains immutable: four exact IDs (Kimi K3, GLM-5.3, DeepSeek V4 Flash/Pro), integer thousandths USD/1M rate triples, and frozen picodollar minute cells. Historical `clinepass-2026-09-25-v2` uses 12 exact IDs from the ClinePass list, integer ten-thousandths USD/1M input/output/read/write rows, per-model source, project collection date, and unknown official effective date. Current `clinepass-2026-09-29-v3` preserves the v2 persisted snapshot shape and exactly those rates; its version freezes the UTC selection contract. Only authenticated API projections add `selection: 'terminal-utc-weekdays-no-holidays'`, so the exact previous image can validate the persisted version if an isolated v3-cell rollback rehearsal passes. A v2 snapshot/cell remains an unchanged historical interval. The two DeepSeek IDs (`v4-pro` and `v4.1-flash`) use the user-directed direct API tariff for both off-peak/peak rows; ClinePass itself lists only Flash's peak row. Direct API rates are reference comparisons, **not** proof of ClinePass subscription charges. Do not transfer direct DeepSeek's retired-name alias to legacy `cline-pass/deepseek-v4-flash` or use old GLM/Kimi names for new rates.
 - Price rows with a listed Cached Write rate or unknown context band (Qwen3.7 Plus) remain visible but cannot produce full amounts from existing usage. For a no-write row, valuation requires explicit safe nonnegative input/output/cached-read with `cachedRead <= input`; fixed-point BigInt picodollars calculate `(input-cachedRead)*inputRate + cachedRead*readRate + output*outputRate`, with v1 multiplier 1000 and v2/v3 multiplier 100. Historical v1/v2 DeepSeek cells retain their frozen lower/upper **reference ranges**. New v3 successes select off-peak or peak using the terminal success `ts` in UTC: Monday–Friday [01:00,04:00) and [06:00,10:00) are peak, otherwise off-peak; Chinese public holidays are deliberately ignored, so weekday-holiday reference estimates may exceed the official holiday rate. Add that single selected amount to both bounds in the existing versioned minute cell. Mixed old intervals remain ranges; equal summed bounds may be shown as a single estimate, never as evidence of the actual billed tariff. Missing price/usage/inconsistent counts cannot produce $0; explicit zero can. Each successful request freezes amount and snapshot version inside the existing bounded minute owner; historical cells are never repriced. Priced-request coverage, version/cell eviction, and monetary/count overflow are independent and cannot be described as a complete bill. This value must never change the independent community $50 monthly remaining projection.
 
 #### Quota refresh and account pipeline
 
-- Routing-owned refreshes and statistics-page refreshes share one FIFO admission pump. Every actual `/users/me/plan/usage-limits` transport uses the account proxy without direct fallback, has a 15-second absolute deadline, caps the body at 256 KiB, and occupies one of exactly two global slots until the native response settles. Overlapping scheduler callbacks, account saves, tabs and manual requests cannot create a third live upstream call; chat selection never waits for this work.
+- Routing-owned refreshes and statistics-page refreshes share one FIFO admission pump. Every actual `/users/me/plan/usage-limits` transport goes through `clineRequestJSON()` with the account (no explicit `proxyUrl`), so its egress is a pool entry when the pool is enabled and otherwise the account proxy, never a direct fallback after a configured egress fails; it does not run egress retries, has a 15-second absolute deadline, caps the body at 256 KiB, and occupies one of exactly two global slots until the native response settles. Overlapping scheduler callbacks, account saves, tabs and manual requests cannot create a third live upstream call; chat selection never waits for this work.
 - `quotaJobs` owns one queued/running promise per account ID. Matching demands join that promise. Cancelled or identity-stale work remains ID-locked and slot-counted until settlement; finalizers may remove only the same job object. Queue admission rereads current account identity, source ownership, cache and backoff rather than retaining arbitrary account payloads.
 - A successful partial or complete snapshot is reusable for five minutes from `lastSuccessAt`; a routing snapshot remains fresh only when all three windows belong to the latest successful, non-error attempt and are no older than 15 minutes. Manual `force:true` bypasses only the success cache: backoff, deduplication and the global cap still apply. Each page token snapshots a monotonic per-account success version before body parsing, so a success published after batch acceptance is reused instead of replayed, including across key/proxy rotation. Only true account deletion removes that runtime version.
 - `POST /api/statistics/quota-refresh` is an authenticated finite sweep derived from persisted accounts. It accepts exactly `{ force: boolean }`, keeps the response open for the sweep, returns only `{ ok, refreshed, cached, deferred, skipped, failed, cancelled }`, and never writes scheduling configuration. At most 16 page batches may be active; excess requests receive `429` with `Retry-After: 1` before jobs are created.
@@ -333,12 +356,16 @@ Account keys, proxy URLs/authentication, Header values, and notes are intentiona
 | Account custom Header is forbidden or violates count/name/value/total bounds | management save `400`; no write |
 | Account proxy URL is malformed or unsupported | management/proxy-test `400`; no request |
 | Configured proxy connect/auth/TLS/DNS fails | record redacted proxy/network failure; never direct fallback |
+| Pool entry fails before the tunnel/TLS is connected (refusal, SOCKS/CONNECT auth, non-200 CONNECT, `connectTimeoutMs`) | cool that entry for `failureCooldownMs`; `errorScope=proxy`, `scopeEvidence=proxy_pool_connect`, `healthAction=none`; no rule/account/circuit effect; switch to another unused entry within `egressRetries`, else the existing `502`; never direct or account egress in the same attempt |
+| Pool enabled but no entry is available | this call uses the account egress (`account-proxy`/`direct`) with `poolFallback: true`; HTML 429 there follows the per-account backoff path |
 | Model alias target is missing/non-Cline or alias collides with an original model | `400`; no write |
 | Log filter is unknown or has an invalid integer/boolean | `400` |
 | Session identity is over 512 characters or invalid | ignore it and continue identity fallback |
 | Upstream has an HTTP 4xx/5xx status | preserve it as `upstreamStatus` and normally as `normalizedStatus` |
 | HTTP 200 error envelope has a recognized status/message | normalize and classify before ordered canonical matching; otherwise `502` |
 | HTML 429 from the Cline edge (no structured error) | `scope=gateway`; no error rule, cooldown, circuit or health sample; egress backoff, one same-provider retry, then `429` with `Retry-After` |
+| HTML 429 on a pool entry | cool the entry only; no account backoff/wait; immediate retry on another unused entry up to `egressRetries`; exhausted or no other entry → `429 rate_limit_error`, `Retry-After` 1-60 from whole-pool earliest recovery, no account-egress replay |
+| `POST /api/accounts` or reload `proxyPool` is invalid (unknown field, bad enum/range/URL, duplicate or colliding entry, >2000 entries, enabled manual with no entries, enabled floppydata without `apiKey`) | `400` (reload refused) with a field-path message that never echoes URL/credential values; no write |
 | Other ambiguous 429 from Cline | `scope=unknown`; absent an explicit scoped rule, default ignore and no implicit durable cooldown |
 | Explicit account quota 429 with a configured removal action | stop that provider chain, do not penalize provider health, and replace the account at most once |
 | Every known provider is excluded | no upstream request; safe `503`; never auto-bypass exclusions |
@@ -1005,3 +1032,101 @@ await sendAccountBoundProbe();
 ```
 
 Never infer channel health from a successful HTTP status alone; match the reported actual Provider or retain `unknown`.
+
+## Scenario: Global upstream egress proxy pool
+
+### 1. Scope / Trigger
+
+Use when changing `resolveEgress()`, the egress/connect-phase tracking inside `clineRequest()`, `egressStep()`, `lib/proxy-pool.js`, `lib/floppydata-source.js`, the `/api/proxy-pool/*` routes or the `proxyPool` configuration. The Cline edge rate-limits by **egress IP** (about 70 requests per ~60 s, answered with HTML 429 regardless of key or account), so one shared outbound IP throttles every account at once. The opt-in global pool spreads each keyed upstream call over many egress entries. It never changes account selection (HRW, bindings, cache pool, quota role and leases stay account-keyed). Absent or disabled, every path is byte- and behavior-identical to the pre-pool code. The persisted schema is in `database-guidelines.md`; log fields and redaction are in `logging-guidelines.md`.
+
+### 2. Signatures
+
+```js
+// lib/proxy-pool.js (pure; clock, random and agent factory injected)
+normalizeProxyUrl(value, { strict = false })
+normalizeProxyPool(value, { strict = true, secret })   // secret enables entry-id collision checks
+entryIdFor(secret, normalizedUrl)                       // HMAC-SHA256 hex, first 8 chars
+parseRetryAfter(value, now)                             // seconds or HTTP-date -> ms clamped 1000-600000, else null
+createProxyPoolRuntime({ secret, now, random, createAgent, destroyAgent, retireGraceMs, rpmWindowMs })
+  .configure(cfg) .replaceEntries(urls) .pickEntry({ exclude }) -> { entry: lease | null, retryAt }
+  .hasAvailable(exclude) .earliestRetryAt({ exclude }) .noteFallback() .sweep()
+  .status() .secretSeeds() .sampleEntries(limit) .destroyAll()
+// lease: { entryId, endpointKey, scheme, commit(), release(), noteThrottle(ms), noteConnectFailure() }
+//        non-enumerable url and lazily created agent
+
+// lib/floppydata-source.js
+createFloppyDataSource({ getConfig, fetchImpl, now, setTimer, clearTimer, onBatch, onStatus,
+  normalizeUrl, random, concurrency = 8, timeoutMs = 15000, backoffBaseMs = 30000 })
+  .start() .stop() .refresh() .reconfigure(prev, next) -> "restart" | "reschedule" | "none"
+  .balance() -> { availableBytes, availableGb, expiringAt } .status() .running
+FLOPPYDATA_ERRORS = ['unauthorized', 'insufficient_balance', 'rate_limited',
+  'upstream_error', 'network', 'invalid_response']
+```
+
+```text
+GET  /api/accounts      -> proxyPool: effectiveProxyPool() (defaults when absent; plaintext entries/apiKey, admin only)
+POST /api/accounts      <- optional proxyPool (complete object; omitted keeps the server value)
+GET  /api/proxy-pool/status  -> { enabled, source, strategy, total, available, retiring,
+       fallbacks: { total, recent }, floppydata: <status> | null,
+       entries: [{ entryId, scheme, endpointKey, state: ok|cooldown|rate-limited|retiring,
+                   cooldownUntil, reason: throttle|connect|null, rpmUsed, inFlight,
+                   recent: { requests, throttled, connectFailures } }] }
+POST /api/proxy-pool/refresh -> 200 status projection | 409 unless enabled && source=floppydata
+GET  /api/proxy-pool/balance -> 200 { ok: true, availableBytes, availableGb, expiringAt }
+       | 409 { error: { message, code: 'unauthorized' } } (no apiKey)
+       | 502 { error: { message, code: <FLOPPYDATA_ERRORS> } }
+POST /api/proxy-pool/test    <- {} | { sample: 1-50 } -> 200 { results: [{ entryId, ok, ms, status?, errorCategory?: 'timeout'|'proxy' }] }
+```
+
+All four `/api/proxy-pool/*` routes use the existing admin Cookie/CSRF boundary, reject any query string with `400` and other methods with `405`. Runtime env: `CLINE_PASS_PROXY_FREE_SOCKET_TIMEOUT_MS` (see `database-guidelines.md`).
+
+### 3. Contracts
+
+- **Selection.** `pickEntry()` sweeps expired retirees, then considers active entries not in `exclude` (by URL or entry ID), with `cooldownUntil <= now` and, when `maxRpmPerProxy > 0`, live committed+reserved count below the limit in a 60 s rolling window. `round-robin` scans from the global cursor and stores `index + 1`; `random` draws uniformly with `crypto.randomInt` among available entries. The returned lease reserves one entry RPM slot and increments `inFlight`. `clineRequest()` commits it right after `req.end()` (same seam as the account permit) and releases it on response end/close or failure; an unsent request refunds the reservation. Entry RPM is independent of the account `maxRpm` permit, which is still taken for every real attempt.
+- **Entries and generations.** `replaceEntries()` is the only mutation for manual saves and FloppyData batches. Same-URL entries keep their health state; a changed list bumps the generation and resets the cursor. Removed entries with `inFlight > 0` move to `retiring` (never selected; in-flight requests and long SSE streams finish on their agent) and are destroyed when the last lease releases, or by the sweep after `SSE_STREAM_IDLE_MS + 60000`; idle removed entries are destroyed at once. Runtime entry-ID collisions are dropped. Health state lives only in memory and resets on restart or batch swap.
+- **Connect phase.** Before the socket is connected (reused keep-alive socket, `secureConnect` for HTTPS targets, `connect` otherwise) a failure on a sent, unaborted request without a response sets `egress.connectPhase = true`; for a pool lease it calls `noteConnectFailure()` (cooldown `failureCooldownMs`). Pool calls also arm `connectTimeoutMs`; expiry destroys the request with `proxy connect timeout` and settles immediately even while the proxy handshake is still pending. Errors after connection never cool an entry. HTML 429 cooling (`noteThrottle`) and both connect rules run inside `clineRequest()`, so every keyed path reports entry health, but only the chat chain switches entries: catalog, quota, probe, validation and `/api/test` calls make one attempt and do not run `egressStep()`.
+- **Account isolation.** A pool connect failure is classified `{ scope: 'proxy', evidence: 'proxy_pool_connect', failureClass: 'network' }` and settles with `healthAction: 'none'`, no error/retry rule evaluation, no account degrade/cooldown, and no provider circuit; a pending half-open owner is released. Pool HTML 429 follows the gateway contract above with the pool-specific `Retry-After`. Neither marks the account.
+- **Configuration lifecycle.** Startup, `POST /api/accounts` and reload all normalize strictly; `proxyPool` is in `ACCOUNT_CONFIGURATION_FIELDS`, so it participates in `configurationRevision()` and a stale `expectedConfigurationRevision` returns `409`. `applyProxyPoolConfig(previous, next)` runs at startup and after every published account/reload save: configure runtime settings; disabled → stop FloppyData and `replaceEntries([])`; manual → stop FloppyData and `replaceEntries(entries)`; FloppyData newly enabled or not running → stop, retire current entries, start (immediate import); FloppyData identity field changed (`apiKey`, `apiBase`, `type`, `country`, `state`, `city`, `protocol`, `rotation`, `count`) → restart and retire the old batch; only `refreshIntervalMs` changed → reschedule. Switching modes never invalidates account quota, bindings, circuits, RPM or probe cells.
+- **FloppyData import.** One batch makes `count` calls to `POST {apiBase}/v2/proxy/rotating/connections` with `X-Api-Key`, at most 8 concurrent, each with a 15 s timeout and a unique alphanumeric `session` = `cps` + base36 epoch ms + 2 random base36 chars + call index. `connection.connectionString` must pass strict `normalizeProxyUrl` and match the requested protocol (`socks5` accepts `socks5:`/`socks5h:`); otherwise `invalid_response`. 401/403 → `unauthorized` and 402 → `insufficient_balance` abort the rest of the batch; 429 → `rate_limited`; other non-2xx → `upstream_error`; transport/timeout → `network`. A batch with at least `ceil(count/2)` unique URLs atomically replaces the pool and schedules the next import after `refreshIntervalMs`; a smaller batch keeps the current entries and retries after `min(30000 × 2^(failures-1), refreshIntervalMs)`. Refresh is single-flight (manual refresh joins the running batch). `stop()` cancels timers and in-flight calls only; retiring entries is the caller's `replaceEntries([])`. A batch that arrives after the source was switched or disabled is ignored. FloppyData calls are direct management traffic, never through the pool or an account proxy, and status/errors carry only enums and counts.
+- **Management routes.** The status projection contains no URL, username, password or key. `test` samples at most 50 active entries (8 concurrent, 15 s each) and sends the `/api/accounts/proxy-test` empty-messages body through an ephemeral agent built by `createPoolProxyAgent()` with **no** Authorization, lease or RPM permit; any HTTP status counts as `ok: true`, while a transport failure (including a rejected CONNECT) is `ok: false` with `timeout`/`proxy`. It never touches entry cooldown or entry RPM. `balance` calls `GET {apiBase}/v2/account/balances` only on demand and projects bytes, GB (two decimals) and the earliest expiry. The console renders all of these through enum labels only.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| `proxyPool` absent, or present with `enabled: false` | `resolveEgress()` is exactly `account.proxyUrl || direct`; gateway backoff/retry, attribution and config bytes unchanged |
+| Pool enabled, entries available | every keyed call (chat, `/api/test`, probe, validation, periodic probe, `/api/accounts/test`, quota, catalog) uses a pool entry; account proxy and direct receive nothing |
+| Pool empty (first FloppyData import pending/failed), all cooling, or all RPM-full | D10 fallback to the account egress for that call with `poolFallback: true`; the fallback counter increments |
+| Pool entry HTML 429 / connect-phase failure in chat before first byte | entry cooled; switch entry within `egressRetries` without waiting; exhausted → 429 with pool `Retry-After` 1-60 or the existing 502; never an extra account-egress attempt |
+| Error after the tunnel/TLS is established, or client abort | no entry cooldown; ordinary transport/upstream classification |
+| FloppyData batch below half, 401/402/429/5xx/network/invalid response | keep the current entries; status `state: 'error'` with the enum; bounded backoff |
+| `/api/proxy-pool/*` with a query string / wrong method | `400` / `405` |
+| `refresh` while pool disabled or source is manual | `409`; no API call |
+| `balance` without a saved `apiKey` | `409` with `code: 'unauthorized'`; FloppyData failure → `502` with an enum code, never the response body |
+| `test` body is not `{}` / `{ sample }` with integer 1-50 | `400`; no proxy traffic |
+
+### 5. Good / Base / Bad Cases
+
+- **Good:** three manual entries in round-robin serve six requests A, B, C, A, B, C; random covers every entry over 60 requests.
+- **Good:** entry A answers HTML 429; the same request moves to B at once and returns 200; the trace shows two `pool:` IDs, A is skipped until its cooldown ends, and the account has no backoff or degrade.
+- **Good:** a FloppyData swap retires the old batch while an SSE stream on an old entry finishes normally; the old agent is destroyed afterwards.
+- **Base:** all entries cooling → the next request goes through the account's fixed proxy (or direct) with `poolFallback: true`; pool off restores the account egress immediately after save or SIGHUP.
+- **Bad:** retrying a failed pool entry directly or through the account proxy in the same attempt; applying account HTML-429 backoff to pool traffic; letting a pool connect failure degrade the account or open a provider circuit; persisting FloppyData entries to `config.json`.
+
+### 6. Tests Required
+
+`test/proxy-pool.test.js` (normalization defaults/strict paths without secret echo, entry IDs, `Retry-After`, round-robin/random, exclude/`hasAvailable`/`retryAt`, RPM reserve/commit/refund, replace/retire/sweep, collisions, credential-free status and seeds). `test/floppydata-source.test.js` (unique sessions and bounded concurrency, half-batch rule and backoff, 401/402 abort, error enum, timeout, single-flight, stop, reconfigure, balance projection, secret-free status). `test/proxy-pool-config.test.js` (legacy byte stability, strict API/startup validation and revision, round-robin override and fallback, SIGHUP toggle, handshake failure and connect timeout cooling, FloppyData start/stop). `test/proxy-pool.integration.test.js` (HTML 429 switch without account backoff, refused entry, exhausted 429 `Retry-After`, `maxRpmPerProxy` fallback, quota/catalog through the pool, credential-free logs/metadata/APIs and `proxyHealth` attribution, random coverage, authenticated HTTP CONNECT and 407 conversion, SSE-safe batch swap, HEAD-image rollback compatibility). `test/proxy-pool-ui.test.js` covers the console card. All fixtures use local fake upstreams, proxies and FloppyData API (`test/proxy-pool-fixture.js`); none contact `api.cline.bot` or `api.floppydata.net`. Run the full environment-scrubbed `npm test` and `git diff --check`.
+
+### 7. Wrong vs Correct
+
+```js
+// Wrong: on a pool failure, "help" the request by trying the account egress or direct.
+catch (error) { if (egress.kind === 'pool') return clineRequest(url, { ...opts, proxyUrl: account.proxyUrl }); }
+
+// Correct: exclude the failed entry and let egressStep pick another entry or stop.
+const next = egressStep(result, attempt); // adds egress.url to egressExclude
+if (next === 'retry') { index--; continue; } // same provider, new entry, no wait
+if (next === 'stop') break;                  // final 429 (pool Retry-After) or 502
+```
+
+D10 fallback is a selection outcome (`pickEntry()` returned no entry), not a failure-recovery path.

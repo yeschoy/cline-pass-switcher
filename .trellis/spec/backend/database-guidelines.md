@@ -20,7 +20,9 @@ atomicWriteJson(file, obj, { pretty = true } = {}) // config/admin formatted; me
 normalizeRouteConfig(route)
 normalizePerModelMap(map)
 normalizeAccount(account, index, previousById, previousByName)
-normalizeProxyUrl(value, { strict = false })
+normalizeProxyUrl(value, { strict = false }) // shared from lib/proxy-pool.js
+normalizeProxyPool(value, { strict = true, secret }) // lib/proxy-pool.js; undefined -> disabled defaults
+proxyPoolPatch(value, current = config)
 validateAndNormalizeHeaders(value, { strict = false })
 normalizeModelAliases(value)
 normalizeAccountPipeline(value, { strict = false, fallbackOrder, fallbackCachePoolSize,
@@ -77,8 +79,9 @@ These are evaluated once from environment by `boundedEnv()`/`runtimeDuration()`;
 | `CLINE_PASS_DIRECT_MAX_FREE_SOCKETS` | 32 | 1–64; effective value `min(configured free, effective direct max sockets)` |
 | `CLINE_PASS_PROXY_MAX_SOCKETS` | 32 | 1–128; each cached/disposable HTTP(S)/SOCKS proxy Agent |
 | `CLINE_PASS_PROXY_MAX_FREE_SOCKETS` | 2 | 1–16; effective value `min(configured free, effective proxy max sockets)` |
+| `CLINE_PASS_PROXY_FREE_SOCKET_TIMEOUT_MS` | 60000 | 1000–600000; idle timeout applied only when a **pool-entry** agent returns a socket to its free pool (in-flight deadlines unchanged) |
 
-Only the four duration keys support `CLINE_PASS_TEST_INBOUND_KEEP_ALIVE_MS`, `CLINE_PASS_TEST_SSE_FIRST_EVENT_MS`, `CLINE_PASS_TEST_SSE_STREAM_IDLE_MS`, and `CLINE_PASS_TEST_SSE_HEARTBEAT_MS` (plus `CLINE_PASS_TEST_NON_STREAM_ATTEMPT_MS` for the non-stream attempt bound). Direct Agent options set `keepAlive: true`, `scheduling: 'lifo'`, and 60000 ms **free-socket** idle timeout. Proxy Agent options set the same keep-alive / socket-count knobs but **omit** `timeout` so SOCKS/HTTPS CONNECT cannot kill in-flight attempts at 60s; attempt / SSE deadlines own the wall clock. At most 128 persisted proxy URLs enter the cache, with disposable agents for draft tests and cache overflow. No new persisted migration is required. Target Node >=18 APIs; the archived `09-21-newapi-chat-keepalive/check-report.md` records an official SHA256-verified Node 18.20.8 `darwin-arm64` full 241/241 test run. The parent cross-feature check additionally ran on Node 26; neither run verifies a Docker container or the real New API topology.
+Only the four duration keys support `CLINE_PASS_TEST_INBOUND_KEEP_ALIVE_MS`, `CLINE_PASS_TEST_SSE_FIRST_EVENT_MS`, `CLINE_PASS_TEST_SSE_STREAM_IDLE_MS`, and `CLINE_PASS_TEST_SSE_HEARTBEAT_MS` (plus `CLINE_PASS_TEST_NON_STREAM_ATTEMPT_MS` for the non-stream attempt bound). Direct Agent options set `keepAlive: true`, `scheduling: 'lifo'`, and 60000 ms **free-socket** idle timeout. Proxy Agent options set the same keep-alive / socket-count knobs but **omit** `timeout` so SOCKS/HTTPS CONNECT cannot kill in-flight attempts at 60s; attempt / SSE deadlines own the wall clock. At most 128 persisted proxy URLs enter the cache, with disposable agents for draft tests and cache overflow. Pool-entry agents are a separate runtime-owned set (one per active or retiring entry, same socket-count knobs) and do not count toward that cache. No new persisted migration is required. Target Node >=18 APIs; the archived `09-21-newapi-chat-keepalive/check-report.md` records an official SHA256-verified Node 18.20.8 `darwin-arm64` full 241/241 test run. The parent cross-feature check additionally ran on Node 26; neither run verifies a Docker container or the real New API topology.
 
 #### Static `config.json`
 
@@ -145,7 +148,29 @@ Only the four duration keys support `CLINE_PASS_TEST_INBOUND_KEEP_ALIVE_MS`, `CL
   errorDetailLogging: boolean,   // default true after admin init; sanitized chat failures only
   errorDetailMigrationVersion: 1, // one-time upgrade of legacy false, later opt-out persists
   rawBodyLogging: boolean,       // default false; opt-in unredacted detail bodies for future captures only
-  perModel: { [modelId]: RouteConfig }
+  perModel: { [modelId]: RouteConfig },
+  proxyPool?: {                  // optional global egress pool; absent = disabled and never written back
+    enabled: boolean,            // default false
+    strategy: "round-robin" | "random",   // default "round-robin"
+    source: "manual" | "floppydata",      // default "manual"
+    egressRetries: integer,      // 0-5, default 2
+    throttleCooldownMs: integer, // 1000-600000, default 60000 (HTML 429 without Retry-After)
+    failureCooldownMs: integer,  // 1000-600000, default 30000 (connect-phase failure)
+    connectTimeoutMs: integer,   // 1000-60000, default 10000
+    maxRpmPerProxy: integer,     // 0-10000, default 0 = unlimited
+    entries: string[],           // manual source; <= 2000 normalized proxy URLs, no duplicates
+    floppydata: {                // kept (not cleared) while source is manual
+      apiKey: string,            // "" or 1-256 visible ASCII; required when enabled with source floppydata
+      apiBase: string,           // http(s) origin without credentials/path/query/hash; default "https://api.floppydata.net"
+      type: "residential" | "mobile" | "datacenter",  // default "residential"
+      country: string,           // two letters, stored upper-case; default "US"
+      state: string, city: string, // default ""; <= 64 chars, no control bytes
+      protocol: "socks5" | "http" | "https",          // default "socks5"
+      rotation: -1 | 0 | 5 | 10 | 15 | 20 | 60,       // default 0 (sticky session)
+      count: integer,            // 1-500, default 100
+      refreshIntervalMs: integer // 60000-3600000, default 180000
+    }
+  }
 }
 
 RouteConfig = {
@@ -180,6 +205,7 @@ Startup normalization preserves legacy behavior while making the schema explicit
 - normalize `drainEnabled`/`drainThreshold`/`drainMaxConcurrent`/`warmThreshold` inside `accountPipeline` (not `accountWorkflow`): the pre-drain image's non-strict startup normalizer silently drops unknown `accountPipeline` keys, so a rollback image boots on a config written by this one (it returns to the 80/95 boundaries with drain off), whereas unknown `accountWorkflow` keys fail startup. Missing fields default (`false`/95/2/80) or, for an older management client, preserve the current server value; strict saves reject non-boolean `drainEnabled`, non-finite or out-of-range percentages, `drainThreshold <= warmThreshold`, `warmThreshold >= 95` while drain is disabled, and non-integer/zero `drainMaxConcurrent`; non-strict invalid input resets to defaults.
 - normalize `cachePoolLowQuotaSize` as an integer 0-100000 with `0 <= low <= cachePoolSize <= cachePoolMaxSize`. Legacy absence defaults to `0` (including a new size-zero installation); an older management client omitting the field preserves the current server value. Explicit `0` disables role-aware membership/selection even for a positive pool. Non-strict invalid input falls back to `0` and an excessive low target clamps to the minimum; strict saves reject either without writing. A positive cache preset explicitly drafts `1`, never auto-migrate existing positive pools to `1`.
 - `providerProbeSchedule` defaults to `{ enabled: true, intervalMs: 300000, maxPerRound: 2, maxPer24h: 100, failureThreshold: 3 }`. Strict admin input requires exactly those fields with boolean enablement and integers in 60000-86400000 / 1-10 / 1-1000 / 1-10 respectively; old saves omitting the field preserve it. A missing legacy `providerProbeIdentityKey` is generated once; an explicit malformed key fails before migration writes. The private key is never returned by the API or copied to metadata; see `quality-guidelines.md` for its evidence and budget semantics.
+- `proxyPool` is normalized only when the loaded file contains the key: `normalizeProxyPool(value, { strict: true, secret: META.routingSecret })` fills missing fields with the defaults above (a changed result is written back) and rejects unknown fields, wrong types/enums, out-of-range integers, an invalid/duplicate/entry-ID-colliding manual URL, more than 2000 entries, an enabled manual source without entries, or an enabled FloppyData source without `apiKey`; any rejection fails startup without rewriting bytes (it is never silently downgraded to disabled). A file without the key keeps exact bytes, and `POST /api/accounts` also keeps it absent when the submitted value equals the disabled defaults (`proxyPoolPatch()`). The same strict path guards management saves (`400`, omitted ⇒ current value kept) and hot reload (refused, file unchanged). Manual `entries` and the FloppyData `apiKey` are plaintext operator secrets in `config.json`, visible only through authenticated `GET /api/accounts`. FloppyData-imported entries (URLs with session usernames/passwords) live **only in memory** and are re-imported after restart; they are never written to `config.json` or `metadata.json`. Entry health, cooldown, RPM windows and the round-robin cursor are process-local too. Accounts gain no new field.
 - normalize `sessionBindingExplicitTtlMs`/`sessionBindingFallbackTtlMs` as integers 60000-604800000 and `sessionBindingMaxEntries` as an integer 1-100000. A missing/invalid value falls back to the current in-range server value, then to `7200000`/`900000`/`50000`; non-strict normalization caps a fallback TTL above the explicit TTL at `Math.min(900000, explicitTtlMs)`.
 
 Account-level RPM runtime state is deliberately process-local and is never persisted. `server.js` keeps one rolling-window owner per account (`rpmWindows`, `RPM_WINDOW_MS` = 60 s; only the test environment may shrink it through `CLINE_PASS_TEST_RPM_WINDOW_MS`) holding committed native chat start times plus uncommitted reservations. It clears on restart, is independent per process/replica, and is explicitly not a cross-process hard cap. Account deletion and key/proxy identity rotation clear that account's window, and `maxRpm: 0` disables the limit and drops the state; ordinary disable/re-enable keeps already-committed in-window facts (POST `/api/accounts` calls `clearRpmState()` only on deletion, key/proxy rotation, or a limit that becomes `0`). `metadata.json` must never contain the timestamps array, the `head` cursor, the reservation count, or the `rpmWindows` map.
@@ -242,7 +268,7 @@ Account-level RPM runtime state is deliberately process-local and is never persi
       modelFinal: { [resolvedModelId]: { successes, failures, cancelled, overflowFields } },
       providerUsage: { [resolvedModelId]: { [providerOrEmptyForUnknown]: Aggregate } },
       valuation: { [resolvedModelId]: { [providerOrEmptyForUnknown]: { [priceVersion]: { pricedRequests, lowPicoUsd, highPicoUsd, overflowFields } } } },
-      proxyHealth: { [proxyEndpointKey]: { requests, errors5xx, overflowFields } } // credential-free scheme://host[:port]; any attempt 5xx, ignores error rules
+      proxyHealth: { [proxyEndpointKey]: { requests, errors5xx, overflowFields } } // credential-free scheme://host[:port]; any attempt 5xx, ignores error rules; keyed by each attempt's actual egress endpoint (pool entry or account proxy)
     }],
     recentCoverage: {
       droppedAccountMinuteCells,
@@ -368,6 +394,11 @@ Admin sessions last 24h (`Max-Age=86400`) and survive restart/deploy through own
 | Upstream reset time has no timezone, over 9 fractional digits, or an impossible Gregorian date | refresh records safe `schema`; retain the complete last-good snapshot |
 | Quota refresh fails after an earlier success | Retain the previous snapshot/last-success and persist only safe attempt/error metadata; routing treats it as unknown |
 | Account key/proxy changes, is disabled, or is deleted during quota work | Runtime fences prevent stale publication; key/proxy/delete clear persisted quota, while disable retains last-good diagnostic state |
+| `config.json` has no `proxyPool` key | pool disabled; startup, saves that omit it or submit the disabled defaults, and reloads keep exact bytes |
+| Persisted `proxyPool` is invalid (see startup bullet) | fail startup with a field-path message (no URL/credential values) and keep original bytes; a reload is refused and the file is unchanged |
+| `POST /api/accounts` sends an invalid `proxyPool` | `400`; no write; an omitted field keeps the current value |
+| FloppyData import succeeds | entries replace the in-memory pool only; `config.json`/`metadata.json` bytes are not touched |
+| Pool traffic records `proxyHealth` | key is the attempt's actual credential-free `proxyEndpointKey()` (same format as before, so an older image validates it); no new metadata key is added |
 | Existing account ID is changed by management API | `400`; no write |
 | Duplicate account IDs | `400`; no write |
 | Rename/write fails | propagate the error; remove the temporary file when possible |
@@ -417,6 +448,7 @@ Persistence changes must use a temporary `DATA_DIR` and assert:
 - account removal deletes its `accountStates` entry;
 - invalid canonical rule IDs/scopes/actions/applicability/status/body/Header/reset shapes and limits return `400` and preserve bytes; legacy rules migrate in content-before-status order, unchanged old-client mirrors preserve canonical rules, conflicting mirrors return `409`, and valid canonical order survives restart;
 - `retryRules` strict validation rejects unknown fields, non-`stop` decisions, duplicate IDs, missing/oversized/out-of-range conditions and oversize arrays while preserving exact config bytes; a missing field defaults to `[]` without auto-seeding, an old-client omission preserves the stored value, and valid canonical entries round-trip through save and restart;
+- `test/proxy-pool-config.test.js` asserts legacy byte stability without `proxyPool` across restart/omitting/default saves, strict API validation with revision guard and unchanged bytes, and startup rejection of an invalid persisted pool without rewriting; `test/proxy-pool.integration.test.js` (`the HEAD image starts on a config with proxyPool and metadata written after pool traffic, and keeps proxyPool across its own save`) proves rollback compatibility and that no pool credential reaches metadata;
 - both detailed switches default/type/unknown-field/restart tests, legacy one-field settings writes, two-field writes and injected atomic-write failure preserve previous config bytes/runtime modes; independent detail retention/recovery never changes ordinary logs or metadata.
 
 The current integration suite directly covers malformed config preservation, legacy migration, metadata mode, routing-secret/cooldown restart, and session-value exclusion. Add focused assertions before relying on account-state cleanup or unchanged-file behavior after every validation branch.

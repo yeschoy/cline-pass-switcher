@@ -15,7 +15,7 @@ The unused framework-oriented component, hook, and type-safety templates were re
 | Guide | Use it when changing |
 |-------|----------------------|
 | [Directory Structure](./directory-structure.md) | Static document organization, naming, feature placement, test layout |
-| [State Management](./state-management.md) | Server snapshots, complete account drafts, raw/bulk/statistics/log/detail ownership |
+| [State Management](./state-management.md) | Server snapshots, complete account drafts, egress proxy pool card, raw/bulk/statistics/log/detail ownership |
 | [Quality Guidelines](./quality-guidelines.md) | Native accessibility, rendering safety, responsive layout, UI/API verification |
 
 ## Pre-Development Checklist

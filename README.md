@@ -7,7 +7,7 @@
 Node.js 本地/服务器代理 + 网页控制台，用于 [Cline Pass](https://cline.bot/cline-pass) 订阅：
 
 - 🔍 **上游枚举与校验** —— 列出订阅模型背后每一条上游渠道，并一键实测哪些「✔可用 / ⏳限流 / ✘不可钉」
-- 🎯 **单渠道钉选尝试与一键配置上游** —— 首选固定+健康回退 / Switcher 健康自动选择都由 switcher 外层执行；每个具名 HTTP attempt 只注入当前 provider 的单元素 `only`。可按账号执行探测→校验→预览→测试→确认；真实网关是否遵守 `only` 需按账号验证，并支持 provider 内成本、首字、吞吐排序
+- 🎯 **单渠道钉选尝试与一键配置上游** —— 规划器（Vercel AI Gateway）管道一次请求即注入完整的 `providerOptions.gateway.only` + `order`（已排除/硬隔离的渠道被过滤，`pinMode`/健康只重排顺序），不在本地逐个 provider 重试；直连（OpenRouter）管道仍用单元素 `provider.only` 并由 switcher 外层顺序重试。可按账号执行探测→校验→预览→测试→确认；`order` 只是网关提示，真实网关是否遵守 `only`/`order` 需按账号验证，并支持 provider 内成本、首字、吞吐排序
 - 🧬 **双维度错误策略** —— 一套有序 `errorRules` 可分别作用于账号或模型×Provider，支持状态码、正文 ANY、响应 Header、Provider/model 范围及 ignore/degrade/cooldown/hard-quarantine；只有显式规则会冷却或硬隔离
 - 🚫 **上游排除** —— 勾「排除」的已知渠道不会进入 attempt 计划；已知渠道全部被排除时安全失败，不会用 auto 绕过排除
 - 👥 **账号池** —— 支持单账号、轮询、HRW 粘性、最少连接、加权轮询、优先级容灾和可选的无粘性负载＋健康度调度；安全预设可先预览再应用
@@ -197,8 +197,9 @@ location / {
 | `exposeCatalog` | `true` 时代理的 `/models`、`/v1/models`、`/api/v1/models` 会合并目录模型；上游目录只用该客户端归属的合格账号抓取，空池不会用其他客户端账号或合成回退。静态已知模型/别名 ID 仍可全局可见；默认 `false` 不抓取目录 |
 | `knownModels` | 订阅模型清单（控制台主表） |
 | `modelAliases` | 客户端别名到现有 `cline-pass/*` 模型的映射；路由按解析后的模型执行 |
-| `perModel` | 每模型路由：`{ upstreams, exclude, pinMode, sort, maxRetries, providerCooldownMs }`。`upstreams` 非空时是权威来源顺序，否则使用探测到的渠道顺序；`pinMode: "strict"` 首次固定来源顺序首个可用渠道，失败后从剩余渠道按 Provider-model 24h 成功率回退；`pinMode: "preferred"` 从首次起就用同一健康顺序。每次 named HTTP attempt 只注入一个 provider。`maxRetries` 是首试后的外层重试次数，`providerCooldownMs` 为 0～300000（0 关闭）并在首包前 500/504/网络超时/429/不可用 后短暂跳过该 Provider（502 不打开该 circuit）。账号内同名配置整项覆盖全局配置，不逐字段合并 |
+| `perModel` | 每模型路由：`{ upstreams, exclude, pinMode, sort, maxRetries, providerCooldownMs }`。`upstreams` 非空时是权威来源顺序，否则使用探测到的渠道顺序；`pinMode: "strict"` 首次固定来源顺序首个可用渠道，失败后从剩余渠道按 Provider-model 24h 成功率回退；`pinMode: "preferred"` 从首次起就用同一健康顺序。直连管道每次 named HTTP attempt 只注入一个 provider；规划器/网关管道一次 HTTP 请求注入完整 `only`+`order`，`pinMode` 与健康顺序只决定该列表的排列，`maxRetries` 不会在同一账号内再开额外的 provider 尝试（账号替换仍独立生效）。`maxRetries` 是首试后的外层重试次数，`providerCooldownMs` 为 0～300000（0 关闭）并在首包前 500/504/网络超时/429/不可用 后短暂跳过该 Provider（502 不打开该 circuit）。账号内同名配置整项覆盖全局配置，不逐字段合并 |
 | `apiKey` | 旧版单 key 字段，启动时自动迁移进 `accounts` |
+| `proxyPool` | 可选的全局上游出口代理池（缺省即关闭，启动时不会补写）：`{ enabled, strategy: "round-robin" \| "random", source: "manual" \| "floppydata", egressRetries（0～5，默认 2）, throttleCooldownMs（默认 60000）, failureCooldownMs（默认 30000）, connectTimeoutMs（默认 10000）, maxRpmPerProxy（0 不限）, entries（手动来源，最多 2000 条代理 URL）, floppydata: { apiKey, type, country, state, city, protocol, rotation, count（默认 100）, refreshIntervalMs（默认 180000）, apiBase } }`。启动、保存与热加载都严格校验，非法即拒绝且不改文件；旧客户端保存省略该字段时保留现值。详见下文“代理池（出口 IP 分摊）” |
 
 定期校验回退：管理员先通过控制台或 `POST /api/providers/probe-schedule` 提交完整配置并将 `enabled` 置为 `false`，确认只停止**新的**后台付费请求；旧自动避开保持生效，逐账号/模型/渠道显式恢复后才能解除。升级前备份完整 DATA_DIR（配置、元数据及认证数据），旧镜像与新格式不能假定可安全共享写入；回退旧版须停服务后在隔离目录恢复整份旧备份。运行中的请求取消/失败也可能已在发出前保守计入预算。定期校验、负对照及生产发布不应以本地 mock 通过作为真实上游验证授权。
 
@@ -211,20 +212,20 @@ Cline Pass 订阅模型在 Cline 网关之后分成两条管道，钉住上游�
 | 管道 | 实际后端 | 识别特征 | 钉住方式 |
 |---|---|---|---|
 | **直连**（direct） | OpenRouter | 响应顶层带 `provider` 与真实 `model` 字段 | 顶层 `provider.only`（单元素） |
-| **规划器**（planner） | **Vercel AI Gateway** | 响应带 `provider_metadata.gateway.routing` | **`providerOptions.gateway.only / sort`**（`only` 单元素） |
+| **规划器**（planner） | **Vercel AI Gateway** | 响应带 `provider_metadata.gateway.routing` | **`providerOptions.gateway.only / order`**（一次注入完整允许列表） |
 
 **关键发现**：规划器管道的请求由 Vercel AI Gateway 执行，请求体里的顶层 `provider.only/order` 会被 Cline 丢弃。
-本项目只通过 `providerOptions.gateway` 注入当前单一 provider，不再把多 provider `order` 委托给网关；因此每次外层 attempt 可观测、可归因：
+本项目对规划器管道只通过 `providerOptions.gateway` 一次注入配置的允许列表（`only` 与 `order` 相同，客户端自带的 `only`/`order`/顶层 `provider` 会被配置覆盖），对齐 [ClinePassBridge](https://github.com/xiao-qiu-qiu/ClinePassBridge)；`order` 只是优先级提示，网关不保证遵守：
 
 ```json
 {
   "model": "cline-pass/glm-5.2",
   "messages": [],
-  "providerOptions": { "gateway": { "only": ["alibaba"] } }
+  "providerOptions": { "gateway": { "only": ["alibaba", "baseten"], "order": ["alibaba", "baseten"] } }
 }
 ```
 
-实测响应：`finalProvider: "alibaba"`，规划器理由变为 `Provider set restricted to: alibaba`。
+**实际渠道只认响应证据**：`actualProvider` 取自响应（非流、SSE 流、含错误正文中的 routing 文本），优先级 `finalProvider` > `resolvedProvider` > 裸 `provider`，候选/`fallbacksAvailable` 不算；无证据显示「未知」，绝不用计划列表冒充。实测单元素 `only:["alibaba"]` 响应 `finalProvider: "alibaba"`，规划器理由为 `Provider set restricted to: alibaba`。
 参考：[Vercel AI Gateway — Provider Filtering, Ordering & Sorting](https://vercel.com/docs/ai-gateway/models-and-providers/provider-filtering-and-ordering)
 
 ### 上游枚举的三种手段
@@ -366,6 +367,64 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=cline-pass/glm-5.2
 管理 API（独立管理员 Cookie 会话，返回 `Cache-Control: no-store`）：`GET/POST /api/logs/settings`，POST 接受由 `detailedLogging` / `errorDetailLogging` / `rawBodyLogging` 组成的非空布尔字段子集，旧的单字段请求仍兼容；GET 另给 `rawBodyAvailable`、`maxSanitizedPayloadBytes`，缺运行时准入的原文开启返回 409 且配置字节不变；`GET/DELETE /api/logs/details`；`GET /api/logs/details/<requestId>`；`GET /api/logs/details/<requestId>/bodies/<bodyId>`（按组 profile 返回脱敏或未脱敏的 `text/plain`，`nosniff`）。列表支持 `limit` 1–200、`cursor`、`requestId`、`from`/`to` 毫秒时间戳、`model`、`account`、`status`、`result`；错误参数返回 400，过期/已清空/缺失正文返回安全 404。
 
 ---
+
+## 代理池（出口 IP 分摊）
+
+**为什么需要**：Cline 上游边缘网关按**出口 IP** 限流（约 70 次请求 / 60 秒窗口），超限返回 HTML 429，与 key 和账号无关。所有账号共用一个出口时，这个出口一旦打满，整批账号会一起 429。代理池把每次上游调用分摊到多个出口 IP 上。
+
+**来源与策略**：
+
+- **手动导入**：在控制台“代理池”卡片中一行填一个代理 URL（支持 `http`、`https`、`socks5`、`socks5h`，最多 2000 条，自动去重），条目保存在 `config.json`。
+- **FloppyData 自动导入**：填写 API Key 后，服务按 `count`（默认 100）调用 FloppyData 接口生成一批住宅代理会话，每隔 `refreshIntervalMs`（默认 3 分钟）整批更换。导入的条目只放在内存里，不写入 `config.json`，重启后重新导入。新一批成功不足一半时保留旧批，稍后重试。
+- **选择策略**：默认`轮询`，也可选`随机`。
+
+**行为**：
+
+- 开启后，所有账号的每次上游调用（聊天、测试、探测、渠道校验、额度刷新、模型目录）都从池里选一个代理，覆盖账号自己的固定代理。账号选择、会话粘性和缓存池不受影响。
+- 遇到 HTML 429 或代理连接失败（拒绝连接、认证失败、CONNECT 非 200、连接超时）时，该代理进入短时冷却。聊天请求若在首包前遇到这类失败，会立即换一个本次还没用过的代理重试，最多 `egressRetries` 次；测试、探测、额度刷新和模型目录等其他调用只尝试一次。账号不会因此被降级、冷却或退避。重试用完仍是 HTML 429 时返回 429，`Retry-After` 取池中最早恢复时间（1～60 秒）。同一次尝试内不会改走直连或账号代理。
+- 池中没有可用代理（为空、全部冷却，或都达到 `maxRpmPerProxy`）时，本次调用退回账号原来的出口：配了固定代理就走固定代理，否则直连。日志里会标记 `poolFallback`。
+- 关闭开关（控制台保存，或改 `config.json` 后热加载 / SIGHUP）后立即恢复原行为：各账号走自己的 `proxyUrl` 或直连，FloppyData 定时导入同时停止。
+
+**配置示例**（只用占位符，切勿把真实代理或密钥提交到仓库）：
+
+```json
+"proxyPool": {
+  "enabled": true,
+  "strategy": "round-robin",
+  "source": "manual",
+  "egressRetries": 2,
+  "entries": [
+    "socks5h://<user>:<pass>@<host>:1080",
+    "http://<user>:<pass>@<host>:8080"
+  ],
+  "floppydata": { "apiKey": "<API_KEY>", "country": "US", "protocol": "socks5", "count": 100, "refreshIntervalMs": 180000 }
+}
+```
+
+把 `source` 改为 `"floppydata"` 即使用自动导入；此时 `entries` 可以留空，但必须填写 `apiKey`。省略的字段使用默认值。
+
+**控制台与 API**（均需管理员会话）：
+
+- 账号页的“代理池”卡片可以设置开关、策略、来源和各项参数。手动条目默认掩码显示，点“显示并编辑”才出现明文文本框。FloppyData 部分有“立即刷新”和“查询余额”按钮。卡片中还有条目状态表和抽样测试。开启后，账号列表的出口徽标会显示“代理池”。
+- `GET/POST /api/accounts` 读写 `proxyPool` 字段。
+- `GET /api/proxy-pool/status`：返回条目状态，只含短 id、协议、无凭据端点和状态枚举。
+- `POST /api/proxy-pool/refresh`：立即导入一批 FloppyData 代理。
+- `GET /api/proxy-pool/balance`：查询 FloppyData 剩余流量。
+- `POST /api/proxy-pool/test`：抽样测试条目连通性，`{ "sample": 1～50 }`，不影响冷却状态。
+- 请求日志和错误日志中的 `egress` 字段为 `direct`、`account-proxy` 或 `pool:<8 位短 id>`，不会出现代理 URL、用户名或密码。
+
+**费用与资源**：住宅代理**按流量（GB）计费**。开启 FloppyData 后，所有 Cline 上游流量（包括长上下文请求体）都经过住宅代理，请先在控制台查询余额。余额不足时系统不会自动停用，需要手动关闭开关。FloppyData 来源还要求容器能直连 `api.floppydata.net`（HTTPS）。条目很多时，请留意文件描述符上限：每个代理最多保留 2 个空闲连接，2000 条约占 4000 个 fd，必要时调大 `ulimit -n`。回滚到旧版本镜像时，旧版本会保留但忽略 `proxyPool` 字段，账号回到各自的代理。
+
+---
+
+## 开发与测试
+
+```bash
+npm install
+npm test          # node --test，覆盖 test/ 下全部契约与集成测试
+```
+
+目录：`server.js` 为服务入口与调度/代理主体，`lib/` 为协议适配（Chat/Responses/Anthropic）、日志存储与选号工作流，`public/` 为网页控制台，`test/` 为测试，`config.example.json` 为配置样例，`deploy/` 与 `docker-compose.yml` 为部署文件。项目由 Trellis 管理，编码规范见 `.trellis/spec/`。
 
 ## 常见问题
 
