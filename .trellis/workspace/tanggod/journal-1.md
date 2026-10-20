@@ -1376,3 +1376,39 @@ Committed-main raw-detail code is deployed raw-off at 512 MiB with 32 Legacy-own
 ### Status
 
 [OK] **Completed**
+
+
+## Session 57: 代理池按客户端密钥开关：实现、检查与本机发布
+<!-- trellis-session: v=2 fp=b6a98282936a0b4a -->
+
+**Date**: 2026-10-21
+**Task**: 代理池按客户端密钥开关：实现、检查与本机发布
+**Branch**: `main`
+
+### Summary
+
+新增 proxyPoolClientKeys（default + 按密钥 overrides），账号按所属客户端密钥决定是否走代理池；FloppyData 仅在有密钥使用时导入；已发布 20261021-4b6ae7c-pool-client-keys，无配置迁移
+
+### Main Changes
+
+- lib/proxy-pool.js normalizeProxyPoolClientKeys；server.js 四处接线、resolveEgress/poolEgressExpected 按账号归属、删除密钥清理 override、status clientKeys
+- 控制台代理池卡片新增按客户端密钥小节；徽标按已保存配置显示
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4b6ae7c` | feat(proxy-pool): 代理池按客户端密钥开关 |
+| `106a5cd` | docs(deploy): 记录代理池按客户端密钥开关的本机生产发布证据 |
+
+### Testing
+
+- [OK] npm test 632/632；AC9 用 68c6158 旧镜像验证保留新字段
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 管理员控制台验收后把 deployment.json 改为 completed；需要时在控制台开启代理池并按密钥选择
