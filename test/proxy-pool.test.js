@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   normalizeProxyUrl, normalizeProxyPool, entryIdFor, createProxyPoolRuntime, parseRetryAfter, proxyEndpointKey,
-  PROXY_POOL_DEFAULTS, FLOPPYDATA_DEFAULTS, MAX_POOL_ENTRIES,
+  PROXY_POOL_DEFAULTS, FLOPPYDATA_DEFAULTS, MAX_POOL_ENTRIES, normalizeProxyPoolClientKeys, PROXY_POOL_CLIENT_KEYS_DEFAULT,
 } from '../lib/proxy-pool.js';
 
 const SECRET = 'test-routing-secret';
@@ -116,6 +116,33 @@ test('normalizeProxyPool non-strict falls back to disabled defaults; secret enab
   try { assert.deepEqual(normalizeProxyPool({ enabled: true, strategy: 'x', entries: [A] }, { strict: false }), normalizeProxyPool(undefined)); }
   finally { console.warn = warn; }
   assert.deepEqual(normalizeProxyPool({ entries: [A, B] }, { secret: SECRET }).entries, [A, B]);
+});
+
+test('normalizeProxyPoolClientKeys accepts default/overrides for known ids and rejects everything else without echoing values', () => {
+  const knownIds = ['legacy', 'ck_a', 'ck_b'];
+  assert.deepEqual(PROXY_POOL_CLIENT_KEYS_DEFAULT, { default: 'on', overrides: {} });
+  assert.ok(Object.isFrozen(PROXY_POOL_CLIENT_KEYS_DEFAULT) && Object.isFrozen(PROXY_POOL_CLIENT_KEYS_DEFAULT.overrides));
+  assert.deepEqual(normalizeProxyPoolClientKeys(undefined, { knownIds }), { default: 'on', overrides: {} });
+  assert.deepEqual(normalizeProxyPoolClientKeys({}, { knownIds }), { default: 'on', overrides: {} }, 'missing subfields take defaults');
+  assert.deepEqual(normalizeProxyPoolClientKeys({ default: 'off', overrides: { ck_a: 'on', legacy: 'off' } }, { knownIds }), { default: 'off', overrides: { ck_a: 'on', legacy: 'off' } });
+  assert.deepEqual(normalizeProxyPoolClientKeys({ overrides: { legacy: 'off' } }), { default: 'on', overrides: { legacy: 'off' } }, 'legacy is known by default');
+  const secretLike = `cps_${'a'.repeat(96)}`;
+  const invalid = [
+    [null, /^Error: proxyPoolClientKeys must be an object$/], [[], /must be an object/], ['on', /must be an object/],
+    [{ default: 'yes' }, /proxyPoolClientKeys\.default must be one of on, off/], [{ default: true }, /proxyPoolClientKeys\.default/],
+    [{ overrides: [] }, /proxyPoolClientKeys\.overrides must be an object/], [{ overrides: null }, /proxyPoolClientKeys\.overrides must be an object/],
+    [{ overrides: { ck_a: 'default' } }, /proxyPoolClientKeys\.overrides\.ck_a must be one of on, off/], [{ overrides: { ck_a: true } }, /overrides\.ck_a/],
+    [{ overrides: { ck_unknown: 'on' } }, /^Error: proxyPoolClientKeys\.overrides contains an unknown client key id$/],
+    [{ overrides: { [secretLike]: 'on' } }, /unknown client key id/], [{ overrides: JSON.parse('{"__proto__":"on"}') }, /unknown client key id/],
+    [{ default: 'on', extra: 1 }, /^Error: proxyPoolClientKeys\.extra is not a known field$/], [{ [secretLike]: 1 }, /^Error: proxyPoolClientKeys contains an unknown field$/],
+  ];
+  for (const [value, pattern] of invalid) {
+    assert.throws(() => normalizeProxyPoolClientKeys(value, { knownIds }), pattern, JSON.stringify(value));
+    try { normalizeProxyPoolClientKeys(value, { knownIds }); } catch (error) { assert.equal(error.message.includes(secretLike), false); }
+  }
+  const warn = console.warn; console.warn = () => {};
+  try { assert.deepEqual(normalizeProxyPoolClientKeys({ default: 'nope' }, { knownIds, strict: false }), { default: 'on', overrides: {} }); }
+  finally { console.warn = warn; }
 });
 
 test('entryIdFor is an 8-hex HMAC of the normalized URL', () => {

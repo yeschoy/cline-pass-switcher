@@ -146,7 +146,8 @@ test('quota refresh and the model catalog go through pool entries; status/test/r
   assert.equal(catalogCall.via, 'A');
 
   const status = await s.get('/api/proxy-pool/status');
-  assert.deepEqual(Object.keys(status).sort(), ['available', 'enabled', 'entries', 'fallbacks', 'floppydata', 'retiring', 'source', 'strategy', 'total']);
+  assert.deepEqual(Object.keys(status).sort(), ['available', 'clientKeys', 'enabled', 'entries', 'fallbacks', 'floppydata', 'retiring', 'source', 'strategy', 'total']);
+  assert.deepEqual(status.clientKeys, [{ id: 'legacy', name: 'Legacy', mode: 'default', effective: true }], 'absent proxyPoolClientKeys: every key uses the enabled pool');
   assert.equal(status.enabled, true); assert.equal(status.source, 'manual'); assert.equal(status.floppydata, null);
   for (const entry of status.entries) assert.match(entry.endpointKey, /^socks5:\/\/127\.0\.0\.1:\d+$/);
 
@@ -439,4 +440,169 @@ test('the pre-pool image starts on a config with proxyPool and metadata written 
   s.seen.length = 0;
   assert.equal(await s.chat(), 200);
   assert.deepEqual(s.seen, ['A']);
+});
+
+// ---------- 按客户端密钥开关（proxyPoolClientKeys） ----------
+const LEGACY_KEY = 'legacy-test-client-key', KEY_A = 'client-key-a-0000000000', KEY_B = 'client-key-b-0000000000';
+const CLIENT_KEYS = [{ id: 'ck_a', name: 'A', key: KEY_A }, { id: 'ck_b', name: 'B', key: KEY_B }];
+const ownedAccounts = (ownPort = null) => [
+  { id: 'a0', clientKeyId: 'ck_a', name: 'a0', key: 'local-a0', enabled: true, maxConcurrent: 0, priority: 10 },
+  { id: 'b0', clientKeyId: 'ck_b', name: 'b0', key: 'local-b0', enabled: true, maxConcurrent: 0, priority: 10, ...(ownPort ? { proxyUrl: `socks5://127.0.0.1:${ownPort}` } : {}) },
+];
+async function chatAs(s, key, { stream = false } = {}) {
+  const res = await fetch(`http://127.0.0.1:${s.port}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+    body: JSON.stringify({ model: 'm', stream, messages: [{ role: 'user', content: `scoped ${Math.random()}` }] }) });
+  return { status: res.status, text: await res.text() };
+}
+const noClientKeyValues = (text, label) => { for (const secret of [LEGACY_KEY, KEY_A, KEY_B]) assert.equal(String(text).includes(secret), false, `${label} must not contain a client key value`); };
+
+test('per-client-key scope: only keys set to on use the pool; others keep their account egress, account HTML-429 backoff and no fallback', async (t) => {
+  const throttled = new Set();
+  const s = await setup(t, { responder: throttleResponder(throttled), env: { CLINE_PASS_TEST_QUOTA_SUCCESS_MS: '100', CLINE_PASS_TEST_QUOTA_FAILURE_MS: '200' } });
+  const [pa, pb, own] = [await s.socks('PA', { auth }), await s.socks('PB', { auth }), await s.socks('own')];
+  await s.start({ proxyKey: LEGACY_KEY, clientKeys: CLIENT_KEYS, accounts: ownedAccounts(own.port),
+    proxyPool: manualPool([socksUrl(pa.port, 'user-test-session-a'), socksUrl(pb.port, 'user-test-session-b')]),
+    proxyPoolClientKeys: { default: 'off', overrides: { ck_a: 'on' } } });
+
+  // AC2: A goes through pool entries, B through its own account proxy, never counted by the pool.
+  assert.equal((await chatAs(s, KEY_A)).status, 200);
+  assert.equal((await chatAs(s, KEY_B)).status, 200);
+  const streamed = await chatAs(s, KEY_A, { stream: true });
+  assert.equal(streamed.status, 200); assert.match(streamed.text, /\[DONE\]/);
+  assert.deepEqual(s.chats, [{ via: 'PA', auth: 'Bearer local-a0' }, { via: 'own', auth: 'Bearer local-b0' }, { via: 'PB', auth: 'Bearer local-a0' }]);
+  const rows = await rowsFor(s, 'requests', 3);
+  const bRow = rows.find((row) => row.accountId === 'b0');
+  assert.equal(bRow.egress, 'account-proxy'); assert.equal(bRow.poolFallback, false);
+  assert.ok(rows.filter((row) => row.accountId === 'a0').every((row) => POOL_ID.test(row.egress) && row.poolFallback === false));
+  let status = await s.get('/api/proxy-pool/status');
+  assert.equal(status.entries.reduce((sum, entry) => sum + entry.recent.requests, 0), 2, 'only A requests are counted by the pool');
+  assert.equal(status.fallbacks.total, 0, 'B never records a pool fallback');
+  // AC7
+  assert.deepEqual(status.clientKeys, [
+    { id: 'legacy', name: 'Legacy', mode: 'default', effective: false },
+    { id: 'ck_a', name: 'A', mode: 'on', effective: true },
+    { id: 'ck_b', name: 'B', mode: 'default', effective: false },
+  ]);
+  noClientKeyValues(JSON.stringify(status), 'status');
+
+  // AC4: B's HTML 429 keeps the account backoff and one same-egress retry; A's moves to another entry at once.
+  throttled.add('own'); s.chats.length = 0;
+  let started = Date.now();
+  assert.equal((await chatAs(s, KEY_B)).status, 429);
+  assert.ok(Date.now() - started >= 900, 'B waits for the account gateway backoff');
+  assert.deepEqual(s.chats.map((call) => call.via), ['own', 'own'], 'B retries once on the same account egress');
+  throttled.clear(); throttled.add('PA'); s.chats.length = 0;
+  started = Date.now();
+  assert.equal((await chatAs(s, KEY_A)).status, 200);
+  assert.ok(Date.now() - started < 500, 'A does not wait for an account backoff');
+  assert.deepEqual(s.chats.map((call) => call.via), ['PA', 'PB']);
+  throttled.clear();
+  status = await s.get('/api/proxy-pool/status');
+  assert.equal(status.fallbacks.total, 0);
+  const bErrors = (await rowsFor(s, 'errors', 1)).filter((row) => row.accountId === 'b0');
+  assert.ok(bErrors.length && bErrors.every((row) => row.egress === 'account-proxy' && row.poolFallback !== true));
+
+  // AC5: quota refresh and probes follow the owner's setting too.
+  s.seenGet.length = 0;
+  assert.equal((await s.post('/api/statistics/quota-refresh', { force: true })).status, 200);
+  const quota = await waitFor(() => { const calls = s.seenGet.filter((call) => call.path === '/users/me/plan/usage-limits'); return calls.length >= 2 ? calls : null; }, 'quota refreshes');
+  for (const call of quota) assert.match(call.via, call.auth === 'Bearer local-a0' ? /^P[AB]$/ : /^own$/, `${call.auth} quota egress`);
+  assert.ok(quota.some((call) => call.auth === 'Bearer local-a0') && quota.some((call) => call.auth === 'Bearer local-b0'));
+  for (const [accountId, expected] of [['a0', /^P[AB]$/], ['b0', /^own$/]]) {
+    s.chats.length = 0;
+    await s.post('/api/probe', { model: 'm', accountId });
+    assert.ok(s.chats.length > 0, `${accountId} probe reached upstream`);
+    for (const call of s.chats) { assert.equal(call.auth, `Bearer local-${accountId}`); assert.match(call.via, expected, `${accountId} probe egress`); }
+  }
+  await assertDiagnosticsClean(s);
+  noClientKeyValues(s.child.output(), 'server output');
+});
+
+test('per-client-key scope: FloppyData imports only while some key uses the pool, retires entries when none does and re-imports at once', async (t) => {
+  const s = await setup(t);
+  const a = await s.socks('F', { auth });
+  const calls = [];
+  const api = http.createServer((req, res) => {
+    let raw = ''; req.on('data', (d) => { raw += d; });
+    req.on('end', () => {
+      const body = JSON.parse(raw || '{}');
+      calls.push(body.session);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ connection: { connectionString: `socks5://user-test-session-${body.session}:${PASS}@127.0.0.1:${a.port}` } }));
+    });
+  });
+  const apiPort = await listen(api);
+  t.after(() => close(api));
+  await s.start({ proxyKey: LEGACY_KEY, clientKeys: CLIENT_KEYS, accounts: ownedAccounts(),
+    proxyPool: { enabled: true, source: 'floppydata', floppydata: { apiKey: API_KEY, apiBase: `http://127.0.0.1:${apiPort}`, count: 2 } },
+    proxyPoolClientKeys: { default: 'on', overrides: { ck_b: 'off' } } });
+  await waitFor(async () => (await s.get('/api/proxy-pool/status')).total === 2, 'first batch');
+  assert.equal(calls.length, 2);
+  assert.equal((await chatAs(s, KEY_A)).status, 200);
+  assert.equal((await chatAs(s, KEY_B)).status, 200);
+  assert.deepEqual(s.chats.map((call) => call.via), ['F', 'direct'], 'A uses the imported entry, B stays direct');
+
+  // Every key off: import stops and the batch retires.
+  const off = await s.save({ proxyPoolClientKeys: { default: 'off', overrides: {} } });
+  assert.equal(off.status, 200, JSON.stringify(off.data));
+  let status = await s.get('/api/proxy-pool/status');
+  assert.equal(status.total, 0, 'entries retire');
+  assert.equal(status.floppydata.state, 'idle');
+  assert.ok(status.clientKeys.every((key) => key.effective === false));
+  assert.equal((await s.post('/api/proxy-pool/refresh', { wait: true })).status, 409, 'manual refresh is refused while no key uses the pool');
+  s.chats.length = 0;
+  assert.equal((await chatAs(s, KEY_A)).status, 200);
+  assert.deepEqual(s.chats.map((call) => call.via), ['direct']);
+  const [row] = (await rowsFor(s, 'requests', 3)).sort((x, y) => y.ts - x.ts);
+  assert.equal(row.egress, 'direct'); assert.equal(row.poolFallback, false, 'a key that does not use the pool never records a fallback');
+  await sleep(200);
+  assert.equal(calls.length, 2, 'no further API calls');
+
+  // A back on: re-import immediately.
+  const on = await s.save({ proxyPoolClientKeys: { default: 'off', overrides: { ck_a: 'on' } } });
+  assert.equal(on.status, 200);
+  await waitFor(async () => (await s.get('/api/proxy-pool/status')).total === 2, 're-import');
+  assert.equal(calls.length, 4);
+  s.chats.length = 0;
+  assert.equal((await chatAs(s, KEY_A)).status, 200);
+  assert.equal((await chatAs(s, KEY_B)).status, 200);
+  assert.deepEqual(s.chats.map((call) => call.via), ['F', 'direct']);
+  assert.doesNotMatch(s.child.output(), new RegExp(`${API_KEY}|${PASS}|user-test-session-`));
+});
+
+test('the currently deployed image (68c6158) starts with proxyPoolClientKeys, ignores it and preserves it across its own save', async (t) => {
+  const repo = path.resolve('.'), oldRev = '68c6158';
+  try { execFileSync('git', ['rev-parse', '--verify', `${oldRev}^{commit}`], { cwd: repo, stdio: 'ignore' }); }
+  catch { t.skip('not inside a git checkout containing 68c6158'); return; }
+  const s = await setup(t);
+  const [pa, own] = [await s.socks('PA', { auth }), await s.socks('own')];
+  const scope = { default: 'off', overrides: { ck_a: 'on' } };
+  await s.start({ proxyKey: LEGACY_KEY, clientKeys: CLIENT_KEYS, accounts: ownedAccounts(own.port), proxyPool: manualPool([socksUrl(pa.port, 'user-test-session-a')]), proxyPoolClientKeys: scope });
+  assert.equal((await chatAs(s, KEY_B)).status, 200);
+  assert.deepEqual(s.chats.map((call) => call.via), ['own']);
+  await s.stop();
+
+  const oldDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-68c6158-image-'));
+  t.after(() => fs.rmSync(oldDir, { recursive: true, force: true }));
+  execSync(`git archive ${oldRev} server.js package.json lib public | tar -x -C "${oldDir}"`, { cwd: repo, stdio: ['ignore', 'ignore', 'pipe'] });
+  fs.symlinkSync(path.join(repo, 'node_modules'), path.join(oldDir, 'node_modules'), 'dir');
+  s.child = await startServer(s.dir, {}, { cwd: oldDir });
+  const view = await s.get();
+  assert.equal(Object.hasOwn(view, 'proxyPoolClientKeys'), false, 'the old image does not know the field');
+  s.chats.length = 0;
+  assert.equal((await chatAs(s, KEY_B)).status, 200);
+  assert.deepEqual(s.chats.map((call) => call.via), ['PA'], 'the old image falls back to the global switch');
+  const saved = await s.post('/api/accounts', { accounts: view.accounts, mode: view.mode, active: view.active, poolFullWaitMs: view.poolFullWaitMs,
+    errorRules: view.errorRules, retryRules: view.retryRules, quotaProtection: view.quotaProtection, accountPipeline: view.accountPipeline, accountWorkflow: view.accountWorkflow,
+    proxyPool: view.proxyPool, sessionProviderAffinityEnabled: view.sessionProviderAffinityEnabled, expectedConfigurationRevision: view.configurationRevision, concurrencyWaitMs: 1234 });
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  assert.equal(s.read().concurrencyWaitMs, 1234, 'the old image really wrote config.json');
+  assert.deepEqual(s.read().proxyPoolClientKeys, scope, 'the old image preserves the unknown top-level field');
+  await s.stop();
+
+  await s.start();
+  assert.deepEqual((await s.get()).proxyPoolClientKeys, scope, 'rolling forward restores the per-key semantics');
+  s.chats.length = 0;
+  assert.equal((await chatAs(s, KEY_B)).status, 200);
+  assert.deepEqual(s.chats.map((call) => call.via), ['own']);
 });

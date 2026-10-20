@@ -23,7 +23,7 @@ import { WORKFLOW_SELECTORS, defaultAccountWorkflow, normalizeAccountWorkflow, n
 import { AdapterError, createChatSseReader, estimateTokens, normalizeChatImageParts } from './lib/protocol-common.js';
 import { responsesAdapter } from './lib/responses-adapter.js';
 import { anthropicAdapter } from './lib/anthropic-adapter.js';
-import { normalizeProxyUrl, normalizeProxyPool, createProxyPoolRuntime, parseRetryAfter as parsePoolRetryAfter } from './lib/proxy-pool.js';
+import { normalizeProxyUrl, normalizeProxyPool, normalizeProxyPoolClientKeys, PROXY_POOL_CLIENT_KEYS_DEFAULT, createProxyPoolRuntime, parseRetryAfter as parsePoolRetryAfter } from './lib/proxy-pool.js';
 import { createFloppyDataSource, FLOPPYDATA_ERRORS } from './lib/floppydata-source.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1492,6 +1492,11 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
     const pool = normalizeProxyPool(config.proxyPool, { strict: true, secret: META.routingSecret });
     if (!isDeepStrictEqual(pool, config.proxyPool)) { config.proxyPool = pool; dirty = true; }
   }
+  // proxyPoolClientKeys 同理：缺省即"所有密钥使用代理池"且不写回；存在时按现有密钥 id 严格校验。
+  if (Object.hasOwn(loadedConfig, 'proxyPoolClientKeys')) {
+    const scope = normalizeProxyPoolClientKeys(config.proxyPoolClientKeys, { knownIds: poolClientKeyIds(config) });
+    if (!isDeepStrictEqual(scope, config.proxyPoolClientKeys)) { config.proxyPoolClientKeys = scope; dirty = true; }
+  }
   if (normalizeProviderHealthMetadata()) dirty = true;
   if (normalizeProviderProbeMetadata()) dirty = true;
   if (normalizeAccountStates()) dirty = true;
@@ -2389,7 +2394,7 @@ async function acquirePipelineAccountLease(identity, options = {}) {
 const ACCOUNT_CONFIGURATION_FIELDS = Object.freeze([
   'accounts', 'accountMode', 'activeAccount', 'concurrencyWaitMs', 'poolFullWaitMs',
   'sessionProviderAffinityEnabled', 'quotaProtection', 'errorRules', 'retryRules',
-  'accountErrorRules', 'accountContentErrorRules', 'accountPipeline', 'accountWorkflow', 'proxyPool',
+  'accountErrorRules', 'accountContentErrorRules', 'accountPipeline', 'accountWorkflow', 'proxyPool', 'proxyPoolClientKeys',
 ]);
 // 全局出口代理池配置。缺省（字段不存在）等价于关闭的默认值，且不会被写回 config.json。
 const PROXY_POOL_OFF = Object.freeze(normalizeProxyPool(undefined));
@@ -2401,6 +2406,26 @@ function proxyPoolPatch(value, current = config) {
   const pool = normalizeProxyPool(value, { strict: true, secret: META.routingSecret });
   if (!Object.hasOwn(current, 'proxyPool') && isDeepStrictEqual(pool, PROXY_POOL_OFF)) return {};
   return { proxyPool: pool };
+}
+// 按客户端密钥的代理池开关（顶层 proxyPoolClientKeys）。缺省等价于 { default: 'on', overrides: {} } 且不写回；
+// clientKeys 只能重启/独立路由修改，所以合法 id 总是取当前（或文件中已校验）的密钥清单。
+function poolClientKeyIds(candidate = config) { return ['legacy', ...(Array.isArray(candidate.clientKeys) ? candidate.clientKeys.map((row) => row?.id) : [])]; }
+function effectivePoolClientKeys(candidate = config) { return candidate.proxyPoolClientKeys || PROXY_POOL_CLIENT_KEYS_DEFAULT; }
+function poolClientKeyMode(id, scope = effectivePoolClientKeys()) { return Object.hasOwn(scope.overrides, id) ? scope.overrides[id] : scope.default; }
+// 账号是否走代理池：池已开启，且账号所属密钥（缺省 legacy）的有效设置为 on。
+function accountUsesProxyPool(account) {
+  return effectiveProxyPool().enabled === true && poolClientKeyMode(account?.clientKeyId ?? 'legacy') === 'on';
+}
+// 至少有一个现存密钥的有效设置为 on；FloppyData 只在这时导入（避免没人使用时空耗 API 调用与流量）。
+function anyClientKeyUsesProxyPool() {
+  const scope = effectivePoolClientKeys();
+  return clientKeyInventory().some(({ id }) => poolClientKeyMode(id, scope) === 'on');
+}
+function proxyPoolClientKeysPatch(value, current = config) {
+  if (value === undefined) return {};
+  const scope = normalizeProxyPoolClientKeys(value, { knownIds: poolClientKeyIds(current) });
+  if (!Object.hasOwn(current, 'proxyPoolClientKeys') && isDeepStrictEqual(scope, PROXY_POOL_CLIENT_KEYS_DEFAULT)) return {};
+  return { proxyPoolClientKeys: scope };
 }
 function configurationRevision() {
   const snapshot = {};
@@ -2996,7 +3021,8 @@ function reloadConfigFromDisk() {
   if (workflow.enabled && pipeline.cachePoolSize < 1) throw new Error('enabled accountWorkflow requires a positive cachePoolSize');
   if (mode === 'load-health' && pipeline.sticky) throw new Error('load-health cannot enable sticky');
   const poolPatch = Object.hasOwn(raw, 'proxyPool') ? { proxyPool: normalizeProxyPool(raw.proxyPool, { strict: true, secret: META.routingSecret }) } : {};
-  const next = { ...config, ...poolPatch, accounts: accs, accountMode: mode, activeAccount: active, concurrencyWaitMs: wait, poolFullWaitMs: poolWait,
+  const poolScopePatch = Object.hasOwn(raw, 'proxyPoolClientKeys') ? { proxyPoolClientKeys: normalizeProxyPoolClientKeys(raw.proxyPoolClientKeys, { knownIds: poolClientKeyIds(config) }) } : {};
+  const next = { ...config, ...poolPatch, ...poolScopePatch, accounts: accs, accountMode: mode, activeAccount: active, concurrencyWaitMs: wait, poolFullWaitMs: poolWait,
     errorRules, ...legacyRuleProjection(errorRules), retryRules: normalizeRetryRules(pick('retryRules'), { strict: true }),
     quotaProtection: normalizeQuotaProtection(pick('quotaProtection'), { strict: true }), accountPipeline: pipeline, accountWorkflow: workflow,
     sessionProviderAffinityEnabled: affinity, exposeCatalog, knownModels: knownModels.map((m) => m.trim()),
@@ -4256,18 +4282,21 @@ function createPoolProxyAgent(proxyUrl) {
   return agent;
 }
 const proxyPoolRuntime = createProxyPoolRuntime({ secret: META.routingSecret, createAgent: createPoolProxyAgent, retireGraceMs: SSE_STREAM_IDLE_MS + 60_000 });
-const proxyPoolUsesFloppyData = () => { const pool = effectiveProxyPool(); return pool.enabled && pool.source === 'floppydata'; };
+const proxyPoolUsesFloppyData = () => { const pool = effectiveProxyPool(); return pool.enabled && pool.source === 'floppydata' && anyClientKeyUsesProxyPool(); };
 const floppyDataSource = createFloppyDataSource({
   getConfig: () => effectiveProxyPool().floppydata,
   normalizeUrl: (value) => normalizeProxyUrl(value, { strict: true }),
   // 来源已被切走/关闭时迟到的批次不得重新填充池。
   onBatch: (urls) => { if (proxyPoolUsesFloppyData()) proxyPoolRuntime.replaceEntries(urls); },
 });
-// 启动规范化、管理保存、热加载之后调用；只改变出口选择，不触碰账号运行时状态。
+// 启动规范化、管理保存、热加载、删除客户端密钥之后调用；只改变出口选择，不触碰账号运行时状态。
+// previous/next 是 proxyPool；按密钥开关读取已发布的 config（调用时已更新）。
 function applyProxyPoolConfig(previous, next) {
   proxyPoolRuntime.configure(next);
   if (!next.enabled) { floppyDataSource.stop(); proxyPoolRuntime.replaceEntries([]); return; }
   if (next.source === 'manual') { floppyDataSource.stop(); proxyPoolRuntime.replaceEntries(next.entries); return; }
+  // 所有密钥都不使用代理池：停止 FloppyData 导入并让现有条目退役；之后任一密钥改为 on 时由下方重新导入。
+  if (!anyClientKeyUsesProxyPool()) { floppyDataSource.stop(); proxyPoolRuntime.replaceEntries([]); return; }
   const wasFloppyData = !!previous?.enabled && previous.source === 'floppydata';
   if (!wasFloppyData || !floppyDataSource.running) {
     floppyDataSource.stop(); proxyPoolRuntime.replaceEntries([]); void floppyDataSource.start();
@@ -4279,12 +4308,16 @@ function applyProxyPoolConfig(previous, next) {
 applyProxyPoolConfig(PROXY_POOL_OFF, effectiveProxyPool());
 // GET /api/proxy-pool/status：只含短 id、协议、无凭据 endpointKey、状态与枚举。
 function proxyPoolStatusProjection() {
-  const pool = effectiveProxyPool(), runtime = proxyPoolRuntime.status();
+  const pool = effectiveProxyPool(), runtime = proxyPoolRuntime.status(), scope = effectivePoolClientKeys();
   return {
     enabled: pool.enabled, source: pool.source, strategy: pool.strategy,
     total: runtime.total, available: runtime.available, retiring: runtime.retiring, fallbacks: runtime.fallbacks,
     floppydata: pool.source === 'floppydata' ? floppyDataSource.status() : null,
     entries: runtime.entries,
+    // 只含 id、名称与枚举；effective 表示该密钥名下账号此刻是否走池。
+    clientKeys: clientKeyInventory().map(({ id, name }) => ({
+      id, name, mode: Object.hasOwn(scope.overrides, id) ? scope.overrides[id] : 'default', effective: pool.enabled === true && poolClientKeyMode(id, scope) === 'on',
+    })),
   };
 }
 // POST /api/proxy-pool/test：抽样条目各发一次空探测（与 /api/accounts/proxy-test 相同的空 messages 请求体），
@@ -4313,13 +4346,12 @@ async function testProxyPoolEntries(sample = PROXY_POOL_TEST_DEFAULT) {
   await Promise.all(Array.from({ length: Math.min(PROXY_POOL_TEST_CONCURRENCY, targets.length) }, worker));
   return results;
 }
-// 每次上游调用的出口（同步、不排队）。池关闭时与旧逻辑逐字等价：proxyUrl || account.proxyUrl || 直连。
+// 每次上游调用的出口（同步、不排队）。池关闭或账号所属密钥不使用池时与旧逻辑逐字等价：proxyUrl || account.proxyUrl || 直连。
 // 返回对象的 url/entry 不可枚举，展开或序列化时不会带出凭据。
 function resolveEgress(account, proxyUrl = '', egressHint = null) {
   let kind, url = '', entry = null, poolFallback = false, retryAt = null;
-  const pool = effectiveProxyPool();
   if (proxyUrl) { kind = 'explicit'; url = proxyUrl; }
-  else if (pool.enabled) {
+  else if (accountUsesProxyPool(account)) {
     const exclude = egressHint?.exclude instanceof Set && egressHint.exclude.size ? egressHint.exclude : undefined;
     const picked = proxyPoolRuntime.pickEntry({ exclude });
     if (picked.entry) { kind = 'pool'; entry = picked.entry; url = entry.url; }
@@ -5941,8 +5973,9 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
     }
     return 'stop';
   };
-  // 下一次 attempt 预计走池条目时不做账号级 HTML 429 等待；回退到账号出口（或池关闭）时与原逻辑一致。
-  const poolEgressExpected = () => effectiveProxyPool().enabled && proxyPoolRuntime.hasAvailable(egressExclude);
+  // 下一次 attempt 预计走池条目时不做账号级 HTML 429 等待；回退到账号出口（池关闭或本账号所属密钥不使用池）时与原逻辑一致。
+  // account 是本次调用（一个账号段）的参数且不会被重新赋值；首包前换号会以新账号重新调用 runChatChain。
+  const poolEgressExpected = () => accountUsesProxyPool(account) && proxyPoolRuntime.hasAvailable(egressExclude);
   try {
     for (let index = 0; index < maxAttempts; index++) {
       if (clientClosed) break;
@@ -6792,6 +6825,7 @@ async function dispatch(req, res) {
           return sendJSON(res, 400, { error: { message: 'expected only optional boolean wait' } });
         }
         if (!pool.enabled || pool.source !== 'floppydata') return sendJSON(res, 409, { error: { message: 'proxy pool refresh requires the enabled floppydata source' } });
+        if (!anyClientKeyUsesProxyPool()) return sendJSON(res, 409, { error: { message: 'proxy pool refresh requires at least one client key that uses the pool' } });
         // 一批最多 count 次 API 调用；默认立即返回 202，由控制台轮询 status。wait 仅等待有界时长。
         const pending = floppyDataSource.refresh().then(() => true, () => true);
         const done = body.wait ? await Promise.race([pending, new Promise((resolve) => setTimeout(resolve, PROXY_POOL_REFRESH_WAIT_MS, false).unref())]) : false;
@@ -6875,7 +6909,7 @@ async function dispatch(req, res) {
             statistics: { recent24h: recent, lifetimeRequests: lifetime ? lifetime.requests : 0, lifetimeErrors: lifetime ? lifetime.errors : 0 } };
         }),
         mode: config.accountMode, active: config.activeAccount, concurrencyWaitMs: config.concurrencyWaitMs, poolFullWaitMs: config.poolFullWaitMs,
-        accountWorkflow: config.accountWorkflow, proxyPool: effectiveProxyPool(), configurationRevision: configurationRevision(),
+        accountWorkflow: config.accountWorkflow, proxyPool: effectiveProxyPool(), proxyPoolClientKeys: effectivePoolClientKeys(), configurationRevision: configurationRevision(),
         selectionCounters: { persistent: true, persistenceError: selectionCounterPersistenceError, sequence: META.selectionCounters.sequence },
         quotaProtection: config.quotaProtection, errorRules: config.errorRules, retryRules: config.retryRules, accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline, sessionProviderAffinityEnabled: config.sessionProviderAffinityEnabled,
         cachePool: { minSize: configuredCachePoolSize(), maxSize: configuredCachePoolMaxSize(), lowSize: configuredCachePoolLowQuotaSize(), targetSize: configuredCachePoolTargetSize(), scope: 'per-client-key', actual: cachePoolActualByOwner(), binding: sessionBindingSummary() },
@@ -6905,7 +6939,7 @@ async function dispatch(req, res) {
         }
         if (body.retryRules !== undefined) requestedRetryRules = normalizeRetryRules(body.retryRules, { strict: true });
         if (body.quotaProtection !== undefined) requestedProtection = normalizeQuotaProtection(body.quotaProtection, { strict: true });
-        requestedProxyPool = proxyPoolPatch(body.proxyPool);
+        requestedProxyPool = { ...proxyPoolPatch(body.proxyPool), ...proxyPoolClientKeysPatch(body.proxyPoolClientKeys) };
         if (body.accountPipeline !== undefined) requestedPipeline = normalizeAccountPipeline(body.accountPipeline, {
           strict: true,
           fallbackOrder: config.accountPipeline.order,
@@ -7061,6 +7095,8 @@ async function dispatch(req, res) {
         try { validateClientKeys(next, { persisted: true }); if (adminPasswordOK(row.key)) throw new Error('client key must differ from admin password'); }
         catch (error) { return sendJSON(res, 400, { error: { message: error.message } }); }
         atomicWriteJson(CONFIG_PATH, next); config.clientKeys = next.clientKeys; markProbeConfigWrite();
+        // 新密钥按 default 生效；default 为 on 而其余密钥都是 off 时，这会重新启动 FloppyData 导入。
+        applyProxyPoolConfig(effectiveProxyPool(), effectiveProxyPool());
         return sendJSON(res, 200, { id: row.id, name: row.name, key: row.key });
       }
       const id = parts[0], existing = config.clientKeys.find((row) => row.id === id);
@@ -7088,9 +7124,19 @@ async function dispatch(req, res) {
       if (req.method === 'DELETE' && parts.length === 1) {
         if (config.accounts.some((account) => account.clientKeyId === id)) return sendJSON(res, 409, { error: { message: 'reassign owned accounts before revoking this key' } });
         const next = { ...config, clientKeys: config.clientKeys.filter((row) => row.id !== id) };
+        // 同一次写盘删掉它的代理池 override；字段存在则保持存在，缺省则保持缺省。
+        if (Object.hasOwn(config, 'proxyPoolClientKeys') && Object.hasOwn(config.proxyPoolClientKeys.overrides, id)) {
+          const overrides = { ...config.proxyPoolClientKeys.overrides }; delete overrides[id];
+          next.proxyPoolClientKeys = { ...config.proxyPoolClientKeys, overrides };
+        }
         validateClientKeys(next, { persisted: true });
-        atomicWriteJson(CONFIG_PATH, next); config.clientKeys = next.clientKeys; markProbeConfigWrite();
+        const previousProxyPool = effectiveProxyPool();
+        atomicWriteJson(CONFIG_PATH, next); config.clientKeys = next.clientKeys;
+        if (Object.hasOwn(next, 'proxyPoolClientKeys')) config.proxyPoolClientKeys = next.proxyPoolClientKeys;
+        markProbeConfigWrite();
         clientCatalogs.delete(id); notifyCapacityWaiters();
+        // 删掉最后一个使用池的 override 时需要停止 FloppyData 导入（或反之）。
+        applyProxyPoolConfig(previousProxyPool, effectiveProxyPool());
         return sendJSON(res, 200, { ok: true });
       }
       return sendJSON(res, 404, { error: { message: 'no route' } });

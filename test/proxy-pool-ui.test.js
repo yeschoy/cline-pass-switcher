@@ -42,7 +42,11 @@ test('proxy pool card exposes labelled native controls, FloppyData fields, statu
     assert.match(card, new RegExp(`for="${id}"`), `${id} is labelled`);
     assert.match(card, new RegExp(`id="${id}"`));
   }
-  assert.match(card, /所有上游调用使用代理池/);
+  assert.match(card, /启用代理池（按下方客户端密钥设置生效）/);
+  assert.match(card, /<div id="proxyPoolKeys" role="group" aria-labelledby="proxyPoolKeysTitle" aria-describedby="proxyPoolKeysHelp" hidden>/, 'per-key subsection is hidden until the server supports it');
+  assert.match(card, /<h3 id="proxyPoolKeysTitle"[^>]*>按客户端密钥<\/h3>/);
+  assert.match(card, /for="proxyPoolKeyDefault">未单独设置的密钥 <select id="proxyPoolKeyDefault"[^>]*><option value="on">使用<\/option><option value="off">不使用<\/option><\/select>/);
+  assert.match(card, /<th>客户端密钥<\/th><th>代理池<\/th><th>当前<\/th>/);
   assert.match(card, /<option value="round-robin">轮询<\/option><option value="random">随机<\/option>/);
   assert.match(card, /<option value="manual">手动导入<\/option><option value="floppydata">FloppyData<\/option>/);
   assert.match(card, /id="proxyPoolApiKey" type="password"/);
@@ -270,7 +274,8 @@ test('request/error log rows show bounded egress labels and the fallback marker'
 test('loadAll hydrates the pool draft from GET /api/accounts and loads the credential-free status', async () => {
   const h = harness(undefined);
   h.context.responses = { '/api/models': {}, '/api/accounts': accountsFixture(poolFixture({ strategy: 'random', throttleCooldownMs: 1500, floppydata: { ...FLOPPY_DEFAULT, apiKey: API_KEY, rotation: 15, refreshIntervalMs: 600000 } })), '/api/security': {}, '/api/security/client-keys': { keys: [{ id: 'legacy', name: 'Legacy' }] }, '/api/meta': {}, '/api/model-aliases': { aliases: {} },
-    '/api/proxy-pool/status': { enabled: true, source: 'manual', strategy: 'random', total: 2, available: 2, retiring: 0, fallbacks: { total: 0, recent: 0 }, floppydata: null, entries: [] } };
+    '/api/proxy-pool/status': { enabled: true, source: 'manual', strategy: 'random', total: 2, available: 2, retiring: 0, fallbacks: { total: 0, recent: 0 }, floppydata: null, entries: [], clientKeys: [{ id: 'legacy', name: 'Legacy', mode: 'off', effective: false }] } };
+  h.context.responses['/api/accounts'].proxyPoolClientKeys = { default: 'on', overrides: { legacy: 'off' } };
   h.run('render=()=>{}; api=async(path)=>{sent.push(path);return responses[path]}');
   await h.run('loadAll()');
   await new Promise((resolve) => setImmediate(resolve));
@@ -284,4 +289,65 @@ test('loadAll hydrates the pool draft from GET /api/accounts and loads the crede
   assert.equal(h.el('#proxyPoolApiKey').type, 'password');
   assert.match(h.el('#proxyPoolStatusSummary').textContent, /随机 · 总数 2 · 可用 2/);
   assert.deepEqual(h.json('collectAccounts().proxyPool.throttleCooldownMs'), 1500);
+  assert.equal(h.el('#proxyPoolKeys').hidden, false);
+  assert.deepEqual(h.json('collectAccounts().proxyPoolClientKeys'), { default: 'on', overrides: { legacy: 'off' } });
+  assert.match(h.el('#proxyPoolKeyBody').innerHTML, /<option value="off" selected>不使用<\/option>[\s\S]*不走代理池/);
+  assert.doesNotMatch(h.el('#accBody').innerHTML, />代理池</, 'the legacy-owned account does not show the pool badge');
+});
+
+const twoKeyHarness = (scope) => {
+  const h = harness(poolFixture());
+  h.context.scope = scope;
+  h.run(`CLIENT_KEYS=[{id:'legacy',name:'Legacy'},{id:'ck_a',name:'A <b>'},{id:'ck_b',name:'B'}];
+    ACCS.accounts[0].clientKeyId='ck_a';
+    ACCS.accounts.push({ id:'b0', clientKeyId:'ck_b', name:'b0', note:'', key:'fake1', enabled:true, maxConcurrent:0, maxRpm:0, weight:1, priority:100, proxyUrl:'', headers:{}, perModel:{}, activeCount:0 });
+    if (scope) ACCS.proxyPoolClientKeys=scope; hydrateProxyPoolKeys(ACCS.proxyPoolClientKeys); renderAccounts();`);
+  return h;
+};
+const accountRows = (h) => h.el('#accBody').innerHTML.split('<tr>').filter(Boolean);
+
+test('per-client-key subsection hydrates modes, edits only the draft, omits follow-default rows and scopes badges and drawer hints to effective owners', () => {
+  const h = twoKeyHarness({ default: 'off', overrides: { ck_a: 'on', ck_gone: 'on' } });
+  assert.equal(h.el('#proxyPoolKeys').hidden, false);
+  assert.equal(h.el('#proxyPoolKeyDefault').value, 'off');
+  const rows = h.el('#proxyPoolKeyBody').innerHTML.split('<tr>').filter(Boolean);
+  assert.equal(rows.length, 3);
+  assert.match(rows[0], /Legacy[\s\S]*<option value="default" selected>跟随默认[\s\S]*不走代理池/);
+  assert.match(rows[1], /A &lt;b&gt;[\s\S]*aria-label="A &lt;b&gt; 是否使用代理池"[\s\S]*<option value="on" selected>使用[\s\S]*badge green">走代理池/);
+  assert.match(rows[2], /B[\s\S]*<option value="default" selected>跟随默认[\s\S]*不走代理池/);
+  assert.deepEqual(h.json('collectAccounts().proxyPoolClientKeys'), { default: 'off', overrides: { ck_a: 'on' } }, 'unknown ids are never submitted');
+
+  const [a0, b0] = accountRows(h);
+  assert.match(a0, /<span class="badge"[^>]*>代理池<\/span>/, 'A-owned account shows the pool badge');
+  assert.doesNotMatch(b0, />代理池</, 'B-owned account does not');
+  h.run('openAccountDrawer(0)');
+  assert.equal(h.el('#drawerProxyPoolHint').hidden, false);
+  h.run('closeAccountDrawer(true); openAccountDrawer(1)');
+  assert.equal(h.el('#drawerProxyPoolHint').hidden, true);
+  h.run('closeAccountDrawer(true)');
+
+  h.run("changeProxyPoolKeyMode('ck_a','default'); changeProxyPoolKeyMode('ck_b','off'); changeProxyPoolKeyDefault('on'); changeProxyPoolKeyMode('ck_zzz','on'); changeProxyPoolKeyMode('ck_b','maybe'); changeProxyPoolKeyDefault('default')");
+  assert.deepEqual(h.json('collectAccounts().proxyPoolClientKeys'), { default: 'on', overrides: { ck_b: 'off' } });
+  assert.match(h.el('#accMsg').textContent, /页面草稿/);
+  h.run('renderAccounts()');
+  assert.match(accountRows(h)[0], />代理池</, 'badges follow the saved configuration, not the draft');
+  assert.doesNotMatch(accountRows(h)[1], />代理池</);
+
+  // The live status projection drives the "current" column when it is loaded.
+  h.run("renderProxyPoolStatus({ enabled: true, source: 'manual', strategy: 'round-robin', total: 0, available: 0, retiring: 0, fallbacks: { total: 0, recent: 0 }, floppydata: null, entries: [], clientKeys: [{ id: 'legacy', name: 'Legacy', mode: 'default', effective: true }, { id: 'ck_a', name: 'A', mode: 'on', effective: false }] })");
+  const live = h.el('#proxyPoolKeyBody').innerHTML.split('<tr>').filter(Boolean);
+  assert.match(live[0], /badge green">走代理池/); assert.match(live[1], /不走代理池/);
+
+  // A disabled pool hides every badge regardless of the key setting.
+  h.run('ACCS.proxyPool.enabled=false; renderAccounts()');
+  assert.doesNotMatch(h.el('#accBody').innerHTML, />代理池</);
+});
+
+test('servers without proxyPoolClientKeys hide the per-key subsection, keep the old payload and show badges for every owner of an enabled pool', () => {
+  const h = twoKeyHarness(undefined);
+  assert.equal(h.el('#proxyPoolKeys').hidden, true);
+  assert.equal(h.run("Object.hasOwn(collectAccounts(),'proxyPoolClientKeys')"), false);
+  assert.ok(accountRows(h).every((row) => />代理池</.test(row)), 'absent field means every key uses the pool');
+  h.run('hydrateProxyPoolKeys(null)');
+  assert.equal(h.el('#proxyPoolKeys').hidden, true);
 });

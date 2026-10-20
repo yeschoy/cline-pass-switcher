@@ -200,6 +200,7 @@ location / {
 | `perModel` | 每模型路由：`{ upstreams, exclude, pinMode, sort, maxRetries, providerCooldownMs }`。`upstreams` 非空时是权威来源顺序，否则使用探测到的渠道顺序；`pinMode: "strict"` 首次固定来源顺序首个可用渠道，失败后从剩余渠道按 Provider-model 24h 成功率回退；`pinMode: "preferred"` 从首次起就用同一健康顺序。直连管道每次 named HTTP attempt 只注入一个 provider；规划器/网关管道一次 HTTP 请求注入完整 `only`+`order`，`pinMode` 与健康顺序只决定该列表的排列，`maxRetries` 不会在同一账号内再开额外的 provider 尝试（账号替换仍独立生效）。`maxRetries` 是首试后的外层重试次数，`providerCooldownMs` 为 0～300000（0 关闭）并在首包前 500/504/网络超时/429/不可用 后短暂跳过该 Provider（502 不打开该 circuit）。账号内同名配置整项覆盖全局配置，不逐字段合并 |
 | `apiKey` | 旧版单 key 字段，启动时自动迁移进 `accounts` |
 | `proxyPool` | 可选的全局上游出口代理池（缺省即关闭，启动时不会补写）：`{ enabled, strategy: "round-robin" \| "random", source: "manual" \| "floppydata", egressRetries（0～5，默认 2）, throttleCooldownMs（默认 60000）, failureCooldownMs（默认 30000）, connectTimeoutMs（默认 10000）, maxRpmPerProxy（0 不限）, entries（手动来源，最多 2000 条代理 URL）, floppydata: { apiKey, type, country, state, city, protocol, rotation, count（默认 100）, refreshIntervalMs（默认 180000）, apiBase } }`。启动、保存与热加载都严格校验，非法即拒绝且不改文件；旧客户端保存省略该字段时保留现值。详见下文“代理池（出口 IP 分摊）” |
+| `proxyPoolClientKeys` | 可选的按客户端密钥代理池开关（缺省等同 `{ default: "on", overrides: {} }`，启动时不会补写）：`{ default: "on" \| "off", overrides: { "<clientKeyId>": "on" \| "off" } }`。严格校验，详见下文“代理池”的“按客户端密钥” |
 
 定期校验回退：管理员先通过控制台或 `POST /api/providers/probe-schedule` 提交完整配置并将 `enabled` 置为 `false`，确认只停止**新的**后台付费请求；旧自动避开保持生效，逐账号/模型/渠道显式恢复后才能解除。升级前备份完整 DATA_DIR（配置、元数据及认证数据），旧镜像与新格式不能假定可安全共享写入；回退旧版须停服务后在隔离目录恢复整份旧备份。运行中的请求取消/失败也可能已在发出前保守计入预算。定期校验、负对照及生产发布不应以本地 mock 通过作为真实上游验证授权。
 
@@ -380,7 +381,7 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=cline-pass/glm-5.2
 
 **行为**：
 
-- 开启后，所有账号的每次上游调用（聊天、测试、探测、渠道校验、额度刷新、模型目录）都从池里选一个代理，覆盖账号自己的固定代理。账号选择、会话粘性和缓存池不受影响。
+- 开启后，使用代理池的客户端密钥（默认是全部密钥，见下方“按客户端密钥”）名下账号的每次上游调用（聊天、测试、探测、渠道校验、额度刷新、模型目录）都从池里选一个代理，覆盖账号自己的固定代理。账号选择、会话粘性和缓存池不受影响。
 - 遇到 HTML 429 或代理连接失败（拒绝连接、认证失败、CONNECT 非 200、连接超时）时，该代理进入短时冷却。聊天请求若在首包前遇到这类失败，会立即换一个本次还没用过的代理重试，最多 `egressRetries` 次；测试、探测、额度刷新和模型目录等其他调用只尝试一次。账号不会因此被降级、冷却或退避。重试用完仍是 HTML 429 时返回 429，`Retry-After` 取池中最早恢复时间（1～60 秒）。同一次尝试内不会改走直连或账号代理。
 - 池中没有可用代理（为空、全部冷却，或都达到 `maxRpmPerProxy`）时，本次调用退回账号原来的出口：配了固定代理就走固定代理，否则直连。日志里会标记 `poolFallback`。
 - 关闭开关（控制台保存，或改 `config.json` 后热加载 / SIGHUP）后立即恢复原行为：各账号走自己的 `proxyUrl` 或直连，FloppyData 定时导入同时停止。
@@ -403,11 +404,23 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=cline-pass/glm-5.2
 
 把 `source` 改为 `"floppydata"` 即使用自动导入；此时 `entries` 可以留空，但必须填写 `apiKey`。省略的字段使用默认值。
 
+**按客户端密钥**：仍然只有一个池，但可以按客户端密钥（Legacy 和“独立客户端密钥”，不是账号的上游 key）决定谁使用它，例如只让某个用户的流量走住宅代理，以控制流量费用。顶层字段 `proxyPoolClientKeys` 缺省时等同 `{ "default": "on", "overrides": {} }`，即所有密钥都使用（与之前一致），启动时不会补写：
+
+```json
+"proxyPoolClientKeys": { "default": "off", "overrides": { "<clientKeyId>": "on" } }
+```
+
+- `default` 是未单独设置的密钥的取值；`overrides` 的键必须是 `legacy` 或现有客户端密钥的 id，值只能是 `on` / `off`。非法值在启动、保存和热加载时都会被拒绝，且不改文件。
+- 某个密钥不使用代理池时，它名下的账号与“池关闭”完全相同：走账号自己的 `proxyUrl` 或直连，遇到 HTML 429 照常做账号级退避，不记 `poolFallback`，也不计入池的请求数。
+- 所有密钥都不使用时，FloppyData 停止导入并让现有条目退役；之后任一密钥改为使用会立即重新导入。手动条目不受影响。
+- 控制台“代理池”卡片的“按客户端密钥”小节可以设置默认值和每个密钥（跟随默认 / 使用 / 不使用），并显示当前是否生效；随“保存账号配置”一起保存。删除客户端密钥时，它的设置会一起删除。
+- 回滚到不认识该字段的旧镜像时，旧镜像会保留但忽略它，回到“全局开关”语义。
+
 **控制台与 API**（均需管理员会话）：
 
-- 账号页的“代理池”卡片可以设置开关、策略、来源和各项参数。手动条目默认掩码显示，点“显示并编辑”才出现明文文本框。FloppyData 部分有“立即刷新”和“查询余额”按钮。卡片中还有条目状态表和抽样测试。开启后，账号列表的出口徽标会显示“代理池”。
-- `GET/POST /api/accounts` 读写 `proxyPool` 字段。
-- `GET /api/proxy-pool/status`：返回条目状态，只含短 id、协议、无凭据端点和状态枚举。
+- 账号页的“代理池”卡片可以设置开关、策略、来源和各项参数。手动条目默认掩码显示，点“显示并编辑”才出现明文文本框。FloppyData 部分有“立即刷新”和“查询余额”按钮。卡片中还有条目状态表和抽样测试。开启后，所属密钥实际使用代理池的账号，其出口徽标会显示“代理池”。
+- `GET/POST /api/accounts` 读写 `proxyPool` 与 `proxyPoolClientKeys` 字段。
+- `GET /api/proxy-pool/status`：返回条目状态，只含短 id、协议、无凭据端点和状态枚举；`clientKeys` 列出每个密钥的 id、名称、设置（`default` / `on` / `off`）和是否生效，不含密钥值。
 - `POST /api/proxy-pool/refresh`：立即导入一批 FloppyData 代理。默认后台执行并返回 202，控制台自动轮询状态；请求体传 `{"wait": true}` 时最多等待 30 秒再返回结果。
 - `GET /api/proxy-pool/balance`：查询 FloppyData 剩余流量。
 - `POST /api/proxy-pool/test`：抽样测试条目连通性，`{ "sample": 1～50 }`，不影响冷却状态。

@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "后端总入口与开发前检查清单"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "全局代理池契约、resolveEgress、HTML 429 换代理与账号退避规则"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "proxyPool 配置契约、缺省不写回、strict 校验、旧镜像兼容"}
+{"file": ".trellis/spec/backend/client-key-guidelines.md", "reason": "客户端密钥归属、clientKeys 行结构与删除路由约束"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "代理池卡片草稿与 collectAccounts 规则"}
+{"file": ".trellis/tasks/archive/2026-10/10-20-proxy-pool/design.md", "reason": "上一任务的代理池整体设计"}

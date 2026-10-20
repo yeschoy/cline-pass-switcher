@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "出口判定与重试语义核对"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "字节不变、400 不写、旧镜像兼容"}
+{"file": ".trellis/spec/backend/client-key-guidelines.md", "reason": "密钥值不出现在投影中、删除路由一致性"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "控制台改动质量"}

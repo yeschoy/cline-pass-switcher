@@ -111,22 +111,22 @@ export async function stopServer(child) {
 
 const SSE_OK = 'data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n';
 // 默认上游：GET /models 返回目录，其余 GET 500（额度刷新失败不影响路由）；聊天由 responder 决定，默认 200（按 stream 返回 SSE 或 JSON）。
-// s.seen 记录每个聊天请求经过的出口，s.seenGet 记录 GET 请求的 { path, via }。
+// s.seen 记录每个聊天请求经过的出口，s.chats 记录 { via, auth }，s.seenGet 记录 GET 请求的 { path, via, auth }（auth 为上游 Authorization，占位值）。
 export async function setup(t, { metadata = null, responder = null, env = {} } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-proxy-pool-'));
   const registry = new Map();
-  const s = { dir, registry, seen: [], seenGet: [], file: path.join(dir, 'config.json'), proxies: [] };
+  const s = { dir, registry, seen: [], chats: [], seenGet: [], file: path.join(dir, 'config.json'), proxies: [] };
   const upstream = http.createServer((req, res) => {
     let raw = '';
     req.on('data', (chunk) => { raw += chunk; });
     req.on('end', () => {
       const via = registry.get(req.socket.remotePort) || 'direct';
       if (req.method === 'GET') {
-        s.seenGet.push({ path: req.url, via });
+        s.seenGet.push({ path: req.url, via, auth: req.headers.authorization || null });
         if (req.url === '/models') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ data: [{ id: 'cline-pass/catalog-model' }] })); }
         res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end('{}');
       }
-      s.seen.push(via);
+      s.seen.push(via); s.chats.push({ via, auth: req.headers.authorization || null });
       let body = {};
       try { body = JSON.parse(raw || '{}'); } catch {}
       if (responder) return responder(via, res, { body, headers: req.headers });
