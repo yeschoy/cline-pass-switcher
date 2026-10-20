@@ -868,3 +868,26 @@ test('redactor keeps working with a 2000-entry proxy pool worth of usernames', (
   assert.equal(manualRedactor.limited, false, 'seed limit fits a full manual pool');
   assert.doesNotMatch(manualRedactor.text(`echo user-test-@1999 and pass-test-:1999`), /user-test-|pass-test-/);
 });
+
+test('seeded redactors match a fresh redactor, reuse the compiled base and stay isolated', () => {
+  const seeds = [...Array.from({ length: 2000 }, (_, i) => [`user-test-seeded-${i}`, `pass-test-seeded-${i}`]).flat(), undefined, '', 'Bearer-like-account-key-0001'];
+  const sample = JSON.stringify({ message: `ok user-test-seeded-77 pass-test-seeded-1999 Bearer-like-account-key-0001 ${'filler '.repeat(500)}` });
+  const fresh = new DetailRedactor(seeds).text(sample);
+  let t0 = performance.now();
+  const first = DetailRedactor.seeded(seeds);
+  const coldMs = performance.now() - t0;
+  assert.equal(first.text(sample), fresh);
+  t0 = performance.now();
+  const second = DetailRedactor.seeded([...seeds]);
+  const warmMs = performance.now() - t0;
+  assert.equal(second.text(sample), fresh);
+  assert.ok(warmMs < coldMs, `cached fork (${warmMs}ms) must be cheaper than a cold build (${coldMs}ms)`);
+  // A fork that learns a new secret recompiles for itself only.
+  second.add('late-learned-secret-xyz');
+  assert.doesNotMatch(second.text('leak late-learned-secret-xyz'), /late-learned-secret-xyz/);
+  assert.match(first.text('leak late-learned-secret-xyz'), /late-learned-secret-xyz/);
+  assert.match(DetailRedactor.seeded(seeds).text('leak late-learned-secret-xyz'), /late-learned-secret-xyz/);
+  // Limits carry over from the seed list exactly like the constructor.
+  const overflow = Array.from({ length: MAX_REDACTION_SECRETS + 10 }, (_, i) => `overflow-seed-${i}`);
+  assert.equal(DetailRedactor.seeded(overflow).limited, new DetailRedactor(overflow).limited);
+});

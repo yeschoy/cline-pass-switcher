@@ -121,7 +121,7 @@ POST /api/model-aliases
 GET/DELETE /api/logs/requests
 GET/DELETE /api/logs/errors
 GET  /api/proxy-pool/status      // credential-free pool/entry projection
-POST /api/proxy-pool/refresh     // body not read; 409 unless enabled floppydata source
+POST /api/proxy-pool/refresh     // {} | { wait: boolean }; 409 unless enabled floppydata source
 GET  /api/proxy-pool/balance     // FloppyData traffic balance on demand
 POST /api/proxy-pool/test        // exact {} or { sample: 1-50 }; default 10
 ```
@@ -1071,7 +1071,10 @@ GET  /api/proxy-pool/status  -> { enabled, source, strategy, total, available, r
        entries: [{ entryId, scheme, endpointKey, state: ok|cooldown|rate-limited|retiring,
                    cooldownUntil, reason: throttle|connect|null, rpmUsed, inFlight,
                    recent: { requests, throttled, connectFailures } }] }
-POST /api/proxy-pool/refresh -> 200 status projection | 409 unless enabled && source=floppydata
+POST /api/proxy-pool/refresh <- {} | { wait: boolean } (any other field/type -> 400)
+       -> 202 status projection (batch started or already running; the console polls GET status, bounded)
+       | 200 status projection (wait: true and the batch settled within PROXY_POOL_REFRESH_WAIT_MS = 30000)
+       | 409 unless enabled && source=floppydata
 GET  /api/proxy-pool/balance -> 200 { ok: true, availableBytes, availableGb, expiringAt }
        | 409 { error: { message, code: 'unauthorized' } } (no apiKey)
        | 502 { error: { message, code: <FLOPPYDATA_ERRORS> } }

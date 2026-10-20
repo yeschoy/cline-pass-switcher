@@ -221,6 +221,15 @@ test('FloppyData draft fields, refresh, balance and test calls use fixed endpoin
   h.context.responses['/api/proxy-pool/refresh'] = { error: { message: 'proxy pool refresh requires the enabled floppydata source' } };
   await h.run('refreshProxyPoolSource()');
   assert.match(h.el('#proxyPoolFloppyStatus').textContent, /立即刷新失败：需先保存并启用 FloppyData 来源/);
+
+  // 202 while the batch runs: poll status until the refresh settles.
+  h.context.responses['/api/proxy-pool/refresh'] = { ...status, floppydata: { ...status.floppydata, state: 'refreshing' } };
+  h.context.responses['/api/proxy-pool/status'] = status;
+  h.run('setTimeout=(fn)=>{fn();return 0}');
+  const polled = h.calls.length;
+  await h.run('refreshProxyPoolSource()');
+  assert.deepEqual(h.calls.slice(polled).map((call) => call.path), ['/api/proxy-pool/refresh', '/api/proxy-pool/status']);
+  assert.match(h.el('#proxyPoolFloppyStatus').textContent, /错误 余额不足/);
 });
 
 test('manual masked rows show entry id and state only when the draft matches the running batch; badges and drawer hint follow the saved switch', () => {

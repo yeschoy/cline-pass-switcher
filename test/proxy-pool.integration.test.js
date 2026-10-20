@@ -206,9 +206,15 @@ test('floppydata refresh/balance endpoints project only enums and never echo the
   const status = await waitFor(async () => { const value = await s.get('/api/proxy-pool/status'); return value.floppydata?.lastError ? value : null; }, 'first batch result');
   assert.equal(status.floppydata.lastError, 'insufficient_balance');
   assert.equal(status.total, 0);
-  const refreshed = await s.post('/api/proxy-pool/refresh', {});
+  const refreshed = await s.post('/api/proxy-pool/refresh', { wait: true });
   assert.equal(refreshed.status, 200);
   assert.equal(refreshed.data.floppydata.lastError, 'insufficient_balance');
+  // Default refresh returns immediately (202) while the batch runs; wait must be boolean.
+  const started = await s.post('/api/proxy-pool/refresh', {});
+  assert.equal(started.status, 202);
+  assert.equal(started.data.floppydata.state, 'refreshing');
+  assert.equal((await s.post('/api/proxy-pool/refresh', { wait: 'yes' })).status, 400);
+  await waitFor(async () => (await s.get('/api/proxy-pool/status')).floppydata?.state !== 'refreshing', 'background refresh settles');
   // Pool empty → the chat falls back to the account egress (direct here) with poolFallback.
   assert.equal(await s.chat(), 200);
   assert.deepEqual(s.seen, ['direct']);
@@ -338,7 +344,7 @@ test('FloppyData batch swap keeps an in-flight SSE stream intact, retires then d
 
   // Swap to batch 2 while the stream is still open.
   mode = 2;
-  const refreshed = await s.post('/api/proxy-pool/refresh', {});
+  const refreshed = await s.post('/api/proxy-pool/refresh', { wait: true });
   assert.equal(refreshed.status, 200);
   assert.equal(refreshed.data.total, 4);
   assert.equal(refreshed.data.retiring, 1, 'only the entry carrying the stream is kept while retiring');
@@ -365,7 +371,7 @@ test('FloppyData batch swap keeps an in-flight SSE stream intact, retires then d
 
   // A batch with fewer than half successes keeps the current batch and reports the enum.
   mode = 'partial';
-  const partial = await s.post('/api/proxy-pool/refresh', {});
+  const partial = await s.post('/api/proxy-pool/refresh', { wait: true });
   assert.equal(partial.status, 200);
   assert.equal(partial.data.floppydata.state, 'error');
   assert.equal(partial.data.floppydata.lastError, 'upstream_error');
@@ -384,10 +390,15 @@ test('FloppyData batch swap keeps an in-flight SSE stream intact, retires then d
   assertFilesClean(s.dir);
 });
 
-test('the HEAD image starts on a config with proxyPool and metadata written after pool traffic, and keeps proxyPool across its own save', async (t) => {
+test('the pre-pool image starts on a config with proxyPool and metadata written after pool traffic, and keeps proxyPool across its own save', async (t) => {
   const repo = path.resolve('.');
-  try { execFileSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: repo, stdio: 'ignore' }); }
-  catch { t.skip('not inside a git checkout'); return; }
+  // The "old image" is the parent of the commit that introduced lib/proxy-pool.js (HEAD itself once uncommitted).
+  let oldRev;
+  try {
+    const added = execFileSync('git', ['log', '--diff-filter=A', '--format=%H', '-1', '--', 'lib/proxy-pool.js'], { cwd: repo, encoding: 'utf8' }).trim();
+    oldRev = added ? `${added}^` : 'HEAD';
+    execFileSync('git', ['rev-parse', '--verify', `${oldRev}^{commit}`], { cwd: repo, stdio: 'ignore' });
+  } catch { t.skip('not inside a git checkout with the pre-pool commit'); return; }
   const s = await setup(t);
   const a = await s.socks('A', { auth });
   const pool = manualPool([socksUrl(a.port, 'user-test-session-a')], { floppydata: { apiKey: API_KEY } });
@@ -404,7 +415,7 @@ test('the HEAD image starts on a config with proxyPool and metadata written afte
 
   const oldDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-head-image-'));
   t.after(() => fs.rmSync(oldDir, { recursive: true, force: true }));
-  execSync(`git archive HEAD server.js package.json lib public | tar -x -C "${oldDir}"`, { cwd: repo, stdio: ['ignore', 'ignore', 'pipe'] });
+  execSync(`git archive ${oldRev} server.js package.json lib public | tar -x -C "${oldDir}"`, { cwd: repo, stdio: ['ignore', 'ignore', 'pipe'] });
   fs.symlinkSync(path.join(repo, 'node_modules'), path.join(oldDir, 'node_modules'), 'dir');
   s.child = await startServer(s.dir, {}, { cwd: oldDir });
   const view = await s.get();

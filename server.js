@@ -4290,7 +4290,7 @@ function proxyPoolStatusProjection() {
 // POST /api/proxy-pool/test：抽样条目各发一次空探测（与 /api/accounts/proxy-test 相同的空 messages 请求体），
 // 用与真实池流量相同构造（CONNECT 非 200 即失败）的一次性 agent、显式代理出口，不带任何账号 key（不占账号 lease/RPM，不产生计费调用）；
 // 只看隧道能否到达上游（任何 HTTP 状态即 ok），不写条目冷却、不计条目 RPM。
-const PROXY_POOL_TEST_MAX = 50, PROXY_POOL_TEST_DEFAULT = 10, PROXY_POOL_TEST_CONCURRENCY = 8, PROXY_POOL_TEST_TIMEOUT_MS = 15000;
+const PROXY_POOL_TEST_MAX = 50, PROXY_POOL_TEST_DEFAULT = 10, PROXY_POOL_TEST_CONCURRENCY = 8, PROXY_POOL_TEST_TIMEOUT_MS = 15000, PROXY_POOL_REFRESH_WAIT_MS = 30000;
 async function testProxyPoolEntries(sample = PROXY_POOL_TEST_DEFAULT) {
   const targets = proxyPoolRuntime.sampleEntries(Math.min(PROXY_POOL_TEST_MAX, sample));
   const results = new Array(targets.length);
@@ -5492,7 +5492,7 @@ function redactSecrets(value) {
 const errText = (e) => redactSecrets(e == null ? '' : typeof e === 'string' ? e : JSON.stringify(e));
 function ordinaryFailureReason(result, sensitiveValues = []) {
   const seeds = [config.apiKey, ...clientKeyInventory(config, PROXY_KEY).map((item) => item.key), ...activeClientSecrets.keys(), process.env.PROXY_KEY, ...config.accounts.flatMap((account) => [account.key, account.proxyUrl, ...Object.values(account.headers || {})]), ...configuredEgressSecrets({ includeUrls: false })].filter(Boolean);
-  const redactor = new DetailRedactor(seeds);
+  const redactor = DetailRedactor.seeded(seeds);
   redactor.learnHeaders(result?.responseHeaders || {});
   redactor.learn(result?.structuredError);
   return redactor.text(safeReason(result?.note || result?.out?.error?.message || result?.netError || '', sensitiveValues));
@@ -6787,9 +6787,15 @@ async function dispatch(req, res) {
       const pool = effectiveProxyPool();
       if (req.method === 'GET' && p === '/api/proxy-pool/status') return sendJSON(res, 200, proxyPoolStatusProjection());
       if (req.method === 'POST' && p === '/api/proxy-pool/refresh') {
+        const body = await readJsonBody(req);
+        if (!isPlainObject(body) || Object.keys(body).some((key) => key !== 'wait') || (body.wait !== undefined && typeof body.wait !== 'boolean')) {
+          return sendJSON(res, 400, { error: { message: 'expected only optional boolean wait' } });
+        }
         if (!pool.enabled || pool.source !== 'floppydata') return sendJSON(res, 409, { error: { message: 'proxy pool refresh requires the enabled floppydata source' } });
-        await floppyDataSource.refresh();
-        return sendJSON(res, 200, proxyPoolStatusProjection());
+        // 一批最多 count 次 API 调用；默认立即返回 202，由控制台轮询 status。wait 仅等待有界时长。
+        const pending = floppyDataSource.refresh().then(() => true, () => true);
+        const done = body.wait ? await Promise.race([pending, new Promise((resolve) => setTimeout(resolve, PROXY_POOL_REFRESH_WAIT_MS, false).unref())]) : false;
+        return sendJSON(res, done ? 200 : 202, proxyPoolStatusProjection());
       }
       if (req.method === 'GET' && p === '/api/proxy-pool/balance') {
         if (!pool.floppydata?.apiKey) return sendJSON(res, 409, { error: { message: 'floppydata apiKey is not configured', code: 'unauthorized' } });

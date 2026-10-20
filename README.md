@@ -408,7 +408,7 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=cline-pass/glm-5.2
 - 账号页的“代理池”卡片可以设置开关、策略、来源和各项参数。手动条目默认掩码显示，点“显示并编辑”才出现明文文本框。FloppyData 部分有“立即刷新”和“查询余额”按钮。卡片中还有条目状态表和抽样测试。开启后，账号列表的出口徽标会显示“代理池”。
 - `GET/POST /api/accounts` 读写 `proxyPool` 字段。
 - `GET /api/proxy-pool/status`：返回条目状态，只含短 id、协议、无凭据端点和状态枚举。
-- `POST /api/proxy-pool/refresh`：立即导入一批 FloppyData 代理。
+- `POST /api/proxy-pool/refresh`：立即导入一批 FloppyData 代理。默认后台执行并返回 202，控制台自动轮询状态；请求体传 `{"wait": true}` 时最多等待 30 秒再返回结果。
 - `GET /api/proxy-pool/balance`：查询 FloppyData 剩余流量。
 - `POST /api/proxy-pool/test`：抽样测试条目连通性，`{ "sample": 1～50 }`，不影响冷却状态。
 - 请求日志和错误日志中的 `egress` 字段为 `direct`、`account-proxy` 或 `pool:<8 位短 id>`，不会出现代理 URL、用户名或密码。
