@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "路由/transport/凭据投影契约核对"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "旧配置字节不变、metadata schema 不变、校验 400 不写文件"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "日志与 API 中无代理 URL/凭据"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "不回退直连、池耗尽错误形态"}
+{"file": ".trellis/spec/backend/deployment-guidelines.md", "reason": "ulimit 提示与旧镜像回滚说明"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "控制台改动质量检查"}

@@ -1,0 +1,11 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "后端总入口与开发前检查清单"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "账号代理边界、transport/agent、RPM permit、HTML 429 网关分类、凭据投影规则"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "config/metadata 契约、proxyUrl 规范化、proxyHealth 键格式、旧镜像兼容"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "代理失败不回退直连、传输失败分类、permit 提交时机"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "普通日志投影白名单、trace 字段、脱敏种子、详细日志 redactor"}
+{"file": ".trellis/spec/backend/admin-auth-guidelines.md", "reason": "新管理路由的 Cookie/CSRF 边界"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "控制台代理池面板与账号抽屉改动"}
+{"file": ".trellis/tasks/10-20-proxy-pool/research/upstream-call-paths.md", "reason": "全部上游调用路径与 clineRequest 插入点"}
+{"file": ".trellis/tasks/10-20-proxy-pool/research/retry-and-affinity.md", "reason": "HTML 429 重试循环、settleAttempt、会话粘性与 RPM 模式"}
+{"file": ".trellis/tasks/10-20-proxy-pool/research/config-api-tests.md", "reason": "配置四处接入点、管理 API、假 SOCKS/CONNECT 测试方法"}
+{"file": ".trellis/tasks/10-20-proxy-pool/research/floppydata-api.md", "reason": "FloppyData connections/balances 接口契约、用户名格式、网关端口与计费"}
