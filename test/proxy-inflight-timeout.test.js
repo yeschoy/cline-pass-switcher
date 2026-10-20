@@ -16,7 +16,17 @@ const tlsOptions = {
   cert: fs.readFileSync(certPath),
 };
 const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
-const close = (server) => new Promise((resolve) => server.close(resolve));
+// Keep-alive agents and piped proxy tunnels keep sockets open, so close() alone never resolves.
+const trackSockets = (server) => {
+  const sockets = new Set();
+  server.on('connection', (socket) => { sockets.add(socket); socket.once('close', () => sockets.delete(socket)); });
+  return sockets;
+};
+const close = (server) => new Promise((resolve) => {
+  server.close(resolve);
+  for (const socket of server.trackedSockets || []) socket.destroy();
+});
+const tracked = (server) => { server.trackedSockets = trackSockets(server); return server; };
 
 function applyNestedSocketTimeouts(socket, ms) {
   for (let current = socket; current; current = current._parent || current.socket) {
@@ -25,7 +35,7 @@ function applyNestedSocketTimeouts(socket, ms) {
 }
 
 function startSocksProxy() {
-  const socks = net.createServer((client) => {
+  const socks = tracked(net.createServer((client) => {
     let buffer = Buffer.alloc(0), stage = 0;
     client.on('data', function onData(chunk) {
       buffer = Buffer.concat([buffer, chunk]);
@@ -63,10 +73,11 @@ function startSocksProxy() {
           client.pipe(target);
           target.pipe(client);
         });
+        client.once('close', () => target.destroy());
         target.on('error', () => client.destroy());
       }
     });
-  });
+  }));
   return listen(socks).then((port) => ({ socks, port }));
 }
 
@@ -103,22 +114,24 @@ test('server proxyAgentOptions omit timeout while direct agents keep idle pool t
 });
 
 test('SOCKS+TLS: agent timeout hang-up; omit timeout or nested sync keeps attempt deadline', async (t) => {
-  const upstream = https.createServer(tlsOptions, (req, res) => {
+  const upstream = tracked(https.createServer(tlsOptions, (req, res) => {
     req.resume();
     setTimeout(() => {
       if (res.destroyed) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end('{"ok":true}');
     }, 800);
-  });
+  }));
   const upstreamPort = await listen(upstream);
   const { socks, port: socksPort } = await startSocksProxy();
-  t.after(async () => { await close(socks); await close(upstream); });
+  const agents = [];
+  const agent = (options) => { const a = new SocksProxyAgent(proxyUrl, options); agents.push(a); return a; };
+  t.after(async () => { for (const a of agents) a.destroy(); await close(socks); await close(upstream); });
 
   const proxyUrl = `socks5://127.0.0.1:${socksPort}`;
   const url = `https://127.0.0.1:${upstreamPort}/`;
   const hung = await onceHttps(url, {
-    agent: new SocksProxyAgent(proxyUrl, { keepAlive: true, timeout: 400 }),
+    agent: agent({ keepAlive: true, timeout: 400 }),
     timeoutMs: 3000,
   });
   assert.equal(hung.ok, false, `expected hang up, got ${JSON.stringify(hung)}`);
@@ -126,7 +139,7 @@ test('SOCKS+TLS: agent timeout hang-up; omit timeout or nested sync keeps attemp
   assert.ok(hung.ms < 700, `agent timeout must win before request timeout: ${hung.ms}ms`);
 
   const synced = await onceHttps(url, {
-    agent: new SocksProxyAgent(proxyUrl, { keepAlive: true, timeout: 400 }),
+    agent: agent({ keepAlive: true, timeout: 400 }),
     timeoutMs: 3000,
     syncNested: true,
   });
@@ -134,7 +147,7 @@ test('SOCKS+TLS: agent timeout hang-up; omit timeout or nested sync keeps attemp
   assert.equal(synced.status, 200);
 
   const omitted = await onceHttps(url, {
-    agent: new SocksProxyAgent(proxyUrl, { keepAlive: true }),
+    agent: agent({ keepAlive: true }),
     timeoutMs: 3000,
   });
   assert.equal(omitted.ok, true, omitted.message);
@@ -145,16 +158,16 @@ test('SOCKS+TLS: agent timeout hang-up; omit timeout or nested sync keeps attemp
 test('HTTPS CONNECT+TLS: omitting agent timeout matches server proxy contract', async (t) => {
   // HttpsProxyAgent passes timeout into net.connect but does not destroy on 'timeout'
   // the way SocksProxyAgent does; server still omits it for both proxy kinds.
-  const upstream = https.createServer(tlsOptions, (req, res) => {
+  const upstream = tracked(https.createServer(tlsOptions, (req, res) => {
     req.resume();
     setTimeout(() => {
       if (res.destroyed) return;
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end('ok');
     }, 800);
-  });
+  }));
   const upstreamPort = await listen(upstream);
-  const proxy = http.createServer();
+  const proxy = tracked(http.createServer());
   proxy.on('connect', (req, client, head) => {
     const target = net.connect(upstreamPort, '127.0.0.1', () => {
       client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
@@ -162,13 +175,15 @@ test('HTTPS CONNECT+TLS: omitting agent timeout matches server proxy contract', 
       target.pipe(client);
       client.pipe(target);
     });
+    client.once('close', () => target.destroy());
     target.on('error', () => client.destroy());
   });
   const proxyPort = await listen(proxy);
-  t.after(async () => { await close(proxy); await close(upstream); });
+  const agent = new HttpsProxyAgent(`http://127.0.0.1:${proxyPort}`, { keepAlive: true });
+  t.after(async () => { agent.destroy(); await close(proxy); await close(upstream); });
 
   const omitted = await onceHttps(`https://127.0.0.1:${upstreamPort}/`, {
-    agent: new HttpsProxyAgent(`http://127.0.0.1:${proxyPort}`, { keepAlive: true }),
+    agent,
     timeoutMs: 3000,
   });
   assert.equal(omitted.ok, true, omitted.message);

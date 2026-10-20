@@ -911,16 +911,18 @@ test('empty Legacy cannot gain an anonymous environment account alongside additi
     accounts: [{ id: 'team-account', name: 'team', key: 'upstream-team', clientKeyId: 'team' }] };
   fixture(dir, initial);
   const file = path.join(dir, 'config.json'), bytes = fs.readFileSync(file);
+  // PORT=0 falls back to the default 3123, which may be taken on a developer host.
+  const portServer = http.createServer(); const port = String(await listen(portServer)); await close(portServer);
   const rejected = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: {
     ...process.env, DATA_DIR: dir, PROXY_KEY: '', CLINE_PASS_KEY: 'synthetic-injected-upstream', CLINE_PASS_ADMIN_BOOTSTRAP: '',
-    PORT: '0', BIND_HOST: '127.0.0.1',
+    PORT: port, BIND_HOST: '127.0.0.1',
   }, stdio: 'ignore' });
   await new Promise((resolve) => rejected.once('exit', resolve));
   assert.notEqual(rejected.exitCode, 0);
   assert.deepEqual(fs.readFileSync(file), bytes, 'rejected startup must not rewrite operator config');
   const accepted = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: {
     ...process.env, DATA_DIR: dir, PROXY_KEY: legacy, CLINE_PASS_KEY: 'synthetic-injected-upstream',
-    CLINE_PASS_ADMIN_BOOTSTRAP: '', PORT: '0', BIND_HOST: '127.0.0.1',
+    CLINE_PASS_ADMIN_BOOTSTRAP: '', PORT: port, BIND_HOST: '127.0.0.1',
   }, stdio: ['ignore', 'pipe', 'pipe'] });
   t.after(() => stop(accepted));
   let output = '';
