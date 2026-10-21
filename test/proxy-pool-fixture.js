@@ -115,7 +115,7 @@ const SSE_OK = 'data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n
 export async function setup(t, { metadata = null, responder = null, env = {} } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-proxy-pool-'));
   const registry = new Map();
-  const s = { dir, registry, seen: [], chats: [], seenGet: [], file: path.join(dir, 'config.json'), proxies: [] };
+  const s = { dir, registry, seen: [], probes: [], chats: [], seenGet: [], file: path.join(dir, 'config.json'), proxies: [] };
   const upstream = http.createServer((req, res) => {
     let raw = '';
     req.on('data', (chunk) => { raw += chunk; });
@@ -126,9 +126,11 @@ export async function setup(t, { metadata = null, responder = null, env = {} } =
         if (req.url === '/models') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ data: [{ id: 'cline-pass/catalog-model' }] })); }
         res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end('{}');
       }
-      s.seen.push(via); s.chats.push({ via, auth: req.headers.authorization || null });
       let body = {};
       try { body = JSON.parse(raw || '{}'); } catch {}
+      // 连通性探测（/api/proxy-pool/test、FloppyData 换批前验证）发空 messages：单独记录，不计入聊天请求。
+      if (Array.isArray(body.messages) && body.messages.length === 0) s.probes.push(via);
+      else { s.seen.push(via); s.chats.push({ via, auth: req.headers.authorization || null }); }
       if (responder) return responder(via, res, { body, headers: req.headers });
       if (body.stream) { res.writeHead(200, { 'Content-Type': 'text/event-stream' }); return res.end(SSE_OK); }
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }));

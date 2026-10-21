@@ -4287,6 +4287,7 @@ const floppyDataSource = createFloppyDataSource({
   getConfig: () => effectiveProxyPool().floppydata,
   normalizeUrl: (value) => normalizeProxyUrl(value, { strict: true }),
   // 来源已被切走/关闭时迟到的批次不得重新填充池。
+  validateBatch: validateFloppyBatch,
   onBatch: (urls) => { if (proxyPoolUsesFloppyData()) proxyPoolRuntime.replaceEntries(urls); },
 });
 // 会话粘性的保留时长：FloppyData 取"轮换"分钟数（-1 每次换 IP 则不保留；0 = 固定会话，按 60 分钟封顶）；手动来源条目不换批，不需要。
@@ -4330,27 +4331,43 @@ function proxyPoolStatusProjection() {
 // 用与真实池流量相同构造（CONNECT 非 200 即失败）的一次性 agent、显式代理出口，不带任何账号 key（不占账号 lease/RPM，不产生计费调用）；
 // 只看隧道能否到达上游（任何 HTTP 状态即 ok），不写条目冷却、不计条目 RPM。
 const PROXY_POOL_TEST_MAX = 50, PROXY_POOL_TEST_DEFAULT = 10, PROXY_POOL_TEST_CONCURRENCY = 8, PROXY_POOL_TEST_TIMEOUT_MS = 15000, PROXY_POOL_REFRESH_WAIT_MS = 30000;
+// 对一个代理 URL 做一次空探测：隧道能到达上游（任何 HTTP 状态）即 ok。url 只在这里使用，不进入返回值。
+async function probePoolProxyUrl(url, timeoutMs) {
+  const model = config.knownModels[0] || 'cline-pass/glm-5.3-flash', t0 = Date.now();
+  try {
+    const result = await clineRequestJSON(`${config.upstreamBase}/chat/completions`, {
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, messages: [], max_tokens: 1 }),
+      proxyUrl: url, ephemeralProxy: true, proxyAgentFactory: createPoolProxyAgent, timeoutMs, maxResponseBytes: 256 * 1024,
+    });
+    return { ok: result.status > 0, ms: Date.now() - t0, status: result.status };
+  } catch (error) {
+    return { ok: false, ms: Date.now() - t0, errorCategory: /timeout/i.test(String(error?.message || '')) ? 'timeout' : 'proxy' };
+  }
+}
+async function runLimited(items, limit, task) {
+  const results = new Array(items.length);
+  let next = 0;
+  const worker = async () => { while (next < items.length) { const index = next++; results[index] = await task(items[index], index); } };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
 async function testProxyPoolEntries(sample = PROXY_POOL_TEST_DEFAULT) {
   const targets = proxyPoolRuntime.sampleEntries(Math.min(PROXY_POOL_TEST_MAX, sample));
-  const results = new Array(targets.length);
-  const model = config.knownModels[0] || 'cline-pass/glm-5.3-flash';
-  let next = 0;
-  const worker = async () => {
-    while (next < targets.length) {
-      const index = next++, target = targets[index], t0 = Date.now();
-      try {
-        const result = await clineRequestJSON(`${config.upstreamBase}/chat/completions`, {
-          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, messages: [], max_tokens: 1 }),
-          proxyUrl: target.url, ephemeralProxy: true, proxyAgentFactory: createPoolProxyAgent, timeoutMs: PROXY_POOL_TEST_TIMEOUT_MS, maxResponseBytes: 256 * 1024,
-        });
-        results[index] = { entryId: target.entryId, ok: result.status > 0, ms: Date.now() - t0, status: result.status };
-      } catch (error) {
-        results[index] = { entryId: target.entryId, ok: false, ms: Date.now() - t0, errorCategory: /timeout/i.test(String(error?.message || '')) ? 'timeout' : 'proxy' };
-      }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(PROXY_POOL_TEST_CONCURRENCY, targets.length) }, worker));
-  return results;
+  return runLimited(targets, PROXY_POOL_TEST_CONCURRENCY, async (target) => ({ entryId: target.entryId, ...(await probePoolProxyUrl(target.url, PROXY_POOL_TEST_TIMEOUT_MS)) }));
+}
+// FloppyData 换批前的连通性验证：接口返回的会话不一定能连上（线上出现过一批 78% 连不上）。抽样探测，
+// 可达比例不足 70% 则整批拒绝（保留当前批，退避后重试）；通过时去掉抽样中已确认不通的条目。
+const FLOPPY_BATCH_PROBE_SAMPLE = 8, FLOPPY_BATCH_PROBE_TIMEOUT_MS = 8000, FLOPPY_BATCH_MIN_REACHABLE = 0.7;
+async function validateFloppyBatch(urls, signal) {
+  if (!urls.length) return [];
+  const sample = urls.slice();
+  for (let i = sample.length - 1; i > 0; i--) { const j = crypto.randomInt(i + 1); [sample[i], sample[j]] = [sample[j], sample[i]]; }
+  const picked = sample.slice(0, Math.min(FLOPPY_BATCH_PROBE_SAMPLE, sample.length));
+  const results = await runLimited(picked, PROXY_POOL_TEST_CONCURRENCY, async (url) => (signal?.aborted ? { ok: false } : probePoolProxyUrl(url, FLOPPY_BATCH_PROBE_TIMEOUT_MS)));
+  if (signal?.aborted) return [];
+  const dead = new Set(picked.filter((url, index) => !results[index].ok));
+  if (picked.length - dead.size < Math.ceil(picked.length * FLOPPY_BATCH_MIN_REACHABLE)) return [];
+  return urls.filter((url) => !dead.has(url));
 }
 // 每次上游调用的出口（同步、不排队）。池关闭或账号所属密钥不使用池时与旧逻辑逐字等价：proxyUrl || account.proxyUrl || 直连。
 // 返回对象的 url/entry 不可枚举，展开或序列化时不会带出凭据。
@@ -6505,7 +6522,7 @@ async function handleChat(req, res, clientKeyId, adapter = null) {
   if (!out) {
     const result = disconnected ? 'client_cancelled' : 'failed';
     finalizeStatistics({ globalError: !disconnected, clientDisconnect: disconnected, segments: statisticsSegments(chain.trace, null, null, disconnected) });
-    recordChat({ requestId, requestedModel, resolvedModel: modelId, stream: false, result, normalizedStatus: disconnected ? 499 : 502, error: disconnected ? null : 'no upstream response', trace: chain.trace, accountPath, accountActions, ...affinityFacts(), strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, providerPlanSource: targetSource, providerMode: targetMode, sensitiveValues });
+    recordChat({ requestId, requestedModel, resolvedModel: modelId, stream: isStream, result, normalizedStatus: disconnected ? 499 : 502, error: disconnected ? null : 'no upstream response', trace: chain.trace, accountPath, accountActions, ...affinityFacts(), strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, providerPlanSource: targetSource, providerMode: targetMode, sensitiveValues });
     if (res.destroyed) return;
     return sendJSON(res, disconnected ? 499 : 502, { error: { message: disconnected ? 'client cancelled request' : 'no upstream response', type: disconnected ? 'client_cancelled' : 'upstream_error' } });
   }
@@ -6515,7 +6532,7 @@ async function handleChat(req, res, clientKeyId, adapter = null) {
   if (status === 200 && !disconnected) rememberSessionProvider(identity, modelId, acc, chain.successfulAttempt, providerSequence, affinityGeneration);
   finalizeStatistics({ globalError: status !== 200 && !disconnected, finalProvider: routing.finalProvider, usage, clientDisconnect: disconnected, segments: statisticsSegments(chain.trace, acc?.id, usage, disconnected) });
   recordChat({
-    requestId, requestedModel, resolvedModel: modelId, provider: routing.finalProvider || null, canonical: routing.canonicalSlug || null, ms: Date.now() - chain.t0, stream: false, result: disconnected ? 'client_cancelled' : status === 200 ? 'success' : 'failed',
+    requestId, requestedModel, resolvedModel: modelId, provider: routing.finalProvider || null, canonical: routing.canonicalSlug || null, ms: Date.now() - chain.t0, stream: isStream, result: disconnected ? 'client_cancelled' : status === 200 ? 'success' : 'failed',
     attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, error: disconnected ? null : status !== 200 ? safeOut.error.message : null,
     account: acc?.name || null, accountId: acc?.id || null, accountPath, accountActions, accountAction: chain.accountAction?.action || accountActions.at(-1)?.action || null, upstreamStatus: chain.upstreamStatus, normalizedStatus: chain.normalizedStatus, ...affinityFacts(usage),
     strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, providerPlanSource: targetSource, providerMode: targetMode, appliedHeaderNames: Object.keys(acc?.headers || {}), proxyError: traceProxyError(chain.trace, acc), errorCategory: chain.routingFailure ? 'routing' : chain.localRpm ? 'rpm' : null, blockedBy: chain.localRpm ? 'rpm' : null, retryAfter: chain.localRpm && Number.isSafeInteger(chain.retryAfter) ? chain.retryAfter : null, sensitiveValues,

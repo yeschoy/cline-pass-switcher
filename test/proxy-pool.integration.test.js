@@ -412,6 +412,59 @@ test('non-stream HTML 429 keeps the account backoff and single same-egress retry
   assert.ok(s.seen.every((via) => via === 'own'), `no pool entry was used: ${s.seen}`);
 });
 
+test('FloppyData: a new batch whose sampled sessions cannot connect is rejected and the current batch stays; a mostly-good batch is imported without its dead entries', async (t) => {
+  const s = await setup(t);
+  const good = [await s.socks('G1', { auth }), await s.socks('G2', { auth })];
+  const deadPort = await freePort();
+  let mode = 'good';
+  const api = http.createServer((req, res) => {
+    let raw = ''; req.on('data', (chunk) => { raw += chunk; });
+    req.on('end', () => {
+      const body = JSON.parse(raw || '{}'), index = Number(body.session.match(/(\d+)$/)[1]);
+      // good：全部可连；bad：全部连不上；mixed：8 个里 2 个连不上。
+      const dead = mode === 'bad' || (mode === 'mixed' && index % 4 === 0);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ connection: { connectionString: `socks5://user-test-session-${body.session}:${PASS}@127.0.0.1:${dead ? deadPort : good[index % 2].port}` } }));
+    });
+  });
+  const apiPort = await listen(api);
+  t.after(() => close(api));
+  await s.start({ proxyPool: { enabled: true, source: 'floppydata', floppydata: { apiKey: API_KEY, apiBase: `http://127.0.0.1:${apiPort}`, count: 8 } } });
+  const first = await waitFor(async () => { const value = await s.get('/api/proxy-pool/status'); return value.total === 8 && value.floppydata?.state === 'ok' ? value : null; }, 'first batch');
+  const firstIds = new Set(first.entries.map((entry) => entry.entryId));
+  assert.ok(s.probes.length > 0 && s.probes.length <= 8, `the batch was probed before the swap (${s.probes.length})`);
+  assert.equal(s.seen.length, 0, 'probes never count as chat requests');
+
+  // 一批全是连不上的会话：整批拒绝，当前批保持，聊天不受影响。
+  mode = 'bad';
+  const rejected = await s.post('/api/proxy-pool/refresh', { wait: true });
+  assert.equal(rejected.status, 200);
+  assert.equal(rejected.data.floppydata.state, 'error'); assert.equal(rejected.data.floppydata.lastError, 'unreachable');
+  assert.deepEqual(rejected.data.floppydata.lastBatch, { requested: 8, succeeded: 8 });
+  assert.deepEqual(new Set(rejected.data.entries.map((entry) => entry.entryId)), firstIds, 'the current batch is kept');
+  for (let i = 0; i < 4; i++) assert.equal(await s.chat(), 200);
+  assert.equal((await s.get('/api/proxy-pool/status')).entries.filter((entry) => entry.state === 'cooldown').length, 0, 'no live traffic reached a dead session');
+
+  // 大部分可连：导入，但去掉抽样中确认不通的条目（8 个里 2 个）。
+  mode = 'mixed';
+  const accepted = await s.post('/api/proxy-pool/refresh', { wait: true });
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.data.floppydata.state, 'ok'); assert.equal(accepted.data.floppydata.lastError, null);
+  assert.equal(accepted.data.total, 6, 'the two confirmed-dead entries were dropped');
+  for (const entry of accepted.data.entries) assert.equal(firstIds.has(entry.entryId), false, 'a new batch has new entries');
+  await assertDiagnosticsClean(s, [JSON.stringify(rejected.data), JSON.stringify(accepted.data)]);
+});
+
+test('the request log records the client stream mode for failures that happen before the first event', async (t) => {
+  const s = await setup(t, { responder: (via, res, ctx) => { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'boom', type: 'server_error' } })); } });
+  const [a, own] = [await s.socks('A', { auth }), await s.socks('own')];
+  await s.start({ accounts: ownAccount(own.port), proxyPool: manualPool([socksUrl(a.port, 'user-test-session-a')]) });
+  assert.notEqual((await s.chatFull({ stream: true })).status, 200);
+  assert.notEqual((await s.chatFull({ stream: false })).status, 200);
+  const rows = await rowsFor(s, 'requests', 2);
+  assert.deepEqual(rows.map((row) => row.stream).sort(), [false, true], 'a failed streaming request is not logged as non-stream');
+});
+
 test('an authenticated HTTP CONNECT entry works; a 407 from the proxy is a connect-phase failure that moves to another entry', async (t) => {
   const s = await setup(t);
   const c = await s.connectProxy('C', { auth });

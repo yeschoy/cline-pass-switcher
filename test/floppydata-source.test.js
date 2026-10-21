@@ -100,6 +100,52 @@ test('partial success at or above half replaces; below half keeps old batch and 
   assert.equal(status.nextRefreshAt, below.clock.t + 30000);
 });
 
+test('validateBatch: a failing sample keeps the current batch, reports unreachable and backs off; a passing one drops confirmed-dead entries', async () => {
+  let verdict = 'dead';
+  const seenSignals = [];
+  const env = setup({ cfg: { count: 4, refreshIntervalMs: 180000 }, validateBatch: async (urls, signal) => {
+    seenSignals.push(signal); await tick();
+    if (verdict === 'dead') return [];
+    if (verdict === 'throws') throw new Error(`probe failed user-test-session-0`);
+    return urls.slice(1);
+  } });
+  const first = await env.source.start();
+  assert.equal(env.batches.length, 0, 'a rejected batch is never published');
+  assert.equal(first.state, 'error'); assert.equal(first.lastError, 'unreachable');
+  assert.ok(FLOPPYDATA_ERRORS.includes('unreachable'));
+  assert.deepEqual(first.lastBatch, { requested: 4, succeeded: 4 }, 'lastBatch still reports the API result');
+  const retry = env.timers.scheduled().at(-1);
+  assert.ok(retry.ms <= 30000, `retries with the failure backoff, not the full interval (${retry.ms})`);
+
+  verdict = 'throws';
+  env.timers.fire(retry); await env.source.refresh().catch(() => {});
+  assert.equal(env.batches.length, 0); assert.equal(env.source.status().lastError, 'unreachable');
+  assert.doesNotMatch(JSON.stringify(env.source.status()), SECRETS);
+
+  verdict = 'ok';
+  env.timers.fire(env.timers.scheduled().at(-1)); await env.source.refresh();
+  assert.equal(env.batches.length, 1); assert.equal(env.batches[0].length, 3, 'entries confirmed unreachable are dropped from the batch');
+  assert.equal(env.source.status().state, 'ok'); assert.equal(env.source.status().lastError, null);
+  assert.ok(seenSignals.every((signal) => signal && typeof signal.aborted === 'boolean'));
+});
+
+test('validateBatch keeps refresh single-flight and stop during validation never publishes', async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const env = setup({ cfg: { count: 2 }, validateBatch: async (urls) => { await gate; return urls; } });
+  const started = env.source.start();
+  await tick(); await tick();
+  const calls = env.calls.length;
+  assert.equal(env.source.status().state, 'refreshing');
+  const duplicate = env.source.refresh();
+  await tick();
+  assert.equal(env.calls.length, calls, 'a second refresh while validating joins the running one');
+  env.source.stop();
+  release(); await started; await duplicate;
+  assert.equal(env.batches.length, 0, 'a stopped run never publishes');
+  assert.equal(env.source.status().state, 'idle');
+});
+
 test('401 and 402 abort the remaining batch calls', async () => {
   for (const [code, error] of [[401, 'unauthorized'], [403, 'unauthorized'], [402, 'insufficient_balance']]) {
     const aborted = [];

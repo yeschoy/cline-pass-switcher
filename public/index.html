@@ -1849,7 +1849,7 @@ let PROXY_POOL_ENTRIES=[],PROXY_POOL_EDITING=false,PROXY_POOL_STATUS=null,PROXY_
 const PROXY_POOL_PROTOCOLS=['http:','https:','socks5:','socks5h:'],PROXY_POOL_MAX_ENTRIES=2000,PROXY_POOL_EGRESS=/^(?:direct|account-proxy|pool:[0-9a-f]{8})$/;
 const PROXY_POOL_STATE_LABELS={ok:'可用',cooldown:'冷却中','rate-limited':'达到限速',retiring:'退役中',retained:'保持中（会话绑定）'},PROXY_POOL_REASON_LABELS={throttle:'HTML 429',connect:'连接失败'};
 const FLOPPYDATA_STATE_LABELS={idle:'未运行',refreshing:'正在导入',ok:'正常',error:'失败'};
-const FLOPPYDATA_ERROR_LABELS={unauthorized:'API Key 无效或未配置',insufficient_balance:'余额不足',rate_limited:'接口限流',upstream_error:'接口返回错误',network:'网络错误',invalid_response:'响应无效'};
+const FLOPPYDATA_ERROR_LABELS={unauthorized:'API Key 无效或未配置',insufficient_balance:'余额不足',rate_limited:'接口限流',upstream_error:'接口返回错误',network:'网络错误',invalid_response:'响应无效',unreachable:'新一批代理连通性不足（已保留当前批）'};
 function proxyPoolCount(value){return Number.isSafeInteger(value)&&value>=0?String(value):'—';}
 function proxyPoolTime(value){return Number.isSafeInteger(value)&&value>0?new Date(value).toLocaleString():'—';}
 function normalizeProxyPoolUrl(raw){try{if(raw.length>2048)return '';const u=new URL(raw);if(!PROXY_POOL_PROTOCOLS.includes(u.protocol)||!u.hostname||u.search||u.hash||(u.pathname&&u.pathname!=='/'))return '';if(u.port&&(Number(u.port)<1||Number(u.port)>65535))return '';return u.toString();}catch{return '';}}
