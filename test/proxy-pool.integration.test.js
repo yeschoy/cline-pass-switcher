@@ -258,6 +258,41 @@ test('random strategy covers every entry over 60 requests', async (t) => {
   assert.equal(status.fallbacks.total, 0);
 });
 
+test('a session sticks to one pool entry, fails over together when that entry throttles, and sessionless calls still rotate', async (t) => {
+  const throttled = new Set();
+  const s = await setup(t, { responder: throttleResponder(throttled) });
+  const proxies = [await s.socks('A', { auth }), await s.socks('B', { auth }), await s.socks('C', { auth })];
+  await s.start({ proxyPool: manualPool(proxies.map((proxy, i) => socksUrl(proxy.port, `user-test-session-${i}`))) });
+  const chatIn = async (session) => {
+    const res = await fetch(`http://127.0.0.1:${s.port}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(session ? { 'Session-Id': session } : {}) },
+      body: JSON.stringify({ model: 'm', messages: [{ role: 'user', content: `sticky ${Math.random()}` }] }) });
+    await res.text();
+    return res.status;
+  };
+  // 同一会话的连续请求固定在同一个条目；不同会话分散；无会话的调用仍按轮询覆盖所有条目。
+  for (let i = 0; i < 12; i++) assert.equal(await chatIn('sticky-session-1'), 200);
+  assert.equal(new Set(s.seen).size, 1, `one session stays on one entry (${JSON.stringify(s.seen)})`);
+  const pinned = s.seen[0];
+  s.seen.length = 0;
+  for (let i = 0; i < 24; i++) assert.equal(await chatIn(`sticky-other-${i}`), 200);
+  assert.ok(new Set(s.seen).size >= 2, `sessions spread over entries (${JSON.stringify(s.seen)})`);
+  s.seen.length = 0;
+  for (let i = 0; i < 6; i++) assert.equal(await chatIn(null), 200);
+  assert.equal(new Set(s.seen).size, 3, 'sessionless calls rotate through every entry');
+
+  // 绑定的条目 HTML 429：本请求立即换到次高条目；之后这个会话稳定留在新条目上（原条目冷却 60 秒）。
+  s.seen.length = 0; throttled.add(pinned);
+  assert.equal(await chatIn('sticky-session-1'), 200);
+  assert.equal(s.seen.length, 2); assert.equal(s.seen[0], pinned); assert.notEqual(s.seen[1], pinned);
+  const successor = s.seen[1];
+  s.seen.length = 0;
+  for (let i = 0; i < 5; i++) assert.equal(await chatIn('sticky-session-1'), 200);
+  assert.deepEqual(s.seen, Array(5).fill(successor));
+  const view = await s.get();
+  assert.equal(view.accounts[0].state?.cooldownUntil || 0, 0, 'account is not cooled');
+  assert.equal((await s.get('/api/proxy-pool/status')).fallbacks.total, 0);
+});
+
 test('an authenticated HTTP CONNECT entry works; a 407 from the proxy is a connect-phase failure that moves to another entry', async (t) => {
   const s = await setup(t);
   const c = await s.connectProxy('C', { auth });

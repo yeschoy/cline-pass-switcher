@@ -228,6 +228,34 @@ test('random strategy uses the injected random over available entries', () => {
   for (let i = 0; i < 10; i++) assert.notEqual(pickUrl(runtime), cooled);
 });
 
+test('stickyKey pins a session to one entry, fails over by weight, returns when healthy, and ignores the cursor', () => {
+  for (const strategy of ['round-robin', 'random']) {
+    const { runtime, clock } = harness({ strategy, throttleCooldownMs: 5000 });
+    const urls = [A, B, C];
+    runtime.replaceEntries(urls);
+    // 同一会话反复选择始终得到同一个条目，不受 strategy 与游标影响；不同会话分散到多个条目。
+    const first = pickUrl(runtime, { stickyKey: 'session-1' });
+    for (let i = 0; i < 20; i++) assert.equal(pickUrl(runtime, { stickyKey: 'session-1' }), first);
+    const spread = new Set(Array.from({ length: 60 }, (_, i) => pickUrl(runtime, { stickyKey: `session-${i}` })));
+    assert.equal(spread.size, 3);
+    // 没有 stickyKey 的调用仍按策略选择（轮询在三个条目间循环）。
+    if (strategy === 'round-robin') assert.equal(new Set([0, 1, 2].map(() => pickUrl(runtime))).size, 3);
+    // 条目被排除（本请求已失败过）：落到权重次高的条目，对同一会话稳定。
+    const second = pickUrl(runtime, { stickyKey: 'session-1', exclude: new Set([first]) });
+    assert.notEqual(second, first);
+    for (let i = 0; i < 5; i++) assert.equal(pickUrl(runtime, { stickyKey: 'session-1', exclude: new Set([first]) }), second);
+    // 条目 HTML 429 冷却：同样落到次高条目；冷却结束后回到原条目。
+    const { entry } = runtime.pickEntry({ stickyKey: 'session-1' });
+    assert.equal(entry.url, first);
+    entry.noteThrottle(); entry.release();
+    for (let i = 0; i < 5; i++) assert.equal(pickUrl(runtime, { stickyKey: 'session-1' }), second);
+    clock.t += 6000;
+    assert.equal(pickUrl(runtime, { stickyKey: 'session-1' }), first);
+    // 全部不可用时与普通选择一致：没有条目。
+    assert.equal(pickUrl(runtime, { stickyKey: 'session-1', exclude: new Set(urls) }), null);
+  }
+});
+
 test('maxRpmPerProxy reserves, commits, refunds and blocks within the window', () => {
   const { runtime, clock } = harness({ maxRpmPerProxy: 2 });
   runtime.replaceEntries([A, B]);
