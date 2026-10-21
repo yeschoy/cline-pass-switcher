@@ -166,6 +166,25 @@ test('collectAccounts sends the complete proxyPool draft, converts seconds to ms
   assert.match(h.el('#accMsg').textContent, /至少需要 1 条代理/);
 });
 
+test('the implicit direct option is a labelled checkbox that round-trips through collectAccounts and renders the direct status row', () => {
+  assert.match(html, /<input id="proxyPoolDirect" type="checkbox">[^<]*本机直连作为池中的一个出口/);
+  const h = harness(poolFixture());
+  assert.equal(h.run("Object.hasOwn(collectAccounts(),'proxyPoolDirect')"), false, 'servers that do not report the field keep the old payload shape');
+  h.run("ACCS.proxyPoolDirect=false;$('#proxyPoolDirect').checked=true");
+  assert.equal(h.run('collectAccounts().proxyPoolDirect'), true, 'the checkbox draft is sent');
+  h.run("$('#proxyPoolDirect').checked=false");
+  assert.equal(h.run('collectAccounts().proxyPoolDirect'), false);
+  // 状态表：直连条目显示为"本机直连（隐式）"，且不影响手动条目与状态的按序对应。
+  h.run(`PROXY_POOL_ENTRIES=${JSON.stringify([URL_A])};ACCS.proxyPool.entries=${JSON.stringify([URL_A])}`);
+  h.run(`renderProxyPoolStatus(${JSON.stringify({ enabled: true, source: 'manual', strategy: 'round-robin', total: 2, available: 2, retiring: 0, fallbacks: { total: 0, recent: 0 }, floppydata: null, clientKeys: [],
+    entries: [{ entryId: '01234567', scheme: 'socks5', endpointKey: 'socks5://127.0.0.1:1080', state: 'ok', cooldownUntil: null, reason: null, rpmUsed: 0, inFlight: 0, recent: { requests: 0, throttled: 0, connectFailures: 0 } },
+      { entryId: '89abcdef', scheme: 'direct', endpointKey: 'direct://local', state: 'ok', cooldownUntil: null, reason: null, rpmUsed: 0, inFlight: 0, recent: { requests: 0, throttled: 0, connectFailures: 0 } }] })})`);
+  assert.match(h.el('#proxyPoolStatusBody').innerHTML, /本机直连（隐式）/);
+  assert.doesNotMatch(h.el('#proxyPoolStatusBody').innerHTML, /direct:\/\/local/);
+  assert.match(h.el('#proxyPoolMaskedList').innerHTML, /01234567/, 'manual entry #1 still maps to the first status row');
+  assert.doesNotMatch(h.el('#proxyPoolMaskedList').innerHTML, /89abcdef/);
+});
+
 test('servers without proxyPool keep the old payload shape', () => {
   const h = harness(undefined);
   assert.equal(h.run("Object.hasOwn(collectAccounts(),'proxyPool')"), false);

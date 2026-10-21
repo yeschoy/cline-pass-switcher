@@ -1492,6 +1492,8 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
     const pool = normalizeProxyPool(config.proxyPool, { strict: true, secret: META.routingSecret });
     if (!isDeepStrictEqual(pool, config.proxyPool)) { config.proxyPool = pool; dirty = true; }
   }
+  // proxyPoolDirect：顶层布尔，缺省即 false 且不写回（旧镜像保留但忽略未知顶层字段）。
+  if (Object.hasOwn(loadedConfig, 'proxyPoolDirect') && typeof config.proxyPoolDirect !== 'boolean') throw new Error('invalid proxyPoolDirect');
   // proxyPoolClientKeys 同理：缺省即"所有密钥使用代理池"且不写回；存在时按现有密钥 id 严格校验。
   if (Object.hasOwn(loadedConfig, 'proxyPoolClientKeys')) {
     const scope = normalizeProxyPoolClientKeys(config.proxyPoolClientKeys, { knownIds: poolClientKeyIds(config) });
@@ -2394,7 +2396,7 @@ async function acquirePipelineAccountLease(identity, options = {}) {
 const ACCOUNT_CONFIGURATION_FIELDS = Object.freeze([
   'accounts', 'accountMode', 'activeAccount', 'concurrencyWaitMs', 'poolFullWaitMs',
   'sessionProviderAffinityEnabled', 'quotaProtection', 'errorRules', 'retryRules',
-  'accountErrorRules', 'accountContentErrorRules', 'accountPipeline', 'accountWorkflow', 'proxyPool', 'proxyPoolClientKeys',
+  'accountErrorRules', 'accountContentErrorRules', 'accountPipeline', 'accountWorkflow', 'proxyPool', 'proxyPoolClientKeys', 'proxyPoolDirect',
 ]);
 // 全局出口代理池配置。缺省（字段不存在）等价于关闭的默认值，且不会被写回 config.json。
 const PROXY_POOL_OFF = Object.freeze(normalizeProxyPool(undefined));
@@ -2420,6 +2422,14 @@ function accountUsesProxyPool(account) {
 function anyClientKeyUsesProxyPool() {
   const scope = effectivePoolClientKeys();
   return clientKeyInventory().some(({ id }) => poolClientKeyMode(id, scope) === 'on');
+}
+// 把本机直连作为池中的一个隐式出口（顶层 proxyPoolDirect）。缺省 false 且不写回。
+const poolDirectEnabled = (candidate = config) => candidate.proxyPoolDirect === true;
+function proxyPoolDirectPatch(value, current = config) {
+  if (value === undefined) return {};
+  if (typeof value !== 'boolean') throw new Error('proxyPoolDirect must be boolean');
+  if (!Object.hasOwn(current, 'proxyPoolDirect') && value === false) return {};
+  return { proxyPoolDirect: value };
 }
 function proxyPoolClientKeysPatch(value, current = config) {
   if (value === undefined) return {};
@@ -3022,7 +3032,8 @@ function reloadConfigFromDisk() {
   if (mode === 'load-health' && pipeline.sticky) throw new Error('load-health cannot enable sticky');
   const poolPatch = Object.hasOwn(raw, 'proxyPool') ? { proxyPool: normalizeProxyPool(raw.proxyPool, { strict: true, secret: META.routingSecret }) } : {};
   const poolScopePatch = Object.hasOwn(raw, 'proxyPoolClientKeys') ? { proxyPoolClientKeys: normalizeProxyPoolClientKeys(raw.proxyPoolClientKeys, { knownIds: poolClientKeyIds(config) }) } : {};
-  const next = { ...config, ...poolPatch, ...poolScopePatch, accounts: accs, accountMode: mode, activeAccount: active, concurrencyWaitMs: wait, poolFullWaitMs: poolWait,
+  const poolDirectPatch = Object.hasOwn(raw, 'proxyPoolDirect') ? (typeof raw.proxyPoolDirect === 'boolean' ? { proxyPoolDirect: raw.proxyPoolDirect } : (() => { throw new Error('proxyPoolDirect must be boolean'); })()) : {};
+  const next = { ...config, ...poolPatch, ...poolScopePatch, ...poolDirectPatch, accounts: accs, accountMode: mode, activeAccount: active, concurrencyWaitMs: wait, poolFullWaitMs: poolWait,
     errorRules, ...legacyRuleProjection(errorRules), retryRules: normalizeRetryRules(pick('retryRules'), { strict: true }),
     quotaProtection: normalizeQuotaProtection(pick('quotaProtection'), { strict: true }), accountPipeline: pipeline, accountWorkflow: workflow,
     sessionProviderAffinityEnabled: affinity, exposeCatalog, knownModels: knownModels.map((m) => m.trim()),
@@ -4299,7 +4310,7 @@ function poolStickyRetentionMs(pool) {
 // 启动规范化、管理保存、热加载、删除客户端密钥之后调用；只改变出口选择，不触碰账号运行时状态。
 // previous/next 是 proxyPool；按密钥开关读取已发布的 config（调用时已更新）。
 function applyProxyPoolConfig(previous, next) {
-  proxyPoolRuntime.configure({ ...next, stickyRetentionMs: poolStickyRetentionMs(next) });
+  proxyPoolRuntime.configure({ ...next, stickyRetentionMs: poolStickyRetentionMs(next), includeDirect: next.enabled === true && poolDirectEnabled() });
   if (!next.enabled) { floppyDataSource.stop(); proxyPoolRuntime.replaceEntries([], { retain: false }); return; }
   if (next.source === 'manual') { floppyDataSource.stop(); proxyPoolRuntime.replaceEntries(next.entries, { retain: false }); return; }
   // 所有密钥都不使用代理池：停止 FloppyData 导入并让现有条目退役；之后任一密钥改为 on 时由下方重新导入。
@@ -4383,7 +4394,7 @@ function resolveEgress(account, proxyUrl = '', egressHint = null) {
       try { proxyPoolRuntime.noteFallback(); } catch {}
     }
   } else { url = account?.proxyUrl || ''; kind = url ? 'account' : 'direct'; }
-  const egress = { kind, entryId: entry?.entryId || null, endpointKey: entry ? entry.endpointKey : proxyEndpointKey(url), poolFallback, connectPhase: false };
+  const egress = { kind, entryId: entry?.entryId || null, endpointKey: entry ? (entry.direct ? null : entry.endpointKey) : proxyEndpointKey(url), poolFallback, connectPhase: false };
   Object.defineProperty(egress, 'url', { value: url, enumerable: false });
   Object.defineProperty(egress, 'poolRetryAt', { value: retryAt, enumerable: false });
   Object.defineProperty(egress, 'entry', { value: entry, enumerable: false });
@@ -4523,7 +4534,8 @@ function clineRequest(url, { headers = {}, body, signal, timeoutMs = 120000, acc
       poolEntry = egress.entry;
       if (poolEntry) {
         disposableAgent = false;
-        agent = poolEntry.agent;
+        // 隐式直连条目没有代理 agent：用与账号直连相同的共享 agent（按目标协议）。
+        agent = poolEntry.direct ? (u.protocol === 'https:' ? directHttpsAgent : directHttpAgent) : poolEntry.agent;
         if (!agent) throw new Error('proxy pool agent unavailable');
       } else {
         const effectiveProxy = egress.url;
@@ -6938,7 +6950,7 @@ async function dispatch(req, res) {
             statistics: { recent24h: recent, lifetimeRequests: lifetime ? lifetime.requests : 0, lifetimeErrors: lifetime ? lifetime.errors : 0 } };
         }),
         mode: config.accountMode, active: config.activeAccount, concurrencyWaitMs: config.concurrencyWaitMs, poolFullWaitMs: config.poolFullWaitMs,
-        accountWorkflow: config.accountWorkflow, proxyPool: effectiveProxyPool(), proxyPoolClientKeys: effectivePoolClientKeys(), configurationRevision: configurationRevision(),
+        accountWorkflow: config.accountWorkflow, proxyPool: effectiveProxyPool(), proxyPoolClientKeys: effectivePoolClientKeys(), proxyPoolDirect: poolDirectEnabled(), configurationRevision: configurationRevision(),
         selectionCounters: { persistent: true, persistenceError: selectionCounterPersistenceError, sequence: META.selectionCounters.sequence },
         quotaProtection: config.quotaProtection, errorRules: config.errorRules, retryRules: config.retryRules, accountErrorRules: config.accountErrorRules, accountContentErrorRules: config.accountContentErrorRules, accountPipeline: config.accountPipeline, sessionProviderAffinityEnabled: config.sessionProviderAffinityEnabled,
         cachePool: { minSize: configuredCachePoolSize(), maxSize: configuredCachePoolMaxSize(), lowSize: configuredCachePoolLowQuotaSize(), targetSize: configuredCachePoolTargetSize(), scope: 'per-client-key', actual: cachePoolActualByOwner(), binding: sessionBindingSummary() },
@@ -6968,7 +6980,7 @@ async function dispatch(req, res) {
         }
         if (body.retryRules !== undefined) requestedRetryRules = normalizeRetryRules(body.retryRules, { strict: true });
         if (body.quotaProtection !== undefined) requestedProtection = normalizeQuotaProtection(body.quotaProtection, { strict: true });
-        requestedProxyPool = { ...proxyPoolPatch(body.proxyPool), ...proxyPoolClientKeysPatch(body.proxyPoolClientKeys) };
+        requestedProxyPool = { ...proxyPoolPatch(body.proxyPool), ...proxyPoolClientKeysPatch(body.proxyPoolClientKeys), ...proxyPoolDirectPatch(body.proxyPoolDirect) };
         if (body.accountPipeline !== undefined) requestedPipeline = normalizeAccountPipeline(body.accountPipeline, {
           strict: true,
           fallbackOrder: config.accountPipeline.order,

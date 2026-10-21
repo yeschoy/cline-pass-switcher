@@ -465,6 +465,65 @@ test('the request log records the client stream mode for failures that happen be
   assert.deepEqual(rows.map((row) => row.stream).sort(), [false, true], 'a failed streaming request is not logged as non-stream');
 });
 
+test('the implicit direct entry rotates with the proxies, shows as pool:<id>, and an HTML 429 on it moves to another entry without account backoff', async (t) => {
+  const throttled = new Set();
+  const s = await setup(t, { responder: throttleResponder(throttled) });
+  const [a, b] = [await s.socks('A', { auth }), await s.socks('B', { auth })];
+  await s.start({ proxyPool: manualPool([socksUrl(a.port, 'user-test-session-a'), socksUrl(b.port, 'user-test-session-b')]), proxyPoolDirect: true });
+  const status = await s.get('/api/proxy-pool/status');
+  assert.equal(status.total, 3);
+  assert.deepEqual(status.entries.filter((entry) => entry.scheme === 'direct').map((entry) => entry.endpointKey), ['direct://local']);
+
+  // 轮询：三个出口各一次；直连条目使用本机出口（上游看到的 via 为 direct）。
+  for (let i = 0; i < 6; i++) assert.equal(await s.chat(), 200);
+  assert.deepEqual(['A', 'B', 'direct'].map((via) => s.seen.filter((seen) => seen === via).length), [2, 2, 2]);
+  const rows = await rowsFor(s, 'requests', 6);
+  assert.ok(rows.every((row) => POOL_ID.test(row.egress) && row.poolFallback === false), 'the direct entry is a pool member, not a fallback');
+  const after = await s.get('/api/proxy-pool/status');
+  assert.equal(after.fallbacks.total, 0);
+  assert.equal(after.entries.reduce((sum, entry) => sum + entry.recent.requests, 0), 6);
+  assert.equal(s.bytes().includes('direct://'), false, 'the implicit entry is never persisted in config.json');
+
+  // 直连条目收到 HTML 429：只冷却它，本请求立即换条目，账号不退避。
+  throttled.add('direct'); s.seen.length = 0;
+  for (let i = 0; i < 3; i++) assert.equal(await s.chat(), 200);
+  assert.ok(s.seen.includes('direct'), 'the direct entry was tried');
+  const view = await s.get();
+  assert.equal(view.accounts[0].state?.cooldownUntil || 0, 0, 'account is not cooled');
+  const cooled = (await s.get('/api/proxy-pool/status')).entries.filter((entry) => entry.state === 'cooldown');
+  assert.deepEqual(cooled.map((entry) => entry.scheme), ['direct']);
+  assert.equal(fs.readFileSync(path.join(s.dir, 'metadata.json'), 'utf8').includes('direct://'), false, 'no proxyHealth key is written for the direct entry');
+});
+
+test('a pre-direct image (4fffc30) starts with proxyPoolDirect, ignores it and preserves it across its own save', async (t) => {
+  const repo = path.resolve('.'), oldRev = '4fffc30';
+  try { execFileSync('git', ['rev-parse', '--verify', `${oldRev}^{commit}`], { cwd: repo, stdio: 'ignore' }); }
+  catch { t.skip('not inside a git checkout containing 4fffc30'); return; }
+  const s = await setup(t);
+  const [pa, own] = [await s.socks('PA', { auth }), await s.socks('own')];
+  await s.start({ accounts: ownAccount(own.port), proxyPool: manualPool([socksUrl(pa.port, 'user-test-session-a')]), proxyPoolDirect: true });
+  await s.stop();
+
+  const oldDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-4fffc30-image-'));
+  t.after(() => fs.rmSync(oldDir, { recursive: true, force: true }));
+  execSync(`git archive ${oldRev} server.js package.json lib public | tar -x -C "${oldDir}"`, { cwd: repo, stdio: ['ignore', 'ignore', 'pipe'] });
+  fs.symlinkSync(path.join(repo, 'node_modules'), path.join(oldDir, 'node_modules'), 'dir');
+  s.child = await startServer(s.dir, {}, { cwd: oldDir });
+  const view = await s.get();
+  assert.equal(Object.hasOwn(view, 'proxyPoolDirect'), false, 'the old image does not know the field');
+  assert.equal((await s.get('/api/proxy-pool/status')).total, 1, 'the old image has only the configured proxy');
+  const saved = await s.post('/api/accounts', { accounts: view.accounts, mode: view.mode, active: view.active, poolFullWaitMs: view.poolFullWaitMs,
+    errorRules: view.errorRules, retryRules: view.retryRules, quotaProtection: view.quotaProtection, accountPipeline: view.accountPipeline, accountWorkflow: view.accountWorkflow,
+    proxyPool: view.proxyPool, proxyPoolClientKeys: view.proxyPoolClientKeys, sessionProviderAffinityEnabled: view.sessionProviderAffinityEnabled, expectedConfigurationRevision: view.configurationRevision, concurrencyWaitMs: 1234 });
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  assert.equal(s.read().concurrencyWaitMs, 1234, 'the old image really wrote config.json');
+  assert.equal(s.read().proxyPoolDirect, true, 'the old image preserves the unknown top-level field');
+  await s.stop();
+  await s.start();
+  assert.equal((await s.get()).proxyPoolDirect, true);
+  assert.equal((await s.get('/api/proxy-pool/status')).total, 2, 'rolling forward restores the direct entry');
+});
+
 test('an authenticated HTTP CONNECT entry works; a 407 from the proxy is a connect-phase failure that moves to another entry', async (t) => {
   const s = await setup(t);
   const c = await s.connectProxy('C', { auth });

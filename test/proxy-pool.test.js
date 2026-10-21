@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   normalizeProxyUrl, normalizeProxyPool, entryIdFor, createProxyPoolRuntime, parseRetryAfter, proxyEndpointKey,
-  PROXY_POOL_DEFAULTS, FLOPPYDATA_DEFAULTS, MAX_POOL_ENTRIES, normalizeProxyPoolClientKeys, PROXY_POOL_CLIENT_KEYS_DEFAULT,
+  PROXY_POOL_DEFAULTS, FLOPPYDATA_DEFAULTS, MAX_POOL_ENTRIES, normalizeProxyPoolClientKeys, PROXY_POOL_CLIENT_KEYS_DEFAULT, DIRECT_POOL_URL,
 } from '../lib/proxy-pool.js';
 
 const SECRET = 'test-routing-secret';
@@ -326,6 +326,40 @@ test('retained entries keep their in-flight stream and show in status without ex
   assert.equal(destroyed.length, 0, 'in-flight entry is only destroyed once released');
   entry.release();
   assert.equal(destroyed.length >= 1, true);
+});
+
+test('includeDirect adds one implicit direct entry that rotates, survives batch swaps, honours RPM and is never sampled or exposed as a URL', () => {
+  const { runtime, clock, created } = harness({ maxRpmPerProxy: 2 });
+  runtime.replaceEntries([A, B]);
+  assert.equal(runtime.status().total, 2);
+  runtime.configure({ includeDirect: true });
+  let status = runtime.status();
+  assert.equal(status.total, 3); assert.equal(status.available, 3);
+  const direct = status.entries.find((entry) => entry.scheme === 'direct');
+  assert.ok(direct); assert.equal(direct.endpointKey, DIRECT_POOL_URL); assert.equal(direct.entryId, entryIdFor(SECRET, DIRECT_POOL_URL));
+  // 轮询覆盖三个条目；直连条目的句柄标记 direct、没有 agent，url 不可枚举。
+  const handles = [0, 1, 2].map(() => { const { entry } = runtime.pickEntry(); entry.commit(); entry.release(); return entry; });
+  assert.equal(handles.filter((entry) => entry.direct).length, 1);
+  const directHandle = handles.find((entry) => entry.direct);
+  assert.equal(directHandle.agent, undefined); assert.equal(Object.keys(directHandle).includes('url'), false);
+  assert.equal(created.every((agent) => agent.url !== DIRECT_POOL_URL), true, 'no proxy agent is created for the direct entry');
+  // 每分钟上限同样适用（2 次后限速）。
+  const { entry: again } = runtime.pickEntry({ stickyKey: undefined }); again.commit(); again.release();
+  assert.equal(runtime.status().entries.some((entry) => entry.state === 'rate-limited'), true);
+  // 换批保持直连条目（含其状态），也不影响条目数。
+  const idBefore = direct.entryId;
+  runtime.replaceEntries([C, D]);
+  status = runtime.status();
+  assert.equal(status.total, 3); assert.equal(status.entries.find((entry) => entry.scheme === 'direct').entryId, idBefore);
+  // 抽样测试只取代理，不含直连；secretSeeds 不含它。
+  assert.equal(runtime.sampleEntries(10).every((item) => item.scheme !== 'direct'), true);
+  assert.doesNotMatch(JSON.stringify(runtime.status()), /user-test-session|pass-test/);
+  // 会话粘性可以落在直连条目上；关闭后立即移除。
+  runtime.configure({ includeDirect: false });
+  assert.equal(runtime.status().total, 2); assert.equal(runtime.status().entries.some((entry) => entry.scheme === 'direct'), false);
+  runtime.replaceEntries([C, D]);
+  assert.equal(runtime.status().total, 2, 'a swap does not bring the direct entry back');
+  void clock;
 });
 
 test('maxRpmPerProxy reserves, commits, refunds and blocks within the window', () => {

@@ -319,3 +319,66 @@ test('proxyPoolClientKeys: startup and reload reject invalid values without rewr
   await s.start();
   assert.deepEqual((await s.get()).proxyPoolClientKeys, { default: 'off', overrides: { ck_a: 'on' } }, 'the pruned config boots');
 });
+
+// ---------- proxyPoolDirect：把本机直连作为池中的隐式出口 ----------
+test('proxyPoolDirect: absent keeps bytes and revision; non-boolean is a 400 that keeps bytes; booleans persist, omit keeps, SIGHUP applies it', async (t) => {
+  const s = await setup(t);
+  await s.start({ proxyPool: manualPool([socksUrl(1080)]) });
+  await s.stop();
+  const normalized = s.bytes();
+  assert.equal(Object.hasOwn(s.read(), 'proxyPoolDirect'), false);
+  await s.start();
+  assert.equal(s.bytes(), normalized, 'restart does not write the default');
+  const view = await s.get();
+  assert.equal(view.proxyPoolDirect, false, 'GET projects false when absent');
+  const echoed = await s.save({ proxyPoolDirect: false });
+  assert.equal(echoed.status, 200, JSON.stringify(echoed.data));
+  assert.equal(echoed.data.configurationRevision, view.configurationRevision, 'absent field does not change the revision');
+  assert.equal(s.bytes(), normalized, 'false keeps the field absent');
+  assert.equal((await s.save()).status, 200); assert.equal(s.bytes(), normalized, 'omitting keeps it absent');
+
+  for (const proxyPoolDirect of [null, 'true', 1, [], {}]) {
+    const result = await s.save({ proxyPoolDirect });
+    assert.equal(result.status, 400, `rejects ${JSON.stringify(proxyPoolDirect)}`);
+    assert.match(result.data.error.message, /^proxyPoolDirect must be boolean/);
+    assert.equal(s.bytes(), normalized, 'rejected save leaves bytes unchanged');
+  }
+  assert.equal((await s.get('/api/proxy-pool/status')).entries.length, 1);
+  const saved = await s.save({ proxyPoolDirect: true });
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  assert.notEqual(saved.data.configurationRevision, view.configurationRevision, 'a present field is part of the revision');
+  assert.equal(s.read().proxyPoolDirect, true);
+  const status = await s.get('/api/proxy-pool/status');
+  assert.equal(status.total, 2, 'the implicit direct entry joined the pool at once');
+  assert.deepEqual(status.entries.filter((entry) => entry.scheme === 'direct').map((entry) => entry.endpointKey), ['direct://local']);
+  assert.equal((await s.save({ mode: 'roundrobin' })).status, 200);
+  assert.equal(s.read().proxyPoolDirect, true, 'omitting keeps the server value');
+
+  // SIGHUP: 关闭 / 重新开启；非法值被拒绝且不改文件。
+  fs.writeFileSync(s.file, JSON.stringify({ ...s.read(), proxyPoolDirect: false }, null, 2));
+  s.child.kill('SIGHUP');
+  await waitFor(async () => (await s.get('/api/proxy-pool/status')).total === 1, 'SIGHUP removes the direct entry');
+  fs.writeFileSync(s.file, JSON.stringify({ ...s.read(), proxyPoolDirect: 'yes' }, null, 2));
+  const bytes = s.bytes();
+  const refused = await s.post('/api/config/reload', {});
+  assert.equal(refused.status, 400); assert.match(refused.data.error.message, /proxyPoolDirect/);
+  assert.equal(s.bytes(), bytes, 'refused reload does not rewrite the file');
+  // 关闭代理池时不留直连条目。
+  fs.writeFileSync(s.file, JSON.stringify({ ...s.read(), proxyPoolDirect: true, proxyPool: { ...s.read().proxyPool, enabled: false } }, null, 2));
+  s.child.kill('SIGHUP');
+  await waitFor(async () => (await s.get()).proxyPoolDirect === true, 'SIGHUP applies proxyPoolDirect');
+  assert.equal((await s.get('/api/proxy-pool/status')).entries.length, 0, 'a disabled pool has no entries, not even the direct one');
+});
+
+test('proxyPoolDirect: an invalid value fails startup without rewriting the file', async (t) => {
+  const s = await setup(t);
+  s.writeConfig({ proxyPoolDirect: 'yes' });
+  const original = s.bytes();
+  prepareAdminFixture(s.dir);
+  const child = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: { PATH: process.env.PATH, DATA_DIR: s.dir, BIND_HOST: '127.0.0.1', NODE_ENV: 'test' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  child.stdout.on('data', (d) => { output += d; }); child.stderr.on('data', (d) => { output += d; });
+  assert.notEqual(await new Promise((resolve) => child.once('exit', resolve)), 0);
+  assert.match(output, /invalid proxyPoolDirect/);
+  assert.equal(s.bytes(), original, 'failed startup keeps bytes');
+});

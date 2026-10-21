@@ -200,6 +200,7 @@ location / {
 | `perModel` | 每模型路由：`{ upstreams, exclude, pinMode, sort, maxRetries, providerCooldownMs }`。`upstreams` 非空时是权威来源顺序，否则使用探测到的渠道顺序；`pinMode: "strict"` 首次固定来源顺序首个可用渠道，失败后从剩余渠道按 Provider-model 24h 成功率回退；`pinMode: "preferred"` 从首次起就用同一健康顺序。直连管道每次 named HTTP attempt 只注入一个 provider；规划器/网关管道一次 HTTP 请求注入完整 `only`+`order`，`pinMode` 与健康顺序只决定该列表的排列，`maxRetries` 不会在同一账号内再开额外的 provider 尝试（账号替换仍独立生效）。`maxRetries` 是首试后的外层重试次数，`providerCooldownMs` 为 0～300000（0 关闭）并在首包前 500/504/网络超时/429/不可用 后短暂跳过该 Provider（502 不打开该 circuit）。账号内同名配置整项覆盖全局配置，不逐字段合并 |
 | `apiKey` | 旧版单 key 字段，启动时自动迁移进 `accounts` |
 | `proxyPool` | 可选的全局上游出口代理池（缺省即关闭，启动时不会补写）：`{ enabled, strategy: "round-robin" \| "random", source: "manual" \| "floppydata", egressRetries（0～5，默认 2）, throttleCooldownMs（默认 60000）, failureCooldownMs（默认 30000）, connectTimeoutMs（默认 10000）, maxRpmPerProxy（0 不限）, entries（手动来源，最多 2000 条代理 URL）, floppydata: { apiKey, type, country, state, city, protocol, rotation, count（默认 100）, refreshIntervalMs（默认 180000）, apiBase } }`。启动、保存与热加载都严格校验，非法即拒绝且不改文件；旧客户端保存省略该字段时保留现值。详见下文“代理池（出口 IP 分摊）” |
+| `proxyPoolDirect` | 可选的布尔值（缺省 false，启动时不会补写）：为 true 且代理池开启时，池里增加一个隐式的“本机直连”条目，与各代理平等轮换。严格校验（非布尔即拒绝且不改文件），支持热加载；详见下文“代理池”的“隐式直连条目” |
 | `proxyPoolClientKeys` | 可选的按客户端密钥代理池开关（缺省等同 `{ default: "on", overrides: {} }`，启动时不会补写）：`{ default: "on" \| "off", overrides: { "<clientKeyId>": "on" \| "off" } }`。严格校验，详见下文“代理池”的“按客户端密钥” |
 
 定期校验回退：管理员先通过控制台或 `POST /api/providers/probe-schedule` 提交完整配置并将 `enabled` 置为 `false`，确认只停止**新的**后台付费请求；旧自动避开保持生效，逐账号/模型/渠道显式恢复后才能解除。升级前备份完整 DATA_DIR（配置、元数据及认证数据），旧镜像与新格式不能假定可安全共享写入；回退旧版须停服务后在隔离目录恢复整份旧备份。运行中的请求取消/失败也可能已在发出前保守计入预算。定期校验、负对照及生产发布不应以本地 mock 通过作为真实上游验证授权。
@@ -382,6 +383,7 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=cline-pass/glm-5.2
 **行为**：
 
 - 开启后，使用代理池的客户端密钥（默认是全部密钥，见下方“按客户端密钥”）名下账号的每次上游调用（聊天、测试、探测、渠道校验、额度刷新、模型目录）都从池里选一个代理，覆盖账号自己的固定代理。账号选择、会话粘性和缓存池不受影响。
+- **隐式直连条目**：打开“把本机直连作为池中的一个出口”后，池里会多一个不经任何代理的条目（本机出口）。它和各代理平等参与轮询/随机、会话粘性、每分钟上限、HTML 429 冷却与换条目重试；日志里显示为 `pool:<8位ID>`，不记 `poolFallback`；状态表显示为“本机直连（隐式）”。它不是配置里的条目（不会出现在 `entries`），也不参与抽样测试，不产生代理健康统计。对手动与 FloppyData 两种来源都生效；关闭代理池时不存在。配置字段是顶层 `proxyPoolDirect`（布尔，缺省 false 且不写回；旧镜像保留但忽略，回滚后池里只有配置的代理）。
 - **非流式聊天不走代理池**：客户端的非流式聊天请求（`stream` 不为 true）直接使用账号自己的代理或直连。住宅代理在约 50 秒没有数据时会断开连接，非流式长生成要等到结束才有数据，经池必然超时；流式请求一直有数据，不受影响。这类请求在日志里显示 `direct` 或 `account-proxy`，不记 `poolFallback`，也不计入池的请求数；遇到 HTML 429 时按账号退避并在同一出口重试一次，与池关闭时一致。额度刷新、探测、渠道校验、模型目录和控制台的账号测试等短调用仍走池。
 - **会话粘性**：客户端带明确会话 ID 时（如 Claude Code、Codex 的会话/线程 ID，或 `Session-Id` 等请求头），同一会话的聊天请求固定使用同一个代理；不同会话分散到不同代理。该代理冷却、限速或本请求已失败时，本次临时换到当前批里权重最高的另一个代理，恢复后回到原代理。没有明确会话 ID 的调用、额度刷新、探测等仍按所选策略轮询或随机。
 - **换批前验证连通性（FloppyData）**：接口返回成功不代表代理可用。每次换批前，服务会从新一批里随机抽 8 个，用与“抽样测试”相同的空探测（经代理到达上游，任何 HTTP 状态都算通）检查；可达的不足 70% 就整批不用（状态为“新一批代理连通性不足（已保留当前批）”），保留当前批并按退避重试；通过时去掉抽样中已确认不通的条目。每次刷新会产生约 8 个很小的住宅代理请求的流量。
