@@ -178,7 +178,7 @@ test('quota refresh and the model catalog go through pool entries; status/test/r
 
   const status = await s.get('/api/proxy-pool/status');
   assert.deepEqual(Object.keys(status).sort(), ['available', 'clientKeys', 'enabled', 'entries', 'fallbacks', 'floppydata', 'retiring', 'source', 'strategy', 'total']);
-  assert.deepEqual(status.clientKeys, [{ id: 'legacy', name: 'Legacy', mode: 'default', effective: true }], 'absent proxyPoolClientKeys: every key uses the enabled pool');
+  assert.deepEqual(status.clientKeys, [{ id: 'legacy', name: '默认密钥', mode: 'default', effective: true }], 'absent proxyPoolClientKeys: every key uses the enabled pool');
   assert.equal(status.enabled, true); assert.equal(status.source, 'manual'); assert.equal(status.floppydata, null);
   for (const entry of status.entries) assert.match(entry.endpointKey, /^socks5:\/\/127\.0\.0\.1:\d+$/);
 
@@ -745,7 +745,7 @@ test('per-client-key scope: only keys set to on use the pool; others keep their 
   assert.equal(status.fallbacks.total, 0, 'B never records a pool fallback');
   // AC7
   assert.deepEqual(status.clientKeys, [
-    { id: 'legacy', name: 'Legacy', mode: 'default', effective: false },
+    { id: 'legacy', name: '默认密钥', mode: 'default', effective: false },
     { id: 'ck_a', name: 'A', mode: 'on', effective: true },
     { id: 'ck_b', name: 'B', mode: 'default', effective: false },
   ]);

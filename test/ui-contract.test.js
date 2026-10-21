@@ -42,9 +42,9 @@ test('provider setup preview and cooldown controls preserve explicit confirmatio
 
 test('client-key console uses authenticated labels, native owner/secret controls and one-time disclosure', () => {
   assert.match(html, /api\('\/api\/security\/client-keys'\)/);
-  assert.match(html, /非空环境变量 PROXY_KEY 仅在启动\/重启时覆盖 Legacy/);
-  assert.match(html, /Legacy 匿名模式（仅限 Legacy 账号池；其他密钥仍须认证）/);
-  assert.match(html, /id="secProxyKey"[^>]*placeholder="空 = Legacy 匿名（仅 Legacy 账号池）"/);
+  assert.match(html, /非空环境变量 PROXY_KEY 仅在启动\/重启时覆盖默认密钥/);
+  assert.match(html, /默认密钥匿名模式（仅限默认密钥账号池；其他密钥仍须认证）/);
+  assert.match(html, /id="secProxyKey"[^>]*placeholder="空 = 匿名（仅默认密钥账号池）"/);
   assert.doesNotMatch(html, /鉴权已关闭（任何客户端都可访问代理）/);
   assert.match(html, /id="newAccountOwner"[^>]*><option value="legacy"/);
   assert.match(html, /<label for="drawerClientKeyId">归属客户端密钥/);

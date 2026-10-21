@@ -300,7 +300,7 @@ test('proxyPoolClientKeys: startup and reload reject invalid values without rewr
   await waitFor(async () => (await s.get()).proxyPoolClientKeys.default === 'off', 'SIGHUP applies proxyPoolClientKeys');
   const status = await s.get('/api/proxy-pool/status');
   assert.deepEqual(status.clientKeys, [
-    { id: 'legacy', name: 'Legacy', mode: 'default', effective: false },
+    { id: 'legacy', name: '默认密钥', mode: 'default', effective: false },
     { id: 'ck_a', name: 'A', mode: 'on', effective: true },
     { id: 'ck_b', name: 'B', mode: 'on', effective: true },
   ]);

@@ -208,10 +208,10 @@ test('refresh after one-time dismissal never steals focus from another control o
 test('empty Legacy with other keys defaults new accounts to a valid non-anonymous owner', () => {
   const h=harness();h.run("CLIENT_KEYS=[{id:'legacy',name:'Legacy'},{id:'other',name:'Other'}];renderSecurity({proxyKey:''})");
   assert.equal(h.el('#newAccountOwner').value,'other');
-  assert.equal(h.el('#secBadge').textContent,'Legacy 匿名模式');
+  assert.equal(h.el('#secBadge').textContent,'默认密钥匿名模式');
   assert.doesNotMatch(h.el('#secBadge').textContent,/全部|关闭鉴权/);
   h.el('#newAccountOwner').value='legacy';h.run('addAccountRow()');
-  assert.equal(h.snapshot().accounts.length,3);assert.match(h.el('#accMsg').textContent,/Legacy/);
+  assert.equal(h.snapshot().accounts.length,3);assert.match(h.el('#accMsg').textContent,/默认/);
   h.el('#newAccountOwner').value='other';h.run('addAccountRow()');
   assert.equal(h.snapshot().accounts[3].clientKeyId,'other');
 });
@@ -221,7 +221,7 @@ test('legacy-only snapshots and in-flight key responses cannot revive one-time s
   h.run('render=()=>{}; api=async path=>responses[path]');await h.run('loadAll()');
   assert.equal(h.run('CLIENT_KEYS.length'),1);assert.equal(h.el('#newAccountOwner').value,'legacy');
   h.el('#newClientKeyName').value='New team';await h.run('createClientKey()');
-  assert.match(h.el('#clientKeysStatus').textContent,/Legacy/);
+  assert.match(h.el('#clientKeysStatus').textContent,/默认/);
   h.context.resolveWrite=null;h.context.sent=[];
   h.run("api=async(path,body,method)=>{sent.push({path,body,method});return new Promise(resolve=>{resolveWrite=resolve});}");
   h.el('#secProxyKey').value='configured-legacy';

@@ -165,8 +165,12 @@ const config = { ...DEFAULT_CONFIG, ...loadedConfig };
 const activeClientSecrets = new Map();
 const CLIENT_KEY_ID = /^[A-Za-z0-9_-]{1,100}$/;
 const CLIENT_KEY_MAX = 16;
+// Display name of the stable owner ID 'legacy' (the stored proxyKey); the ID stays as persisted data.
+// Only management create/rename reserves it, so an already persisted key with that name still boots.
+const DEFAULT_CLIENT_KEY_NAME = '默认密钥';
+const reservedClientKeyName = (name) => String(name).trim().toLowerCase() === DEFAULT_CLIENT_KEY_NAME.toLowerCase();
 function clientKeyInventory(candidate = config, legacyKey = candidate.proxyKey) {
-  return [{ id: 'legacy', name: 'Legacy', key: legacyKey }, ...candidate.clientKeys];
+  return [{ id: 'legacy', name: DEFAULT_CLIENT_KEY_NAME, key: legacyKey }, ...candidate.clientKeys];
 }
 function defaultClientKeyId() { return PROXY_KEY || !config.clientKeys.length ? 'legacy' : config.clientKeys[0].id; }
 function validateClientKeys(candidate, { persisted = false } = {}) {
@@ -181,7 +185,7 @@ function validateClientKeys(candidate, { persisted = false } = {}) {
         names.has(row.name.toLowerCase()) || secrets.has(row.key)) throw new Error('invalid or duplicate client key');
     ids.add(row.id); names.add(row.name.toLowerCase()); secrets.add(row.key);
   }
-  if (candidate.clientKeys.length && !legacy && (candidate.accounts || []).some((a) => (a?.clientKeyId ?? 'legacy') === 'legacy')) throw new Error('configure the legacy key before adding other client keys');
+  if (candidate.clientKeys.length && !legacy && (candidate.accounts || []).some((a) => (a?.clientKeyId ?? 'legacy') === 'legacy')) throw new Error('configure the default client key before adding other client keys');
   if (persisted && Array.isArray(candidate.accounts)) for (const account of candidate.accounts) {
     if (account?.clientKeyId !== undefined && !ids.has(account.clientKeyId)) throw new Error('unknown client key owner');
   }
@@ -197,7 +201,7 @@ validateClientKeys({ ...config, proxyKey: String(process.env.PROXY_KEY || '').tr
 const injectedKey = String(process.env.CLINE_PASS_KEY || '').trim();
 if (config.clientKeys.length && !(String(process.env.PROXY_KEY || '').trim() || String(config.proxyKey || '').trim()) &&
     injectedKey && !(config.accounts || []).some((account) => account?.key === injectedKey))
-  throw new Error('configure the legacy key before injecting a legacy account alongside other client keys');
+  throw new Error('configure the default client key before injecting a default-key account alongside other client keys');
 if (loadedAdminState !== MISSING_ADMIN && loadedAdminState.initialized) for (const item of clientKeyInventory(config, String(process.env.PROXY_KEY || '').trim() || config.proxyKey)) {
   if (item.key && item.key.length <= 1024 && crypto.timingSafeEqual(crypto.scryptSync(item.key, Buffer.from(loadedAdminState.salt, 'hex'), 64), Buffer.from(loadedAdminState.hash, 'hex')))
     throw new Error('client key must differ from the administrator password');
@@ -7131,6 +7135,7 @@ async function dispatch(req, res) {
       if (req.method === 'POST' && p === '/api/security/client-keys') {
         const body = await readJsonBody(req);
         if (!isPlainObject(body) || Object.keys(body).join(',') !== 'name' || typeof body.name !== 'string') return sendJSON(res, 400, { error: { message: 'expected key name' } });
+        if (reservedClientKeyName(body.name)) return sendJSON(res, 400, { error: { message: 'invalid or duplicate client key' } });
         const row = { id: randomId('ck'), name: body.name, key: generateClientKey() };
         const next = { ...config, clientKeys: [...config.clientKeys, row] };
         try { validateClientKeys(next, { persisted: true }); if (adminPasswordOK(row.key)) throw new Error('client key must differ from admin password'); }
@@ -7145,6 +7150,7 @@ async function dispatch(req, res) {
       if (req.method === 'PATCH' && parts.length === 1) {
         const body = await readJsonBody(req);
         if (!isPlainObject(body) || Object.keys(body).join(',') !== 'name' || typeof body.name !== 'string') return sendJSON(res, 400, { error: { message: 'expected key name' } });
+        if (reservedClientKeyName(body.name)) return sendJSON(res, 400, { error: { message: 'invalid or duplicate client key' } });
         const next = { ...config, clientKeys: config.clientKeys.map((row) => row.id === id ? { ...row, name: body.name } : row) };
         try { validateClientKeys(next, { persisted: true }); }
         catch (error) { return sendJSON(res, 400, { error: { message: error.message } }); }

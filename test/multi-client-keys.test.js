@@ -274,6 +274,8 @@ test('key inventory, migration, old full save, rotation, reassignment and byte-p
     assert.equal(fs.readFileSync(file, 'utf8'), bytes);
     assert.equal((await manage('/api/security/client-keys', 'POST', { name: 'team b renamed' })).status, 400);
     assert.equal((await manage('/api/security/client-keys', 'POST', { name: 'Legacy' })).status, 400);
+    assert.equal((await manage('/api/security/client-keys', 'POST', { name: '默认密钥' })).status, 400, 'the default key display name is reserved');
+    assert.equal((await manage(`/api/security/client-keys/${id}`, 'PATCH', { name: '默认密钥' })).status, 400, 'rename cannot take the reserved default name');
     assert.equal(fs.readFileSync(file, 'utf8'), bytes);
     for (const [secret, expected] of [[legacy, 'upstream-one'], [key, 'upstream-two']]) {
       const response = await chat(port, secret);

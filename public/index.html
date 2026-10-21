@@ -297,7 +297,7 @@
       <label class="dim" style="font-size:12px" for="sessionBindingMaxEntries">会话绑定上限 <input id="sessionBindingMaxEntries" type="number" min="1" max="100000" step="1" value="50000" aria-describedby="cachePoolHelp" style="width:100px"></label>
       <label class="dim" for="sessionProviderAffinityEnabled"><input id="sessionProviderAffinityEnabled" type="checkbox" disabled aria-describedby="sessionProviderAffinityHelp" onchange="PROVIDER_TOGGLE_DIRTY=true;PROVIDER_TOGGLE_GENERATION++"> 显式会话优先上次成功计划渠道</label>
       <input id="accSearch" placeholder="搜索名称或备注" oninput="clearBulkSelection()" style="background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px">
-      <label for="newAccountOwner" class="dim">新账号归属 <select id="newAccountOwner" aria-label="新账号归属客户端密钥"><option value="legacy">Legacy</option></select></label>
+      <label for="newAccountOwner" class="dim">新账号归属 <select id="newAccountOwner" aria-label="新账号归属客户端密钥"><option value="legacy">默认密钥</option></select></label>
       <button class="ghost" onclick="addAccountRow()">＋ 添加账号</button>
       <button onclick="saveAccounts()">保存账号配置</button>
       <button class="ghost" onclick="reloadConfigFile()" title="服务器上手动修改 config.json 后，无需重启即可生效">从配置文件热加载</button>
@@ -431,8 +431,8 @@
   <div class="card">
     <h2>访问与安全（下游密钥）</h2>
     <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-      <label class="dim" style="font-size:13px" for="secProxyKey">旧版客户端密钥（Legacy）：</label>
-      <input id="secProxyKey" type="password" placeholder="空 = Legacy 匿名（仅 Legacy 账号池）" style="width:340px; background:var(--card2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:7px 10px; font-family:Consolas, monospace; font-size:13px">
+      <label class="dim" style="font-size:13px" for="secProxyKey">默认客户端密钥：</label>
+      <input id="secProxyKey" type="password" placeholder="空 = 匿名（仅默认密钥账号池）" style="width:340px; background:var(--card2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:7px 10px; font-family:Consolas, monospace; font-size:13px">
       <label class="dim" style="font-size:12px"><input type="checkbox" id="secShow" onchange="$('#secProxyKey').type=this.checked?'text':'password'"> 显示</label>
       <span id="secBadge" class="badge"></span>
     </div>
@@ -445,7 +445,7 @@
       <span class="dim" style="font-size:12px">修改代理密钥仅影响模型客户端，不影响管理员登录。</span>
       <span class="dim" style="font-size:12px" id="secMsg" aria-live="polite"></span>
     </div>
-    <p class="dim" style="font-size:12px;margin-top:8px">非空环境变量 PROXY_KEY 仅在启动/重启时覆盖 Legacy 密钥；管理员在运行中保存可暂时改变当前值，下次重启会重新应用环境变量。Legacy 为空且仍有归属旧账号时，需先设置非空密钥才能新增其他客户端密钥。管理员会话与所有客户端密钥独立。</p>
+    <p class="dim" style="font-size:12px;margin-top:8px">非空环境变量 PROXY_KEY 仅在启动/重启时覆盖默认密钥；管理员在运行中保存可暂时改变当前值，下次重启会重新应用环境变量。默认密钥为空且仍有归属它的账号时，需先设置非空密钥才能新增其他客户端密钥。管理员会话与所有客户端密钥独立。</p>
     <section aria-labelledby="clientKeysTitle" style="margin-top:16px">
       <h3 id="clientKeysTitle">独立客户端密钥（仅显示标签与账号归属）</h3>
       <p class="dim">每个账号只归属一个密钥。撤销前须保存账号重分配；密钥操作成功后会刷新服务端状态，未保存的账号草稿将丢失。轮换会立即阻止旧密钥的新请求，已开始的请求仍可完成。生成值只显示一次，请及时复制。</p>
@@ -555,7 +555,7 @@ try { localStorage.removeItem('cps_key'); } catch {}
 let ADMIN_CSRF = null;
 let ADMIN_PENDING = false;
 let ADMIN_BOOTSTRAP = false;
-let CLIENT_KEYS = [{id:'legacy',name:'Legacy'}], CLIENT_KEY_ACTION_ID = 0, CLIENT_KEY_RETURN = null;
+let CLIENT_KEYS = [{id:'legacy',name:'默认密钥'}], CLIENT_KEY_ACTION_ID = 0, CLIENT_KEY_RETURN = null;
 const $ = (s) => document.querySelector(s);
 const escapeHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 const jsArg = (s) => escapeHtml(JSON.stringify(String(s ?? '')));
@@ -798,7 +798,7 @@ async function loadAll() {
   DATA = {...models,subscription:(models.subscription||[]).map(item=>({...item,statistics:modelStatistics.get(item.id)||null}))};
   const pendingWorkflowContext=WORKFLOW_SUPPORTED&&(workflowWasDirty||WORKFLOW_GENERATION!==workflowLoadGeneration)?captureWorkflowContext():null;
   ACCS = accs; ALIASES = aliases;
-  CLIENT_KEYS = Array.isArray(keyList?.keys) && keyList.keys.some(k => k.id === 'legacy') ? keyList.keys.map(({id,name}) => ({id,name})) : [{id:'legacy',name:'Legacy'}];
+  CLIENT_KEYS = Array.isArray(keyList?.keys) && keyList.keys.some(k => k.id === 'legacy') ? keyList.keys.map(({id,name}) => ({id,name})) : [{id:'legacy',name:'默认密钥'}];
   $('#concurrencyWaitMs').value = ACCS.concurrencyWaitMs ?? 2000; $('#poolFullWaitMs').value = ACCS.poolFullWaitMs ?? '';
   $('#monthlyQuotaThreshold').value = (ACCS.quotaProtection?.monthlyThresholdUsd ?? 0.20).toFixed(2);
   const pipeline=ACCS.accountPipeline||{},cacheMin=pipeline.cachePoolSize??0;
@@ -844,7 +844,7 @@ function clientKeyOptions(selected) {
 function renderClientKeys() {
   $('#clientKeyBody').innerHTML=CLIENT_KEYS.map(k=>{
     const count=(ACCS?.accounts||[]).filter(a=>(a.clientKeyId??'legacy')===k.id).length;
-    return `<tr><td>${escapeHtml(k.name)}</td><td class="mono">${escapeHtml(k.id)}</td><td>${count}</td><td>${k.id==='legacy'?'旧版密钥在上方设置':`<div class="row-actions"><button type="button" class="ghost" onclick="renameClientKey(${jsArg(k.id)})">重命名</button><button id="clientKeyRotate-${escapeHtml(k.id)}" type="button" class="ghost" onclick="rotateClientKey(${jsArg(k.id)})">轮换</button><button type="button" class="ghost" onclick="revokeClientKey(${jsArg(k.id)})">撤销</button></div>`}</td></tr>`;
+    return `<tr><td>${escapeHtml(k.name)}</td><td class="mono">${escapeHtml(k.id)}</td><td>${count}</td><td>${k.id==='legacy'?'默认密钥在上方设置':`<div class="row-actions"><button type="button" class="ghost" onclick="renameClientKey(${jsArg(k.id)})">重命名</button><button id="clientKeyRotate-${escapeHtml(k.id)}" type="button" class="ghost" onclick="rotateClientKey(${jsArg(k.id)})">轮换</button><button type="button" class="ghost" onclick="revokeClientKey(${jsArg(k.id)})">撤销</button></div>`}</td></tr>`;
   }).join('');
 }
 function closeClientKeySecret(invalidateAction=true, restoreFocus=true) {
@@ -906,7 +906,7 @@ async function createClientKey() {
   const name=$('#newClientKeyName').value.trim();
   if(!name||name.length>80){clientKeyStatus('请输入 1–80 字符的名称');return;}
   if(!$('#secProxyKey').value.trim()&&(ACCS?.accounts||[]).some(a=>(a.clientKeyId??'legacy')==='legacy')){
-    clientKeyStatus('请先保存非空 Legacy 客户端密钥，再创建独立密钥');return;
+    clientKeyStatus('请先保存非空默认客户端密钥，再创建独立密钥');return;
   }
   await clientKeyWrite('/api/security/client-keys',{name},undefined,$('#newClientKeyName'));
 }
@@ -931,7 +931,7 @@ function renderSecurity(sec) {
   $('#secProxyKey').value = sec.proxyKey || '';
   $('#secPublicBase').value = sec.publicBaseUrl || '';
   const badge = $('#secBadge');
-  badge.textContent = sec.authRequired ? 'Legacy 鉴权已开启' : 'Legacy 匿名模式';
+  badge.textContent = sec.authRequired ? '默认密钥鉴权已开启' : '默认密钥匿名模式';
   badge.className = sec.authRequired ? 'badge green' : 'badge orange';
   const ec = $('#exposeCatalog');
   if (ec) ec.checked = !!sec.exposeCatalog;
@@ -958,7 +958,7 @@ async function saveSecurity() {
     renderSecurity(r);
     DATA.proxyBase = r.proxyBase;
     $('#proxyBase').textContent = '代理地址：' + r.proxyBase + '（点击复制）';
-    secMsg('已保存' + (r.authRequired ? '，Legacy 鉴权开启' : '，Legacy 匿名模式（仅限 Legacy 账号池；其他密钥仍须认证）'));
+    secMsg('已保存' + (r.authRequired ? '，默认密钥鉴权开启' : '，默认密钥匿名模式（仅限默认密钥账号池；其他密钥仍须认证）'));
   } else secMsg(r.error?.message || '保存失败', true);
 }
 
@@ -1841,7 +1841,7 @@ async function recoverAccount(id){const r=await api('/api/accounts/recover',{id}
 async function resetAccountHealth(id,name){if(!confirm(`重置账号「${name}」？将清空其 24 小时健康样本，并清除规则冷却、硬隔离和 Provider 熔断；请求/错误统计、额度保护和月额度封禁不受影响。`))return;const r=await api('/api/accounts/reset-health',{id});if(!r.ok)return accMsg(r.error?.message||'重置失败',true);accMsg('账号健康度与调度状态已重置');await loadAll();}
 async function recoverMonthlyQuota(id){if(!confirm('确定解除月额度封禁？该账号可能再次额度不足并产生失败请求。请先核对额度。'))return;const r=await api('/api/accounts/quota-recover',{id});if(!r.ok)return accMsg(r.error?.message||'解除失败',true);accMsg('月额度封禁已解除，请注意后续失败');await loadAll();}
 async function recoverProvider(model,provider){const r=await api('/api/providers/recover',{model,provider});if(!r.ok){$('#accLive').textContent=r.error?.message||'Provider 恢复失败';return;}$('#accLive').textContent=`已恢复 ${model} / ${provider}`;await loadAll();}
-function addAccountRow(){const owner=$('#newAccountOwner').value;if(!CLIENT_KEYS.some(k=>k.id===owner))return accMsg('请先选择有效的客户端密钥归属',true);if(owner==='legacy'&&!$('#secProxyKey').value.trim()&&CLIENT_KEYS.length>1)return accMsg('请先保存非空 Legacy 客户端密钥，或选择其他归属',true);ACCS.accounts.push({clientKeyId:owner,name:`账号${ACCS.accounts.length+1}`,note:'',key:'',enabled:true,maxConcurrent:0,maxRpm:0,weight:1,priority:100,proxyUrl:'',headers:{},perModel:{}});renderAccounts();openAccountDrawer(ACCS.accounts.length-1);}
+function addAccountRow(){const owner=$('#newAccountOwner').value;if(!CLIENT_KEYS.some(k=>k.id===owner))return accMsg('请先选择有效的客户端密钥归属',true);if(owner==='legacy'&&!$('#secProxyKey').value.trim()&&CLIENT_KEYS.length>1)return accMsg('请先保存非空默认客户端密钥，或选择其他归属',true);ACCS.accounts.push({clientKeyId:owner,name:`账号${ACCS.accounts.length+1}`,note:'',key:'',enabled:true,maxConcurrent:0,maxRpm:0,weight:1,priority:100,proxyUrl:'',headers:{},perModel:{}});renderAccounts();openAccountDrawer(ACCS.accounts.length-1);}
 function delAccount(i){if(!confirm('确认删除该账号？'))return;ACCS.accounts.splice(i,1);ACCS.active=Math.min(ACCS.active,Math.max(0,ACCS.accounts.length-1));renderAccounts();}
 async function testAccount(i,btn){const a=ACCS.accounts[i];if(!a.key)return accMsg('请先在设置中填写 key',true);btn.disabled=true;const r=await api('/api/accounts/test',{accountId:a.id,key:a.key,proxyUrl:a.proxyUrl||''});btn.disabled=false;accMsg(r.ok?`✔ ${a.name} 可用（${r.ms} ms）`:`✘ ${a.name}：${r.error}`,!r.ok);}
 function drawerValue(){return JSON.stringify([$('#drawerName').value,$('#drawerNote').value,$('#drawerKey').value,$('#drawerMax').value,$('#drawerRpm').value,$('#drawerWeight').value,$('#drawerPriority').value,$('#drawerProxy').value,$('#drawerHeaders').value,$('#drawerClientKeyId').value]);}
