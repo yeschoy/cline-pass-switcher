@@ -4289,21 +4289,27 @@ const floppyDataSource = createFloppyDataSource({
   // 来源已被切走/关闭时迟到的批次不得重新填充池。
   onBatch: (urls) => { if (proxyPoolUsesFloppyData()) proxyPoolRuntime.replaceEntries(urls); },
 });
+// 会话粘性的保留时长：FloppyData 取"轮换"分钟数（-1 每次换 IP 则不保留；0 = 固定会话，按 60 分钟封顶）；手动来源条目不换批，不需要。
+function poolStickyRetentionMs(pool) {
+  if (pool.source !== 'floppydata') return 0;
+  const rotation = pool.floppydata?.rotation;
+  return rotation > 0 ? rotation * 60_000 : rotation === 0 ? 3_600_000 : 0;
+}
 // 启动规范化、管理保存、热加载、删除客户端密钥之后调用；只改变出口选择，不触碰账号运行时状态。
 // previous/next 是 proxyPool；按密钥开关读取已发布的 config（调用时已更新）。
 function applyProxyPoolConfig(previous, next) {
-  proxyPoolRuntime.configure(next);
-  if (!next.enabled) { floppyDataSource.stop(); proxyPoolRuntime.replaceEntries([]); return; }
-  if (next.source === 'manual') { floppyDataSource.stop(); proxyPoolRuntime.replaceEntries(next.entries); return; }
+  proxyPoolRuntime.configure({ ...next, stickyRetentionMs: poolStickyRetentionMs(next) });
+  if (!next.enabled) { floppyDataSource.stop(); proxyPoolRuntime.replaceEntries([], { retain: false }); return; }
+  if (next.source === 'manual') { floppyDataSource.stop(); proxyPoolRuntime.replaceEntries(next.entries, { retain: false }); return; }
   // 所有密钥都不使用代理池：停止 FloppyData 导入并让现有条目退役；之后任一密钥改为 on 时由下方重新导入。
-  if (!anyClientKeyUsesProxyPool()) { floppyDataSource.stop(); proxyPoolRuntime.replaceEntries([]); return; }
+  if (!anyClientKeyUsesProxyPool()) { floppyDataSource.stop(); proxyPoolRuntime.replaceEntries([], { retain: false }); return; }
   const wasFloppyData = !!previous?.enabled && previous.source === 'floppydata';
   if (!wasFloppyData || !floppyDataSource.running) {
-    floppyDataSource.stop(); proxyPoolRuntime.replaceEntries([]); void floppyDataSource.start();
+    floppyDataSource.stop(); proxyPoolRuntime.replaceEntries([], { retain: false }); void floppyDataSource.start();
     return;
   }
   // 身份字段变化：旧批立即退役（在途请求跑完再销毁），并立即导入新批；只改刷新间隔：重排定时器。
-  if (floppyDataSource.reconfigure(previous.floppydata, next.floppydata) === 'restart') proxyPoolRuntime.replaceEntries([]);
+  if (floppyDataSource.reconfigure(previous.floppydata, next.floppydata) === 'restart') proxyPoolRuntime.replaceEntries([], { retain: false });
 }
 applyProxyPoolConfig(PROXY_POOL_OFF, effectiveProxyPool());
 // GET /api/proxy-pool/status：只含短 id、协议、无凭据 endpointKey、状态与枚举。

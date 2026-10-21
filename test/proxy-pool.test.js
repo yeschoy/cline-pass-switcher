@@ -256,6 +256,78 @@ test('stickyKey pins a session to one entry, fails over by weight, returns when 
   }
 });
 
+const D = 'socks5://user-test-session-4:pass-test@127.0.0.1:10004';
+const E = 'socks5://user-test-session-5:pass-test@127.0.0.1:10005';
+const F = 'socks5://user-test-session-6:pass-test@127.0.0.1:10006';
+const stateOf = (runtime) => Object.fromEntries(runtime.status().entries.map((entry) => [entry.entryId, entry.state]));
+
+test('stickyRetentionMs keeps a bound entry across batch swaps until its lifetime ends; unbound old entries retire at once', () => {
+  const { runtime, clock } = harness({ throttleCooldownMs: 5000, stickyRetentionMs: 600000 });
+  runtime.replaceEntries([A, B, C]);
+  const bound = pickUrl(runtime, { stickyKey: 'session-1' });
+  clock.t += 200000;
+  runtime.replaceEntries([D, E, F]);
+  const retained = runtime.status().entries.filter((entry) => entry.state === 'retained');
+  assert.equal(retained.length, 1, 'only the bound entry is retained; unbound old entries retire at once');
+  const boundId = retained[0].entryId;
+  assert.equal(entryIdFor(SECRET, bound), boundId);
+  assert.equal(runtime.status().total, 3); assert.equal(runtime.status().available, 3, 'retained entries are not counted as available');
+  // 同一会话继续用旧条目；轮询与其他会话只在新批里选。
+  for (let i = 0; i < 5; i++) assert.equal(pickUrl(runtime, { stickyKey: 'session-1' }), bound);
+  for (let i = 0; i < 30; i++) assert.ok([D, E, F].includes(pickUrl(runtime, { stickyKey: `other-${i}` })), 'other sessions only use the new batch');
+  for (let i = 0; i < 6; i++) assert.ok([D, E, F].includes(pickUrl(runtime)), 'sessionless calls only use the new batch');
+  // 绑定的旧条目冷却：本次临时用新批条目，不改绑定；冷却结束后回到旧条目。
+  const { entry } = runtime.pickEntry({ stickyKey: 'session-1' });
+  entry.noteConnectFailure(); entry.release();
+  const temp = pickUrl(runtime, { stickyKey: 'session-1' });
+  assert.ok([D, E, F].includes(temp));
+  assert.equal(pickUrl(runtime, { stickyKey: 'session-1' }), temp, 'temporary choice is stable');
+  clock.t += 31000;
+  assert.equal(pickUrl(runtime, { stickyKey: 'session-1' }), bound, 'returns to the bound entry once healthy');
+  // 再换一批（仍在 bornAt + 600 s 内）：继续保留。
+  clock.t += 100000;
+  runtime.replaceEntries([E, F, [A, B, C].find((url) => url !== bound)]);
+  assert.equal(pickUrl(runtime, { stickyKey: 'session-1' }), bound);
+  // 寿命结束：绑定失效，改选当前批并重新绑定；旧条目释放。
+  clock.t += 400000;
+  const after = pickUrl(runtime, { stickyKey: 'session-1' });
+  assert.notEqual(after, bound);
+  assert.notEqual(stateOf(runtime)[boundId], 'retained', 'expired entry is released');
+  assert.equal(pickUrl(runtime, { stickyKey: 'session-1' }), after, 'rebound and stable');
+});
+
+test('retain:false and a zero retention drop every binding and retained entry', () => {
+  const { runtime } = harness({ stickyRetentionMs: 600000 });
+  runtime.replaceEntries([A, B, C]);
+  pickUrl(runtime, { stickyKey: 'session-1' });
+  runtime.replaceEntries([D, E, F]);
+  assert.equal(Object.values(stateOf(runtime)).filter((state) => state === 'retained').length, 1);
+  runtime.replaceEntries([D, E, F], { retain: false });
+  assert.equal(Object.values(stateOf(runtime)).includes('retained'), false);
+  assert.ok([D, E, F].includes(pickUrl(runtime, { stickyKey: 'session-1' })));
+  // 关闭保留：之后换批不再保留旧条目。
+  runtime.configure({ stickyRetentionMs: 0 });
+  pickUrl(runtime, { stickyKey: 'session-1' });
+  runtime.replaceEntries([A, B, C]);
+  assert.equal(Object.values(stateOf(runtime)).includes('retained'), false);
+});
+
+test('retained entries keep their in-flight stream and show in status without exposing URLs', () => {
+  const { runtime, clock, destroyed } = harness({ stickyRetentionMs: 600000 });
+  runtime.replaceEntries([A, B, C]);
+  const { entry } = runtime.pickEntry({ stickyKey: 'session-1' });
+  entry.agent; entry.commit();
+  runtime.replaceEntries([D, E, F]);
+  const projected = JSON.stringify(runtime.status());
+  assert.equal(projected.includes('user-test-session'), false);
+  assert.ok(runtime.status().entries.some((item) => item.state === 'retained' && item.inFlight === 1));
+  clock.t += 700000; runtime.sweep();
+  assert.equal(Object.values(stateOf(runtime)).includes('retained'), false);
+  assert.equal(destroyed.length, 0, 'in-flight entry is only destroyed once released');
+  entry.release();
+  assert.equal(destroyed.length >= 1, true);
+});
+
 test('maxRpmPerProxy reserves, commits, refunds and blocks within the window', () => {
   const { runtime, clock } = harness({ maxRpmPerProxy: 2 });
   runtime.replaceEntries([A, B]);

@@ -293,6 +293,57 @@ test('a session sticks to one pool entry, fails over together when that entry th
   assert.equal((await s.get('/api/proxy-pool/status')).fallbacks.total, 0);
 });
 
+test('FloppyData: a session keeps its bound entry across a batch swap while other traffic moves to the new batch', async (t) => {
+  const s = await setup(t);
+  const batches = { 1: [await s.socks('B1a', { auth }), await s.socks('B1b', { auth })], 2: [await s.socks('B2a', { auth }), await s.socks('B2b', { auth })] };
+  let mode = 1;
+  const api = http.createServer((req, res) => {
+    let raw = ''; req.on('data', (chunk) => { raw += chunk; });
+    req.on('end', () => {
+      const body = JSON.parse(raw || '{}'), list = batches[mode];
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ connection: { connectionString: `socks5://user-test-session-${body.session}:${PASS}@127.0.0.1:${list[Number(body.session.slice(-1)) % 2].port}` } }));
+    });
+  });
+  const apiPort = await listen(api);
+  t.after(() => close(api));
+  await s.start({ proxyPool: { enabled: true, source: 'floppydata', floppydata: { apiKey: API_KEY, apiBase: `http://127.0.0.1:${apiPort}`, count: 4, rotation: 60 } } });
+  await waitFor(async () => { const value = await s.get('/api/proxy-pool/status'); return value.total === 4 && value.floppydata?.state === 'ok' ? value : null; }, 'first batch');
+  const chatIn = async (session) => {
+    const res = await fetch(`http://127.0.0.1:${s.port}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(session ? { 'Session-Id': session } : {}) },
+      body: JSON.stringify({ model: 'm', messages: [{ role: 'user', content: `keep ${Math.random()}` }] }) });
+    await res.text();
+    return res.status;
+  };
+  for (let i = 0; i < 3; i++) assert.equal(await chatIn('keep-session'), 200);
+  assert.equal(new Set(s.seen).size, 1);
+  const boundVia = s.seen[0];
+  assert.match(boundVia, /^B1/);
+
+  mode = 2;
+  const swapped = await s.post('/api/proxy-pool/refresh', { wait: true });
+  assert.equal(swapped.status, 200);
+  assert.equal(swapped.data.total, 4);
+  assert.equal(swapped.data.entries.filter((entry) => entry.state === 'retained').length, 1, 'only the entry bound to a session is kept');
+  assert.equal(swapped.data.retiring, 0);
+  assert.equal(swapped.data.available, 4);
+
+  // 已绑定的会话仍走旧条目；新会话与无会话的请求只用新批。
+  s.seen.length = 0;
+  for (let i = 0; i < 5; i++) assert.equal(await chatIn('keep-session'), 200);
+  assert.deepEqual(s.seen, Array(5).fill(boundVia), 'the bound session keeps using its old entry after the swap');
+  s.seen.length = 0;
+  for (let i = 0; i < 8; i++) assert.equal(await chatIn(`fresh-${i}`), 200);
+  for (let i = 0; i < 4; i++) assert.equal(await chatIn(null), 200);
+  assert.ok(s.seen.every((via) => /^B2/.test(via)), `other traffic uses the new batch: ${s.seen}`);
+
+  // 关闭代理池：绑定与被保留的旧条目一并释放。
+  const off = await s.post('/api/accounts', { ...(await s.get('/api/accounts')), proxyPool: { ...(await s.get('/api/accounts')).proxyPool, enabled: false } });
+  assert.equal(off.status, 200, JSON.stringify(off.data));
+  await waitFor(async () => (await s.get('/api/proxy-pool/status')).entries.length === 0, 'retained entry released with the pool');
+  await assertDiagnosticsClean(s, [JSON.stringify(swapped.data)]);
+});
+
 test('an authenticated HTTP CONNECT entry works; a 407 from the proxy is a connect-phase failure that moves to another entry', async (t) => {
   const s = await setup(t);
   const c = await s.connectProxy('C', { auth });
