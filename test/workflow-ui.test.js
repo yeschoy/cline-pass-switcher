@@ -21,9 +21,7 @@ function harness() {
     accountPipeline: { quotaPool: true, healthSort: true, sticky: true, order: ['healthSort', 'quotaPool', 'sticky'], cachePoolSize: 3, cachePoolMaxSize: 10, cachePoolLowQuotaSize: 0, sessionBindingExplicitTtlMs: 7200000, sessionBindingFallbackTtlMs: 900000, sessionBindingMaxEntries: 50000 },
     cachePool: { targetSize: 3 }, accounts: [0, 1, 2].map(i => ({ id: `a${i}`, clientKeyId: i === 2 ? 'team' : 'legacy', name: i ? `Account ${i}` : '<img src=x onerror=alert(1)>', key: `fixture-secret-${i}`, note: 'preserve', enabled: true, maxConcurrent: 7, maxRpm: 0, headers: { 'X-Fixture': 'keep' }, perModel: { model: { upstreams: ['one'] } }, activeCount: 0, selectionCount: i + 1, health: { successRate: null, samples: 0 }, cachePoolRole: 'active' })) };
   context.calls = calls;
-  el('#pipelineSteps').children = ['healthSort', 'quotaPool', 'sticky'].map(step => ({ dataset: { pipelineStep: step } }));
-  run("ACCS=fixture;CLIENT_KEYS=[{id:'legacy',name:'Legacy'},{id:'team',name:'Team'}]; $('#accMode').value='sticky';$('#monthlyQuotaThreshold').value='0.20';$('#concurrencyWaitMs').value='1000';$('#poolFullWaitMs').value=''; for(const [key,id] of Object.entries(PIPELINE_NUMBER_CONTROLS))$('#'+id).value=String(fixture.accountPipeline[key]); for(const [key,id] of Object.entries(RAW_PIPELINE_CONTROLS))$('#'+id).checked=fixture.accountPipeline[key]; hydrateErrorRuleDraft([]);hydrateRetryRuleDraft([]); hydrateAccountWorkflow(fixture,{force:true}); api=async(path,body)=>{calls.push({path,body});return {ok:false,error:{message:'fixture'}}};");
-  el('#accMode').options = ['single', 'roundrobin', 'sticky', 'least-connections', 'weighted-roundrobin', 'priority-failover', 'load-health'].map(value => ({ value }));
+  run("ACCS=fixture;CLIENT_KEYS=[{id:'legacy',name:'Legacy'},{id:'team',name:'Team'}];$('#monthlyQuotaThreshold').value='0.20';$('#concurrencyWaitMs').value='1000';$('#poolFullWaitMs').value=''; for(const [key,id] of Object.entries(PIPELINE_NUMBER_CONTROLS))$('#'+id).value=String(fixture.accountPipeline[key]); hydrateErrorRuleDraft([]);hydrateRetryRuleDraft([]); hydrateAccountWorkflow(fixture,{force:true}); api=async(path,body)=>{calls.push({path,body});return {ok:false,error:{message:'fixture'}}};");
   return { context, el, run, calls, value: code => JSON.parse(run(`JSON.stringify(${code})`)) };
 }
 
@@ -166,9 +164,13 @@ test('reset success remains explicit if its refresh fails', async () => {
   assert.match(h.el('#workflowCounterStatus').textContent, /已重置.*刷新失败.*不要重复/);
 });
 
-test('guided mode disables the legacy preset action as well as its picker', () => {
-  const h = harness(); h.run("updateWorkflowField('enabled',true)");
-  assert.equal(h.el('#accountPresetPreview').disabled, true);
+test('the editor has no enable switch and every save sends an enabled workflow', () => {
+  const h = harness();
+  assert.equal(h.context.fixture.accountWorkflow.enabled, false);
+  assert.equal(h.run('workflowDirty()'), false);
+  assert.equal(h.run('collectAccountWorkflow().enabled'), true);
+  assert.match(h.el('#workflowStatus').textContent, /尚未启用工作流，保存账号配置后启用/);
+  assert.doesNotMatch(html, /id="workflowEnabled"|id="accMode"|id="preset"|legacyPipelineFieldset/);
 });
 
 

@@ -4,8 +4,8 @@ import fs from 'node:fs';
 
 const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 
-test('load-health and pool-full wait use labelled native controls with an inheritance hint', () => {
-  assert.match(html, /<option value="load-health">无粘性/);
+test('pool-full wait uses labelled native controls with an inheritance hint and no legacy mode picker', () => {
+  assert.doesNotMatch(html, /id="accMode"|load-health/);
   assert.match(html, /for="concurrencyWaitMs"/);
   assert.match(html, /for="poolFullWaitMs"/);
   assert.match(html, /id="poolFullWaitMs" type="number" min="0" max="30000" step="1" placeholder="继承"/);
@@ -20,10 +20,8 @@ test('monthly quota protection uses a labelled reference threshold and explicit 
   assert.match(html, /可能再次失败/);
 });
 
-test('console exposes seven bounded presets and accessible account drawer/log/alias views', () => {
-  for (const id of ['stable','throughput','even','quota','failover','safe','cache']) assert.match(html, new RegExp(`${id}:\\{`));
-  const presets = html.slice(html.indexOf('const PRESETS='), html.indexOf('function previewPreset'));
-  for (const forbidden of ['proxyUrl','perModel','modelAliases','key:']) assert.equal(presets.includes(forbidden), false, `presets must not modify ${forbidden}`);
+test('console exposes accessible account drawer/log/alias views and no legacy scheduling presets', () => {
+  assert.doesNotMatch(html, /const PRESETS=|id="preset"|id="presetModal"|function previewPreset/);
   assert.match(html, /role="dialog"/); assert.match(html, /aria-labelledby="drawerTitle"/); assert.match(html, /accountDrawerBackdrop/);
   assert.match(html, /api\/logs/); assert.match(html, /api\/model-aliases/); assert.match(html, /width:min\(100%,1800px\)/);
 });
@@ -113,7 +111,7 @@ test('request and error sections share one log view and reset the selected type 
   assert.equal((html.match(/id="logNext"/g) || []).length, 1);
   assert.match(html, /id="logTitle"[^>]*>最终请求结果（每个请求一条）<\/h2>/);
   assert.match(html, /id="logSectionStatus"[^>]+aria-live="polite">当前板块：请求日志<\/span>/);
-  assert.match(html, /id="logDescription"[^>]*>展示最终请求结果，每个请求一条；旧记录可能缺少 result/);
+  assert.match(html, /id="logDescription"[^>]*>展示最终请求结果，每个请求一条。/);
   assert.match(html, /上游失败尝试（同一请求可能多条）/);
   assert.match(html, /数量不等于失败请求数/);
   assert.match(html, /id="logResult"/);
@@ -128,8 +126,8 @@ test('request and error sections share one log view and reset the selected type 
   assert.match(loadLogs, /const queryId=\+\+LOG_QUERY_ID/);
   assert.match(loadLogs, /if\(LOG_CURSOR\)params\.set\('cursor',LOG_CURSOR\)/);
   assert.match(loadLogs, /params\.set\('result',\$\('#logResult'\)\.value\)/);
-  assert.match(loadLogs, /x\.result\|\|legacyResult/);
-  assert.match(loadLogs, /legacy_failed/);
+  assert.match(loadLogs, /x\.result\|\|'—'/);
+  assert.doesNotMatch(loadLogs, /legacy_failed/);
   assert.match(html, /亲和键\/请求体键\/缓存/);
   assert.match(loadLogs, /affinityLogLabel\(x\)/);
   assert.match(loadLogs, /cacheHitLogLabel\(x\.cacheHit\)/);
@@ -183,15 +181,13 @@ test('request log shows and filters the inbound protocol with consistent column 
   assert.doesNotMatch(html, /prefers-color-scheme|theme-toggle|darkMode|localStorage\.setItem\(['"]theme/);
 });
 
-test('error rule presets, pipeline controls and statistics rendering retain strict boundaries', () => {
+test('error rule presets, cache-pool controls and statistics rendering retain strict boundaries', () => {
   for (const id of ['standard','fast','conservative','observe','clear']) assert.match(html, new RegExp(`${id}:\\[`));
   const errorPresets = html.slice(html.indexOf('const ERROR_RULE_PRESETS='), html.indexOf('function previewErrorPreset'));
   assert.doesNotMatch(errorPresets, /401|403/);
   assert.match(errorPresets, /accountCooldownRule\('preset-account-429','30m0s'\)/);
   assert.match(errorPresets, /providerDegradeRules/);
   assert.match(errorPresets, /action:'ignore'/);
-  const schedulingPresets = html.slice(html.indexOf('const PRESETS='), html.indexOf('function previewPreset'));
-  assert.doesNotMatch(schedulingPresets, /401|403/);
   assert.match(html, /id="errorRuleBody"/);assert.match(html,/id="errorRuleFeedback" aria-live="polite"/);assert.match(html,/onclick="addErrorRule\(\)"/);
   assert.match(html, /function previewErrorPreset\(\).*cloneRuleDraft\(\)/);
   assert.match(html, /const next=replace\?cloneRuleDraft\(preset\):mergeRulesById\(current,preset\)/);
@@ -202,25 +198,20 @@ test('error rule presets, pipeline controls and statistics rendering retain stri
   assert.match(html, /applyErrorPreset\(\).*commitErrorRuleDraft\(next/);
   assert.match(html,/onclick="moveErrorRule\(\$\{index\},-1,this\)"/);assert.match(html,/data-error-rule-index/);assert.match(html,/focusTarget\.focus\(\)/);
   assert.match(html,/<details id="advancedErrorRules"[^>]+ontoggle="if\(this.open\)openAdvancedErrorRules\(\)"/);assert.match(html,/id="advancedErrorRulesJson"[^>]+oninput="markAdvancedErrorRulesDirty\(\)"/);assert.match(html,/function openAdvancedErrorRules\(\).*advancedErrorRulesJson'\)\.focus\(\)/);assert.match(html,/function applyAdvancedErrorRules\(\)/);assert.match(html,/snapshot.generation!==ERROR_RULE_GENERATION/);
-  for (const id of ['pipelineQuotaPool','pipelineHealthSort','pipelineSticky']) assert.match(html, new RegExp(`id="${id}"`));
-  assert.doesNotMatch(html,/id="pipelineExcludeUnhealthy"/);
-  assert.match(html,/会话命中条件门与未命中调度步骤/); assert.equal((html.match(/class="pipeline-step" draggable="true"/g)||[]).length,3);
-  assert.equal((html.match(/class="ghost pipeline-move-up"/g)||[]).length,3); assert.equal((html.match(/class="ghost pipeline-move-down"/g)||[]).length,3);
-  assert.match(html,/id="pipelineOrderStatus" aria-live="polite"/); assert.match(html,/已有绑定先命中/);assert.match(html,/sticky 的保存位置仅为配置兼容/);assert.match(html,/未命中调度步骤/);
-  for(const handler of ['startPipelineDrag','dropPipelineDrag','movePipelineStep','syncPipelineOrder'])assert.match(html,new RegExp(`function ${handler}\\(`));
-  assert.match(html,/onclick="movePipelineStep\('quotaPool',-1,this\)"/,'native move buttons pass their focus target to production reorder logic');
-  assert.match(html,/const opposite=row\?\.querySelector\(direction<0\?'\.pipeline-move-down':'\.pipeline-move-up'\)/);
-  assert.match(html,/const target=button\.disabled\?opposite:button/,'boundary moves transfer focus to the enabled opposite-direction button');
+  for (const id of ['pipelineQuotaPool','pipelineHealthSort','pipelineSticky','pipelineSteps','pipelineOrderStatus','legacyPipelineFieldset']) assert.doesNotMatch(html, new RegExp(`id="${id}"`));
+  for (const handler of ['startPipelineDrag','dropPipelineDrag','movePipelineStep','syncPipelineOrder']) assert.doesNotMatch(html, new RegExp(`function ${handler}\\(`));
+  assert.doesNotMatch(html, /旧版兼容|会话命中条件门|pipeline-step/);
   const collect = html.slice(html.indexOf('function collectAccounts'), html.indexOf('async function saveAccounts'));
   for (const field of ['id:a.id','name:a.name',"note:a.note||''","key:a.key||''",'enabled:a.enabled!==false','maxConcurrent:','maxRpm:','weight:','priority:',"proxyUrl:a.proxyUrl||''","headers:a.headers||{}","perModel:a.perModel||{}"] ) assert.ok(collect.includes(field), `full account snapshot must preserve ${field}`);
   assert.match(collect,/errorRules:rules/);
-  assert.match(collect, /accountPipeline:\{quotaPool:[^}]+healthSort:[^}]+sticky:[^}]+order:pipelineOrder\(\),\.\.\.pipelineNumberDraft\(\)/);
+  assert.match(collect, /mode:ACCS\.mode/);
+  assert.match(collect, /accountPipeline:\{\.\.\.ACCS\.accountPipeline,\.\.\.pipelineNumberDraft\(\),\.\.\.pipelineDrainDraft\(\)\}/);
   for(const id of ['cachePoolSize','cachePoolMaxSize','cachePoolLowQuotaSize'])assert.match(html,new RegExp(`id="${id}" type="number" min="0" max="100000" step="1"`));
   for(const id of ['sessionBindingExplicitTtlMs','sessionBindingFallbackTtlMs'])assert.match(html,new RegExp(`id="${id}" type="number" min="60000" max="604800000" step="1"`));
   assert.match(html,/id="sessionBindingMaxEntries" type="number" min="1" max="100000" step="1"/);
   assert.match(html,/<label[^>]*for="sessionProviderAffinityEnabled"><input id="sessionProviderAffinityEnabled" type="checkbox" disabled aria-describedby="sessionProviderAffinityHelp" onchange="PROVIDER_TOGGLE_DIRTY=true;PROVIDER_TOGGLE_GENERATION\+\+">/);
   assert.match(html,/id="sessionProviderAffinityHelp"[^>]*>默认开启/);
-  assert.match(html,/sessionProviderAffinityEnabled:\$\('#sessionProviderAffinityEnabled'\)\.checked/);assert.match(html,/最小总数 0 = 关闭/);assert.match(html,/max=min 可关闭自动扩容/);assert.match(html,/当前目标与会话绑定状态/);
+  assert.match(html,/sessionProviderAffinityEnabled:\$\('#sessionProviderAffinityEnabled'\)\.checked/);assert.match(html,/最小总数须 ≥ 1/);assert.match(html,/max=min 可关闭自动扩容/);assert.match(html,/当前目标与会话绑定状态/);
   assert.match(html,/cachePoolRole==='active'/);assert.match(html,/缓存活跃/);assert.match(html,/缓存备用/);
   assert.match(html, /api\('\/api\/statistics'\)/);
   assert.match(html, /id="statisticsStatus"[^>]+aria-live="polite"/);
@@ -310,7 +301,7 @@ test('bulk concurrency uses labelled native controls, bounded input and persiste
   for (const id of ['bulkSummary','bulkFeedback']) assert.match(html, new RegExp(`id="${id}" aria-live="polite"`));
   assert.match(html, /批量应用仅更新草稿，尚未生效/);
   assert.match(html, /id="accSearch"[^>]+oninput="clearBulkSelection\(\)"/);
-  assert.match(html, /id="accMode" onchange="renderAccounts\(\)"/);
+  assert.doesNotMatch(html, /name="accActive"/);
 });
 
 
@@ -321,9 +312,9 @@ test('raw scheduling editor uses a labelled native modal, draft guidance and ann
   assert.match(html, /id="rawSchedulingJson"[^>]+overflow-wrap:anywhere/);
   for (const id of ['rawSchedulingError','rawSchedulingFeedback']) assert.match(html,new RegExp(`id="${id}" aria-live="polite"`));
   assert.match(html,/accountNames 为全部账号的只读参考名称（可重复），不可修改/);
-  assert.match(html,/策略全局统一，分别作用于各客户端密钥归属的账号池/);assert.match(html,/priority\/稳定 ID/);assert.match(html,/reserve/);assert.match(html,/grow-one/);assert.match(html,/sticky\+healthSort 是“绑定命中条件门”/);
-  const raw=html.slice(html.indexOf('const RAW_PIPELINE_CONTROLS'),html.indexOf('function collectAccounts'));
-  assert.match(raw,/accountPipeline\.order=pipelineOrder\(\)/);assert.match(raw,/const PIPELINE_NUMBER_CONTROLS/);for(const field of ['cachePoolSize','cachePoolMaxSize','sessionBindingExplicitTtlMs','sessionBindingFallbackTtlMs','sessionBindingMaxEntries'])assert.ok(raw.includes(field),field);assert.match(raw,/value\.accountPipeline\.cachePoolMaxSize/); assert.match(raw,/validPipelineOrder\(value\.accountPipeline\.order\)/); assert.match(raw,/setPipelineOrder\(value\.accountPipeline\.order\)/);
+  assert.match(html,/策略全局统一，分别作用于各客户端密钥归属的账号池/);assert.match(html,/priority\/稳定 ID/);assert.match(html,/reserve/);assert.match(html,/grow-one/);assert.doesNotMatch(html,/sticky\+healthSort/);
+  const raw=html.slice(html.indexOf('const PIPELINE_NUMBER_CONTROLS'),html.indexOf('function collectAccounts'));
+  assert.doesNotMatch(raw,/RAW_PIPELINE_CONTROLS|pipelineOrder|accountMode/);assert.match(raw,/const PIPELINE_NUMBER_CONTROLS/);for(const field of ['cachePoolSize','cachePoolMaxSize','sessionBindingExplicitTtlMs','sessionBindingFallbackTtlMs','sessionBindingMaxEntries'])assert.ok(raw.includes(field),field);assert.match(raw,/value\.accountPipeline\.cachePoolMaxSize/);
 });
 
 test('detailed logs have independent labelled controls, privacy/retention guidance and safe on-demand text', () => {
