@@ -4357,7 +4357,7 @@ async function testProxyPoolEntries(sample = PROXY_POOL_TEST_DEFAULT) {
 function resolveEgress(account, proxyUrl = '', egressHint = null) {
   let kind, url = '', entry = null, poolFallback = false, retryAt = null;
   if (proxyUrl) { kind = 'explicit'; url = proxyUrl; }
-  else if (accountUsesProxyPool(account)) {
+  else if (!egressHint?.skipPool && accountUsesProxyPool(account)) {
     const exclude = egressHint?.exclude instanceof Set && egressHint.exclude.size ? egressHint.exclude : undefined;
     const picked = proxyPoolRuntime.pickEntry({ exclude, stickyKey: egressHint?.stickyKey });
     if (picked.entry) { kind = 'pool'; entry = picked.entry; url = entry.url; }
@@ -5920,7 +5920,7 @@ function gatewayNamedAttempt(modelId, plan, account, list, now) {
 }
 // 两级重试：本函数固定一个账号。direct 管道在该账号内逐个尝试 provider；
 // planner/未识别管道只发一次带完整 only+order 的 HTTP。账号级替换仍由外层处理。
-async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream = false, attemptTimeoutMs = NON_STREAM_ATTEMPT_MS, sensitiveValues = [], attemptOwner = null, preferredProvider = null, sessionKey = null } = {}) {
+async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream = false, attemptTimeoutMs = NON_STREAM_ATTEMPT_MS, sensitiveValues = [], attemptOwner = null, preferredProvider = null, sessionKey = null, poolEligible = true } = {}) {
   const t0 = Date.now();
   const plan = buildProviderPlan(modelId, cfg, account, t0, preferredProvider), trace = [], attempted = new Set();
   let retryStop = false, localRpm = false, localRpmRetryAt = null;
@@ -5965,7 +5965,9 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
   };
   // 出口池：本账号段内已用过的池条目与换代理次数（独立于 provider 重试、gateway 重试与换号）。
   // sessionKey：仅显式会话 ID 的指纹（兜底的首条消息指纹可能被不同用户撞上，会让一个条目过热）；同一会话尽量固定在同一个池条目上，条目不可用时才换。
-  const egressExclude = new Set(), egressHint = { exclude: egressExclude, stickyKey: sessionKey || undefined };
+  // poolEligible=false（客户端的非流式聊天）：本次不走池，出口为账号自己的代理或直连。住宅代理会在约 50 秒没有数据时断开连接，
+  // 非流式长生成要等到结束才有数据，经池会必然超时；流式与其他短调用不受影响。
+  const egressExclude = new Set(), egressHint = { exclude: egressExclude, stickyKey: sessionKey || undefined, skipPool: !poolEligible };
   let egressRetries = 0;
   // 池条目首包前 HTML 429 或连接阶段失败：立即换一个本请求未用过的池条目重试，不等待。
   // 次数用完或池里没有其他可用条目时停止，绝不追加一次走账号出口的请求。
@@ -5982,7 +5984,7 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
   };
   // 下一次 attempt 预计走池条目时不做账号级 HTML 429 等待；回退到账号出口（池关闭或本账号所属密钥不使用池）时与原逻辑一致。
   // account 是本次调用（一个账号段）的参数且不会被重新赋值；首包前换号会以新账号重新调用 runChatChain。
-  const poolEgressExpected = () => accountUsesProxyPool(account) && proxyPoolRuntime.hasAvailable(egressExclude);
+  const poolEgressExpected = () => poolEligible && accountUsesProxyPool(account) && proxyPoolRuntime.hasAvailable(egressExclude);
   try {
     for (let index = 0; index < maxAttempts; index++) {
       if (clientClosed) break;
@@ -6279,7 +6281,7 @@ async function handleChat(req, res, clientKeyId, adapter = null) {
     cfg = resolveModelConfig(account, modelId);
     try {
       upstreamAffinitySent = true;
-      chain = await runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream: isStream, sensitiveValues, attemptOwner, preferredProvider, sessionKey: identity.confidence === 'explicit' ? identity.fingerprint : null });
+      chain = await runChatChain(req, body, modelId, cfg, account, forwardedHeaders, { stream: isStream, sensitiveValues, attemptOwner, preferredProvider, sessionKey: identity.confidence === 'explicit' ? identity.fingerprint : null, poolEligible: isStream });
       cleanupSessionBindingSelection(selected);
       targets = chain.plan?.plannedOrder || [];
       targetSource = chain.plan?.source || 'auto';

@@ -151,9 +151,10 @@ export async function setup(t, { metadata = null, responder = null, env = {} } =
       errorRules: view.errorRules, retryRules: view.retryRules, quotaProtection: view.quotaProtection, accountPipeline: view.accountPipeline, accountWorkflow: view.accountWorkflow,
       sessionProviderAffinityEnabled: view.sessionProviderAffinityEnabled, expectedConfigurationRevision: view.configurationRevision, ...patch });
   };
-  s.chat = async () => (await s.post('/v1/chat/completions', { model: 'm', messages: [{ role: 'user', content: `pool ${Math.random()}` }] })).status;
+  // 客户端的非流式聊天不走代理池（见 poolEligible），所以经池的测试默认发流式请求；非流式用 { stream: false } 显式指定。
+  s.chat = async ({ stream = true } = {}) => (await s.chatFull({ stream })).status;
   // 完整读取响应（含 SSE）后返回 { status, headers, text }。
-  s.chatFull = async ({ stream = false } = {}) => {
+  s.chatFull = async ({ stream = true } = {}) => {
     const res = await fetch(`http://127.0.0.1:${s.port}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'm', stream, messages: [{ role: 'user', content: `pool ${Math.random()}` }] }) });
     return { status: res.status, headers: res.headers, text: await res.text() };
   };

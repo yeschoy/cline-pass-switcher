@@ -265,7 +265,7 @@ test('a session sticks to one pool entry, fails over together when that entry th
   await s.start({ proxyPool: manualPool(proxies.map((proxy, i) => socksUrl(proxy.port, `user-test-session-${i}`))) });
   const chatIn = async (session) => {
     const res = await fetch(`http://127.0.0.1:${s.port}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(session ? { 'Session-Id': session } : {}) },
-      body: JSON.stringify({ model: 'm', messages: [{ role: 'user', content: `sticky ${Math.random()}` }] }) });
+      body: JSON.stringify({ model: 'm', stream: true, messages: [{ role: 'user', content: `sticky ${Math.random()}` }] }) });
     await res.text();
     return res.status;
   };
@@ -311,7 +311,7 @@ test('FloppyData: a session keeps its bound entry across a batch swap while othe
   await waitFor(async () => { const value = await s.get('/api/proxy-pool/status'); return value.total === 4 && value.floppydata?.state === 'ok' ? value : null; }, 'first batch');
   const chatIn = async (session) => {
     const res = await fetch(`http://127.0.0.1:${s.port}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(session ? { 'Session-Id': session } : {}) },
-      body: JSON.stringify({ model: 'm', messages: [{ role: 'user', content: `keep ${Math.random()}` }] }) });
+      body: JSON.stringify({ model: 'm', stream: true, messages: [{ role: 'user', content: `keep ${Math.random()}` }] }) });
     await res.text();
     return res.status;
   };
@@ -342,6 +342,43 @@ test('FloppyData: a session keeps its bound entry across a batch swap while othe
   assert.equal(off.status, 200, JSON.stringify(off.data));
   await waitFor(async () => (await s.get('/api/proxy-pool/status')).entries.length === 0, 'retained entry released with the pool');
   await assertDiagnosticsClean(s, [JSON.stringify(swapped.data)]);
+});
+
+test('non-stream client chat bypasses the pool (account egress, no fallback, no pool counters); stream chat and short calls use the pool', async (t) => {
+  const s = await setup(t);
+  const [a, b, own] = [await s.socks('A', { auth }), await s.socks('B', { auth }), await s.socks('own')];
+  await s.start({ accounts: ownAccount(own.port), proxyPool: manualPool([socksUrl(a.port, 'user-test-session-a'), socksUrl(b.port, 'user-test-session-b')]) });
+
+  // 非流式：走账号自己的代理（住宅代理空闲约 50 秒会断开，长生成必然超时），不是池回退。
+  for (let i = 0; i < 3; i++) assert.equal((await s.chatFull({ stream: false })).status, 200);
+  assert.deepEqual(s.seen, ['own', 'own', 'own']);
+  // 流式：走池。
+  s.seen.length = 0;
+  for (let i = 0; i < 2; i++) assert.equal((await s.chatFull({ stream: true })).status, 200);
+  assert.deepEqual(s.seen.slice().sort(), ['A', 'B']);
+
+  const rows = await rowsFor(s, 'requests', 5);
+  const nonStream = rows.filter((row) => row.stream === false), streamed = rows.filter((row) => row.stream === true);
+  assert.equal(nonStream.length, 3); assert.equal(streamed.length, 2);
+  assert.ok(nonStream.every((row) => row.egress === 'account-proxy' && row.poolFallback === false && row.attempts.every((attempt) => attempt.poolFallback === false)));
+  assert.ok(streamed.every((row) => POOL_ID.test(row.egress) && row.poolFallback === false));
+  const status = await s.get('/api/proxy-pool/status');
+  assert.equal(status.entries.reduce((sum, entry) => sum + entry.recent.requests, 0), 2, 'only the stream requests count against pool entries');
+  assert.equal(status.fallbacks.total, 0, 'bypassing the pool is not a fallback');
+});
+
+test('non-stream HTML 429 keeps the account backoff and single same-egress retry because the pool is bypassed', async (t) => {
+  let calls = 0;
+  const s = await setup(t, { responder: (via, res, ctx) => {
+    if (!ctx.body.stream && via === 'own' && ++calls === 1) { res.writeHead(429, { 'Content-Type': 'text/html' }); return res.end(HTML_429); }
+    okResponder(via, res, ctx);
+  } });
+  const [a, own] = [await s.socks('A', { auth }), await s.socks('own')];
+  await s.start({ accounts: ownAccount(own.port), proxyPool: manualPool([socksUrl(a.port, 'user-test-session-a')]) });
+  const result = await s.chatFull({ stream: false });
+  assert.equal(result.status, 200, result.text);
+  assert.equal(calls >= 2, true, 'retried once on the same account egress');
+  assert.ok(s.seen.every((via) => via === 'own'), `no pool entry was used: ${s.seen}`);
 });
 
 test('an authenticated HTTP CONNECT entry works; a 407 from the proxy is a connect-phase failure that moves to another entry', async (t) => {
@@ -535,7 +572,7 @@ const ownedAccounts = (ownPort = null) => [
   { id: 'a0', clientKeyId: 'ck_a', name: 'a0', key: 'local-a0', enabled: true, maxConcurrent: 0, priority: 10 },
   { id: 'b0', clientKeyId: 'ck_b', name: 'b0', key: 'local-b0', enabled: true, maxConcurrent: 0, priority: 10, ...(ownPort ? { proxyUrl: `socks5://127.0.0.1:${ownPort}` } : {}) },
 ];
-async function chatAs(s, key, { stream = false } = {}) {
+async function chatAs(s, key, { stream = true } = {}) {
   const res = await fetch(`http://127.0.0.1:${s.port}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
     body: JSON.stringify({ model: 'm', stream, messages: [{ role: 'user', content: `scoped ${Math.random()}` }] }) });
   return { status: res.status, text: await res.text() };
