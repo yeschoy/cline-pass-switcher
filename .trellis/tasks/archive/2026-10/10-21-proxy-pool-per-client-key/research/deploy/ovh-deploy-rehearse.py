@@ -157,8 +157,9 @@ def main():
     snapshot = read_json(snapshot_path) if snapshot_path.is_file() else {}
     changed = changes(before, migrated)
     workflow = migrated.get('accountWorkflow') or {}
-    # This release persists no new configuration: absent proxyPool / proxyPoolClientKeys are never written back.
-    require(changed == [] and 'proxyPool' not in migrated and 'proxyPoolClientKeys' not in migrated and
+    # This release persists no new configuration: proxyPool / proxyPoolClientKeys are exactly as before (absent stays absent).
+    require(changed == [] and migrated.get('proxyPool') == before.get('proxyPool') and
+            migrated.get('proxyPoolClientKeys') == before.get('proxyPoolClientKeys') and
             identity(migrated) == before_identity and
             migrated.get('accountWorkflow') == before.get('accountWorkflow') and
             migrated_meta.get('statistics', {}).get('version') in (5, 6) and
