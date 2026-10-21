@@ -99,6 +99,37 @@ test('a pool entry that refuses connections is skipped within the request; the a
   for (const text of [JSON.stringify(errors), JSON.stringify(status), s.child.output()]) assertNoSecrets(text, 'diagnostics');
 });
 
+test('a pooled stream that breaks after it started is attributed to the proxy, not the account, and does not cool the entry', async (t) => {
+  let breakNext = true;
+  const s = await setup(t, { responder: (via, res, ctx) => {
+    if (ctx.body.stream && breakNext) {
+      breakNext = false;
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n');
+      setTimeout(() => res.socket.destroy(), 60);
+      return;
+    }
+    okResponder(via, res, ctx);
+  } });
+  const a = await s.socks('A', { auth });
+  await s.start({ proxyPool: manualPool([socksUrl(a.port, 'user-test-session-a')]) });
+  const broken = await fetch(`http://127.0.0.1:${s.port}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'm', stream: true, messages: [{ role: 'user', content: 'break' }] }) });
+  await broken.text().catch(() => '');
+  const [errorRow] = await rowsFor(s, 'errors', 1);
+  assert.equal(errorRow.errorScope, 'proxy'); assert.equal(errorRow.scopeEvidence, 'proxy_pool_transport');
+  assert.equal(errorRow.healthAction, 'none'); assert.equal(errorRow.accountAction, null); assert.match(errorRow.egress, POOL_ID);
+  assert.equal(errorRow.ruleId ?? null, null, 'no error rule was evaluated');
+  const view = await s.get();
+  assert.equal(view.accounts[0].state, null, 'the account was not degraded');
+  const status = await s.get('/api/proxy-pool/status');
+  assert.equal(status.entries[0].state, 'ok', 'a transport break does not cool the entry');
+  assert.equal(status.entries[0].recent.connectFailures, 0);
+  // 下一次请求仍可用同一个条目。
+  assert.equal(await s.chat(), 200);
+  assert.deepEqual(s.seen, ['A', 'A']);
+  assertNoSecrets(JSON.stringify(errorRow), 'error row');
+});
+
 test('egress retries exhausted on HTML 429 return 429 with a bounded Retry-After and never use the account egress', async (t) => {
   const throttled = new Set(['A', 'B', 'C']);
   const s = await setup(t, { responder: throttleResponder(throttled) });

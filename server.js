@@ -5653,6 +5653,9 @@ function classifyAttemptFailure(result, attempt, account, now = Date.now()) {
   const errorText = structuredErrorText(error || result?.out?.error?.message);
   // 池条目自身在连接阶段失败（代理拒绝/握手/认证/连接超时）：只归因到该条目，不连带账号或 provider。
   if (isPoolConnectFailure(result)) return { scope: 'proxy', evidence: 'proxy_pool_connect', failureClass: 'network', retryAfterMs: null };
+  // 池条目连接成功后在传输中断开（代理空闲切断、对端重置，流式含已收到部分内容后断开）：同样只归因到池，
+  // 不评估规则、不降级账号；条目不冷却（空闲切断不说明条目坏了），也不换条目重试（响应可能已开始）。
+  if (result?.egress?.kind === 'pool' && origin === 'proxy') return { scope: 'proxy', evidence: 'proxy_pool_transport', failureClass: 'network', retryAfterMs: null };
   if (status === 429) {
     const retryAfterMs = parseRetryAfter(result?.retryAfter, now);
     if (quotaShowsExhausted(account, now)) return { scope: 'account', evidence: 'fresh_account_quota', failureClass: 'rate_limit', retryAfterMs };
@@ -5835,7 +5838,7 @@ function settleAttempt(modelId, attempt, result, account, { clientDisconnected =
       accountAction: null, quotaRemovalAction: null, healthAction: 'none', providerCircuitAction: null, retryDecision: null, gatewayThrottle: true };
   }
   if (classification.scope === 'proxy') {
-    // 池条目连接阶段失败：条目已冷却；不评估 error/retry 规则，不降级账号，不打开 provider circuit。
+    // 池条目失败（连接阶段已冷却该条目；传输中断不冷却）：不评估 error/retry 规则，不降级账号，不打开 provider circuit。
     if (attempt.circuitHalfOpen) { const state = providerCircuitStates.get(attempt.circuitKey); if (state) state.halfOpen = false; }
     return { classification, policy: { ruleId: null, scope: null, action: 'ignore', statusCode: Number(result.normalizedStatus || result.status), matchedBy: ['default'] },
       accountAction: null, quotaRemovalAction: null, healthAction: 'none', providerCircuitAction: null, retryDecision: null, poolConnectFailure: true };
