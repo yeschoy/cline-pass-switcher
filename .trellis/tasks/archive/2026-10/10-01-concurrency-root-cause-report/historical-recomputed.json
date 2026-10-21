@@ -303,7 +303,7 @@
       "429": 9
     },
     "egressA": "167.114.158.4",
-    "egressB": "104.202.107.56",
+    "egressB": "<egress-B-ip>",
     "errorFingerprints": {
       "6ff059e12183cc1b0cea42b12c922ecedd2c6400fc4948d4e257b9fcbb152515": 9
     },
@@ -481,15 +481,15 @@
       },
       {
         "route": "B",
-        "ip": "104.202.107.56"
+        "ip": "<egress-B-ip>"
       },
       {
         "route": "B",
-        "ip": "104.202.107.56"
+        "ip": "<egress-B-ip>"
       },
       {
         "route": "B",
-        "ip": "104.202.107.56"
+        "ip": "<egress-B-ip>"
       }
     ]
   },

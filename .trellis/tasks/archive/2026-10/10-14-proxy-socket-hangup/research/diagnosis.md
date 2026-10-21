@@ -4,8 +4,8 @@
 
 ## 结论（先看这个）
 
-1. **字面 `socket hang up` 仍存在，但很少**：保留请求日志里仅 **2** 次请求命中规则 `proxy-socket-hangup`（`2026-10-13 19:17` / `19:19` UTC），账号 `zxg-10.13-04`，出口 `socks5://15.235.125.171:1080`。同一请求内多个 Provider（deepseek→fireworks→alibaba）连续 `upstreamStatus=0`、约 60s。
-2. **更大一簇是「约 60s + transport_proxy」**，多数 **没有** `proxy-socket-hangup` 规则 ID：48h 内约 **46** 个 `errorCategory=proxy` 失败请求、约 **101** 次 ≈60s/`upstreamStatus=0` attempt。主峰在已删除的 `zxg-10.13-03`，其次 `zxg-10.13-04`（同属 `15.235.125.171`）及少量其它出口。
+1. **字面 `socket hang up` 仍存在，但很少**：保留请求日志里仅 **2** 次请求命中规则 `proxy-socket-hangup`（`2026-10-13 19:17` / `19:19` UTC），账号 `zxg-10.13-04`，出口 `socks5://egress-W2:1080`。同一请求内多个 Provider（deepseek→fireworks→alibaba）连续 `upstreamStatus=0`、约 60s。
+2. **更大一簇是「约 60s + transport_proxy」**，多数 **没有** `proxy-socket-hangup` 规则 ID：48h 内约 **46** 个 `errorCategory=proxy` 失败请求、约 **101** 次 ≈60s/`upstreamStatus=0` attempt。主峰在已删除的 `zxg-10.13-03`，其次 `zxg-10.13-04`（同属 `egress-W2`）及少量其它出口。
 3. **与代码同形**：`server.js` 里 `proxyAgentOptions.timeout = 60_000`。SOCKS keep-alive 空闲/无进展约 60s 被掐断时，若错误文案不含 `socket hang up`，不会命中 hang 规则，但仍记为 `failureClass=network` + `scopeEvidence=transport_proxy`。
 4. **不是全站代理池整体炸掉**：各 SOCKS 出口 48h 总失败率约 1.5%–5.7%，大部分失败是普通 `errorCategory=upstream`（780 vs proxy 46）。Hang/≈60s 传输失败是 **出口/账号侧偶发尖峰**，不是 switcher 逻辑全面回归。
 5. **规则 `action=ignore` + account scope**：hangup 后仍在 **同一账号** 上换 Provider 重试，坏代理会被乘以渠道数（常见 3×≈60s），放大用户可见延迟。这是处置语义，不是 hangup 的根因。
@@ -25,9 +25,9 @@
 
 优先关注：
 
-- **`socks5://15.235.125.171:1080`**：唯一确认的 hang 规则命中出口；仍挂在启用账号 `zxg-10.13-04`（以及未出 hang 的 `10.11-03` / `10.11-05` 等）。建议单独探活该出口；若持续 ≈60s/`transport_proxy`，换出口或暂时避开该出口上的重负载账号。
+- **`socks5://egress-W2:1080`**：唯一确认的 hang 规则命中出口；仍挂在启用账号 `zxg-10.13-04`（以及未出 hang 的 `10.11-03` / `10.11-05` 等）。建议单独探活该出口；若持续 ≈60s/`transport_proxy`，换出口或暂时避开该出口上的重负载账号。
 - **历史 `zxg-10.13-03`**：≈60s proxy 尖峰主账号，配置中已不存在——说明删号有效降低了后续 hang 可见量，但不能证明出口本身已健康。
-- **其它出口**（`51.79.7.167`、`io.socks.work:9135`、`15.235.122.152`、`15.235.123.80`）：有常规失败，但 hang 规则未命中；不必因本次 hangup 一律替换。
+- **其它出口**（`egress-O2`、`<proxy-domain>:<port>`、`egress-W1`、`egress-Z1`）：有常规失败，但 hang 规则未命中；不必因本次 hangup 一律替换。
 
 回看指标（运维自检）：
 
