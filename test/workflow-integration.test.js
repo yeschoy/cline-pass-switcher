@@ -659,3 +659,27 @@ test('workflow corrupt authoritative counter snapshot fails startup without over
   await assert.rejects(f.start(), /invalid selectionCounters/);
   assert.equal(fs.readFileSync(filename,'utf8'),bad);
 });
+
+test('reset-soonest sends new sessions to the earliest monthly reset first and spreads inside one day bucket', async t => {
+  const day = 86400000, now = Date.now();
+  // a1/a2 reset in ~3 days (same bucket), a3 in ~10, a0 in ~20; a0 has the least monthly quota left but resets last.
+  const resets = { a0: [20, 98], a1: [3, 40], a2: [3, 10], a3: [10, 60] };
+  const accountQuotas = Object.fromEntries(Object.entries(resets).map(([id, [days, used]]) => [id, {
+    snapshot: { limits: {
+      five_hour: { percentUsed: 1, resetsAt: new Date(now + 3600e3).toISOString() },
+      weekly: { percentUsed: 1, resetsAt: new Date(now + 5 * day).toISOString() },
+      monthly: { percentUsed: used, resetsAt: new Date(now + days * day - 3600e3).toISOString() },
+    }, fetchedAt: now }, lastAttemptAt: now, lastSuccessAt: now, errorCategory: null,
+  }]));
+  const f = await fixture(t, {
+    count: 4, metadata: { accountQuotas },
+    configure: c => ({ ...c, accountWorkflow: { ...defaultAccountWorkflow(), enabled: true, selector: 'reset-soonest', quotaPools: ['hot', 'warm', 'unknown'] } }),
+  });
+  for (let i = 0; i < 6; i++) assert.equal((await f.chat(`reset-${i}`)).success, true);
+  const used = f.seen.map(row => row.account);
+  // Only the 3-day bucket (a1, a2) is used while it has capacity, strictly alternating; a3 and a0 stay idle.
+  assert.deepEqual([...new Set(used)].sort(), ['a1', 'a2']);
+  assert.equal(used.filter(id => id === 'a1').length, 3);
+  assert.equal(used.filter(id => id === 'a2').length, 3);
+  assert.ok(used.every((id, index) => index === 0 || id !== used[index - 1]));
+});

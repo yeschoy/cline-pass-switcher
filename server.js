@@ -2501,7 +2501,16 @@ function workflowFilteredCandidates(context, excludeId = null) {
 }
 function workflowRank(candidates, policy) {
   const byId = new Map(candidates.map(candidate => [candidate.account.id, candidate]));
-  return rankWorkflowCandidates(candidates.map(candidate => ({ id: candidate.account.id, healthRate: routingHealthRate(candidate.health) })), {
+  const now = Date.now();
+  return rankWorkflowCandidates(candidates.map(candidate => {
+    const monthly = candidate.quota?.status === 'fresh' ? candidate.quota.limits?.monthly : null;
+    const resetAt = Date.parse(monthly?.resetsAt);
+    return {
+      id: candidate.account.id, healthRate: routingHealthRate(candidate.health),
+      resetBucket: Number.isFinite(resetAt) ? Math.max(0, Math.ceil((resetAt - now) / 86400000)) : null,
+      monthlyRemaining: Number.isFinite(monthly?.percentUsed) ? 100 - monthly.percentUsed : null,
+    };
+  }), {
     selector: policy.selector, counts: META.selectionCounters.accounts, activeCounts,
     cursor: META.selectionCounters.sequence, unknownHealth: policy.unknownHealth,
   }).map(row => byId.get(row.id));
@@ -2662,7 +2671,7 @@ function projectWorkflowDiagnostics(value) {
   if (!value || value.version !== 1 || !Array.isArray(value.decisions)) return null;
   const kinds = new Set(['new-selection', 'binding-hit', 'temporary-overflow', 'replacement', 'binding-busy', 'filtered', 'capacity-blocked']);
   const nodeNames = new Set(['eligibility', 'cache', 'quota', 'health', 'capacity', 'selector', 'binding', 'lease']);
-  const results = new Set(['owner-and-hard-state', 'active-cache', 'filtered', 'disabled', 'concurrency-and-rpm', 'least-selections', 'roundrobin', 'least-connections', 'health', 'hit', 'invalidated', 'busy', 'admitted', 'blocked']);
+  const results = new Set(['owner-and-hard-state', 'active-cache', 'filtered', 'disabled', 'concurrency-and-rpm', 'least-selections', 'roundrobin', 'least-connections', 'health', 'reset-soonest', 'hit', 'invalidated', 'busy', 'admitted', 'blocked']);
   const count = number => Number.isSafeInteger(number) && number >= 0 ? number : null;
   const decisions = value.decisions.slice(0, 4).filter(row => row?.version === 1 && /^[a-f0-9]{64}$/.test(row.configurationRevision || '') && kinds.has(row.kind)).map(row => ({
     version: 1, configurationRevision: row.configurationRevision,

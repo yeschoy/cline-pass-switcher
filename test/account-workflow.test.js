@@ -142,3 +142,37 @@ test('special stable IDs never mutate object prototypes', () => {
   assert.equal(Object.getPrototypeOf(state.accounts), Object.prototype);
   assert.equal({}.count, undefined);
 });
+
+test('reset-soonest ranks by monthly reset bucket, then least-recently-selected, then least monthly remaining', () => {
+  const rows = [
+    { id: 'far', resetBucket: 20, monthlyRemaining: 5 },
+    { id: 'soon-a', resetBucket: 3, monthlyRemaining: 80 },
+    { id: 'soon-b', resetBucket: 3, monthlyRemaining: 10 },
+    { id: 'today', resetBucket: 0, monthlyRemaining: 90 },
+    { id: 'unknown' },
+  ];
+  const base = { selector: 'reset-soonest', activeCounts: new Map(), unknownHealth: 'optimistic' };
+  // Earliest bucket first; accounts with no fresh quota data always come last.
+  const ids = counts => rankWorkflowCandidates(rows, { ...base, counts, cursor: 7 }).map(row => row.id);
+  assert.deepEqual(ids({}), ['today', 'soon-b', 'soon-a', 'far', 'unknown']);
+  // Inside one bucket the least recently selected goes first, so load spreads instead of piling on one account.
+  assert.deepEqual(ids({ 'soon-b': { count: 1, lastSelected: 9 }, 'soon-a': { count: 1, lastSelected: 4 } }), ['today', 'soon-a', 'soon-b', 'far', 'unknown']);
+  // A fresh selection of the head account demotes it behind its bucket peers, but never behind a later bucket.
+  assert.deepEqual(ids({ today: { count: 1, lastSelected: 12 } }), ['today', 'soon-b', 'soon-a', 'far', 'unknown']);
+});
+
+test('reset-soonest rotates strictly inside a bucket and ignores the cursor', () => {
+  const rows = ['a', 'b', 'c'].map(id => ({ id, resetBucket: 4, monthlyRemaining: 50 }));
+  const counts = {}; let sequence = 0; const picked = [];
+  for (let i = 0; i < 6; i++) {
+    const id = rankWorkflowCandidates(rows, { selector: 'reset-soonest', counts, activeCounts: new Map(), cursor: i * 5, unknownHealth: 'optimistic' })[0].id;
+    sequence++; counts[id] = { count: (counts[id]?.count || 0) + 1, lastSelected: sequence }; picked.push(id);
+  }
+  assert.deepEqual(picked, ['a', 'b', 'c', 'a', 'b', 'c']);
+});
+
+test('reset-soonest is a valid workflow selector and rejects malformed rank inputs safely', () => {
+  assert.equal(normalizeAccountWorkflow({ ...defaultAccountWorkflow(), selector: 'reset-soonest' }).selector, 'reset-soonest');
+  const rows = [{ id: 'x', resetBucket: -1, monthlyRemaining: NaN }, { id: 'y', resetBucket: 2.5 }, { id: 'z', resetBucket: 1 }];
+  assert.deepEqual(rankWorkflowCandidates(rows, { selector: 'reset-soonest' }).map(row => row.id), ['z', 'x', 'y']);
+});

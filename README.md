@@ -38,7 +38,9 @@ Node.js 本地/服务器代理 + 网页控制台，用于 [Cline Pass](https://c
 - 健康筛选默认关闭，开启时界面提供20%阈值（可设0–100%或再次关闭）：低于阈值排除，等于阈值允许。已有绑定在新请求准入时同样复核，失格后安全重新选号并计数；在途请求不被中断。无合格账号返回明确的筛选错误，不绕过阈值。
 - 未采样账号在健康筛选中始终按100%参与，实测统计仍显示“未采样 / 0样本”；`unknown-last`只影响显式健康优先排序，不改变这个过滤规则，也不改变Provider健康规则。多额度窗口的瓶颈仍是最大已用比例，即最小剩余比例。
 
-`accountWorkflow`字段见 `config.example.json`：`onBindingBusy` 支持 `overflow`（默认）、`wait-overflow`、`reject`；`missSteps`必须为 `quota`/`health` 的排列；`quotaPools`可选 `hot`/`warm`/`unknown`，只筛选已在活动池的成员；`minimumHealth`为0–1；`unknownHealth`支持 `optimistic`/`unknown-last`；`selector`支持 `least-selections`、`roundrobin`、`least-connections`、`health`。选择其他选号器属于显式策略变化。
+`accountWorkflow`字段见 `config.example.json`：`onBindingBusy` 支持 `overflow`（默认）、`wait-overflow`、`reject`；`missSteps`必须为 `quota`/`health` 的排列；`quotaPools`可选 `hot`/`warm`/`unknown`，只筛选已在活动池的成员；`minimumHealth`为0–1；`unknownHealth`支持 `optimistic`/`unknown-last`；`selector`支持 `least-selections`、`roundrobin`（最久未选优先）、`least-connections`、`health`、`reset-soonest`。选择其他选号器属于显式策略变化。
+
+**`reset-soonest`（月套餐快重置优先）**：按每个候选账号月额度窗口的重置时间排序，距重置的整天数（向上取整）最小者优先；同一天数档内沿用 `roundrobin` 的最久未选优先，使新会话在同档账号间轮流而不是挤在一个号上；仍并列时月剩余额度少者在前。没有新鲜额度快照（缺失、过期、取数失败）的账号排在所有已知账号之后。它只改变**新选号**的顺序：已有会话绑定（占实际请求的绝大部分）不受影响，只有新会话、绑定失效或临时溢出才会走这个顺序。额度分档（hot/warm/drain）、5h/周窗口耗尽、月额度耗尽、停用、冷却和硬隔离等资格过滤仍先于选号生效，drain 档仍然先于它被尝试。
 
 编辑仅改变草稿。“模拟当前草稿”读取已保存账号状态及节点草稿，不发模型请求、不占槽、不更新绑定或计数；它不预测未来等待期间的状态。“保存账号与工作流”与账号配置一起提交，并用 `expectedConfigurationRevision` 拒绝过期覆盖；冲突后需重新载入、合并编辑。“放弃工作流草稿”恢复最近载入的配置，不是服务器历史版本回滚。真实请求ID可查看当时记录的节点路径、账号和计数变化；旧请求可能没有工作流轨迹。
 
