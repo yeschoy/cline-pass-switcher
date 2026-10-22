@@ -20,7 +20,7 @@ import { DetailRoot, DetailRedactor, detailContext, detailRoute, observeStream, 
 import { projectRawHeaders } from './lib/raw-detail-headers.js';
 import { DetailedLogStore, parseDetailQuery, MAX_AGE_MS, RAW_MAX_AGE_MS, MAX_TOTAL_BYTES } from './lib/detailed-log-store.js';
 import { WORKFLOW_SELECTORS, defaultAccountWorkflow, normalizeAccountWorkflow, normalizeSelectionCounters, effectiveRoutingHealth, rankWorkflowCandidates, routingHealthRate } from './lib/account-workflow.js';
-import { AdapterError, createChatSseReader, estimateTokens, normalizeChatImageParts } from './lib/protocol-common.js';
+import { AdapterError, createChatSseReader, estimateTokens, normalizeChatImageParts, normalizeChatReasoningEffort } from './lib/protocol-common.js';
 import { responsesAdapter } from './lib/responses-adapter.js';
 import { anthropicAdapter } from './lib/anthropic-adapter.js';
 import { normalizeProxyUrl, normalizeProxyPool, normalizeProxyPoolClientKeys, PROXY_POOL_CLIENT_KEYS_DEFAULT, createProxyPoolRuntime, parseRetryAfter as parsePoolRetryAfter } from './lib/proxy-pool.js';
@@ -5354,16 +5354,24 @@ function normalizeStatus(httpStatus, json, fallback = 502) {
   if (/unauthorized|re-authenticate|invalid\s*api|401/i.test(msg)) return 401;
   return fallback;
 }
+// The upstream sometimes wraps a deterministic client error (e.g. a Vercel 400 invalid_request_error such as an
+// unsupported reasoning_effort) in an HTTP 5xx. Restore the wrapped 4xx so it is treated as a request error instead of
+// a provider failure that would cool the whole model down for every other user.
+function wrappedClientStatus(httpStatus, msg) {
+  if (!Number.isInteger(httpStatus) || httpStatus < 500 || httpStatus > 599) return null;
+  const match = /request failed with status (400|422)\b/i.exec(msg);
+  return match && /invalid_request_error/i.test(msg) ? Number(match[1]) : null;
+}
 function unwrap(json, httpStatus = 200) {
   const d = json?.data && (json.data.choices || json.data.error) ? json.data : json;
   if (d?.error && !d?.choices) {
     const msg = errText(d.error);
-    const status = normalizeStatus(httpStatus, d, 502);
+    const status = wrappedClientStatus(httpStatus, msg) ?? normalizeStatus(httpStatus, d, 502);
     return { status, upstreamStatus: httpStatus, normalizedStatus: status, body: { error: { message: msg, type: 'upstream_error' } }, routing: parseRouting(d || {}) };
   }
   if (httpStatus < 200 || httpStatus >= 300) {
     const msg = errText(d?.error || d || `upstream HTTP ${httpStatus}`);
-    const status = normalizeStatus(httpStatus, d, 502);
+    const status = wrappedClientStatus(httpStatus, msg) ?? normalizeStatus(httpStatus, d, 502);
     return { status, upstreamStatus: httpStatus, normalizedStatus: status, body: { error: { message: msg, type: 'upstream_error' } }, routing: parseRouting(d || {}) };
   }
   const r = parseRouting(d);
@@ -6218,6 +6226,12 @@ function usageTokenProjection(usage) {
     cachedTokens: token(usage?.cachedTokens),
   };
 }
+// A 401 from the upstream means this account's credential was refused (not the downstream client's). Try another
+// account once, and never hand the 401 back to the caller: a relay in front of us treats 401 as "channel key invalid"
+// and disables the whole channel for every user because of one account.
+function upstreamAccountAuthFailure(chain) {
+  return chain?.status === 401 && (chain.upstreamStatus === undefined || chain.upstreamStatus === 401);
+}
 async function handleChat(req, res, clientKeyId, adapter = null) {
   const detail = detailContext.getStore();
   const requestId = detail?.requestId || crypto.randomUUID();
@@ -6251,7 +6265,7 @@ async function handleChat(req, res, clientKeyId, adapter = null) {
     }
   }
   // Codex Chat may send image_url as a bare data:/https string; upstream DeepSeek rejects it.
-  body = normalizeChatImageParts(body);
+  body = normalizeChatReasoningEffort(normalizeChatImageParts(body));
   const requestedModel = typeof body.model === 'string' ? body.model.trim() : '';
   if (!requestedModel || requestedModel.length > 300) return sendJSON(res, 400, { error: { message: 'valid model is required' } });
   const sensitiveValues = sensitiveMessageValues(body);
@@ -6339,7 +6353,7 @@ async function handleChat(req, res, clientKeyId, adapter = null) {
     }
     const action = chain.accountAction;
     if (action) accountActions.push({ account: account.name, action: action.action, statusCode: action.statusCode, ruleId: action.ruleId || null, scope: action.scope });
-    if (!chain.plan?.autoHeldExploration && (action?.action === 'cooldown' || action?.action === 'hard-quarantine' || chain.quotaRemovalAction === 'waiting-refresh' || chain.quotaRemovalAction === 'protection-pending') && !chain.started && accountAttempt === 0 && !chain.retryStop) {
+    if (!chain.plan?.autoHeldExploration && (action?.action === 'cooldown' || action?.action === 'hard-quarantine' || chain.quotaRemovalAction === 'waiting-refresh' || chain.quotaRemovalAction === 'protection-pending' || upstreamAccountAuthFailure(chain)) && !chain.started && accountAttempt === 0 && !chain.retryStop) {
       excluded.add(account.id);
       lease.release();
       chainLease = null;
@@ -6553,24 +6567,27 @@ async function handleChat(req, res, clientKeyId, adapter = null) {
   }
   if (status === 200 && /^cline-pass\//.test(modelId) && !config.knownModels.includes(modelId)) { config.knownModels.push(modelId); saveConfig({ preserveProbeCells: true }); }
   const safeOut = status === 200 ? out : { ...out, error: { ...(out.error || {}), message: safeReason(out?.error?.message || 'upstream error', sensitiveValues) } };
+  const maskAuth = !disconnected && upstreamAccountAuthFailure(chain);
+  const clientStatus = disconnected ? 499 : maskAuth ? 502 : status;
+  const clientOut = maskAuth ? { ...safeOut, error: { ...(safeOut.error || {}), message: 'upstream account authentication failed', type: 'upstream_error' } } : safeOut;
   const usage = status === 200 && !disconnected ? normalizeUsage(routing.usage) : null;
   if (status === 200 && !disconnected) rememberSessionProvider(identity, modelId, acc, chain.successfulAttempt, providerSequence, affinityGeneration);
   finalizeStatistics({ globalError: status !== 200 && !disconnected, finalProvider: routing.finalProvider, usage, clientDisconnect: disconnected, segments: statisticsSegments(chain.trace, acc?.id, usage, disconnected) });
   recordChat({
     requestId, requestedModel, resolvedModel: modelId, provider: routing.finalProvider || null, canonical: routing.canonicalSlug || null, ms: Date.now() - chain.t0, stream: isStream, result: disconnected ? 'client_cancelled' : status === 200 ? 'success' : 'failed',
     attempts: chain.trace.map((t) => t.upstream || 'auto'), trace: chain.trace, error: disconnected ? null : status !== 200 ? safeOut.error.message : null,
-    account: acc?.name || null, accountId: acc?.id || null, accountPath, accountActions, accountAction: chain.accountAction?.action || accountActions.at(-1)?.action || null, upstreamStatus: chain.upstreamStatus, normalizedStatus: chain.normalizedStatus, ...affinityFacts(usage),
+    account: acc?.name || null, accountId: acc?.id || null, accountPath, accountActions, accountAction: chain.accountAction?.action || accountActions.at(-1)?.action || null, upstreamStatus: chain.upstreamStatus, normalizedStatus: maskAuth ? 502 : chain.normalizedStatus, ...affinityFacts(usage),
     strategy: initialSelection.strategy, preferredAccountId: initialSelection.preferredAccountId, preferredAccountName: initialSelection.preferredAccountName, selectionReason: selected.reason, overflow: initialSelection.overflow, pipeline: selected.pipeline || initialSelection.pipeline, targets, providerPlanSource: targetSource, providerMode: targetMode, appliedHeaderNames: Object.keys(acc?.headers || {}), proxyError: traceProxyError(chain.trace, acc), errorCategory: chain.routingFailure ? 'routing' : chain.localRpm ? 'rpm' : null, blockedBy: chain.localRpm ? 'rpm' : null, retryAfter: chain.localRpm && Number.isSafeInteger(chain.retryAfter) ? chain.retryAfter : null, sensitiveValues,
   });
   if (res.destroyed) return;
-  res.writeHead(disconnected ? 499 : status, {
+  res.writeHead(clientStatus, {
     'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', ...(chain.retryAfter ? { 'Retry-After': String(chain.retryAfter) } : {}),
     'X-Cline-Target-Upstream': targets.length ? targets.join('>') : targetSource === 'auto' ? 'auto' : 'none', 'X-Cline-Actual-Upstream': routing.finalProvider || 'unknown',
     'X-Cline-Canonical-Model': routing.canonicalSlug || '', 'X-Cline-Attempts': String(chain.trace.length), 'X-Cline-Account': headerSafe(acc?.name || ''),
   });
   res.end(JSON.stringify(adapter
-    ? (status === 200 ? adapter.fromChat(safeOut, adapterCtx) : adapter.errorBody(status, safeOut.error))
-    : safeOut));
+    ? (status === 200 ? adapter.fromChat(safeOut, adapterCtx) : adapter.errorBody(clientStatus, clientOut.error))
+    : clientOut));
 }
 
 // ---------- HTTP 服务 ----------

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {
+import { normalizeChatReasoningEffort,
   AdapterError, createChatAggregator, createChatSseReader, decodeReasoning, encodeReasoning,
   estimateTokens, extractReasoning, newId, normalizeChatImageParts, unwrapChatPayload,
 } from '../lib/protocol-common.js';
@@ -140,4 +140,15 @@ test('unwrapChatPayload and AdapterError helpers', () => {
   assert.equal(err.status, 400);
   assert.equal(err.param, 'tools[0].type');
   assert.match(newId('resp_'), /^resp_[a-f0-9]{24}$/);
+});
+
+test('normalizeChatReasoningEffort maps off spellings to none, lower-cases known values and leaves the rest', () => {
+  const body = { model: 'm', reasoning_effort: 'off', messages: [] };
+  assert.deepEqual(normalizeChatReasoningEffort(body), { ...body, reasoning_effort: 'none' });
+  assert.equal(body.reasoning_effort, 'off');
+  for (const off of ['OFF', ' disabled ', 'false', 'No']) assert.equal(normalizeChatReasoningEffort({ reasoning_effort: off }).reasoning_effort, 'none');
+  assert.equal(normalizeChatReasoningEffort({ reasoning_effort: 'XHigh' }).reasoning_effort, 'xhigh');
+  const same = { reasoning_effort: 'high' };
+  assert.equal(normalizeChatReasoningEffort(same), same);
+  for (const untouched of [{ reasoning_effort: 'turbo' }, { reasoning_effort: 3 }, { messages: [] }, null, 'x']) assert.equal(normalizeChatReasoningEffort(untouched), untouched);
 });

@@ -40,6 +40,11 @@ Node.js 本地/服务器代理 + 网页控制台，用于 [Cline Pass](https://c
 
 `accountWorkflow`字段见 `config.example.json`：`onBindingBusy` 支持 `overflow`（默认）、`wait-overflow`、`reject`；`missSteps`必须为 `quota`/`health` 的排列；`quotaPools`可选 `hot`/`warm`/`unknown`，只筛选已在活动池的成员；`minimumHealth`为0–1；`unknownHealth`支持 `optimistic`/`unknown-last`；`selector`支持 `least-selections`、`roundrobin`（最久未选优先）、`least-connections`、`health`、`reset-soonest`。选择其他选号器属于显式策略变化。
 
+**对下游保护的几个错误处理**：
+- 上游对**账号**返回 401（账号凭据被拒）时，switcher 会换一个账号重试一次；仍然失败时，对下游返回 **502**（`upstream account authentication failed`），**不会把 401 原样转给调用方**。否则前置的中转站（如 new-api）会把 401 当成"渠道密钥失效"，因单个账号的偶发 401 把整个渠道自动禁用。日志里仍记录上游真实的 `upstreamStatus: 401`。
+- 上游把确定性的客户端参数错误（如 Vercel 的 `invalid_request_error` 400，常见于不支持的 `reasoning_effort`）包成 **HTTP 500** 时，switcher 还原成 **400** 返回，并按请求错误处理，**不触发** `provider-status-500` 这类 provider 冷却，避免一个用户的错误参数让所有人 503。只匹配正文里同时含 `request failed with status 400|422` 与 `invalid_request_error` 的 5xx，真正的服务端 500 仍照常冷却。
+- Chat 请求里的 `reasoning_effort` 会规范化：`off`/`disabled`/`false`/`no` 映射为 `none`，已知值（`none|minimal|low|medium|high|xhigh|max`）转小写，未知值保持原样，不猜测。
+
 **`reset-soonest`（月套餐快重置优先）**：按每个候选账号月额度窗口的重置时间排序，距重置的整天数（向上取整）最小者优先；同一天数档内沿用 `roundrobin` 的最久未选优先，使新会话在同档账号间轮流而不是挤在一个号上；仍并列时月剩余额度少者在前。没有新鲜额度快照（缺失、过期、取数失败）的账号排在所有已知账号之后。它只改变**新选号**的顺序：已有会话绑定（占实际请求的绝大部分）不受影响，只有新会话、绑定失效或临时溢出才会走这个顺序。额度分档（hot/warm/drain）、5h/周窗口耗尽、月额度耗尽、停用、冷却和硬隔离等资格过滤仍先于选号生效，drain 档仍然先于它被尝试。
 
 编辑仅改变草稿。“模拟当前草稿”读取已保存账号状态及节点草稿，不发模型请求、不占槽、不更新绑定或计数；它不预测未来等待期间的状态。“保存账号与工作流”与账号配置一起提交，并用 `expectedConfigurationRevision` 拒绝过期覆盖；冲突后需重新载入、合并编辑。“放弃工作流草稿”恢复最近载入的配置，不是服务器历史版本回滚。真实请求ID可查看当时记录的节点路径、账号和计数变化；旧请求可能没有工作流轨迹。

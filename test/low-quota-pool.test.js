@@ -207,7 +207,8 @@ test('provider-scope and explicit ignore never create low quota hold; no reset r
   const rule = { id: 'ignore-auth', scope: 'account', action: 'ignore', when: { statuses: [401] } };
   assert.equal((await post(state.serverPort, '/api/accounts', { accounts: view.accounts, mode: 'sticky', active: 0, concurrencyWaitMs: 0, errorRules: [rule], accountPipeline: view.accountPipeline })).status, 200);
   upstreamStatus = 401;
-  assert.equal((await chat(state.serverPort)).status, 401);
+  // An upstream 401 is never handed back as 401 (a relay would disable the whole channel); with no replacement account it becomes 502.
+  assert.equal((await chat(state.serverPort)).status, 502);
   view = await get(state.serverPort);
   assert.equal(view.accounts.find((a) => a.id === 'low').state?.quotaDisposition ?? null, null, 'explicit ignore cannot be upgraded to hold');
   // A role-aware partial 100 snapshot independently confirms exhaustion without a

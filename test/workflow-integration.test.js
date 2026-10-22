@@ -683,3 +683,60 @@ test('reset-soonest sends new sessions to the earliest monthly reset first and s
   assert.equal(used.filter(id => id === 'a2').length, 3);
   assert.ok(used.every((id, index) => index === 0 || id !== used[index - 1]));
 });
+
+const jsonError = (res, status, message) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: { message } })); };
+const rawChat = (f, body) => fetch(`http://127.0.0.1:${f.port}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer fixture-client' }, body: JSON.stringify({ model, stream: true, messages: [{ role: 'user', content: 'ping' }], ...body }) }).then(async response => ({ status: response.status, text: await response.text() }));
+
+test('reasoning_effort "off" is normalized to "none" before it reaches the upstream', async t => {
+  const f = await fixture(t, { count: 1 });
+  for (const [sent, expected] of [['off', 'none'], ['OFF', 'none'], ['High', 'high'], ['medium', 'medium'], ['weird', 'weird']]) {
+    const before = f.seen.length;
+    assert.equal((await rawChat(f, { reasoning_effort: sent, session_id: `effort-${sent}` })).status, 200);
+    assert.equal(f.seen[before].body.reasoning_effort, expected);
+  }
+});
+
+test('an upstream 500 that wraps a 400 invalid_request_error is returned as 400 and never cools the model down', async t => {
+  const wrapped = `inference request failed: failed to invoke model 'vmc/x' from Vercel: request failed with status 400: {"error":{"message":"Invalid option: expected one of \\"none\\"|\\"low\\"","type":"invalid_request_error","param":"reasoning.effort"}}`;
+  const f = await fixture(t, {
+    count: 2,
+    configure: c => ({ ...c, errorRules: [{ id: 'provider-status-500', scope: 'provider-model', action: 'cooldown', when: { statuses: [500] }, reset: { fallback: '8s', max: '20s' } }] }),
+    onChat: (entry, res) => entry.body.reasoning_effort === 'bogus' ? jsonError(res, 500, wrapped) : success(res),
+  });
+  for (let i = 0; i < 3; i++) {
+    const bad = await rawChat(f, { reasoning_effort: 'bogus', session_id: `bad-${i}` });
+    assert.equal(bad.status, 400);
+    // Another caller on the same model must keep working: the bad request may not trip a provider cooldown.
+    const good = await rawChat(f, { session_id: `good-${i}` });
+    assert.equal(good.status, 200, good.text);
+  }
+});
+
+test('an upstream 500 that is a real server failure still cools the provider down', async t => {
+  const f = await fixture(t, {
+    count: 1,
+    configure: c => ({ ...c, errorRules: [{ id: 'provider-status-500', scope: 'provider-model', action: 'cooldown', when: { statuses: [500] }, reset: { fallback: '8s', max: '20s' } }] }),
+    onChat: (entry, res) => entry.body.reasoning_effort === 'boom' ? jsonError(res, 500, 'internal error') : success(res),
+  });
+  assert.equal((await rawChat(f, { reasoning_effort: 'boom', session_id: 'boom' })).status, 500);
+  assert.equal((await rawChat(f, { session_id: 'after-boom' })).status, 503);
+});
+
+test('an upstream 401 moves the request to another account and is never passed back as 401', async t => {
+  let refused = null;
+  const f = await fixture(t, { count: 2, onChat: (entry, res) => { if (!refused) { refused = entry.account; return jsonError(res, 401, 'Unauthorized: Please make sure you are using the latest version of Cline and re-authenticate your Cline account.'); } success(res); } });
+  const result = await rawChat(f, { session_id: 'auth-failover' });
+  assert.equal(result.status, 200, result.text);
+  assert.equal(f.seen.length, 2);
+  assert.notEqual(f.seen[1].account, refused);
+});
+
+test('when every account is refused with 401 the caller gets a 502, not the upstream 401', async t => {
+  const f = await fixture(t, { count: 1, onChat: (entry, res) => jsonError(res, 401, 'Unauthorized: Please make sure you are using the latest version of Cline and re-authenticate your Cline account.') });
+  for (const stream of [true, false]) {
+    const result = await rawChat(f, { stream, session_id: `auth-all-${stream}` });
+    assert.equal(result.status, 502, result.text);
+    assert.match(result.text, /upstream account authentication failed/);
+    assert.doesNotMatch(result.text, /re-authenticate/);
+  }
+});
