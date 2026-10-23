@@ -5385,7 +5385,9 @@ function unwrap(json, httpStatus = 200) {
 const OR_SORT = { cost: 'price', ttft: 'latency', tps: 'throughput' };
 function gatewayOwnedPipeline(modelId) { return META.models[modelId]?.pipeline !== 'direct'; }
 function injectPrefs(body, modelId, attempt = {}) {
-  const b = JSON.parse(JSON.stringify(body));
+  // 只改顶层的 provider/providerOptions（嵌套对象先 spread 再改），浅拷贝即可；
+  // 之前的 JSON 深拷贝会把几 MB 的 messages 再序列化/解析一遍，白占事件循环。
+  const b = { ...body };
   const upstream = attempt.upstream || null;
   const sort = attempt.sort || null;
   const gatewayOwned = gatewayOwnedPipeline(modelId);

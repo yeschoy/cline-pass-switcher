@@ -891,3 +891,15 @@ test('seeded redactors match a fresh redactor, reuse the compiled base and stay 
   const overflow = Array.from({ length: MAX_REDACTION_SECRETS + 10 }, (_, i) => `overflow-seed-${i}`);
   assert.equal(DetailRedactor.seeded(overflow).limited, new DetailRedactor(overflow).limited);
 });
+
+test('url fast path: non-URL strings skip URL parsing but whitespace-padded or tab-split credential URLs are still learned', () => {
+  const redactor = new DetailRedactor();
+  assert.equal(redactor.url('line 0: const value = compute(0) // not a url'), 'line 0: const value = compute(0) // not a url');
+  assert.equal(redactor.url('plain prose without scheme'), 'plain prose without scheme');
+  assert.equal(redactor.url('  \t\nhttp://user:padded-secret@example.org/'), 'http://%5BREDACTED%5D:%5BREDACTED%5D@example.org/');
+  assert.equal(redactor.url('ht\ttp://user:split-secret@example.org/'), 'http://%5BREDACTED%5D:%5BREDACTED%5D@example.org/');
+  assert.equal(redactor.url('mailto:someone@example.org'), 'mailto:someone@example.org');
+  assert.equal(redactor.secrets.has('padded-secret'), true);
+  assert.equal(redactor.secrets.has('split-secret'), true);
+  assert.equal(redactor.text('echo padded-secret split-secret'), 'echo [REDACTED] [REDACTED]');
+});
