@@ -43,6 +43,16 @@ test('responsesToChat maps instructions, string input, tools and passthrough fie
   assert.equal(ctx.includeEncrypted, true);
 });
 
+test('responsesToChat nests a Responses json_schema text.format under Chat json_schema', () => {
+  const schema = { type: 'object', properties: { title: { type: 'string' } }, required: ['title'], additionalProperties: false };
+  const { chatBody } = responsesToChat({ model: 'm', input: 'hi', text: { format: { type: 'json_schema', name: 'codex_output_schema', schema, strict: true } } });
+  assert.deepEqual(chatBody.response_format, { type: 'json_schema', json_schema: { name: 'codex_output_schema', schema, strict: true } });
+  const unnamed = responsesToChat({ model: 'm', input: 'hi', text: { format: { type: 'json_schema', schema } } }).chatBody;
+  assert.deepEqual(unnamed.response_format, { type: 'json_schema', json_schema: { name: 'response', schema } });
+  const chatShaped = { name: 'x', schema };
+  assert.deepEqual(responsesToChat({ model: 'm', input: 'hi', text: { format: { type: 'json_schema', json_schema: chatShaped } } }).chatBody.response_format, { type: 'json_schema', json_schema: chatShaped });
+});
+
 test('responsesToChat accepts EasyInputMessage items without type (Codex/OpenAI)', () => {
   const { chatBody } = responsesToChat({
     model: 'm',

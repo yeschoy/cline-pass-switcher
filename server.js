@@ -5204,7 +5204,7 @@ function createSseObserver(maxBytes = 64 * 1024) {
     const routing = parseRouting(raw || {}); if (routing.canonicalSlug) canonical = routing.canonicalSlug;
     if (typeof raw?.model === 'string') canonical = raw.model;
     if (!captureError) return;
-    const eventError = upstreamErrorOf(event); if (!error && eventError) { error = safeReason(errText(eventError)); errorPayload = eventError; errorEvent = Buffer.from(buffer); normalizedStatus = normalizeStatus(200, event, 502); }
+    const eventError = upstreamErrorOf(event); if (!error && eventError) { error = safeReason(errText(eventError)); errorPayload = eventError; errorEvent = Buffer.from(buffer); const inferred = normalizeStatus(200, event, 502); normalizedStatus = wrappedClientStatus(inferred, error) ?? inferred; }
   };
   return {
     push(chunk) {
@@ -5355,10 +5355,11 @@ function normalizeStatus(httpStatus, json, fallback = 502) {
   return fallback;
 }
 // The upstream sometimes wraps a deterministic client error (e.g. a Vercel 400 invalid_request_error such as an
-// unsupported reasoning_effort) in an HTTP 5xx. Restore the wrapped 4xx so it is treated as a request error instead of
-// a provider failure that would cool the whole model down for every other user.
-function wrappedClientStatus(httpStatus, msg) {
-  if (!Number.isInteger(httpStatus) || httpStatus < 500 || httpStatus > 599) return null;
+// unsupported reasoning_effort) in an HTTP 5xx, or in an HTTP 200 / SSE error event that we infer as 502. Restore the
+// wrapped 4xx so it is treated as a request error instead of a provider failure that would cool the whole model down
+// for every other user. `status` is the already inferred status, not necessarily the HTTP status.
+function wrappedClientStatus(status, msg) {
+  if (!Number.isInteger(status) || status < 500 || status > 599) return null;
   const match = /request failed with status (400|422)\b/i.exec(msg);
   return match && /invalid_request_error/i.test(msg) ? Number(match[1]) : null;
 }
@@ -5366,12 +5367,14 @@ function unwrap(json, httpStatus = 200) {
   const d = json?.data && (json.data.choices || json.data.error) ? json.data : json;
   if (d?.error && !d?.choices) {
     const msg = errText(d.error);
-    const status = wrappedClientStatus(httpStatus, msg) ?? normalizeStatus(httpStatus, d, 502);
+    const inferred = normalizeStatus(httpStatus, d, 502);
+    const status = wrappedClientStatus(inferred, msg) ?? inferred;
     return { status, upstreamStatus: httpStatus, normalizedStatus: status, body: { error: { message: msg, type: 'upstream_error' } }, routing: parseRouting(d || {}) };
   }
   if (httpStatus < 200 || httpStatus >= 300) {
     const msg = errText(d?.error || d || `upstream HTTP ${httpStatus}`);
-    const status = wrappedClientStatus(httpStatus, msg) ?? normalizeStatus(httpStatus, d, 502);
+    const inferred = normalizeStatus(httpStatus, d, 502);
+    const status = wrappedClientStatus(inferred, msg) ?? inferred;
     return { status, upstreamStatus: httpStatus, normalizedStatus: status, body: { error: { message: msg, type: 'upstream_error' } }, routing: parseRouting(d || {}) };
   }
   const r = parseRouting(d);

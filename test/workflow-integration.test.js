@@ -712,6 +712,25 @@ test('an upstream 500 that wraps a 400 invalid_request_error is returned as 400 
   }
 });
 
+test('an upstream 200 SSE error event that wraps a 400 invalid_request_error is returned as 400 and never cools the model down', async t => {
+  const wrapped = `Failed to create stream: inference request failed: failed to generate stream from Vercel: failed to invoke model 'vmc/x' with streaming: request failed with status 400: {"error":{"message":"Invalid input","type":"invalid_request_error","param":"response_format","code":"invalid_request_error"}}`;
+  const f = await fixture(t, {
+    count: 2,
+    configure: c => ({ ...c, errorRules: [{ id: 'provider-status-502', scope: 'provider-model', action: 'cooldown', when: { statuses: [502] }, reset: { fallback: '8s', max: '20s' } }] }),
+    onChat: (entry, res) => {
+      if (!entry.body.response_format) return success(res);
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.end(`data: ${JSON.stringify({ error: { code: 'stream_initialization_failed', message: wrapped, type: 'stream_error' } })}\n\n`);
+    },
+  });
+  for (let i = 0; i < 3; i++) {
+    const bad = await rawChat(f, { response_format: { type: 'json_schema', json_schema: { type: 'object' } }, session_id: `sse-bad-${i}` });
+    assert.equal(bad.status, 400, bad.text);
+    const good = await rawChat(f, { session_id: `sse-good-${i}` });
+    assert.equal(good.status, 200, good.text);
+  }
+});
+
 test('an upstream 500 that is a real server failure still cools the provider down', async t => {
   const f = await fixture(t, {
     count: 1,
