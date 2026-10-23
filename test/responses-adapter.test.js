@@ -53,6 +53,53 @@ test('responsesToChat nests a Responses json_schema text.format under Chat json_
   assert.deepEqual(responsesToChat({ model: 'm', input: 'hi', text: { format: { type: 'json_schema', json_schema: chatShaped } } }).chatBody.response_format, { type: 'json_schema', json_schema: chatShaped });
 });
 
+test('Codex namespace tools flatten for Chat and their calls round-trip with name + namespace', () => {
+  const tools = [
+    { type: 'function', name: 'shell', parameters: { type: 'object' } },
+    { type: 'namespace', name: 'image_gen', description: 'Tools in the image_gen namespace.', tools: [
+      { type: 'function', name: 'imagegen', description: 'make images', parameters: { type: 'object', properties: { prompt: { type: 'string' } } }, strict: false },
+      { type: 'custom', name: 'sketch' },
+    ] },
+  ];
+  const { chatBody, ctx } = responsesToChat({
+    model: 'm',
+    tools,
+    tool_choice: { type: 'function', name: 'imagegen', namespace: 'image_gen' },
+    input: [
+      { type: 'message', role: 'user', content: 'draw' },
+      { type: 'function_call', call_id: 'c0', name: 'imagegen', namespace: 'image_gen', arguments: '{"prompt":"cat"}' },
+      { type: 'function_call_output', call_id: 'c0', namespace: 'image_gen', output: 'done' },
+    ],
+  });
+  assert.deepEqual(chatBody.tools.map((tool) => tool.function.name), ['shell', 'image_gen__imagegen', 'image_gen__sketch']);
+  assert.equal(chatBody.tools[1].function.description, 'make images');
+  assert.deepEqual(chatBody.tool_choice, { type: 'function', function: { name: 'image_gen__imagegen' } });
+  assert.equal(chatBody.messages[1].tool_calls[0].function.name, 'image_gen__imagegen');
+
+  const json = chatToResponses({ choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [
+    { id: 'c1', type: 'function', function: { name: 'image_gen__imagegen', arguments: '{"prompt":"dog"}' } },
+    { id: 'c2', type: 'function', function: { name: 'image_gen__sketch', arguments: '{"input":"x"}' } },
+    { id: 'c3', type: 'function', function: { name: 'shell', arguments: '{}' } },
+  ] } }] }, ctx);
+  assert.deepEqual(json.output.map(({ type, name, namespace }) => ({ type, name, namespace })), [
+    { type: 'function_call', name: 'imagegen', namespace: 'image_gen' },
+    { type: 'custom_tool_call', name: 'sketch', namespace: 'image_gen' },
+    { type: 'function_call', name: 'shell', namespace: undefined },
+  ]);
+
+  const encoder = createResponsesStreamEncoder(ctx);
+  let out = encoder.start();
+  out += encoder.push({ kind: 'delta', payload: { choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'image_gen__imagegen', arguments: '{"prompt":"dog"}' } }] }, finish_reason: 'tool_calls' }] } });
+  out += encoder.finish();
+  const events = parseSse(out);
+  const added = events.find((event) => event.type === 'response.output_item.added' && event.data.item.type === 'function_call');
+  assert.equal(added.data.item.name, 'imagegen');
+  assert.equal(added.data.item.namespace, 'image_gen');
+  const done = events.at(-1).data.response.output[0];
+  assert.equal(done.name, 'imagegen');
+  assert.equal(done.namespace, 'image_gen');
+});
+
 test('responsesToChat accepts EasyInputMessage items without type (Codex/OpenAI)', () => {
   const { chatBody } = responsesToChat({
     model: 'm',

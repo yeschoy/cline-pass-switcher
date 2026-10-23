@@ -44,6 +44,7 @@ Node.js 本地/服务器代理 + 网页控制台，用于 [Cline Pass](https://c
 - 上游对**账号**返回 401（账号凭据被拒）时，switcher 会换一个账号重试一次；仍然失败时，对下游返回 **502**（`upstream account authentication failed`），**不会把 401 原样转给调用方**。否则前置的中转站（如 new-api）会把 401 当成"渠道密钥失效"，因单个账号的偶发 401 把整个渠道自动禁用。日志里仍记录上游真实的 `upstreamStatus: 401`。
 - 上游把确定性的客户端参数错误（如 Vercel 的 `invalid_request_error` 400，常见于不支持的 `reasoning_effort`）包成 **HTTP 500** 时，switcher 还原成 **400** 返回，并按请求错误处理，**不触发** `provider-status-500` 这类 provider 冷却，避免一个用户的错误参数让所有人 503。只匹配正文里同时含 `request failed with status 400|422` 与 `invalid_request_error` 的 5xx，真正的服务端 500 仍照常冷却。上游以 **HTTP 200 + SSE 错误事件**（如 `stream_initialization_failed`）包着同样的 400 时也一样还原成 400，不再按 502 处理。
 - Responses API 的 `text.format`（`type: json_schema`，`name`/`schema`/`strict` 平铺在 format 上）转成 Chat 时嵌套为 `response_format.json_schema: {name, schema, strict}`；缺 `name` 时补 `response`。
+- Codex 的 `namespace` 工具（`{type: namespace, name, tools: [...]}`，如 `image_gen`）展开成扁平的 Chat 函数 `<namespace>__<name>`（超过 64 字符时截断并加哈希）；模型返回的调用会还原为 `{name, namespace}` 交回客户端，历史里带 `namespace` 的调用和 `tool_choice` 用同一规则映射。
 - Chat 请求里的 `reasoning_effort` 会规范化：`off`/`disabled`/`false`/`no` 映射为 `none`，已知值（`none|minimal|low|medium|high|xhigh|max`）转小写，未知值保持原样，不猜测。
 
 **`reset-soonest`（月套餐快重置优先）**：按每个候选账号月额度窗口的重置时间排序，距重置的整天数（向上取整）最小者优先；同一天数档内沿用 `roundrobin` 的最久未选优先，使新会话在同档账号间轮流而不是挤在一个号上；仍并列时月剩余额度少者在前。没有新鲜额度快照（缺失、过期、取数失败）的账号排在所有已知账号之后。它只改变**新选号**的顺序：已有会话绑定（占实际请求的绝大部分）不受影响，只有新会话、绑定失效或临时溢出才会走这个顺序。额度分档（hot/warm/drain）、5h/周窗口耗尽、月额度耗尽、停用、冷却和硬隔离等资格过滤仍先于选号生效，drain 档仍然先于它被尝试。
