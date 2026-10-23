@@ -147,6 +147,7 @@ test('planner and unknown pipelines send one gateway only+order list and actual 
       'client-fold': route(['alpha', 'beta']),
     },
     errorRules: [],
+    gatewayHas: { 'planner-model': ['vision', 'implicit-caching'], 'client-fold': ['vision'] },
   };
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config));
   prepareAdminFixture(dir);
@@ -174,7 +175,7 @@ test('planner and unknown pipelines send one gateway only+order list and actual 
   assert.equal(planner.headers['x-cline-attempts'], '1');
   assert.deepEqual(seen[0].providerOptions.gateway.only, ['alpha', 'beta', 'gamma']);
   assert.deepEqual(seen[0].providerOptions.gateway.order, ['alpha', 'beta', 'gamma']);
-  assert.deepEqual(seen[0].providerOptions.gateway.has, ['vision', 'implicit-caching'], 'only is accompanied by the capability filter that makes it enforced');
+  assert.deepEqual(seen[0].providerOptions.gateway.has, ['vision', 'implicit-caching'], 'a model listed in gatewayHas sends the capability filter next to only');
   assert.equal(seen[0].provider, undefined);
   const plannerLog = await requestLog(planner);
   assert.deepEqual(plannerLog.targetProviders, ['alpha', 'beta', 'gamma']);
@@ -187,8 +188,12 @@ test('planner and unknown pipelines send one gateway only+order list and actual 
   assert.equal(seen.length, 1, 'an unknown pipeline is gateway-capable and does not walk providers locally');
   assert.deepEqual(seen[0].providerOptions.gateway.only, ['alpha', 'beta']);
   assert.deepEqual(seen[0].providerOptions.gateway.order, seen[0].providerOptions.gateway.only);
-  assert.deepEqual(seen[0].providerOptions.gateway.has, ['vision', 'implicit-caching']);
+  assert.equal(Object.hasOwn(seen[0].providerOptions.gateway, 'has'), false, 'a model absent from gatewayHas keeps the plain only+order shape');
   assert.equal(seen[0].provider, undefined);
+
+  seen.length = 0;
+  assert.equal((await call('unknown-model', { providerOptions: { gateway: { has: ['client-cap'] } } })).status, 500);
+  assert.equal(Object.hasOwn(seen[0].providerOptions.gateway, 'has'), false, 'a client-supplied has is dropped for models that are not opted in');
 
   seen.length = 0;
   const filtered = await call('filtered-model');
@@ -203,7 +208,7 @@ test('planner and unknown pipelines send one gateway only+order list and actual 
   assert.equal(seen[0].provider, undefined, 'gateway injection removes a conflicting top-level provider');
   assert.deepEqual(seen[0].providerOptions.gateway.only, ['alpha', 'beta']);
   assert.deepEqual(seen[0].providerOptions.gateway.order, ['alpha', 'beta']);
-  assert.deepEqual(seen[0].providerOptions.gateway.has, ['vision', 'implicit-caching'], 'a client-supplied has never survives the configured one');
+  assert.deepEqual(seen[0].providerOptions.gateway.has, ['vision'], 'a client-supplied has never survives the configured one');
   assert.deepEqual(seen[0].providerOptions.anthropic, { keep: true });
 
   seen.length = 0;
@@ -267,7 +272,7 @@ test('planner and unknown pipelines send one gateway only+order list and actual 
   assert.equal(seen.length, 1);
 });
 
-test('gatewayHas: configured list is sent with only, [] disables it, SIGHUP applies it and an invalid value refuses to start', async (t) => {
+test('gatewayHas: only listed models send has next to only, SIGHUP applies edits and an invalid value refuses to start', async (t) => {
   const seen = [];
   const upstream = http.createServer((req, res) => {
     const chunks = [];
@@ -280,12 +285,13 @@ test('gatewayHas: configured list is sent with only, [] disables it, SIGHUP appl
   });
   const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-gateway-has-'));
   const configFile = path.join(dir, 'config.json');
-  fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({ routingSecret: 'gateway-has-secret', models: { 'planner-model': { pipeline: 'planner' } } }));
+  const route = { upstreams: ['alpha', 'beta'], exclude: [], pinMode: 'strict', sort: null, maxRetries: null, providerCooldownMs: 0 };
+  fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({ routingSecret: 'gateway-has-secret', models: { 'planner-model': { pipeline: 'planner' }, 'other-model': { pipeline: 'planner' } } }));
   fs.writeFileSync(configFile, JSON.stringify({
     port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 0,
-    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }], knownModels: ['planner-model'],
-    perModel: { 'planner-model': { upstreams: ['alpha', 'beta'], exclude: [], pinMode: 'strict', sort: null, maxRetries: null, providerCooldownMs: 0 } },
-    errorRules: [], gatewayHas: ['vision'],
+    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }], knownModels: ['planner-model', 'other-model'],
+    perModel: { 'planner-model': route, 'other-model': route },
+    errorRules: [],
   }));
   prepareAdminFixture(dir);
   const start = () => {
@@ -302,36 +308,48 @@ test('gatewayHas: configured list is sent with only, [] disables it, SIGHUP appl
   const first = start();
   t.after(async () => { await stop(first.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
   await ready(first);
-  const call = () => rawJson(port, '/v1/chat/completions', { model: 'planner-model', messages: [{ role: 'user', content: 'hi' }] });
-  const reload = async (gatewayHas) => {
-    const next = { ...JSON.parse(fs.readFileSync(configFile, 'utf8')), gatewayHas };
-    fs.writeFileSync(configFile, JSON.stringify(next));
+  const gatewayOf = async (model) => {
+    seen.length = 0;
+    assert.equal((await rawJson(port, '/v1/chat/completions', { model, messages: [{ role: 'user', content: 'hi' }] })).status, 200);
+    return seen[0].providerOptions.gateway;
+  };
+  const edit = (gatewayHas) => fs.writeFileSync(configFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(configFile, 'utf8')), gatewayHas }));
+  const reload = async () => {
     first.output = '';
     first.child.kill('SIGHUP');
     await waitUntil(() => /SIGHUP 热加载(完成|失败)/.test(first.output), 5000, 'SIGHUP reload');
     assert.match(first.output, /SIGHUP 热加载完成：.*gatewayHas/);
   };
 
-  seen.length = 0;
-  assert.equal((await call()).status, 200);
-  assert.deepEqual(seen[0].providerOptions.gateway, { only: ['alpha', 'beta'], order: ['alpha', 'beta'], has: ['vision'] });
+  assert.deepEqual(await gatewayOf('planner-model'), { only: ['alpha', 'beta'], order: ['alpha', 'beta'] }, 'without gatewayHas nothing changes');
 
-  await reload([]);
-  seen.length = 0;
-  assert.equal((await call()).status, 200);
-  assert.deepEqual(seen[0].providerOptions.gateway, { only: ['alpha', 'beta'], order: ['alpha', 'beta'] }, 'an empty gatewayHas sends the legacy only+order shape');
+  edit({ 'planner-model': ['vision', 'implicit-caching'] });
+  await reload();
+  assert.deepEqual(await gatewayOf('planner-model'), { only: ['alpha', 'beta'], order: ['alpha', 'beta'], has: ['vision', 'implicit-caching'] });
+  assert.deepEqual(await gatewayOf('other-model'), { only: ['alpha', 'beta'], order: ['alpha', 'beta'] }, 'models that are not listed are untouched');
 
-  await reload(['audio', ' audio', 'implicit-caching']);
-  seen.length = 0;
-  assert.equal((await call()).status, 200);
-  assert.deepEqual(seen[0].providerOptions.gateway.has, ['audio', 'implicit-caching'], 'entries are trimmed and de-duplicated');
+  edit({ 'planner-model': ['audio', ' audio', 'implicit-caching'], 'other-model': [] });
+  await reload();
+  assert.deepEqual((await gatewayOf('planner-model')).has, ['audio', 'implicit-caching'], 'entries are trimmed and de-duplicated');
+  assert.equal(Object.hasOwn(await gatewayOf('other-model'), 'has'), false, 'an empty list is the same as not listed');
+
+  edit({});
+  await reload();
+  assert.equal(Object.hasOwn(await gatewayOf('planner-model'), 'has'), false, 'removing the entry restores the plain shape');
+
+  edit(['vision']);
+  first.output = '';
+  first.child.kill('SIGHUP');
+  await waitUntil(() => /SIGHUP 热加载失败/.test(first.output), 5000, 'rejected SIGHUP reload');
+  assert.match(first.output, /invalid gatewayHas/);
+  assert.equal(Object.hasOwn(await gatewayOf('planner-model'), 'has'), false, 'a rejected reload keeps the running settings');
 
   await stop(first.child);
-  for (const invalid of ['vision', [''], ['has space'], [1], Array.from({ length: 11 }, (_, index) => `cap${index}`)]) {
-    fs.writeFileSync(configFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(configFile, 'utf8')), gatewayHas: invalid }));
+  for (const invalid of [['vision'], null, 'vision', { 'planner-model': 'vision' }, { 'planner-model': [''] }, { '': ['vision'] }, { 'planner-model': ['has space'] }, { 'planner-model': [1] }, { 'planner-model': Array.from({ length: 11 }, (_, index) => `cap${index}`) }, { 'bad\nmodel': ['vision'] }, Object.fromEntries(Array.from({ length: 201 }, (_, index) => [`m${index}`, ['vision']]))]) {
+    edit(invalid);
     const bad = start();
     const code = await new Promise((resolve) => bad.child.once('exit', resolve));
-    assert.notEqual(code, 0, `gatewayHas ${JSON.stringify(invalid)} must refuse to start`);
+    assert.notEqual(code, 0, `gatewayHas ${JSON.stringify(invalid)?.slice(0, 60)} must refuse to start`);
     assert.match(bad.output, /invalid gatewayHas/);
   }
 });

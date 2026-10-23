@@ -7,7 +7,7 @@
 Node.js 本地/服务器代理 + 网页控制台，用于 [Cline Pass](https://cline.bot/cline-pass) 订阅：
 
 - 🔍 **上游枚举与校验** —— 列出订阅模型背后每一条上游渠道，并一键实测哪些「✔可用 / ⏳限流 / ✘不可钉」
-- 🎯 **单渠道钉选尝试与一键配置上游** —— 规划器（Vercel AI Gateway）管道一次请求即注入完整的 `providerOptions.gateway.only` + `order` + 能力过滤 `has`（已排除/硬隔离的渠道被过滤，`pinMode`/健康只重排顺序），不在本地逐个 provider 重试；直连（OpenRouter）管道仍用单元素 `provider.only` 并由 switcher 外层顺序重试。可按账号执行探测→校验→预览→测试→确认；`order` 只是网关提示，真实网关是否遵守 `only`/`order` 需按账号验证，并支持 provider 内成本、首字、吞吐排序
+- 🎯 **单渠道钉选尝试与一键配置上游** —— 规划器（Vercel AI Gateway）管道一次请求即注入完整的 `providerOptions.gateway.only` + `order`（`gatewayHas` 里显式列出的模型再附带能力过滤 `has`；已排除/硬隔离的渠道被过滤，`pinMode`/健康只重排顺序），不在本地逐个 provider 重试；直连（OpenRouter）管道仍用单元素 `provider.only` 并由 switcher 外层顺序重试。可按账号执行探测→校验→预览→测试→确认；`order` 只是网关提示，真实网关是否遵守 `only`/`order` 需按账号验证，并支持 provider 内成本、首字、吞吐排序
 - 🧬 **双维度错误策略** —— 一套有序 `errorRules` 可分别作用于账号或模型×Provider，支持状态码、正文 ANY、响应 Header、Provider/model 范围及 ignore/degrade/cooldown/hard-quarantine；只有显式规则会冷却或硬隔离
 - 🚫 **上游排除** —— 勾「排除」的已知渠道不会进入 attempt 计划；已知渠道全部被排除时安全失败，不会用 auto 绕过排除
 - 👥 **账号池** —— 控制台以「选号工作流」为唯一调度入口；后端仍能读取并运行旧配置里的单账号、轮询、HRW 粘性、最少连接、加权轮询、优先级容灾和无粘性负载＋健康度调度
@@ -222,7 +222,7 @@ Cline Pass 订阅模型在 Cline 网关之后分成两条管道，钉住上游�
 | 管道 | 实际后端 | 识别特征 | 钉住方式 |
 |---|---|---|---|
 | **直连**（direct） | OpenRouter | 响应顶层带 `provider` 与真实 `model` 字段 | 顶层 `provider.only`（单元素） |
-| **规划器**（planner） | **Vercel AI Gateway** | 响应带 `provider_metadata.gateway.routing` | **`providerOptions.gateway.only / order / has`**（一次注入完整允许列表 + 能力过滤） |
+| **规划器**（planner） | **Vercel AI Gateway** | 响应带 `provider_metadata.gateway.routing` | **`providerOptions.gateway.only / order`**（一次注入完整允许列表；个别模型再加 `has`） |
 
 **关键发现**：规划器管道的请求由 Vercel AI Gateway 执行，请求体里的顶层 `provider.only/order` 会被 Cline 丢弃。
 本项目对规划器管道只通过 `providerOptions.gateway` 一次注入配置的允许列表（`only` 与 `order` 相同，客户端自带的 `only`/`order`/`has`/顶层 `provider` 会被配置覆盖），对齐 [ClinePassBridge](https://github.com/xiao-qiu-qiu/ClinePassBridge)；`order` 只是优先级提示，网关不保证遵守：
@@ -235,11 +235,15 @@ Cline Pass 订阅模型在 Cline 网关之后分成两条管道，钉住上游�
 }
 ```
 
-**能力过滤 `has`（2026-10-23 在两把 key 上实测）**：在这些 key 上，单独的 `gateway.only` 不被执行（连不存在的渠道也能成功，请求落到私有上游）；同时带上 `has: ["vision", "implicit-caching"]` 后，同一把 key、同一个模型会返回所列渠道（`finalProvider`），无效渠道被拒绝。内部机制没有服务端源码佐证，只是实测有效，所以：
+**能力过滤 `has`（按模型显式开启）**：在部分 key 上，单独的 `gateway.only` 不被执行（连不存在的渠道也能成功，请求落到私有落点 `openai-compatible-private`）；同时带上 `has: ["vision", "implicit-caching"]` 后，网关改走能执行 `only` 的路径，返回所配渠道（`finalProvider`），无效渠道被拒绝。内部机制没有服务端源码佐证，只是实测有效；同时 `has` 会把不满足这些能力的渠道（含私有落点）一并排除，**不满足的模型会被网关直接拒绝**，所以不做全局默认：
 
-- 每次注入 `gateway.only` 时一并发送 `has`，默认 `["vision", "implicit-caching"]`；`config.json` 顶层 `gatewayHas` 可改写，`[]` 恢复旧的 only+order 形状。支持 SIGHUP 热加载；非法值（非数组、超过 10 项、条目不是 `[a-z0-9._-]`）拒绝启动。没有 `only` 的 auto 请求与直连管道不带 `has`。
-- 管理端「探测」的假渠道负对照和「校验」使用同样的 `only + has`，判定与真实请求同形；负对照被明确拒绝才报告 `supported`。若某模型没有同时满足这些能力的渠道，网关会拒绝请求，请把 `gatewayHas` 缩小或设为 `[]`。
-- 上线后自行对照验证：① 保持 `has`，请求日志里的实际渠道（`actualProvider`）应为所配渠道；② 保持 `has`、把 `only` 换成不存在的渠道，应当被拒绝且不生成内容（控制台「探测」的负对照即是这一步）。流式请求 HTTP 200 也可能在 SSE 里带错误，以请求/错误日志为准。
+```json
+{ "gatewayHas": { "cline-pass/deepseek-v4.1-flash-1017": ["vision", "implicit-caching"] } }
+```
+
+- `config.json` 顶层 `gatewayHas`：键是解析后的模型 id（别名先展开），值是能力数组（≤10 项，`[a-z0-9._-]`）。只给列出的模型发送 `has`，且只随 `gateway.only` 注入；没有 `only` 的 auto 请求、直连管道、未列出的模型都不带。SIGHUP 热加载，非法值拒绝启动（热加载失败则保留原配置）。
+- 管理端「探测」的假渠道负对照与「校验」对列出的模型使用同样的 `only + has`，判定与真实请求同形。网关把「no available providers match the 'only' filter」的 400 包成 HTTP 500 返回，负对照会按包着的 400 判定为 `supported`。
+- 开启前先实测该模型（见下表），再自行对照验证：① 保持 `has`，请求日志里的实际渠道（`actualProvider`）应为所配渠道；② 保持 `has`、把 `only` 换成不存在的渠道，应当被拒绝且不生成内容（控制台「探测」的负对照就是这一步）。流式请求 HTTP 200 也可能在 SSE 里带错误，以请求/错误日志为准。
 
 **实际渠道只认响应证据**：`actualProvider` 取自响应（非流、SSE 流、含错误正文中的 routing 文本），优先级 `finalProvider` > `resolvedProvider` > 裸 `provider`，候选/`fallbacksAvailable` 不算；无证据显示「未知」，绝不用计划列表冒充。实测单元素 `only:["alibaba"]` 响应 `finalProvider: "alibaba"`，规划器理由为 `Provider set restricted to: alibaba`。
 参考：[Vercel AI Gateway — Provider Filtering, Ordering & Sorting](https://vercel.com/docs/ai-gateway/models-and-providers/provider-filtering-and-ordering)
@@ -260,6 +264,18 @@ Cline Pass 订阅模型在 Cline 网关之后分成两条管道，钉住上游�
 | glm-5.2 + `providerOptions.gateway.sort:"cost"` | ✔ 按成本重排执行顺序 |
 | glm-5.3-flash（直连）+ 顶层 `provider.only:["gmicloud"]` | ✔ `provider: "GMICloud"` |
 | glm-5.3-flash + `providerOptions.gateway` | ✘ 无效（直连管道只认顶层 provider 形式） |
+
+### 实测记录（2026-10-23）：`has: ["vision", "implicit-caching"]` 按模型的效果
+
+两把 key 对照：一把里 `deepseek-v4.1-flash-1017` 的 `only` 被忽略（落私有渠道），另一把里 `only` 本来就生效。每个模型各发 `only+order` 与 `only+order+has` 一次。
+
+| 模型（配置的 `only`） | `only+order` | 再加 `has` | 结论 |
+|---|---|---|---|
+| deepseek-v4.1-flash-1017（`deepseek`） | 一把 key 落私有渠道，另一把落 `deepseek` | 两把 key 都落 `deepseek`；假渠道被拒绝 | **有用，开启** |
+| minimax-m3、qwen3.7-plus | 200 | 200，落点不变 | 无收益 |
+| deepseek-v4.1-flash、glm-5.3（列表含私有渠道，或被服务端虚拟模型覆盖） | 落私有渠道 | 落私有渠道 | 无变化 |
+| qwen3.8-max、kimi-k3（`openai-compatible-private`） | 200 | **500** `No available providers match the 'only' filter` | 会被打挂，不要开 |
+| deepseek-v4-pro、qwen3.7-max | 200 | **500** `No providers … satisfy the required has conditions: vision, implicit-caching` | 会被打挂，不要开 |
 
 > 管道归属由 Cline 侧决定、可能随时间变化，控制台的「探测」会刷新每个模型的管道类型与渠道清单。
 

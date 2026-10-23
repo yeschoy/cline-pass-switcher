@@ -2,7 +2,7 @@
 // Node >= 18。
 //
 // 网关行为：
-// - planner 与未识别管道：一次 HTTP 写入 providerOptions.gateway.only 与同序 .order，并附带能力过滤 .has（默认 vision + implicit-caching，见 gatewayHas）。
+// - planner 与未识别管道：一次 HTTP 写入 providerOptions.gateway.only 与同序 .order；config.gatewayHas 里列出的模型再附带能力过滤 .has。
 // - direct 管道：每次具名 attempt 只注入一个 provider.only，外层本地顺序回退。
 import http from 'node:http';
 import https from 'node:https';
@@ -264,14 +264,23 @@ function envAccountId(key) {
   return `env_${crypto.createHmac('sha256', META.routingSecret).update(String(key)).digest('hex').slice(0, 24)}`;
 }
 const ROUTE_SORTS = new Set(['cost', 'ttft', 'tps']);
-// Cline 网关的能力过滤：与 gateway.only 同发时，部分 key 上的 only 才会被真正执行（2026-10-23 实测，机制未证实）。
-// 只随 gateway.only 注入；配置 "gatewayHas": [] 关闭。
-const GATEWAY_HAS_DEFAULT = Object.freeze(['vision', 'implicit-caching']);
+// Cline 网关的能力过滤 gateway.has：与 gateway.only 同发时，部分 key 上的 only 才会被真正执行（2026-10-23 实测，机制未证实）。
+// 它同时会把不满足能力的渠道（含私有落点）排除，不满足的模型会被网关拒绝，所以只对 config.gatewayHas 里显式列出的模型发送，且只随 gateway.only 注入。
 function normalizeGatewayHas(value) {
-  if (!Array.isArray(value) || value.length > 10 || value.some((item) => typeof item !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(item.trim()))) throw new Error('invalid gatewayHas');
-  return [...new Set(value.map((item) => item.trim()))];
+  if (!isPlainObject(value) || Object.keys(value).length > 200) throw new Error('invalid gatewayHas');
+  const out = {};
+  for (const [model, capabilities] of Object.entries(value)) {
+    const id = model.trim();
+    if (!id || id.length > 300 || /[\x00-\x1f\x7f]/.test(id) || !Array.isArray(capabilities) || capabilities.length > 10 ||
+      capabilities.some((item) => typeof item !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(item.trim()))) throw new Error('invalid gatewayHas');
+    out[id] = [...new Set(capabilities.map((item) => item.trim()))];
+  }
+  return out;
 }
-const gatewayHasList = () => (Array.isArray(config.gatewayHas) ? config.gatewayHas : GATEWAY_HAS_DEFAULT);
+function gatewayHasFor(modelId) {
+  const capabilities = isPlainObject(config.gatewayHas) && Object.hasOwn(config.gatewayHas, modelId) ? config.gatewayHas[modelId] : null;
+  return Array.isArray(capabilities) ? capabilities : [];
+}
 const PROVIDER_HEALTH_STATUSES = new Set(['ok', 'limited', 'degraded', 'bad', 'unknown']);
 const PROVIDER_FAILURE_CLASSES = new Set(['rate_limit', 'auth', 'server', 'network', 'timeout', 'unsupported', 'other']);
 const PROVIDER_FAILURE_COUNT_MAX = 30;
@@ -3314,10 +3323,10 @@ function providersFromError(value, depth = 0) {
 }
 // 管理面 chat 调用：每个真实 native 请求独立 claim 一个 permit；无 permit 时明确跳过而不是静默发出。
 function claimManagementPermit(lease) { return lease ? lease.takeRpmPermit() : { ok: true, permit: null }; }
-// 规划器探测体必须与真实请求同形（only + has），否则在 only 需要 has 才生效的 key 上，对照/校验会把"被忽略"误判成结论。
-function gatewayPinBody(base, providers) {
+// 规划器探测体必须与该模型的真实请求同形（only + 已配置的 has），否则在 only 需要 has 才生效的 key 上，对照/校验会把"被忽略"误判成结论。
+function gatewayPinBody(base, providers, modelId) {
   const gateway = { only: providers.slice() };
-  const has = gatewayHasList();
+  const has = gatewayHasFor(modelId);
   if (has.length) gateway.has = has.slice();
   return { ...base, providerOptions: { gateway } };
 }
@@ -3333,7 +3342,7 @@ async function harvestAvailableProviders(modelId, pipeline, acc, lease = null) {
   }
   const base = { model: modelId, messages: [{ role: 'user', content: 'hi' }], max_tokens: 16 };
   const body = pipeline === 'planner'
-    ? gatewayPinBody(base, [control])
+    ? gatewayPinBody(base, [control], modelId)
     : { ...base, provider: { only: [control] } };
   let response;
   try {
@@ -3342,13 +3351,15 @@ async function harvestAvailableProviders(modelId, pipeline, acc, lease = null) {
       permit: claim.permit, maxResponseBytes: 64 * 1024,
     }, 60000, acc);
   } catch { return { providers: null, pinCapability: 'unknown' }; }
-  const { status, json } = response, error = upstreamErrorOf(json);
+  const { status: httpStatus, json } = response, error = upstreamErrorOf(json);
   const listed = providersFromError(error)?.filter((slug) => slug !== control);
   const providers = listed?.length ? listed : null;
   const text = structuredErrorText(error);
+  // 规划器网关把"no available providers match the 'only' filter"的 400 包成 HTTP 500 返回，按包着的 400 判定。
+  const status = wrappedClientStatus(httpStatus, text) ?? httpStatus;
   const rejected = [400, 404].includes(status) && providers?.length && text.toLowerCase().includes(control) &&
     /\b(?:provider|channel|upstream|route|routing|pin|only)\b/i.test(text) &&
-    /\b(?:reject(?:ed)?|invalid|unknown|not[ _-]?found|unavailable|unsupported)\b/i.test(text) &&
+    /\b(?:reject(?:ed)?|invalid|unknown|not[ _-]?found|unavailable|unsupported)\b|\bno available providers? match\b/i.test(text) &&
     !/(?:account|api[ _-]?key|credential|authoriz|authenticat|permission|billing|payment|subscription|quota|model[ _-]?not[ _-]?found)/i.test(text);
   const choices = json?.data?.choices || json?.choices;
   const complete = status === 200 && !error && Array.isArray(choices) && choices.length &&
@@ -3486,7 +3497,7 @@ async function validateUpstreams(modelId, acc, lease = null) {
       const t0 = Date.now();
       const base = { model: modelId, messages: [{ role: 'user', content: 'hi' }], max_tokens: 16 };
       const body = pipeline === 'planner'
-        ? gatewayPinBody(base, [slug])
+        ? gatewayPinBody(base, [slug], modelId)
         : { ...base, provider: { only: [slug] } };
       // 并发 batch 共享一个 lease，但每个 native call 原子 claim 自己的 permit。
       const claim = claimManagementPermit(lease);
@@ -5414,7 +5425,7 @@ function injectPrefs(body, modelId, attempt = {}) {
     const gateway = {};
     if (list.length) {
       gateway.only = list.slice(); gateway.order = list.slice();
-      const has = gatewayHasList();
+      const has = gatewayHasFor(modelId);
       if (has.length) gateway.has = has.slice();
     }
     if (sort) gateway.sort = sort;

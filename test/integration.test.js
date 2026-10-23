@@ -341,6 +341,7 @@ test('account routing, header boundary, failover, state and streaming', async (t
       { id: 'a', name: 'A', key: 'key-a', enabled: true, maxConcurrent: 0, perModel: {} },
       { id: 'b', name: 'B', key: 'key-b', enabled: true, maxConcurrent: 0, perModel: {} },
     ], knownModels: ['test-model', 'planner-model', 'slow-model', 'abort-model', 'stream-abort-model', 'cooldown-model', 'wrapped-cooldown-model', 'wrapped-sse-error-model', 'post-start-wrapped-sse-error-model', 'long-sse-error-model', 'double-cooldown-model', 'ban-model', 'sse-error-model'], perModel: {}, accountErrorRules: {},
+    gatewayHas: { 'planner-model': ['vision', 'implicit-caching'] },
   };
   const { child, dir } = await startSwitcher(baseConfig);
   t.after(async () => { await stop(child); await close(mock); fs.rmSync(dir, { recursive: true, force: true }); });
@@ -428,7 +429,7 @@ test('account routing, header boundary, failover, state and streaming', async (t
   assert.equal(scopedProbe.status, 200); assert.equal(scopedProbe.json.accountId, validationAccount.id);
   assert.deepEqual(new Set(seen.map((entry) => entry.headers.authorization)), new Set(['Bearer key-b']), 'probe and harvest must keep one selected account');
   const harvestControl = seen.find((entry) => /^cps-pin-test-[a-f0-9]{16}$/.test(entry.body.providerOptions?.gateway?.only?.[0] || ''));
-  assert.deepEqual(harvestControl.body.providerOptions.gateway.has, ['vision', 'implicit-caching'], 'the negative control carries the same capability filter as real planner requests');
+  assert.deepEqual(harvestControl.body.providerOptions.gateway.has, ['vision', 'implicit-caching'], 'the negative control carries the model\'s configured capability filter');
   const scopedValidation = await rawJson(switchPort, '/api/validate-upstreams', { model: 'planner-model', accountId: validationAccount.id });
   assert.equal(scopedValidation.status, 200); assert.equal(scopedValidation.json.results.beta.accountFault, 'auth'); assert.equal(scopedValidation.json.results.beta.status, 'unknown');
   const validationBodies = seen.filter((entry) => ['alpha', 'beta'].includes(entry.body.providerOptions?.gateway?.only?.[0]));
@@ -5132,6 +5133,14 @@ test('manual pin negative control separates routed rejection, ignored only and u
         res.statusCode = planner ? 400 : 404;
         return res.end(JSON.stringify({ error: { message: `provider ${only} rejected; Available providers are: alpha, beta.`, metadata: { available_providers: ['alpha', 'beta'] } } }));
       }
+      if (model === 'planner-wrapped') {
+        res.statusCode = 500;
+        return res.end(JSON.stringify({ error: { message: `inference request failed: failed to invoke model 'vmc/x' from Vercel: request failed with status 400: ${JSON.stringify({ error: { message: `No available providers match the 'only' filter: ${only}. Available providers are: alpha, beta.`, type: 'invalid_request_error' } })}` } }));
+      }
+      if (model === 'planner-wrapped-server') {
+        res.statusCode = 500;
+        return res.end(JSON.stringify({ error: { message: `inference request failed: request failed with status 502: No available providers match the 'only' filter: ${only}. Available providers are: alpha, beta.` } }));
+      }
       if (model.endsWith('-ignored')) return success('alpha');
       if (model === 'planner-generic') { res.statusCode = 400; return res.end(JSON.stringify({ error: { message: 'invalid request shape; Available providers are: alpha, beta.' } })); }
       if (model === 'planner-auth') { res.statusCode = 401; return res.end(JSON.stringify({ error: { message: `account authorization failed for ${only}; Available providers are: alpha, beta.` } })); }
@@ -5147,28 +5156,29 @@ test('manual pin negative control separates routed rejection, ignored only and u
   const upstreamPort = await listen(mock), port = await unusedPort();
   const models = ['planner-supported', 'direct-supported', 'planner-ignored', 'direct-ignored',
     'planner-generic', 'planner-auth', 'planner-rate', 'planner-server', 'planner-empty',
-    'planner-envelope', 'planner-network', 'direct-no-actual', 'auto-only', 'planner-rpm'];
+    'planner-envelope', 'planner-network', 'direct-no-actual', 'auto-only', 'planner-rpm', 'planner-wrapped', 'planner-wrapped-server'];
   const accounts = [
     { id: 'a', name: 'A', key: 'fixture-a', enabled: true, perModel: {} },
     { id: 'b', name: 'B', key: 'fixture-b', enabled: true, perModel: {} },
     { id: 'rpm', name: 'RPM', key: 'fixture-rpm', enabled: true, maxRpm: 1, perModel: {} },
   ];
   const running = await startSwitcher({ port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accounts,
-    knownModels: models, perModel: {}, providerProbeSchedule: { enabled: false, intervalMs: 300000, maxPerRound: 2, maxPer24h: 100, failureThreshold: 3 } });
+    knownModels: models, perModel: {}, gatewayHas: { 'planner-supported': ['vision', 'implicit-caching'] }, providerProbeSchedule: { enabled: false, intervalMs: 300000, maxPerRound: 2, maxPer24h: 100, failureThreshold: 3 } });
   t.after(async () => { await stop(running.child); await close(mock); fs.rmSync(running.dir, { recursive: true, force: true }); });
   const probe = (model, accountId = 'a') => rawJson(port, '/api/probe', { model, accountId });
   for (const [model, expected] of [['planner-supported','supported'], ['direct-supported','supported'],
     ['planner-ignored','ignored'], ['direct-ignored','ignored'], ['planner-generic','unknown'],
     ['planner-auth','unknown'], ['planner-rate','unknown'], ['planner-server','unknown'],
     ['planner-empty','unknown'], ['planner-envelope','unknown'], ['planner-network','unknown'],
-    ['direct-no-actual','unknown']]) {
+    ['direct-no-actual','unknown'], ['planner-wrapped','supported'], ['planner-wrapped-server','unknown']]) {
     const before = seen.length, result = await probe(model, model === 'direct-ignored' ? 'b' : 'a');
     assert.equal(result.status, 200, `${model}: ${result.text}`);
     assert.equal(result.json.pinCapability, expected, model);
     assert.equal(result.json.pinnable, true, 'legacy field still reports a recognized pipeline, not verified pinning');
     assert.equal(seen.length - before, 2, 'manual probe reuses the one existing harvest call');
     assert.match(seen.at(-1).only, /^cps-pin-test-[a-f0-9]{16}$/);
-    if (model.startsWith('planner-')) assert.deepEqual(seen.at(-1).body.providerOptions.gateway.has, ['vision', 'implicit-caching'], `${model}: the control uses the production only+has shape`);
+    if (model === 'planner-supported') assert.deepEqual(seen.at(-1).body.providerOptions.gateway.has, ['vision', 'implicit-caching'], `${model}: the control uses the production only+has shape`);
+    else if (model.startsWith('planner-')) assert.equal(seen.at(-1).body.providerOptions.gateway.has, undefined, `${model}: a model without gatewayHas keeps the plain only control`);
     else assert.equal(seen.at(-1).body.providerOptions, undefined, `${model}: direct pipelines never get a gateway capability filter`);
     assert.equal(seen.at(-1).auth, `Bearer fixture-${model === 'direct-ignored' ? 'b' : 'a'}`);
     assert.equal(result.json.upstreams.includes(seen.at(-1).only), false, 'the impossible slug is never discovered');
