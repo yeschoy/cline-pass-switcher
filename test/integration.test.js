@@ -427,8 +427,13 @@ test('account routing, header boundary, failover, state and streaming', async (t
   const scopedProbe = await rawJson(switchPort, '/api/probe', { model: 'planner-model', accountId: validationAccount.id });
   assert.equal(scopedProbe.status, 200); assert.equal(scopedProbe.json.accountId, validationAccount.id);
   assert.deepEqual(new Set(seen.map((entry) => entry.headers.authorization)), new Set(['Bearer key-b']), 'probe and harvest must keep one selected account');
+  const harvestControl = seen.find((entry) => /^cps-pin-test-[a-f0-9]{16}$/.test(entry.body.providerOptions?.gateway?.only?.[0] || ''));
+  assert.deepEqual(harvestControl.body.providerOptions.gateway.has, ['vision', 'implicit-caching'], 'the negative control carries the same capability filter as real planner requests');
   const scopedValidation = await rawJson(switchPort, '/api/validate-upstreams', { model: 'planner-model', accountId: validationAccount.id });
   assert.equal(scopedValidation.status, 200); assert.equal(scopedValidation.json.results.beta.accountFault, 'auth'); assert.equal(scopedValidation.json.results.beta.status, 'unknown');
+  const validationBodies = seen.filter((entry) => ['alpha', 'beta'].includes(entry.body.providerOptions?.gateway?.only?.[0]));
+  assert.equal(validationBodies.length, 2);
+  for (const entry of validationBodies) assert.deepEqual(entry.body.providerOptions.gateway, { only: [entry.body.providerOptions.gateway.only[0]], has: ['vision', 'implicit-caching'] }, 'per-channel validation pins one provider with the same capability filter');
   const scopedView = await (await fetch(`http://127.0.0.1:${switchPort}/api/models?accountId=${validationAccount.id}`)).json();
   assert.notEqual(scopedView.subscription.find((entry) => entry.id === 'planner-model').meta.upstreamStatus?.beta?.status, 'auth', 'account auth must not contaminate global provider health');
   assert.equal((await rawJson(switchPort, '/api/probe', { model: 'planner-model', accountId: 'missing' })).status, 400);
@@ -5163,6 +5168,8 @@ test('manual pin negative control separates routed rejection, ignored only and u
     assert.equal(result.json.pinnable, true, 'legacy field still reports a recognized pipeline, not verified pinning');
     assert.equal(seen.length - before, 2, 'manual probe reuses the one existing harvest call');
     assert.match(seen.at(-1).only, /^cps-pin-test-[a-f0-9]{16}$/);
+    if (model.startsWith('planner-')) assert.deepEqual(seen.at(-1).body.providerOptions.gateway.has, ['vision', 'implicit-caching'], `${model}: the control uses the production only+has shape`);
+    else assert.equal(seen.at(-1).body.providerOptions, undefined, `${model}: direct pipelines never get a gateway capability filter`);
     assert.equal(seen.at(-1).auth, `Bearer fixture-${model === 'direct-ignored' ? 'b' : 'a'}`);
     assert.equal(result.json.upstreams.includes(seen.at(-1).only), false, 'the impossible slug is never discovered');
   }

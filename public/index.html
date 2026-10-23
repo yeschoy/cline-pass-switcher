@@ -265,7 +265,7 @@
     ① <b>上游可枚举、可观测</b>：部分订阅模型的响应元数据会提供真实模型、可用上游及本次实际命中的上游；
     手动「探测」还会向当前账号发送一次语法合法的假渠道请求，尝试发现渠道并做负对照；若网关忽略钉选，它可能生成内容并计费。<br>
     ② <b>不同管道使用不同的渠道参数</b>：直连管道（OpenRouter）用顶层 <code class="mono">provider.only</code>，每次 HTTP attempt 仅发送一个 provider.only，并由 switcher 本地逐个回退。
-    规划器管道与尚未识别的管道把过滤后的允许列表一次写入 <code class="mono">providerOptions.gateway.only</code> 与同序 <code class="mono">gateway.order</code>；<code class="mono">order</code> 只是网关优先级提示，不保证远端遵守，也不会被写成实际上游。
+    规划器管道与尚未识别的管道把过滤后的允许列表一次写入 <code class="mono">providerOptions.gateway.only</code> 与同序 <code class="mono">gateway.order</code>，并附带能力过滤 <code class="mono">gateway.has</code>（默认 vision + implicit-caching，配置项 <code class="mono">gatewayHas</code>；部分 key 上单独的 only 不会被执行）；<code class="mono">order</code> 只是网关优先级提示，不保证远端遵守，也不会被写成实际上游。
     网关是否严格执行须按账号/模型查看负对照结果与实际 Provider；管道识别或计划渠道本身不是命中证明。
     <code class="mono">sort</code> 只在已选 Provider 内排序。<br>
     ③ <b>目录模型 :free 变体</b>：属于直连管道，是否遵守 <code class="mono">only</code> 仍需验证。<br>

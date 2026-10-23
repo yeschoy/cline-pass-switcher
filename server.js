@@ -2,7 +2,7 @@
 // Node >= 18。
 //
 // 网关行为：
-// - planner 与未识别管道：一次 HTTP 写入 providerOptions.gateway.only 与同序 .order。
+// - planner 与未识别管道：一次 HTTP 写入 providerOptions.gateway.only 与同序 .order，并附带能力过滤 .has（默认 vision + implicit-caching，见 gatewayHas）。
 // - direct 管道：每次具名 attempt 只注入一个 provider.only，外层本地顺序回退。
 import http from 'node:http';
 import https from 'node:https';
@@ -264,6 +264,14 @@ function envAccountId(key) {
   return `env_${crypto.createHmac('sha256', META.routingSecret).update(String(key)).digest('hex').slice(0, 24)}`;
 }
 const ROUTE_SORTS = new Set(['cost', 'ttft', 'tps']);
+// Cline 网关的能力过滤：与 gateway.only 同发时，部分 key 上的 only 才会被真正执行（2026-10-23 实测，机制未证实）。
+// 只随 gateway.only 注入；配置 "gatewayHas": [] 关闭。
+const GATEWAY_HAS_DEFAULT = Object.freeze(['vision', 'implicit-caching']);
+function normalizeGatewayHas(value) {
+  if (!Array.isArray(value) || value.length > 10 || value.some((item) => typeof item !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(item.trim()))) throw new Error('invalid gatewayHas');
+  return [...new Set(value.map((item) => item.trim()))];
+}
+const gatewayHasList = () => (Array.isArray(config.gatewayHas) ? config.gatewayHas : GATEWAY_HAS_DEFAULT);
 const PROVIDER_HEALTH_STATUSES = new Set(['ok', 'limited', 'degraded', 'bad', 'unknown']);
 const PROVIDER_FAILURE_CLASSES = new Set(['rate_limit', 'auth', 'server', 'network', 'timeout', 'unsupported', 'other']);
 const PROVIDER_FAILURE_COUNT_MAX = 30;
@@ -1441,6 +1449,7 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   }
   if (!Object.hasOwn(loadedConfig, 'sessionProviderAffinityEnabled')) { config.sessionProviderAffinityEnabled = true; dirty = true; }
   else if (typeof config.sessionProviderAffinityEnabled !== 'boolean') throw new Error('invalid sessionProviderAffinityEnabled');
+  if (Object.hasOwn(loadedConfig, 'gatewayHas')) config.gatewayHas = normalizeGatewayHas(config.gatewayHas);
   const workflow = normalizeAccountWorkflow(config.accountWorkflow);
   if (JSON.stringify(config.accountWorkflow) !== JSON.stringify(workflow)) { config.accountWorkflow = workflow; dirty = true; }
   const protection = normalizeQuotaProtection(config.quotaProtection);
@@ -3046,7 +3055,8 @@ function reloadConfigFromDisk() {
   const poolPatch = Object.hasOwn(raw, 'proxyPool') ? { proxyPool: normalizeProxyPool(raw.proxyPool, { strict: true, secret: META.routingSecret }) } : {};
   const poolScopePatch = Object.hasOwn(raw, 'proxyPoolClientKeys') ? { proxyPoolClientKeys: normalizeProxyPoolClientKeys(raw.proxyPoolClientKeys, { knownIds: poolClientKeyIds(config) }) } : {};
   const poolDirectPatch = Object.hasOwn(raw, 'proxyPoolDirect') ? (typeof raw.proxyPoolDirect === 'boolean' ? { proxyPoolDirect: raw.proxyPoolDirect } : (() => { throw new Error('proxyPoolDirect must be boolean'); })()) : {};
-  const next = { ...config, ...poolPatch, ...poolScopePatch, ...poolDirectPatch, accounts: accs, accountMode: mode, activeAccount: active, concurrencyWaitMs: wait, poolFullWaitMs: poolWait,
+  const gatewayHasPatch = Object.hasOwn(raw, 'gatewayHas') ? { gatewayHas: normalizeGatewayHas(raw.gatewayHas) } : {};
+  const next = { ...config, ...poolPatch, ...poolScopePatch, ...poolDirectPatch, ...gatewayHasPatch, accounts: accs, accountMode: mode, activeAccount: active, concurrencyWaitMs: wait, poolFullWaitMs: poolWait,
     errorRules, ...legacyRuleProjection(errorRules), retryRules: normalizeRetryRules(pick('retryRules'), { strict: true }),
     quotaProtection: normalizeQuotaProtection(pick('quotaProtection'), { strict: true }), accountPipeline: pipeline, accountWorkflow: workflow,
     sessionProviderAffinityEnabled: affinity, exposeCatalog, knownModels: knownModels.map((m) => m.trim()),
@@ -3304,6 +3314,13 @@ function providersFromError(value, depth = 0) {
 }
 // 管理面 chat 调用：每个真实 native 请求独立 claim 一个 permit；无 permit 时明确跳过而不是静默发出。
 function claimManagementPermit(lease) { return lease ? lease.takeRpmPermit() : { ok: true, permit: null }; }
+// 规划器探测体必须与真实请求同形（only + has），否则在 only 需要 has 才生效的 key 上，对照/校验会把"被忽略"误判成结论。
+function gatewayPinBody(base, providers) {
+  const gateway = { only: providers.slice() };
+  const has = gatewayHasList();
+  if (has.length) gateway.has = has.slice();
+  return { ...base, providerOptions: { gateway } };
+}
 async function harvestAvailableProviders(modelId, pipeline, acc, lease = null) {
   const claim = claimManagementPermit(lease);
   if (!claim.ok) return { providers: null, pinCapability: 'unknown' };
@@ -3316,7 +3333,7 @@ async function harvestAvailableProviders(modelId, pipeline, acc, lease = null) {
   }
   const base = { model: modelId, messages: [{ role: 'user', content: 'hi' }], max_tokens: 16 };
   const body = pipeline === 'planner'
-    ? { ...base, providerOptions: { gateway: { only: [control] } } }
+    ? gatewayPinBody(base, [control])
     : { ...base, provider: { only: [control] } };
   let response;
   try {
@@ -3469,7 +3486,7 @@ async function validateUpstreams(modelId, acc, lease = null) {
       const t0 = Date.now();
       const base = { model: modelId, messages: [{ role: 'user', content: 'hi' }], max_tokens: 16 };
       const body = pipeline === 'planner'
-        ? { ...base, providerOptions: { gateway: { only: [slug] } } }
+        ? gatewayPinBody(base, [slug])
         : { ...base, provider: { only: [slug] } };
       // 并发 batch 共享一个 lease，但每个 native call 原子 claim 自己的 permit。
       const claim = claimManagementPermit(lease);
@@ -5395,7 +5412,11 @@ function injectPrefs(body, modelId, attempt = {}) {
   if (gatewayOwned) {
     const list = Array.isArray(attempt.upstreams) && attempt.upstreams.length ? attempt.upstreams.slice() : (upstream ? [upstream] : []);
     const gateway = {};
-    if (list.length) { gateway.only = list.slice(); gateway.order = list.slice(); }
+    if (list.length) {
+      gateway.only = list.slice(); gateway.order = list.slice();
+      const has = gatewayHasList();
+      if (has.length) gateway.has = has.slice();
+    }
     if (sort) gateway.sort = sort;
     if (Object.keys(gateway).length) options.gateway = gateway;
     else delete options.gateway;

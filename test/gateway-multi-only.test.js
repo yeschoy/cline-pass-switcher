@@ -123,12 +123,13 @@ test('planner and unknown pipelines send one gateway only+order list and actual 
       'delta-resolved': { pipeline: 'planner' },
       'preferred-model': { pipeline: 'planner' },
       'client-fold': { pipeline: 'planner' },
+      'auto-model': { pipeline: 'planner' },
     },
   }));
   const config = {
     port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 0,
     accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }],
-    knownModels: ['planner-model', 'unknown-model', 'filtered-model', 'direct-model', 'stream-late', 'stream-resolved', 'error-text', 'sticky-error', 'error-empty', 'fallbacks-only', 'both-facts', 'delta-resolved', 'preferred-model', 'client-fold'],
+    knownModels: ['planner-model', 'unknown-model', 'filtered-model', 'direct-model', 'stream-late', 'stream-resolved', 'error-text', 'sticky-error', 'error-empty', 'fallbacks-only', 'both-facts', 'delta-resolved', 'preferred-model', 'client-fold', 'auto-model'],
     perModel: {
       'planner-model': route(['alpha', 'beta', 'gamma']),
       'unknown-model': route(['alpha', 'beta']),
@@ -173,6 +174,7 @@ test('planner and unknown pipelines send one gateway only+order list and actual 
   assert.equal(planner.headers['x-cline-attempts'], '1');
   assert.deepEqual(seen[0].providerOptions.gateway.only, ['alpha', 'beta', 'gamma']);
   assert.deepEqual(seen[0].providerOptions.gateway.order, ['alpha', 'beta', 'gamma']);
+  assert.deepEqual(seen[0].providerOptions.gateway.has, ['vision', 'implicit-caching'], 'only is accompanied by the capability filter that makes it enforced');
   assert.equal(seen[0].provider, undefined);
   const plannerLog = await requestLog(planner);
   assert.deepEqual(plannerLog.targetProviders, ['alpha', 'beta', 'gamma']);
@@ -185,6 +187,7 @@ test('planner and unknown pipelines send one gateway only+order list and actual 
   assert.equal(seen.length, 1, 'an unknown pipeline is gateway-capable and does not walk providers locally');
   assert.deepEqual(seen[0].providerOptions.gateway.only, ['alpha', 'beta']);
   assert.deepEqual(seen[0].providerOptions.gateway.order, seen[0].providerOptions.gateway.only);
+  assert.deepEqual(seen[0].providerOptions.gateway.has, ['vision', 'implicit-caching']);
   assert.equal(seen[0].provider, undefined);
 
   seen.length = 0;
@@ -195,12 +198,17 @@ test('planner and unknown pipelines send one gateway only+order list and actual 
   assert.deepEqual(seen[0].providerOptions.gateway.order, ['keep', 'also']);
 
   seen.length = 0;
-  const folded = await call('client-fold', { provider: { only: ['client-pin'], order: ['client-pin'], extra: true }, providerOptions: { gateway: { only: ['client-gw'], order: ['client-gw'] }, anthropic: { keep: true } } });
+  const folded = await call('client-fold', { provider: { only: ['client-pin'], order: ['client-pin'], extra: true }, providerOptions: { gateway: { only: ['client-gw'], order: ['client-gw'], has: ['client-cap'] }, anthropic: { keep: true } } });
   assert.equal(folded.status, 500);
   assert.equal(seen[0].provider, undefined, 'gateway injection removes a conflicting top-level provider');
   assert.deepEqual(seen[0].providerOptions.gateway.only, ['alpha', 'beta']);
   assert.deepEqual(seen[0].providerOptions.gateway.order, ['alpha', 'beta']);
+  assert.deepEqual(seen[0].providerOptions.gateway.has, ['vision', 'implicit-caching'], 'a client-supplied has never survives the configured one');
   assert.deepEqual(seen[0].providerOptions.anthropic, { keep: true });
+
+  seen.length = 0;
+  assert.equal((await call('auto-model')).status, 500);
+  assert.equal(seen[0].providerOptions, undefined, 'without an injected only list there is no capability filter either');
 
   seen.length = 0;
   const direct = await call('direct-model');
@@ -257,4 +265,73 @@ test('planner and unknown pipelines send one gateway only+order list and actual 
   assert.equal((await call('preferred-model')).status, 200);
   assert.equal(seen[0].providerOptions.gateway.order[0], 'beta', 'preferred reorders the single gateway list and does not open a second provider HTTP call');
   assert.equal(seen.length, 1);
+});
+
+test('gatewayHas: configured list is sent with only, [] disables it, SIGHUP applies it and an invalid value refuses to start', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      seen.push(JSON.parse(Buffer.concat(chunks).toString() || '{}'));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(routing('alpha')));
+    });
+  });
+  const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-gateway-has-'));
+  const configFile = path.join(dir, 'config.json');
+  fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({ routingSecret: 'gateway-has-secret', models: { 'planner-model': { pipeline: 'planner' } } }));
+  fs.writeFileSync(configFile, JSON.stringify({
+    port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 0,
+    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }], knownModels: ['planner-model'],
+    perModel: { 'planner-model': { upstreams: ['alpha', 'beta'], exclude: [], pinMode: 'strict', sort: null, maxRetries: null, providerCooldownMs: 0 } },
+    errorRules: [], gatewayHas: ['vision'],
+  }));
+  prepareAdminFixture(dir);
+  const start = () => {
+    const child = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: { ...process.env, DATA_DIR: dir, BIND_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const state = { child, output: '' };
+    child.stdout.on('data', (chunk) => { state.output += chunk; }); child.stderr.on('data', (chunk) => { state.output += chunk; });
+    return state;
+  };
+  const ready = (state) => new Promise((resolve, reject) => {
+    const deadline = setTimeout(() => reject(new Error(`switcher startup timeout: ${state.output}`)), 5000);
+    const poll = setInterval(() => { if (state.output.includes('OpenAI 兼容代理地址')) { clearInterval(poll); clearTimeout(deadline); resolve(); } }, 20);
+    state.child.once('exit', (code) => { clearInterval(poll); clearTimeout(deadline); reject(new Error(`switcher exited ${code}: ${state.output}`)); });
+  });
+  const first = start();
+  t.after(async () => { await stop(first.child); await close(upstream); fs.rmSync(dir, { recursive: true, force: true }); });
+  await ready(first);
+  const call = () => rawJson(port, '/v1/chat/completions', { model: 'planner-model', messages: [{ role: 'user', content: 'hi' }] });
+  const reload = async (gatewayHas) => {
+    const next = { ...JSON.parse(fs.readFileSync(configFile, 'utf8')), gatewayHas };
+    fs.writeFileSync(configFile, JSON.stringify(next));
+    first.output = '';
+    first.child.kill('SIGHUP');
+    await waitUntil(() => /SIGHUP 热加载(完成|失败)/.test(first.output), 5000, 'SIGHUP reload');
+    assert.match(first.output, /SIGHUP 热加载完成：.*gatewayHas/);
+  };
+
+  seen.length = 0;
+  assert.equal((await call()).status, 200);
+  assert.deepEqual(seen[0].providerOptions.gateway, { only: ['alpha', 'beta'], order: ['alpha', 'beta'], has: ['vision'] });
+
+  await reload([]);
+  seen.length = 0;
+  assert.equal((await call()).status, 200);
+  assert.deepEqual(seen[0].providerOptions.gateway, { only: ['alpha', 'beta'], order: ['alpha', 'beta'] }, 'an empty gatewayHas sends the legacy only+order shape');
+
+  await reload(['audio', ' audio', 'implicit-caching']);
+  seen.length = 0;
+  assert.equal((await call()).status, 200);
+  assert.deepEqual(seen[0].providerOptions.gateway.has, ['audio', 'implicit-caching'], 'entries are trimmed and de-duplicated');
+
+  await stop(first.child);
+  for (const invalid of ['vision', [''], ['has space'], [1], Array.from({ length: 11 }, (_, index) => `cap${index}`)]) {
+    fs.writeFileSync(configFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(configFile, 'utf8')), gatewayHas: invalid }));
+    const bad = start();
+    const code = await new Promise((resolve) => bad.child.once('exit', resolve));
+    assert.notEqual(code, 0, `gatewayHas ${JSON.stringify(invalid)} must refuse to start`);
+    assert.match(bad.output, /invalid gatewayHas/);
+  }
 });
