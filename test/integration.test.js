@@ -1208,7 +1208,7 @@ test('new scheduling modes, account fields, model aliases and independent logs',
   assert.equal(new Set(seen.map(x=>x.auth)).size,2,'least-connections must use the idle account');
   assert.equal((await rawJson(switchPort,'/api/model-aliases',{aliases:{friendly:'cline-pass/target'}})).status,200);
   assert.equal((await rawJson(switchPort,'/api/model-aliases',{aliases:{bad:'cline-pass/missing'}})).status,400);
-  seen.length=0; const aliased=await rawJson(switchPort,'/v1/chat/completions',{model:'friendly',messages:[]}); assert.equal(aliased.status,200);assert.equal(seen[0].body.model,'cline-pass/target');assert.ok(aliased.headers['x-cline-request-id']);
+  seen.length=0; const aliased=await rawJson(switchPort,'/v1/chat/completions',{model:'friendly',messages:[]}); assert.equal(aliased.status,200);assert.equal(seen[0].body.model,'cline-pass/target');assert.ok(aliased.headers['x-cline-request-id']);assert.equal(aliased.headers['x-oneapi-request-id'],aliased.headers['x-cline-request-id']);
   const models=await (await fetch(`http://127.0.0.1:${switchPort}/v1/models`)).json();assert.ok(models.data.some(x=>x.id==='friendly')&&models.data.some(x=>x.id==='cline-pass/target'));
   const aliasStats=await(await fetch(`http://127.0.0.1:${switchPort}/api/statistics`)).json();
   assert.equal(aliasStats.models.some(x=>x.id==='friendly'),false,'aliases do not split resolved-model statistics');

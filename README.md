@@ -373,7 +373,7 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=cline-pass/glm-5.2
 
 认证管理 API `GET /api/statistics` 返回累计、最近 24 小时、按实际模型聚合的滚动缓存统计、当前账号健康与严格投影的额度信息，不返回分钟桶、密钥、代理、Header、消息、会话或原始额度响应。
 
-请求与错误日志分别写入 `DATA_DIR/logs/requests-*.jsonl` 和 `errors-*.jsonl`。默认保留 30 天、请求 50,000 条、错误 10,000 条，两类合计不超过 100 MiB；服务先监听再后台恢复既有日志，恢复期间模型流量和新日志不受影响，查询会暂时返回安全的 `503` 而不会展示部分历史。查询 API 为 `GET /api/logs/{requests|errors}`（`limit` 1～200、`cursor` 游标和字段筛选），对应 `DELETE` 只清空指定类型。每个代理请求返回 `X-Cline-Request-Id`。逐次日志记录受控的 `errorScope / scopeEvidence / failureClass / healthAction / retryAfterMs / responseContentType / responseBytes`，不会保存原始响应正文。
+请求与错误日志分别写入 `DATA_DIR/logs/requests-*.jsonl` 和 `errors-*.jsonl`。默认保留 30 天、请求 50,000 条、错误 10,000 条，两类合计不超过 100 MiB；服务先监听再后台恢复既有日志，恢复期间模型流量和新日志不受影响，查询会暂时返回安全的 `503` 而不会展示部分历史。查询 API 为 `GET /api/logs/{requests|errors}`（`limit` 1～200、`cursor` 游标和字段筛选），对应 `DELETE` 只清空指定类型。每个代理请求返回 `X-Cline-Request-Id`，并以同一 ID 返回 `X-Oneapi-Request-Id`：前置 new-api 会把它记入自己日志的 `upstream_request_id`，从而把 new-api 的用户/令牌日志与本服务的请求日志对应起来（new-api 不会把该头转给最终客户端）。逐次日志记录受控的 `errorScope / scopeEvidence / failureClass / healthAction / retryAfterMs / responseContentType / responseBytes`，不会保存原始响应正文。
 
 账号代理支持 `http://`、`https://`、`socks5://`、`socks5h://` 和可选 URL 用户名/密码，只应用于该账号的 Cline 请求；代理失败进入网络/代理错误记录，并且不会回退直连。账号 Header 在客户端协议白名单之后合并，随后由系统强制覆盖 `Content-Type` 和账号 `Authorization`。Authorization、Cookie、逐跳 Header、会话/线程/设备身份及凭据类 Header 均禁止配置。
 

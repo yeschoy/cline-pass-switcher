@@ -6277,6 +6277,8 @@ async function handleChat(req, res, clientKeyId, adapter = null) {
   const detail = detailContext.getStore();
   const requestId = detail?.requestId || crypto.randomUUID();
   res.setHeader('X-Cline-Request-Id', requestId);
+  // new-api stores this upstream response header as logs.upstream_request_id, joining its per-user log to ours.
+  res.setHeader('X-Oneapi-Request-Id', requestId);
   if (detail?.profile === 'error') detail.ingressUncaptured = true;
   const raw = await readBody(req);
   // A small ingress snapshot holds a reference, not a second copy. Account for
