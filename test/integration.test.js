@@ -760,6 +760,8 @@ test('Chat affinity preserves caller keys, derives Claude keys and logs only saf
 
 test('provider cooldown skips repeated failures and admits only one half-open probe', async (t) => {
   const seen = [];
+  // 网关把 provider 的参数 400 包进 5xx（生产原文形状，单行且后面跟 providerMetadata）。
+  const WRAPPED_400 = `Failed to create stream: inference request failed: failed to invoke model 'm' with streaming: request failed with status 400: ${JSON.stringify({ error: { message: 'Invalid max_tokens value, the valid range of max_tokens is [1, 393216]', isRetryable: false }, providerMetadata: { gateway: { routing: { modelAttempts: [] } } } })}`;
   const upstream = http.createServer((req, res) => {
     const chunks = [];
     req.on('data', (chunk) => chunks.push(chunk));
@@ -770,7 +772,7 @@ test('provider cooldown skips repeated failures and admits only one half-open pr
         if (provider === 'first') {
           const status = body.model === 'parameter' ? 418 : body.model === 'gate502' ? 502 : 500;
           res.writeHead(status, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ error: { message: body.model === 'parameter' ? 'invalid parameter' : body.model === 'gate502' ? 'Invalid input' : 'provider failed', status } }));
+          return res.end(JSON.stringify({ error: { message: body.model === 'parameter' ? 'invalid parameter' : body.model === 'gate502' ? 'Invalid input' : body.model === 'empty' ? 'empty response content' : body.model === 'wrapped' ? WRAPPED_400 : 'provider failed', status } }));
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }));
@@ -783,8 +785,8 @@ test('provider cooldown skips repeated failures and admits only one half-open pr
   const route = (providerCooldownMs) => ({ upstreams: ['first','second'], exclude: [], pinMode: 'strict', sort: null, maxRetries: null, providerCooldownMs });
   const running = await startSwitcher({
     port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 0,
-    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }], knownModels: ['cool','parameter','disabled','stale','gate502'],
-    perModel: { cool: route(80), parameter: route(80), disabled: route(0), stale: route(80), gate502: route(80) },
+    accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }], knownModels: ['cool','parameter','disabled','stale','gate502','empty','wrapped'],
+    perModel: { cool: route(80), parameter: route(80), disabled: route(0), stale: route(80), gate502: route(80), empty: route(80), wrapped: route(80) },
     errorRules: [{ id: 'stale-hard', scope: 'provider-model', action: 'hard-quarantine', models: ['stale'], when: { statuses: [500] } }],
   });
   t.after(async () => { await stop(running.child); await close(upstream); fs.rmSync(running.dir, { recursive: true, force: true }); });
@@ -813,6 +815,17 @@ test('provider cooldown skips repeated failures and admits only one half-open pr
   assert.equal((await request('disabled')).status, 200); assert.equal((await request('disabled')).status, 200);
   assert.deepEqual(seen.filter((entry) => entry.model === 'disabled').map((entry) => entry.provider), ['first','second','first','second'], 'unmatched failures degrade success rate without creating an implicit durable cooldown');
   const disabledModel=(await(await fetch(`http://127.0.0.1:${port}/api/models`)).json()).subscription.find(row=>row.id==='disabled');assert.equal(disabledModel.meta.upstreamStatus.first.success.degrades,2);assert.equal(disabledModel.meta.upstreamStatus.first.success.successRate,0);assert.equal(disabledModel.meta.upstreamStatus.second.success.successes,2);assert.equal(disabledModel.meta.upstreamStatus.second.success.successRate,1);
+  for (const model of ['empty', 'wrapped']) {
+    seen.length = 0;
+    assert.equal((await request(model)).status, 200); assert.equal((await request(model)).status, 200);
+    assert.deepEqual(seen.filter((entry) => entry.model === model).map((entry) => entry.provider), ['first','second','first','second'], `${model}: a request failure wrapped in 5xx must not open the provider circuit`);
+  }
+  const wrappedView = (await (await fetch(`http://127.0.0.1:${port}/api/models`)).json()).subscription;
+  for (const model of ['empty', 'wrapped']) {
+    const first = wrappedView.find((row) => row.id === model).meta.upstreamStatus.first;
+    assert.equal(first.success.degrades, 0, `${model}: a wrapped request failure must not degrade provider health`);
+    assert.notEqual(first.status, 'bad', `${model}: a wrapped request failure must not mark the provider unsupported`);
+  }
 
   seen.length = 0;
   const staleRequest = request('stale');

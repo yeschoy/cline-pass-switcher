@@ -5756,7 +5756,11 @@ function classifyAttemptFailure(result, attempt, account, now = Date.now()) {
   if (origin === 'timeout') return { scope: 'provider', evidence: 'transport_timeout', failureClass: 'timeout', retryAfterMs: null };
   if (origin === 'proxy') return { scope: 'account', evidence: 'transport_proxy', failureClass: 'network', retryAfterMs: null };
   if (origin === 'network' || result?.upstreamStatus === 0) return { scope: 'provider', evidence: 'transport_network', failureClass: 'network', retryAfterMs: null };
-  if (/unsupported|not supported|no allowed providers|no available providers|model\s*id[^\n]*not found|invalid[^\n]*provider|provider[^\n]*not found|cannot[^\n]*pin/i.test(errorText)) return { scope: 'provider', evidence: 'structured_unsupported', failureClass: 'unsupported', retryAfterMs: null };
+  // errorText 是整段单行 JSON（网关错误还带 providerMetadata），词间跨度必须有界，否则 "Invalid max_tokens …" 会一路匹配到后面的 "provider"。
+  if (/unsupported|not supported|no allowed providers|no available providers|model\s*id[^\n]{0,80}not found|invalid[^\n]{0,30}provider|provider[^\n]{0,80}not found|cannot[^\n]{0,30}pin/i.test(errorText)) return { scope: 'provider', evidence: 'structured_unsupported', failureClass: 'unsupported', retryAfterMs: null };
+  // 网关把请求自身的问题包成 5xx/流内错误：provider 回的参数 400（max_tokens 越界、工具 schema 非法等）、
+  // 推理耗尽 max_tokens 的空响应（500 empty response content）。归为 request：默认不扣 provider 健康、不开 provider circuit。
+  if (/request failed with status 400\b|empty response content/i.test(errorText)) return { scope: 'request', evidence: 'wrapped_request_error', failureClass: 'other', retryAfterMs: null };
   if (status >= 500 && status <= 599) return { scope: 'provider', evidence: 'http_server', failureClass: 'server', retryAfterMs: null };
   if (status >= 400 && status <= 499) return { scope: 'request', evidence: 'http_request', failureClass: 'other', retryAfterMs: null };
   return { scope: attempt?.upstream ? 'provider' : 'unknown', evidence: 'unclassified_failure', failureClass: 'other', retryAfterMs: null };
