@@ -101,6 +101,33 @@
       "sort": null,
       "maxRetries": null,
       "providerCooldownMs": 0
+    },
+    "cline-pass/deepseek-v4-pro": {
+      "upstream": null,
+      "upstreams": ["deepseek", "fireworks", "baseten", "alibaba", "azure", "novita"],
+      "exclude": [],
+      "pinMode": "strict",
+      "sort": null,
+      "maxRetries": 2,
+      "providerCooldownMs": 60000
+    },
+    "cline-pass/deepseek-v4.1-flash": {
+      "upstream": null,
+      "upstreams": ["deepseek", "alibaba", "baseten", "fireworks", "togetherai", "nebius"],
+      "exclude": [],
+      "pinMode": "strict",
+      "sort": null,
+      "maxRetries": 2,
+      "providerCooldownMs": 60000
+    },
+    "cline-pass/deepseek-v4.1-flash-1017": {
+      "upstream": null,
+      "upstreams": ["deepseek", "alibaba", "baseten", "fireworks", "togetherai", "nebius"],
+      "exclude": [],
+      "pinMode": "strict",
+      "sort": null,
+      "maxRetries": 2,
+      "providerCooldownMs": 60000
     }
   },
   "accountWorkflow": {
