@@ -264,6 +264,24 @@ function envAccountId(key) {
   return `env_${crypto.createHmac('sha256', META.routingSecret).update(String(key)).digest('hex').slice(0, 24)}`;
 }
 const ROUTE_SORTS = new Set(['cost', 'ttft', 'tps']);
+// 模型名里的厂商：订阅模型都带 `cline-pass/` 前缀，去掉后按已知厂商名匹配，
+// 用于「厂商官方渠道优先」。只做提升，不新增候选：
+// 模型自己的候选列表里必须有该渠道才动，否则保持原样。
+const SUBSCRIPTION_PREFIX = /^cline-pass\//i;
+function officialChannelFor(modelId) {
+  const bare = String(modelId || '').trim().replace(SUBSCRIPTION_PREFIX, '');
+  // 首段就是模型名本身（cline-pass/deepseek-v4-pro → deepseek-v4-pro），
+  // 因此按「已知厂商前缀」匹配，而不是切分斜杠：deepseek-v4-pro / deepseek-v4.1-flash 都归到 deepseek。
+  return bare.split('/').pop()?.toLowerCase().startsWith('deepseek') ? 'deepseek' : null;
+}
+// 候选顺序调整：厂商官方渠道已在候选中时提到最前，其余保持相对顺序（不改变来源语义、不触发冷却）。
+function withOfficialChannelFirst(providers, modelId) {
+  const official = officialChannelFor(modelId);
+  if (!official || !Array.isArray(providers) || providers.length < 2) return providers;
+  const index = providers.indexOf(official);
+  if (index <= 0) return providers;
+  return [official, ...providers.slice(0, index), ...providers.slice(index + 1)];
+}
 // Cline 网关的能力过滤 gateway.has：与 gateway.only 同发时，部分 key 上的 only 才会被真正执行（2026-10-23 实测，机制未证实）。
 // 它同时会把不满足能力的渠道（含私有落点）排除，不满足的模型会被网关拒绝，所以只对 config.gatewayHas 里显式列出的模型发送，且只随 gateway.only 注入。
 function normalizeGatewayHas(value) {
@@ -5983,6 +6001,9 @@ function traceAttempt(attempt, result, account, ms, diagnostic) {
 function gatewayInjectList(modelId, plan, account, now) {
   let list = plan.mode === 'preferred' ? healthOrderedProviders(plan, plan.available) : [...plan.available];
   if (list.includes(plan.preferredProvider)) list = [plan.preferredProvider, ...list.filter((provider) => provider !== plan.preferredProvider)];
+  // deepseek 模型：候选里存在厂商官方渠道时提到最前。放在排除/硬隔离/冷却过滤之前，
+  // 所以被排除或正在冷却的官方渠道不会被重新拉回列表。
+  list = withOfficialChannelFirst(list, modelId);
   if (!(plan.providerCooldownMs > 0) || !account) return list;
   return list.filter((provider) => {
     const state = providerCircuitStates.get(providerCircuitKey(account.id, modelId, provider));

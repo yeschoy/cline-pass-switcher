@@ -1,7 +1,5 @@
-// deepseek 官方渠道优先：perModel.upstreams 把 "deepseek" 放在首位时，
-// 规划器（Vercel AI Gateway）管道必须一次注入完整 gateway.only + gateway.order，
-// 且 deepseek 同时是两者的头部——官方渠道的优先权完全交给网关内部的 fallback，
-// 本地不会逐个 provider 重试（见 README 的 perModel 说明）。
+// deepseek 模型 + 候选里有 deepseek 渠道 → 自动把该渠道提到注入的 only/order 头部。
+// 这是模型名驱动的通用规则，不要求逐模型写 perModel；候选里没有 deepseek 时不得凭空添加。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -23,33 +21,31 @@ function rawJson(port, pathname, body) {
     const req = http.request({ hostname: '127.0.0.1', port, path: pathname, method: 'POST', headers: fixtureHeaders(port, pathname, 'POST', { 'Content-Type': 'application/json', 'Content-Length': data.length }) }, (res) => {
       const chunks = [];
       res.on('data', (chunk) => chunks.push(chunk));
-      res.on('end', () => { const text = Buffer.concat(chunks).toString(); let json = null; try { json = text ? JSON.parse(text) : null; } catch {} resolve({ status: res.statusCode, headers: res.headers, text, json }); });
+      res.on('end', () => { const text = Buffer.concat(chunks).toString(); let json = null; try { json = text ? JSON.parse(text) : null; } catch {} resolve({ status: res.statusCode, text, json }); });
     });
     req.on('error', reject); req.end(data);
   });
 }
 const routing = (provider) => ({ choices: [{ message: { content: 'ok' }, provider_metadata: { gateway: { routing: { resolvedProvider: provider } } } }] });
 
-async function boot(t, { perModel, errorRules = [], gatewayHas } = {}) {
+// perModelRoute: null 表示该模型走 discovered 渠道（META.models[model].upstreams）。
+async function boot(t, { models, perModel = {} }) {
   const seen = [];
   const upstream = http.createServer((req, res) => {
     const chunks = [];
     req.on('data', (chunk) => chunks.push(chunk));
     req.on('end', () => {
-      const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
-      seen.push(body);
-      const targets = body.providerOptions?.gateway?.order || [];
+      seen.push(JSON.parse(Buffer.concat(chunks).toString() || '{}'));
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(routing(targets[0] || 'none')));
+      res.end(JSON.stringify(routing('x')));
     });
   });
-  const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-deepseek-first-'));
-  fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({ routingSecret: 'deepseek-first-secret', models: { 'cline-pass/deepseek-v4-pro': { pipeline: 'planner' } } }));
+  const upstreamPort = await listen(upstream), port = await unusedPort(), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cps-official-'));
+  fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({ routingSecret: 'official-channel-secret', models }));
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
     port, upstreamBase: `http://127.0.0.1:${upstreamPort}`, accountMode: 'single', activeAccount: 0, concurrencyWaitMs: 0,
     accounts: [{ id: 'a', name: 'A', key: 'key-a', enabled: true, perModel: {} }],
-    knownModels: ['cline-pass/deepseek-v4-pro'],
-    perModel, errorRules, ...(gatewayHas ? { gatewayHas } : {}),
+    knownModels: Object.keys(models), perModel, errorRules: [],
   }));
   prepareAdminFixture(dir);
   const child = spawn(process.execPath, ['server.js'], { cwd: path.resolve('.'), env: { ...process.env, DATA_DIR: dir, BIND_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -61,48 +57,46 @@ async function boot(t, { perModel, errorRules = [], gatewayHas } = {}) {
     child.once('exit', (code) => { clearInterval(poll); clearTimeout(deadline); reject(new Error(`switcher exited ${code}: ${output}`)); });
   });
   t.after(async () => { await stop(child); await close(upstream); });
-  const call = () => rawJson(port, '/v1/chat/completions', { model: 'cline-pass/deepseek-v4-pro', messages: [{ role: 'user', content: 'hi' }], max_tokens: 16 });
-  return { seen, call };
+  const call = (model) => rawJson(port, '/v1/chat/completions', { model, messages: [{ role: 'user', content: 'hi' }], max_tokens: 16 });
+  const gatewayFor = (model) => { const body = seen.at(-1); return body.providerOptions?.gateway || null; };
+  return { seen, call, gatewayFor };
 }
 
-test('official deepseek leads only+order and the whole list rides one gateway call', async (t) => {
-  const route = { upstream: null, upstreams: ['deepseek', 'fireworks', 'baseten'], exclude: [], pinMode: 'strict', sort: null, maxRetries: 2, providerCooldownMs: 60000 };
-  const { seen, call } = await boot(t, { perModel: { 'cline-pass/deepseek-v4-pro': route } });
-
-  assert.equal((await call()).status, 200);
-  assert.equal(seen.length, 1, 'the planner pipeline issues a single gateway call, not a local per-provider loop');
-  assert.deepEqual(seen[0].providerOptions.gateway.only, ['deepseek', 'fireworks', 'baseten']);
-  assert.deepEqual(seen[0].providerOptions.gateway.order, ['deepseek', 'fireworks', 'baseten'], 'the official channel is the head the gateway tries first');
+test('a deepseek model hoists the deepseek channel to the head without any perModel entry', async (t) => {
+  const model = 'cline-pass/deepseek-v4-pro';
+  const { call, gatewayFor } = await boot(t, { models: { [model]: { pipeline: 'planner', upstreams: ['fireworks', 'deepseek', 'baseten', 'alibaba'] } } });
+  assert.equal((await call(model)).status, 200);
+  const gateway = gatewayFor(model);
+  assert.deepEqual(gateway.order, ['deepseek', 'fireworks', 'baseten', 'alibaba'], 'the official channel is moved to the head, the rest keep their relative order');
+  assert.deepEqual(gateway.only, gateway.order, 'only and order stay the same list');
 });
 
-test('strict keeps the official head on the first attempt and preferred is the explicit opt-out', async (t) => {
-  const base = { upstream: null, upstreams: ['deepseek', 'fireworks', 'baseten'], exclude: [], sort: null, maxRetries: 2, providerCooldownMs: 0 };
-  const strict = await boot(t, { perModel: { 'cline-pass/deepseek-v4-pro': { ...base, pinMode: 'strict' } } });
-  assert.equal((await strict.call()).status, 200);
-  assert.equal(strict.seen[0].providerOptions.gateway.order[0], 'deepseek', 'strict-first keeps the configured official channel at the head');
-
-  // preferred ranks by Provider-model 24h success rate from the first attempt on;
-  // unsampled channels count as unknown and fall back to source order, so with no
-  // samples the official head survives either way.
-  const preferred = await boot(t, { perModel: { 'cline-pass/deepseek-v4-pro': { ...base, pinMode: 'preferred' } } });
-  assert.equal((await preferred.call()).status, 200);
-  assert.deepEqual(preferred.seen[0].providerOptions.gateway.order, ['deepseek', 'fireworks', 'baseten'], 'unsampled channels fall back to source order, so the official head holds without health samples');
+test('models without a deepseek channel are left exactly as discovered', async (t) => {
+  const model = 'cline-pass/glm-5.3-flash';
+  const { call, gatewayFor } = await boot(t, { models: { [model]: { pipeline: 'planner', upstreams: ['fireworks', 'baseten', 'alibaba'] } } });
+  assert.equal((await call(model)).status, 200);
+  assert.deepEqual(gatewayFor(model).order, ['fireworks', 'baseten', 'alibaba'], 'no channel is invented or reordered');
 });
 
-test('excluding the official channel removes it instead of silently falling back to auto', async (t) => {
-  const route = { upstream: null, upstreams: ['deepseek', 'fireworks'], exclude: ['deepseek'], pinMode: 'strict', sort: null, maxRetries: 2, providerCooldownMs: 0 };
-  const { seen, call } = await boot(t, { perModel: { 'cline-pass/deepseek-v4-pro': route } });
-
-  assert.equal((await call()).status, 200);
-  assert.deepEqual(seen[0].providerOptions.gateway.only, ['fireworks'], 'an excluded official channel never reaches the gateway list');
+test('a non-deepseek model that happens to list deepseek is not reordered', async (t) => {
+  const model = 'cline-pass/glm-5.3';
+  const { call, gatewayFor } = await boot(t, { models: { [model]: { pipeline: 'planner', upstreams: ['alibaba', 'deepseek'] } } });
+  assert.equal((await call(model)).status, 200);
+  assert.deepEqual(gatewayFor(model).order, ['alibaba', 'deepseek'], 'the rule is scoped to deepseek models, not to the channel name alone');
 });
 
-test('gatewayHas capabilities ride along with the official-first list', async (t) => {
-  const route = { upstream: null, upstreams: ['deepseek', 'fireworks'], exclude: [], pinMode: 'strict', sort: null, maxRetries: 2, providerCooldownMs: 0 };
-  const { seen, call } = await boot(t, { perModel: { 'cline-pass/deepseek-v4-pro': route }, gatewayHas: { 'cline-pass/deepseek-v4-pro': ['tool-use', 'reasoning'] } });
+test('an explicit perModel order is also hoisted so operators need no per-model knowledge', async (t) => {
+  const model = 'cline-pass/deepseek-v4.1-flash';
+  const route = { upstream: null, upstreams: ['alibaba', 'togetherai', 'deepseek'], exclude: [], pinMode: 'strict', sort: null, maxRetries: 2, providerCooldownMs: 0 };
+  const { call, gatewayFor } = await boot(t, { models: { [model]: { pipeline: 'planner', upstreams: ['alibaba', 'deepseek'] } }, perModel: { [model]: route } });
+  assert.equal((await call(model)).status, 200);
+  assert.deepEqual(gatewayFor(model).order, ['deepseek', 'alibaba', 'togetherai'], 'a configured order is hoisted too, with the explicit tail preserved');
+});
 
-  assert.equal((await call()).status, 200);
-  const gateway = seen[0].providerOptions.gateway;
-  assert.equal(gateway.order[0], 'deepseek');
-  assert.deepEqual(gateway.has, ['tool-use', 'reasoning']);
+test('an excluded deepseek channel is not resurrected by the hoist', async (t) => {
+  const model = 'cline-pass/deepseek-v4-pro';
+  const route = { upstream: null, upstreams: ['fireworks', 'deepseek', 'baseten'], exclude: ['deepseek'], pinMode: 'strict', sort: null, maxRetries: 2, providerCooldownMs: 0 };
+  const { call, gatewayFor } = await boot(t, { models: { [model]: { pipeline: 'planner', upstreams: ['fireworks', 'deepseek'] } }, perModel: { [model]: route } });
+  assert.equal((await call(model)).status, 200);
+  assert.deepEqual(gatewayFor(model).only, ['fireworks', 'baseten'], 'exclusion is applied after the hoist, never bypassed');
 });
