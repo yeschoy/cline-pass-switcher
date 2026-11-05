@@ -20,4 +20,11 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 
 <!-- TRELLIS:END -->
 
+## Cursor Cloud specific instructions
+
+- Install with `npm ci`. The console is one Node process: `DATA_DIR=/workspace/data BIND_HOST=127.0.0.1 PORT=3123 node server.js`. `DATA_DIR` keeps `config.json`, metadata, and admin state in gitignored `data/`.
+- Cloud Agent startup listens on `http://127.0.0.1:3123/`. The first boot creates a loopback-only administrator and writes the password to `data/dev-admin.password` (mode 0600). Use that file to sign in. Keep `data/` private and untracked.
+- `npm test` runs `node --test` and does not need an upstream Cline Pass key.
+- Keep `CLINE_PASS_KEY` empty for local work. `GET /api/meta`, `GET /models`, and `POST /v1/messages/count_tokens` succeed with an empty account pool. Saving an upstream key enables the default provider probe schedule, which sends live requests.
+
 每次完成完成任务记得提交并且推送代码
