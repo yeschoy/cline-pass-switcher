@@ -1446,3 +1446,37 @@ Committed-main raw-detail code is deployed raw-off at 512 MiB with 32 Legacy-own
 ### Next Steps
 
 - 按用户需要另行部署；_tmp/provider-routing-403-artifacts.md 登记测试日志，清理等待用户同意。
+
+
+## Session 59: 生产发布 providerOptions 403 修复并清理临时产物
+<!-- trellis-session: v=2 fp=9c0c95d54fe59bd9 -->
+
+**Date**: 2026-11-07
+**Task**: 生产发布 providerOptions 403 修复并清理临时产物
+**Branch**: `main`
+
+### Summary
+
+已将 main@2e8b32d 发布到 OVH；同等安全设置与生产副本预演通过，真实 JSON/SSE 均200、auto且单次attempt。配置与管理员状态哈希未变。发布 awaiting-admin-acceptance，受保护管理页面待用户确认。
+
+### Main Changes
+
+- 首次公网 Python UA 被 Cloudflare1010 拦截触发安全回滚；在旧版复现并验证 curl/独立客户端200后修正探针，二次发布通过。版本、镜像、私有备份及证据保留。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3729eb7` | docs: 记录 providerOptions 403 修复生产发布 |
+
+### Testing
+
+- [OK] 已提交源码再次 npm test 675/675；候选 Node22.23.4 隔离预演及18个运行时文件哈希一致；本机/内部/公网meta200，client catalog200、client-key-only管理401；生产普通与SSE各200且有内容。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 用户登录管理控制台确认模型、统计、请求日志、详细日志设置与quota-refresh拒绝门禁后完成管理员验收。本次登记的本地临时文件和远端上传中转文件已按授权清理，Trellis日志及原有任务目录未动。
