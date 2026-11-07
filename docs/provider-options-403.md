@@ -57,6 +57,6 @@ B 的非流式成功响应记录了 132 个输入、15 个输出、147 个总 to
 
 ## 本地验收
 
-Node **v26.13.0**：新增/相关定向测试 14/14 通过，全量 `npm test` **675/675 通过**（约 125 秒）；`node --check server.js`、`node --check test/gateway-routing-compat.test.js` 与 `git diff --check` 通过。本轮未执行 Node 18 或生产容器运行验证，也未部署新版本。
+Node **v26.13.0**：新增/相关定向测试 14/14 通过，全量 `npm test` **675/675 通过**（约 125 秒）；`node --check server.js`、`node --check test/gateway-routing-compat.test.js` 与 `git diff --check` 通过。该次本地门禁未执行 Node 18；后续已完成生产容器 Node 22 验证、部署与真实 JSON/SSE 调用，见[发布记录](deploy-records/20261107-2e8b32d-provider-options-403.md)。
 
 全量首轮额外捕获到非法上游 URL 被新能力判断提前抛错、将既有 502 变成 500 的回归；已将非法 URL 的错误所有权保留给原生 transport，定向重跑确认未发送 RPM 预留仍释放，最终全量重跑通过。
