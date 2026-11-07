@@ -2,7 +2,8 @@
 // Node >= 18。
 //
 // 网关行为：
-// - planner 与未识别管道：一次 HTTP 写入 providerOptions.gateway.only 与同序 .order；config.gatewayHas 里列出的模型再附带能力过滤 .has。
+// - Cline 官方接口默认禁用 providerOptions 路由；兼容网关可显式开启 gatewayRoutingEnabled。
+// - 开启后 planner 与未识别管道：一次 HTTP 写入 gateway.only 与同序 .order；config.gatewayHas 里列出的模型再附带 .has。
 // - direct 管道：每次具名 attempt 只注入一个 provider.only，外层本地顺序回退。
 import http from 'node:http';
 import https from 'node:https';
@@ -1476,6 +1477,7 @@ function normalizeConfigAndMeta({ persist = false } = {}) {
   }
   if (!Object.hasOwn(loadedConfig, 'sessionProviderAffinityEnabled')) { config.sessionProviderAffinityEnabled = true; dirty = true; }
   else if (typeof config.sessionProviderAffinityEnabled !== 'boolean') throw new Error('invalid sessionProviderAffinityEnabled');
+  if (Object.hasOwn(loadedConfig, 'gatewayRoutingEnabled')) config.gatewayRoutingEnabled = normalizeGatewayRoutingEnabled(config.gatewayRoutingEnabled);
   if (Object.hasOwn(loadedConfig, 'gatewayHas')) config.gatewayHas = normalizeGatewayHas(config.gatewayHas);
   const workflow = normalizeAccountWorkflow(config.accountWorkflow);
   if (JSON.stringify(config.accountWorkflow) !== JSON.stringify(workflow)) { config.accountWorkflow = workflow; dirty = true; }
@@ -3082,8 +3084,9 @@ function reloadConfigFromDisk() {
   const poolPatch = Object.hasOwn(raw, 'proxyPool') ? { proxyPool: normalizeProxyPool(raw.proxyPool, { strict: true, secret: META.routingSecret }) } : {};
   const poolScopePatch = Object.hasOwn(raw, 'proxyPoolClientKeys') ? { proxyPoolClientKeys: normalizeProxyPoolClientKeys(raw.proxyPoolClientKeys, { knownIds: poolClientKeyIds(config) }) } : {};
   const poolDirectPatch = Object.hasOwn(raw, 'proxyPoolDirect') ? (typeof raw.proxyPoolDirect === 'boolean' ? { proxyPoolDirect: raw.proxyPoolDirect } : (() => { throw new Error('proxyPoolDirect must be boolean'); })()) : {};
+  const gatewayRoutingPatch = Object.hasOwn(raw, 'gatewayRoutingEnabled') ? { gatewayRoutingEnabled: normalizeGatewayRoutingEnabled(raw.gatewayRoutingEnabled) } : {};
   const gatewayHasPatch = Object.hasOwn(raw, 'gatewayHas') ? { gatewayHas: normalizeGatewayHas(raw.gatewayHas) } : {};
-  const next = { ...config, ...poolPatch, ...poolScopePatch, ...poolDirectPatch, ...gatewayHasPatch, accounts: accs, accountMode: mode, activeAccount: active, concurrencyWaitMs: wait, poolFullWaitMs: poolWait,
+  const next = { ...config, ...poolPatch, ...poolScopePatch, ...poolDirectPatch, ...gatewayRoutingPatch, ...gatewayHasPatch, accounts: accs, accountMode: mode, activeAccount: active, concurrencyWaitMs: wait, poolFullWaitMs: poolWait,
     errorRules, ...legacyRuleProjection(errorRules), retryRules: normalizeRetryRules(pick('retryRules'), { strict: true }),
     quotaProtection: normalizeQuotaProtection(pick('quotaProtection'), { strict: true }), accountPipeline: pipeline, accountWorkflow: workflow,
     sessionProviderAffinityEnabled: affinity, exposeCatalog, knownModels: knownModels.map((m) => m.trim()),
@@ -3349,6 +3352,7 @@ function gatewayPinBody(base, providers, modelId) {
   return { ...base, providerOptions: { gateway } };
 }
 async function harvestAvailableProviders(modelId, pipeline, acc, lease = null) {
+  if (pipeline === 'planner' && !gatewayRoutingEnabled()) return { providers: null, pinCapability: 'unknown' };
   const claim = claimManagementPermit(lease);
   if (!claim.ok) return { providers: null, pinCapability: 'unknown' };
   // A valid but unconfigured slug tests whether this account/model's `only` is
@@ -3448,6 +3452,7 @@ async function probeModel(modelId, acc, lease = null) {
 
 // 上游渠道可用性分类：渠道被单独钉住时的真实状态
 function classifyUpstreamError(msg) {
+  if (isClientProviderRoutingError(msg)) return 'unknown';
   const m = String(msg || '');
   if (/empty response content/i.test(m)) return 'ok';                     // 请求已到达模型（推理耗尽 max_tokens 导致内容为空）
   if (/429|rate-?limited|temporarily rate/i.test(m)) return 'limited';   // 渠道有效，共享池限流中
@@ -3509,6 +3514,7 @@ async function validateUpstreams(modelId, acc, lease = null) {
   const list = meta.upstreams || [];
   const pipeline = meta.pipeline;
   const results = {};
+  if (pipeline !== 'direct' && !gatewayRoutingEnabled()) return Object.fromEntries(list.map((slug) => [slug, { status: 'unknown', ms: 0, note: 'gateway provider routing is disabled; upstream selects the provider' }]));
   const batch = 5;
   for (let i = 0; i < list.length; i += batch) {
     await Promise.all(list.slice(i, i + batch).map(async (slug) => {
@@ -5032,6 +5038,7 @@ function probeCandidates(windowOrdinal = 0, now = Date.now()) {
     const account = eligible[(accountStart + i) % eligible.length];
     for (let j = 0; j < Math.min(200, subscribed.length); j++) {
       const model = subscribed[(modelStart + j) % subscribed.length];
+      if (gatewayOwnedPipeline(model) && !gatewayRoutingEnabled()) continue;
       const excluded = new Set(normalizeStringList(resolveModelConfig(account, model).exclude, 50));
       // Read the planner's configured/discovered source and hard/manual eligibility without creating global health samples.
       for (const provider of knownProbeProviders(account, model)) {
@@ -5046,7 +5053,7 @@ function probeCandidates(windowOrdinal = 0, now = Date.now()) {
   return { items, truncated: subscribed.length > 200 };
 }
 function probeCandidateStillEligible({ account, model, provider }, now = Date.now()) {
-  if (!enabledAccounts().includes(account) || !config.knownModels.includes(model) ||
+  if ((gatewayOwnedPipeline(model) && !gatewayRoutingEnabled()) || !enabledAccounts().includes(account) || !config.knownModels.includes(model) ||
       !knownProbeProviders(account, model).includes(provider) ||
       normalizeStringList(resolveModelConfig(account, model).exclude, 50).includes(provider)) return false;
   const state = normalizeProviderHealthState(META.models[model]?.upstreamStatus?.[provider]);
@@ -5429,6 +5436,17 @@ function unwrap(json, httpStatus = 200) {
 
 // planner / 未识别管道：一次注入完整 gateway.only + gateway.order。direct：单元素 provider.only，不发 order。
 const OR_SORT = { cost: 'price', ttft: 'latency', tps: 'throughput' };
+function normalizeGatewayRoutingEnabled(value) {
+  if (typeof value !== 'boolean') throw new Error('gatewayRoutingEnabled must be boolean');
+  return value;
+}
+function gatewayRoutingEnabled(candidate = config) {
+  if (Object.hasOwn(candidate, 'gatewayRoutingEnabled')) return normalizeGatewayRoutingEnabled(candidate.gatewayRoutingEnabled);
+  // 2026-11-07 实测：Cline 按 providerOptions 字段本身拒绝请求，非 gateway 命名空间也会 403。
+  // 自建/兼容网关保留旧行为；官方接口不再根据历史枚举结果自动注入路由。
+  try { return new URL(candidate.upstreamBase).hostname.toLowerCase() !== 'api.cline.bot'; }
+  catch { return true; } // 非法 URL 仍交给原 transport 归一化为 502，并按原生命周期释放未发送的 RPM permit。
+}
 function gatewayOwnedPipeline(modelId) { return META.models[modelId]?.pipeline !== 'direct'; }
 function injectPrefs(body, modelId, attempt = {}) {
   // 只改顶层的 provider/providerOptions（嵌套对象先 spread 再改），浅拷贝即可；
@@ -5437,6 +5455,10 @@ function injectPrefs(body, modelId, attempt = {}) {
   const upstream = attempt.upstream || null;
   const sort = attempt.sort || null;
   const gatewayOwned = gatewayOwnedPipeline(modelId);
+  if (!(attempt.gatewayRoutingEnabled ?? gatewayRoutingEnabled())) {
+    delete b.providerOptions;
+    if (gatewayOwned) { delete b.provider; return b; }
+  }
   const options = isPlainObject(b.providerOptions) ? { ...b.providerOptions } : {};
   if (gatewayOwned) {
     const list = Array.isArray(attempt.upstreams) && attempt.upstreams.length ? attempt.upstreams.slice() : (upstream ? [upstream] : []);
@@ -5472,13 +5494,16 @@ function injectPrefs(body, modelId, attempt = {}) {
 // 稳定候选快照：configured 非空时权威，否则 stable discovered；exclude/硬隔离/冷却在快照阶段过滤。
 // 实际逐次选择由 selectProviderAttempt() 完成——strict 首试按来源顺序，后续与 preferred 都按 Provider-model 24h 成功率。
 function buildProviderPlan(modelId, cfg = {}, account = null, now = Date.now(), preferredProvider = null) {
-  const configuredOrder = normalizeStringList(cfg.upstreams, 20);
-  const discoveredOrder = normalizeStringList(META.models[modelId]?.upstreams, 100);
+  const gatewayRouting = gatewayRoutingEnabled();
+  const gatewayDefault = !gatewayRouting && gatewayOwnedPipeline(modelId);
+  const configuredOrder = gatewayDefault ? [] : normalizeStringList(cfg.upstreams, 20);
+  const discoveredOrder = gatewayDefault ? [] : normalizeStringList(META.models[modelId]?.upstreams, 100);
   const exclude = new Set(normalizeStringList(cfg.exclude, 50));
   const source = configuredOrder.length ? 'configured' : discoveredOrder.length ? 'discovered' : 'auto';
   const mode = cfg.pinMode === 'preferred' ? 'preferred' : 'strict';
   const plan = {
-    source, mode, sort: cfg.sort || null, providerCooldownMs: Number(cfg.providerCooldownMs) || 0,
+    source, mode, gatewayRoutingEnabled: gatewayRouting, gatewayDefault,
+    sort: gatewayDefault ? null : cfg.sort || null, providerCooldownMs: gatewayDefault ? 0 : Number(cfg.providerCooldownMs) || 0,
     maxAttempts: cfg.maxRetries === null || cfg.maxRetries === undefined ? Infinity : Math.max(1, Number(cfg.maxRetries) + 1),
     accountGeneration: account ? (providerCircuitAccountGenerations.get(account.id) || 0) : 0,
     routeGeneration: account ? (providerCircuitRouteGenerations.get(providerCircuitRouteKey(account.id, modelId)) || 0) : 0,
@@ -5524,10 +5549,10 @@ function healthOrderedProviders(plan, providers) {
   });
 }
 function namedProviderAttempt(plan, provider, extra = {}) {
-  return { upstream: provider, attribution: 'named', sort: plan.sort, circuitAccountGeneration: plan.accountGeneration, circuitRouteGeneration: plan.routeGeneration, ...extra };
+  return { upstream: provider, attribution: 'named', sort: plan.sort, gatewayRoutingEnabled: plan.gatewayRoutingEnabled, circuitAccountGeneration: plan.accountGeneration, circuitRouteGeneration: plan.routeGeneration, ...extra };
 }
 function autoProviderAttempt(plan) {
-  return { upstream: null, attribution: 'auto', selection: 'compat-auto', sort: plan.sort, circuitAccountGeneration: plan.accountGeneration, circuitRouteGeneration: plan.routeGeneration };
+  return { upstream: null, attribution: 'auto', selection: 'compat-auto', sort: plan.sort, gatewayRoutingEnabled: plan.gatewayRoutingEnabled, circuitAccountGeneration: plan.accountGeneration, circuitRouteGeneration: plan.routeGeneration };
 }
 // 每次 named attempt 前从 remaining 重新选择，排除本请求已尝试项。
 function selectProviderAttempt(modelId, plan, account, attempted, now = Date.now()) {
@@ -5668,6 +5693,10 @@ function structuredErrorText(error) {
   if (error == null) return '';
   try { return (typeof error === 'string' ? error : JSON.stringify(error)).slice(0, 8192); } catch { return ''; }
 }
+function isClientProviderRoutingError(error) {
+  const text = structuredErrorText(error);
+  return /client-supplied\b/i.test(text) && /\bproviderOptions\b/i.test(text) && /\bmodel routing is not supported\b/i.test(text);
+}
 function structuredErrorStrings(error) {
   if (typeof error === 'string') return [error.slice(0, 8192)];
   if (!error || typeof error !== 'object') return [];
@@ -5770,6 +5799,7 @@ function classifyAttemptFailure(result, attempt, account, now = Date.now()) {
     if (hasExplicitProviderEvidence(error, attempt?.upstream)) return { scope: 'provider', evidence: 'structured_provider', failureClass: 'rate_limit', retryAfterMs };
     return { scope: 'unknown', evidence: 'ambiguous_rate_limit', failureClass: 'rate_limit', retryAfterMs };
   }
+  if (status === 403 && isClientProviderRoutingError(error || result?.out?.error?.message)) return { scope: 'request', evidence: 'client_provider_routing', failureClass: 'other', retryAfterMs: null };
   if (status === 401 || status === 403) return { scope: 'account', evidence: 'http_auth', failureClass: 'auth', retryAfterMs: null };
   if (origin === 'timeout') return { scope: 'provider', evidence: 'transport_timeout', failureClass: 'timeout', retryAfterMs: null };
   if (origin === 'proxy') return { scope: 'account', evidence: 'transport_proxy', failureClass: 'network', retryAfterMs: null };
@@ -6060,6 +6090,11 @@ async function runChatChain(req, body, modelId, cfg, account, forwardedHeaders, 
   const routingFail = (message, retryAfter) => ({ status: 503, upstreamStatus: null, normalizedStatus: 503,
     out: { error: { message, type: 'upstream_error' } }, routing: {}, acc: account, trace, t0, plan,
     retryAfter: retryAfter || null, netError: null, accountAction: null, clientDisconnected: false, retryStop: false, routingFailure: true });
+  // 默认路由不能保证避开被禁渠道：保留显式排除和持久隔离/冷却的 fail-closed 边界。
+  if (plan.gatewayDefault && (normalizeStringList(cfg.exclude, 50).length || Object.values(META.models[modelId]?.upstreamStatus || {}).some((value) => {
+    const state = normalizeProviderHealthState(value);
+    return state.hardQuarantined || state.cooldownUntil > t0;
+  }))) return routingFail('upstream default routing cannot enforce provider exclusions or quarantine; review restrictions before disabling gateway routing', null);
   if (!auto && !plan.available.length) return routingFail(plan.allExcluded ? 'no provider available after exclusions' : 'no provider is currently eligible', plan.retryAfter);
   if (useGatewayList && !gatewayList.length) return routingFail('provider half-open probe is already in progress', gatewayCircuitRetryAfter(modelId, plan, account, t0) || plan.retryAfter || 1);
   let last = null;
@@ -7325,7 +7360,7 @@ async function dispatch(req, res) {
       return sendJSON(res, 200, { ok: true, ...r });
     }
     if (req.method === 'GET' && p === '/api/history') return sendJSON(res, 200, { history: recentHistory });
-    if (req.method === 'GET' && p === '/api/config') return sendJSON(res, 200, { port: config.port, perModel: config.perModel, knownModels: config.knownModels });
+    if (req.method === 'GET' && p === '/api/config') return sendJSON(res, 200, { port: config.port, perModel: config.perModel, knownModels: config.knownModels, gatewayRoutingEnabled: gatewayRoutingEnabled() });
     if (req.method === 'POST' && p === '/api/config/reload') {
       const body = await readJsonBody(req);
       if (!isPlainObject(body) || Object.keys(body).length) return sendJSON(res, 400, { error: { message: 'expected empty body' } });

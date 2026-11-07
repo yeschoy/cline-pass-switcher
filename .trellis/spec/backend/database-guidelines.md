@@ -87,6 +87,8 @@ Only the four duration keys support `CLINE_PASS_TEST_INBOUND_KEEP_ALIVE_MS`, `CL
 
 #### Static `config.json`
 
+`gatewayRoutingEnabled` is optional and strict boolean when present. Startup validates without adding a missing field. File reload/SIGHUP validates before mutation, keeps the live value on omission, and refuses an invalid value without rewriting operator bytes. `GET /api/config` projects its effective boolean; per-model API saves do not own it. Disabling gateway routing intentionally uses upstream-default planner routing and cannot enforce old allow-lists/order; explicit exclusion/quarantine guards remain fail-closed. See the Cline refusal scenario in `quality-guidelines.md`.
+
 ```js
 {
   port,                 // default 3123
@@ -96,6 +98,7 @@ Only the four duration keys support `CLINE_PASS_TEST_INBOUND_KEEP_ALIVE_MS`, `CL
   publicBaseUrl,
   exposeCatalog,
   upstreamBase,
+  gatewayRoutingEnabled?: boolean, // absent: false for exact api.cline.bot hostname, true elsewhere; no migration/writeback
   knownModels,
   accounts: [{
     id, clientKeyId, name, note, key, enabled, // clientKeyId is downstream owner ID; key is upstream secret

@@ -10,6 +10,7 @@
   "errorDetailMigrationVersion": 1,
   "rawBodyLogging": false,
   "upstreamBase": "https://api.cline.bot/api/v1",
+  "gatewayRoutingEnabled": false,
   "accounts": [
     {
       "id": "replace-with-stable-account-id",

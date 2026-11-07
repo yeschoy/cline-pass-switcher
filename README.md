@@ -6,6 +6,8 @@
 
 Node.js 本地/服务器代理 + 网页控制台，用于 [Cline Pass](https://cline.bot/cline-pass) 订阅：
 
+> **2026-11-07 兼容性更新**：Cline 官方接口已实测拒绝客户端 `providerOptions`（403）。本项目对 `api.cline.bot` 默认关闭这类注入，规划器模型改由上游自动选渠道；下文的规划器钉选/排序仅适用于支持它的兼容网关。直连管道保留 `provider.only`。详见[兼容模式](#cline-官方接口的-403-兼容模式)。
+
 - 🔍 **上游枚举与校验** —— 列出订阅模型背后每一条上游渠道，并一键实测哪些「✔可用 / ⏳限流 / ✘不可钉」
 - 🎯 **单渠道钉选尝试与一键配置上游** —— 规划器（Vercel AI Gateway）管道一次请求即注入完整的 `providerOptions.gateway.only` + `order`（`gatewayHas` 里显式列出的模型再附带能力过滤 `has`；已排除/硬隔离的渠道被过滤，`pinMode`/健康只重排顺序），不在本地逐个 provider 重试；直连（OpenRouter）管道仍用单元素 `provider.only` 并由 switcher 外层顺序重试。可按账号执行探测→校验→预览→测试→确认；`order` 只是网关提示，真实网关是否遵守 `only`/`order` 需按账号验证，并支持 provider 内成本、首字、吞吐排序
 - 🧬 **双维度错误策略** —— 一套有序 `errorRules` 可分别作用于账号或模型×Provider，支持状态码、正文 ANY、响应 Header、Provider/model 范围及 ignore/degrade/cooldown/hard-quarantine；只有显式规则会冷却或硬隔离
@@ -203,10 +205,11 @@ location / {
 | `errorDetailLogging` | 默认 `true`；管理员初始化后自动捕获脱敏聊天失败详情；旧 `false` 首次升级也会改为 `true`，之后可显式关闭 |
 | `rawBodyLogging` | 默认 `false`；独立显式选择新详情正文未脱敏（必须另行启用完整/错误详情；需已完成管理员首次改密）。风险及备份前置条件见下文 |
 | `exposeCatalog` | `true` 时代理的 `/models`、`/v1/models`、`/api/v1/models` 会合并目录模型；上游目录只用该客户端归属的合格账号抓取，空池不会用其他客户端账号或合成回退。静态已知模型/别名 ID 仍可全局可见；默认 `false` 不抓取目录 |
+| `gatewayRoutingEnabled` | 可选布尔开关；省略时 Cline 官方 `api.cline.bot` 关闭、其他兼容网关开启。关闭后规划器走上游默认路由，不再注入或透传 `providerOptions`；直连仍保留 `provider.only`。支持文件热加载，详见下文兼容模式 |
 | `knownModels` | 订阅模型清单（控制台主表） |
 | `modelAliases` | 客户端别名到现有 `cline-pass/*` 模型的映射；路由按解析后的模型执行 |
 | `perModel` | 每模型路由：`{ upstreams, exclude, pinMode, sort, maxRetries, providerCooldownMs }`。`upstreams` 非空时是权威来源顺序，否则使用探测到的渠道顺序；`pinMode: "strict"` 首次固定来源顺序首个可用渠道，失败后从剩余渠道按 Provider-model 24h 成功率回退；`pinMode: "preferred"` 从首次起就用同一健康顺序。直连管道每次 named HTTP attempt 只注入一个 provider；规划器/网关管道一次 HTTP 请求注入完整 `only`+`order`，`pinMode` 与健康顺序只决定该列表的排列，`maxRetries` 不会在同一账号内再开额外的 provider 尝试（账号替换仍独立生效）。`maxRetries` 是首试后的外层重试次数，`providerCooldownMs` 为 0～300000（0 关闭）并在首包前 500/504/网络超时/429/不可用 后短暂跳过该 Provider（502 不打开该 circuit）。账号内同名配置整项覆盖全局配置，不逐字段合并 |
-| 厂商官方渠道优先（自动） | 模型名是 deepseek 系（去掉 `cline-pass/` 前缀后以 `deepseek` 开头）时，若该模型本次的候选渠道里**本来就有** `deepseek`，注入的 `gateway.only`/`order` 会把它提到最前，其余渠道保持原相对顺序；无需为每个模型写 `perModel`，`perModel` 里显式配置的顺序同样会被提升。它**不会新增候选**：候选里没有 `deepseek` 的模型（如 `*-fast` 变体实测只有 `baseten`）保持原样；被 `exclude` 排除或正在冷却的官方渠道也不会被拉回。提升发生在排除/硬隔离/冷却过滤之前，所以排除语义不被绕过。规划器管道仍是一次 HTTP 请求把整个 `only`+`order` 交给网关，故障转移由网关内部完成，网关是否遵守及官方渠道的实际质量只能按账号实测。哪些模型真有官方端点、各渠道价格与 `zdr` 标记见 [`docs/deepseek-official-channel-availability.md`](docs/deepseek-official-channel-availability.md) |
+| 厂商官方渠道优先（自动） | **仅网关路由已开启时生效**。模型名是 deepseek 系（去掉 `cline-pass/` 前缀后以 `deepseek` 开头）时，若该模型本次的候选渠道里**本来就有** `deepseek`，注入的 `gateway.only`/`order` 会把它提到最前，其余渠道保持原相对顺序；无需为每个模型写 `perModel`，`perModel` 里显式配置的顺序同样会被提升。它**不会新增候选**：候选里没有 `deepseek` 的模型（如 `*-fast` 变体实测只有 `baseten`）保持原样；被 `exclude` 排除或正在冷却的官方渠道也不会被拉回。提升发生在排除/硬隔离/冷却过滤之前，所以排除语义不被绕过。规划器管道仍是一次 HTTP 请求把整个 `only`+`order` 交给网关，故障转移由网关内部完成，网关是否遵守及官方渠道的实际质量只能按账号实测。哪些模型真有官方端点、各渠道价格与 `zdr` 标记见 [`docs/deepseek-official-channel-availability.md`](docs/deepseek-official-channel-availability.md) |
 | `apiKey` | 旧版单 key 字段，启动时自动迁移进 `accounts` |
 | `proxyPool` | 可选的全局上游出口代理池（缺省即关闭，启动时不会补写）：`{ enabled, strategy: "round-robin" \| "random", source: "manual" \| "floppydata", egressRetries（0～5，默认 2）, throttleCooldownMs（默认 60000）, failureCooldownMs（默认 30000）, connectTimeoutMs（默认 10000）, maxRpmPerProxy（0 不限）, entries（手动来源，最多 2000 条代理 URL）, floppydata: { apiKey, type, country, state, city, protocol, rotation, count（默认 100）, refreshIntervalMs（默认 180000）, apiBase } }`。启动、保存与热加载都严格校验，非法即拒绝且不改文件；旧客户端保存省略该字段时保留现值。详见下文“代理池（出口 IP 分摊）” |
 | `proxyPoolDirect` | 可选的布尔值（缺省 false，启动时不会补写）：为 true 且代理池开启时，池里增加一个隐式的“本机直连”条目，与各代理平等轮换。严格校验（非布尔即拒绝且不改文件），支持热加载；详见下文“代理池”的“隐式直连条目” |
@@ -217,6 +220,19 @@ location / {
 ---
 
 ## 核心机制：Cline Pass 的两条路由管道（实测发现）
+
+### Cline 官方接口的 403 兼容模式
+
+实测同一 key、同一 `minimax-m3`：带 `providerOptions` 返回 `403 client-supplied "providerOptions" model routing is not supported`；去掉后非流式和流式均正常。即使只带非路由命名空间也会被拒绝，不能只删除 `gateway.only`。[实测记录](docs/provider-options-403.md)。
+
+- `config.json` 可选顶层布尔字段 `gatewayRoutingEnabled`：省略时，`upstreamBase` 主机名为 `api.cline.bot` 则关闭，其他兼容网关保持开启；显式 `true` / `false` 优先。示例配置显式使用 `false`。
+- 关闭后，移除客户端带来的**整个** `providerOptions`。规划器/未知管道还移除顶层 `provider`，只发送一次由上游默认选渠道的请求。原有 `upstreams`、顺序、`sort`、`gatewayHas` 和渠道亲和提示均不再控制这些请求；配置保留但不代表已生效。直连管道仍可使用 `provider.only`。
+- 默认路由无法保证渠道排除/隔离：若模型存在显式 `exclude` 或持久渠道隔离/未到期冷却，返回明确的本地 503，**不自动删除限制、不偷偷绕过**。只有管理员确认可以放弃限制后才能调整它们。
+- 规划器的渠道校验返回 `unknown` 且不发请求，定时渠道探测跳过，手动模型探测只做正常请求而不再发送假渠道负对照；避免把默认路由成功误报为钉选成功。
+- 日志/响应目标显示 `auto`，不把配置渠道冒充实际渠道；这类 403 归为请求参数限制，默认不降级账号或 Provider。其他认证类 403 不变。
+- 手工修改后使用控制台“从配置文件热加载”、`POST /api/config/reload` 或 SIGHUP 生效，无需重启。非法类型拒绝整次热加载，保留原运行配置。不要在仍返回该 403 的官方接口上强行开启。
+
+以下两条管道的规划器路由说明以 **`gatewayRoutingEnabled: true` 且上游接受参数** 为前提，历史实测不代表当前官方接口仍支持：
 
 Cline Pass 订阅模型在 Cline 网关之后分成两条管道，钉住上游的写法**完全不同**：
 
@@ -489,7 +505,7 @@ npm test          # node --test，覆盖 test/ 下全部契约与集成测试
 先用响应的 `X-Cline-Request-Id` 查询 `/api/logs/requests?requestId=...` 与 `/api/logs/errors?requestId=...`：前者给出账号路径和全部真实 attempts，后者给出每次 `targetProvider/errorScope/scopeEvidence/accountAction`。`X-Cline-Target-Upstream` 只是规划目标，`X-Cline-Actual-Upstream: unknown` 只是未解析到终态 provider，二者都不是切换证据。若仍需区分 Cline 边缘 HTML 429 与内部 provider 限流，可从对应错误行按需查看精确 attempt 的脱敏 Header/正文；排障结束后可关闭默认开启的错误详情。
 
 **Q：直接用官方 API 写 `provider.only` 为什么不生效？**
-对规划器管道（走 Vercel AI Gateway 的模型）会被 Cline 网关丢弃，请改用 `providerOptions.gateway`，见上文。
+历史上规划器管道会丢弃顶层 `provider.only`。当前 Cline 官方接口还会对 `providerOptions` 返回 403，应使用默认路由兼容模式；只有已确认支持参数的兼容网关才开启 `gatewayRoutingEnabled` 并使用 `providerOptions.gateway`，见上文。
 
 **Q：两条管道的渠道清单为什么不一样？**
 钉住发生在不同后端（OpenRouter vs Vercel AI Gateway），各自支持的渠道池不同，要以对应清单为准。

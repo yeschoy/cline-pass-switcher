@@ -3,6 +3,8 @@
 采集时间：2026-11-05 03:40（Asia/Shanghai）。数据源：Vercel AI Gateway 公开端点
 `GET https://ai-gateway.vercel.sh/v1/models/{model}/endpoints`，只读探测，未消耗额度。
 
+> **2026-11-07 更新**：Cline 官方接口现已实测拒绝 `providerOptions` 路由，本项目默认使用上游自动路由。本文关于自动提升官方渠道、Magpie extra body 的说明，仅适用于已确认接受参数并开启 `gatewayRoutingEnabled` 的兼容网关；不能再直接用于当前官方接口。[403 排查与对照实测](provider-options-403.md)。
+
 ## 1. 结论摘要
 
 1. **`deepseek` 官方渠道只覆盖 4 个模型**：`deepseek-v4-pro`、`deepseek-v4-pro-0813`、
@@ -38,7 +40,7 @@
 
 ### switcher（本仓库）
 
-**不需要任何配置**。`server.js` 的 `withOfficialChannelFirst()` 已经实现通用规则：
+**仅在开启 `gatewayRoutingEnabled` 且上游支持路由参数时适用**。`server.js` 的 `withOfficialChannelFirst()` 已经实现通用规则：
 模型名去掉 `cline-pass/` 前缀后以 `deepseek` 开头，且该模型本次候选渠道里**本来就有**
 `deepseek` 时，自动把它提到 `gateway.only` / `gateway.order` 头部；候选里没有就完全不动。
 因此上表中标 ❌ 的模型不会被这条规则影响，不会出现「无可用 provider」。
