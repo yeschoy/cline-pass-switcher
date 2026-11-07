@@ -1412,3 +1412,37 @@ Committed-main raw-detail code is deployed raw-off at 512 MiB with 32 Legacy-own
 ### Next Steps
 
 - 管理员控制台验收后把 deployment.json 改为 completed；需要时在控制台开启代理池并按密钥选择
+
+
+## Session 58: Cline providerOptions 403 实测与兼容修复
+<!-- trellis-session: v=2 fp=86ad520038e6fafe -->
+
+**Date**: 2026-11-07
+**Task**: Cline providerOptions 403 实测与兼容修复
+**Branch**: `main`
+
+### Summary
+
+用户授权后同 key/model 对照实测：providerOptions 返回403，移除后 JSON/SSE 成功；默认官方接口禁用该字段及规划器钉选，保留兼容开关与硬限制安全失败。代码已完成，未部署。
+
+### Main Changes
+
+- 同步聊天重写、路由计划、手动校验/负对照、定时探测和精确403请求归因；更新业务报告与后端规范。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1d3cf82` | fix: 兼容 Cline 禁止 providerOptions 路由 |
+
+### Testing
+
+- [OK] Node v26.13.0 定向14/14，全量675/675；syntax与git diff --check通过。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 按用户需要另行部署；_tmp/provider-routing-403-artifacts.md 登记测试日志，清理等待用户同意。
